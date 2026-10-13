@@ -1,9 +1,9 @@
-"""CordisProcessor: the failed-trace batching half of harness evolution.
+"""The trace pipeline: the trace batching half of harness evolution.
 
-The processor pairs reports with their inference records and batches the
-traces whose scores fall inside the configured window; the evolution backend
-(``CordisBackend``) consumes the batch. Exercised directly rather
-than through any Recipe wrapper.
+The pipeline pairs reports with their inference records and batches every
+valid scored trace; the evolution backend (``CordisBackend``) consumes the
+batch. The stages are built from a ``pipeline`` section, as a deployment
+configures them, rather than through any Recipe wrapper.
 """
 
 from __future__ import annotations
@@ -13,8 +13,12 @@ import pytest
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
-from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
-from reef.train.types import ProcessorContext, TrainingBatch
+from reef.pipeline_context import PipelineContext
+from reef.recipe.cordis import CordisRecipe
+from reef.record2record import InferenceRecord2Record
+from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceRecord2Record, TraceTasks
+from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.types import TrainingBatch
 
 
 def _inference(agent_record_id: str, payload: dict) -> AgentRecord:
@@ -38,8 +42,59 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
     )
 
 
-def _processor(config: dict | None = None) -> CordisProcessor:
-    return CordisProcessor(ProcessorContext("s", config or {}))
+#: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
+INFERENCE_STAGES = {
+    "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
+    "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
+}
+
+
+def harness_stages(batch_size: int = 1, *, inference: bool = False) -> PipelineConfig:
+    """The harness evolution stages as a deployment's ``pipeline`` section configures them."""
+    section: dict = dict(INFERENCE_STAGES) if inference else {}
+    section["task2batch"] = {"config": {"batch_size": batch_size}}
+    return PipelineConfig.from_setting(section, spec=CordisRecipe.pipeline_spec(), environ={})
+
+
+def reports_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+    """Harness traces from reported scores: the default stages, built directly."""
+    return TrainingPipeline(
+        context,
+        record2record=TraceRecord2Record(context),
+        record2task=TraceTasks(),
+        task2batch=TraceBatches(context, batch_size),
+    )
+
+
+def records_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+    """Harness traces from recorded inference traffic, unscored: the inference stages, built directly."""
+    return TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=TraceBatches(context, batch_size),
+    )
+
+
+def _processor() -> TrainingPipeline:
+    return harness_stages().build(PipelineContext("s"))
+
+
+def test_the_default_stages_batch_reports_and_the_inference_stages_batch_records() -> None:
+    reported = harness_stages(3).build(PipelineContext("s"))
+    assert (type(reported.record2record), type(reported.record2task), type(reported.task2batch)) == (
+        TraceRecord2Record,
+        TraceTasks,
+        TraceBatches,
+    )
+    assert reported.task2batch.batch_size == 3
+    recorded = harness_stages(2, inference=True).build(PipelineContext("s"))
+    assert (type(recorded.record2record), type(recorded.record2task), type(recorded.task2batch)) == (
+        InferenceRecord2Record,
+        InferenceTasks,
+        TraceBatches,
+    )
+    assert recorded.task2batch.batch_size == 2
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
@@ -125,22 +180,14 @@ def test_trace_processor_rejects_a_report_without_references() -> None:
 
 
 def test_trace_processor_has_no_judge_hook() -> None:
-    assert not hasattr(CordisProcessor, "judge")
-
-
-def test_trace_processor_validates_assembly_config_fields_at_construction() -> None:
-    # The trace-batch spec never assembles a policy sample, but the assembly
-    # settings are part of every reported-feedback processor's config surface: a bad value
-    # fails at construction instead of passing silently.
-    with pytest.raises(ValueError, match="realign_threshold"):
-        _processor({"realign_threshold": -1})
-    with pytest.raises(ValueError, match="accept_multi_turn_policy_samples"):
-        _processor({"accept_multi_turn_policy_samples": "yes"})
+    for stage in (TrainingPipeline, TraceTasks, TraceBatches):
+        assert not hasattr(stage, "judge")
 
 
 def test_trace_processor_has_no_training_preparation_hook() -> None:
-    assert not hasattr(CordisProcessor, "prepare_training_step")
-    assert not hasattr(CordisProcessor, "prepare")
+    for stage in (TrainingPipeline, TraceTasks, TraceBatches):
+        assert not hasattr(stage, "prepare_training_step")
+        assert not hasattr(stage, "prepare")
 
 
 def test_trace_processor_refuses_a_non_finite_score() -> None:
@@ -152,8 +199,8 @@ def test_trace_processor_refuses_a_non_finite_score() -> None:
         assert not processor.ready()
 
 
-def _record_processor(batch_size: int = 2) -> RecordDrivenTraceProcessor:
-    return RecordDrivenTraceProcessor(ProcessorContext("s", {"batch_size": batch_size}))
+def _record_processor(batch_size: int = 2) -> TrainingPipeline:
+    return harness_stages(batch_size, inference=True).build(PipelineContext("s"))
 
 
 def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:

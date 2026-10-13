@@ -76,6 +76,22 @@ class ServiceConfig:
         default_factory=dict,
         metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
     )
+    teacher_model_path: str | None = config_option(
+        None, public_path=("teacher", "model_path"), help="Teacher engine HF model or directory; frozen SGLang."
+    )
+    teacher_num_gpus: int = config_option(
+        1, public_path=("teacher", "num_gpus"), help="Teacher engine GPUs, also its tensor parallel size."
+    )
+    teacher_port: int = config_option(
+        30001, public_path=("teacher", "port"), help="Teacher engine's internal HTTP port."
+    )
+    teacher_timeout: float = config_option(
+        300.0, public_path=("teacher", "timeout"), help="Deadline of one teacher engine scoring request in seconds."
+    )
+    teacher_options: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Native SGLang teacher options.", public_path=("teacher", "options")),
+    )
     training_backend: str | None = config_option(
         None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
     )
@@ -198,11 +214,13 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
     )
-    #: The task generator the generated-task recipe asks for tasks: a plugin class and its config.
-    task_generation_settings: Mapping[str, Any] | None = field(
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2batch``.
+    pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Task generator settings as a JSON/YAML object with module and config.", path=("task-generation",)
+            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2batch, each with module and "
+            "config.",
+            path=("pipeline",),
         ),
     )
     #: The generator service ``reef serve`` starts beside the HTTP service; ``reef.service.deploy.generator`` parses it.
@@ -282,7 +300,7 @@ def service_owned_keys() -> frozenset[str]:
     non_reef_fields = {
         "evaluation_settings",
         "generator_settings",
-        "task_generation_settings",
+        "pipeline_settings",
         "tracing_config",
         "training_settings",
         "wandb_config",

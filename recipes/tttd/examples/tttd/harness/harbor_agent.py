@@ -40,8 +40,8 @@ SEARCH_STATE_PATH = Path(__file__).resolve().parents[1] / "work" / TASK / "tttd-
 # arrive, so a harness that disagreed would fail on the training timeout.
 # TTTD_STACK selects another stack file beside serve.yaml (serve-tinker.yaml runs on Tinker).
 _STACK = yaml.safe_load((Path(__file__).resolve().parents[1] / os.environ.get("TTTD_STACK", "serve.yaml")).read_text())
-GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
-ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
+GROUPS_PER_STEP = _STACK["pipeline"]["record2record"]["config"]["groups_per_step"]
+ROLLOUTS_PER_GROUP = _STACK["pipeline"]["record2record"]["config"]["rollouts_per_group"]
 STEPS = _STACK["training"]["config"]["steps"]
 MAX_NEW_TOKENS = _STACK["training"]["config"]["max_new_tokens"]
 # A reduced smoke turns thinking off so a short completion emits a program.

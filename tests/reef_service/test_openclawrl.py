@@ -1,4 +1,4 @@
-"""OpenClaw-RL processor (in-processor judging), backend preparation, and recipe."""
+"""OpenClaw-RL pipeline (judging in the record stage), backend preparation, and recipe."""
 
 from __future__ import annotations
 
@@ -9,22 +9,28 @@ import pytest
 from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
+from recipes.openclawrl import OpenClawRLBatches, OpenClawRLRecipe
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.prm import PRMJudge
+from recipes.openclawrl.processor import OpenClawRLBatchSettings, OpenClawRLTasks
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
+from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.pipeline_context import PipelineContext
+from reef.recipe.errors import RecipeConfigError
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.algos import StepScheduling
-from reef.train.processors.computed import JudgingWorker
+from reef.train.pipeline import TrainingPipeline
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import ProcessorContext, TrainingBatch
+from reef.train.types import TrainingBatch
 
 
 class FakeWorker:
-    """Duck-typed JudgingWorker: captures jobs, replays scripted judgments."""
+    """Duck-typed BackgroundJobWorker: captures jobs, replays scripted judgments."""
 
     def __init__(self) -> None:
         self.jobs = []
@@ -90,9 +96,16 @@ def _successor(prior_messages, next_state: str):
     return [*prior_messages, {"role": "assistant", "content": "a"}, {"role": "user", "content": next_state}]
 
 
-def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None, **config):
-    context = ProcessorContext("s", {"batch_size": batch_size, "session_ttl_s": ttl_s, **config})
-    return OpenClawRLProcessor(context, worker=worker, clients=clients)
+def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None, **judging):
+    context = PipelineContext("s")
+    settings = OpenClawRLJudgingSettings(session_ttl_s=ttl_s, **judging)
+    stage = OpenClawRLRecord2Record(context, settings, worker=worker, clients=clients)
+    return TrainingPipeline(
+        context,
+        record2record=stage,
+        record2task=OpenClawRLTasks(),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=batch_size), stage),
+    )
 
 
 Q1 = [{"role": "user", "content": "q1"}]
@@ -317,7 +330,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 @pytest.mark.unit
 def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
-    recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=4)
+    recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()))
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
@@ -328,21 +341,100 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     trainer.close()
 
 
+def openclawrl_recipe(pipeline: dict | None = None, **data) -> OpenClawRLRecipe:
+    """The recipe as a deployment file configures it: recipe fields in ``data``, stages in ``pipeline``."""
+    config: dict = {"data": data}
+    if pipeline is not None:
+        config["pipeline"] = pipeline
+    recipe = OpenClawRLRecipe.from_environment({}, config=config, **runtime_bindings(StubTrainingRuntime()))
+    assert isinstance(recipe, OpenClawRLRecipe)
+    return recipe
+
+
 @pytest.mark.unit
-def test_recipe_reads_config() -> None:
-    configured = OpenClawRLRecipe.from_environment(
-        {},
-        config={"data": {"batch_size": 2, "prm_timeout_s": 3600.0}},
-        **runtime_bindings(StubTrainingRuntime()),
+def test_the_pipeline_section_configures_the_stages() -> None:
+    recipe = openclawrl_recipe(
+        {
+            "record2record": {
+                "config": {
+                    "prm_url": "http://prm:23001",
+                    "prm_tokenizer_path": "/models/prm",
+                    "prm_timeout_s": 3600,
+                    "prm_concurrency": 2,
+                    "prm_max_hint_candidates": 2,
+                    "session_ttl_s": 60.0,
+                    "max_open_sessions": 16,
+                }
+            },
+            "task2batch": {"config": {"batch_size": 2, "prm_record_file": "/tmp/prm-records.jsonl"}},
+        }
     )
-    assert configured.batch_size == 2
-    assert configured.prm_timeout_s == 3600.0
+    built = recipe.build_pipeline(PipelineContext("s"))
+    try:
+        assert isinstance(built.record2record, OpenClawRLRecord2Record)
+        assert isinstance(built.record2task, OpenClawRLTasks)
+        assert isinstance(built.task2batch, OpenClawRLBatches)
+        judging = built.record2record.openclawrl_judging
+        assert isinstance(judging.prm, PRMJudge)
+        assert judging.prm.generate_url == "http://prm:23001/generate"
+        assert judging.prm.timeout_s == 3600.0
+        assert judging.max_hint_candidates == 2
+        assert judging.index.ttl_s == 60.0 and judging.index.max_sessions == 16
+        assert isinstance(built.record2record.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"
+        assert built.batch_size == 2
+        assert built.task2batch.openclawrl_judging is judging, "the batches report what the record stage judged"
+        assert str(built.task2batch.record_path) == "/tmp/prm-records.jsonl"
+    finally:
+        built.close()
 
 
 @pytest.mark.unit
-def test_recipe_requires_the_tokenizer_next_to_prm_url() -> None:
-    with pytest.raises(ValueError, match="prm_tokenizer_path"):
-        OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_url="http://prm:23001")
+def test_the_default_stages_are_correlate_only_with_the_upstream_batch_size() -> None:
+    built = openclawrl_recipe().build_pipeline(PipelineContext("s"))
+    assert isinstance(built.record2record, OpenClawRLRecord2Record)
+    assert built.record2record.openclawrl_judging.prm is None and built.record2record.worker is None
+    assert built.batch_size == 16
+    built.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("key", "stage"),
+    [("batch_size", "task2batch"), ("prm_timeout_s", "record2record"), ("prm-url", "record2record")],
+)
+def test_a_stage_setting_in_the_recipe_config_is_refused(key: str, stage: str) -> None:
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        openclawrl_recipe(**{key: 1})
+
+
+@pytest.mark.unit
+def test_the_retired_teacher_settings_are_refused() -> None:
+    with pytest.raises(RecipeConfigError, match=r"does not consume reef\.prm_teacher_timeout_s"):
+        OpenClawRLRecipe.service_config({"prm_teacher_timeout_s": 5.0}, model_path="/models/policy")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("pipeline", "match"),
+    [
+        ({"record2record": {"config": {"prm_url": "http://prm:23001"}}}, "prm_tokenizer_path"),
+        ({"record2record": {"config": {"prm_concurrency": 0}}}, "prm_concurrency must be positive"),
+        ({"record2record": {"config": {"batch_size": 2}}}, "batch_size"),
+        ({"task2batch": {"config": {"batch_size": 0}}}, "batch_size must be positive"),
+        ({"task2batch": {"config": {"prm_url": "http://prm:23001"}}}, "prm_url"),
+    ],
+)
+def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, match: str) -> None:
+    recipe = openclawrl_recipe(pipeline)
+    with pytest.raises(RecipeConfigError, match=match):
+        recipe.build_pipeline(PipelineContext("s"))
+
+
+@pytest.mark.unit
+def test_the_batches_need_the_openclawrl_record_stage() -> None:
+    recipe = openclawrl_recipe({"record2record": {"module": "reef.record2record:PassThroughRecord2Record"}})
+    with pytest.raises(RecipeConfigError, match="OpenClawRLBatches needs OpenClawRLRecord2Record"):
+        recipe.build_pipeline(PipelineContext("s"))
 
 
 @pytest.mark.unit
@@ -411,8 +503,12 @@ def test_rejected_submission_retires_the_turn() -> None:
 
 @pytest.mark.unit
 def test_broken_worker_rejects_submissions() -> None:
-    worker = JudgingWorker(object())  # the judge never runs: broken first
-    worker._broken = True
+    class NeverRuns(BackgroundJobRunner):
+        async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+            raise AssertionError("a broken worker runs no job")
+
+    worker = BackgroundJobWorker(NeverRuns(), thread_name="test-jobs")  # The worker is broken before it gets a job.
+    worker.broken = True
     from recipes.openclawrl.turns import TurnJob
 
     job = TurnJob(
@@ -472,8 +568,16 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     """A batch mean cannot tell "the judges disagree" from "they never ran"."""
     record = tmp_path / "prm-records.jsonl"
     worker = FakeWorker()
-    context = ProcessorContext("s", {"batch_size": 1, "prm_record_file": str(record)})
-    processor = OpenClawRLProcessor(context, worker=worker)
+    context = PipelineContext("s")
+    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    processor = TrainingPipeline(
+        context,
+        record2record=stage,
+        record2task=OpenClawRLTasks(),
+        task2batch=OpenClawRLBatches(
+            context, OpenClawRLBatchSettings(batch_size=1, prm_record_file=str(record)), stage
+        ),
+    )
     processor.ingest(_turn("t1", Q1))
     processor.ingest(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
@@ -599,7 +703,7 @@ def test_traffic_without_a_session_tag_says_so_instead_of_training_on_nothing(ca
             processor.ingest(_turn(f"t{i}", [{"role": "user", "content": f"homework {i}"}]))
         assert "x-reef-tag-session" in caplog.text  # the fallback announced itself
         caplog.clear()
-        processor.expire(time.monotonic() + 10_000.0)  # every session times out unbound
+        processor.record2record.judging.expire(time.monotonic() + 10_000.0)  # every session times out unbound
     assert "without ever binding" in caplog.text
     assert "x-reef-tag-session" in caplog.text
 
@@ -610,7 +714,7 @@ def test_a_tagged_run_stays_quiet(caplog) -> None:
     with caplog.at_level("WARNING"):
         processor.ingest(_turn("t1", Q1, session="hw-1"))
         processor.ingest(_turn("t2", Q2, session="hw-1"))
-        processor.expire(time.monotonic() + 10_000.0)
+        processor.record2record.judging.expire(time.monotonic() + 10_000.0)
     assert caplog.text == ""
 
 
@@ -636,14 +740,3 @@ def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
     parsed, _ = SGLangInferenceHandler._assistant_message(closed, None, force_reasoning=True)
     assert parsed["content"] == "The answer is 36."
     assert parsed["reasoning_content"] == "pondering"
-
-
-def test_retired_openclawrl_fields_are_accepted_and_ignored(caplog) -> None:
-    from reef_service.runtime_stubs import StubTrainingRuntime
-
-    from recipes.openclawrl import OpenClawRLRecipe
-
-    with caplog.at_level("WARNING"):
-        recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_teacher_timeout_s=5.0)
-    assert recipe.prm_teacher_timeout_s == 5.0
-    assert "prm_teacher_timeout_s is deprecated and ignored" in caplog.text

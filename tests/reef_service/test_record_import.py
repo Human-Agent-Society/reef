@@ -7,22 +7,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-
 from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
+from reef.record2record import ReportGrouping, ReportRecord2Record
+from reef.record2task import ReportTasks
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.task2batch import Task2Batch
 from reef.train import PreparedStep, Trainer, TrainingBatch
-from reef.train.processors.reported import ReportedFeedbackProcessor
+from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskItem
 
 from .test_reef_trainer_contracts import ExampleBackend
-
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -44,12 +45,23 @@ def imported(record_id, payload=None, request_type="inference"):
     }
 
 
-class FeedbackProcessor(ReportedFeedbackProcessor):
+class FeedbackTasks(ReportTasks):
     def make_sample(self, context):
         return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
-    def make_batch(self, items, batch_number):
-        return TrainingBatch(f"batch:{batch_number}", items)
+
+class FeedbackBatches(Task2Batch):
+    def make_batch(self, tasks, batch_number):
+        return TrainingBatch(f"batch:{batch_number}", tasks)
+
+
+def feedback_pipeline(context, batch_size):
+    return TrainingPipeline(
+        context,
+        record2record=ReportRecord2Record(context, ReportGrouping()),
+        record2task=FeedbackTasks(),
+        task2batch=FeedbackBatches(context, batch_size),
+    )
 
 
 class LearningBackend(ExampleBackend):
@@ -74,7 +86,7 @@ class LearningRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: FeedbackProcessor(context.with_config({"batch_size": 2})),
+            pipeline_factory=lambda context: feedback_pipeline(context, batch_size=2),
             candidate_backend=LearningBackend(scenario, self.batches),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
@@ -181,7 +193,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                     response = await client.post("/reef/records", headers=HEADERS, json=record)
                     assert response.status == 200, await response.text()
             scenario = dispatcher.get_or_create_scenario("s")
-            processor = scenario.trainer.processor
+            processor = scenario.trainer.pipeline
             await wait_for_training(scenario, 6)
             if bulk:
                 retry = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
@@ -213,7 +225,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                 assert feedback.status == 200, await feedback.text()
             await wait_for_training(scenario, 8)
             assert handler.calls == 2
-            assert scenario.trainer.processor is processor
+            assert scenario.trainer.pipeline is processor
             assert len(scenario.store.history()) == len(recipe.batches) == 4
             samples = [sample for batch in recipe.batches for sample in batch.items]
             assert [sample.metadata["messages"][0]["content"] for sample in samples] == [

@@ -37,11 +37,11 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import merged_requires
-from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
 from reef.train.trainer import Trainer
 from reef.train.types import TrainingBatch
 
 from ._strategies import resolve_episode_scorer, resolve_proposer
+from .test_harness_evolve_processor import harness_stages
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])
@@ -53,7 +53,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
         return Mutation("create", "requested-rules", {"name": "rules", "config": {"text": "marker rules"}})
 
     # A large auto batch must not keep an explicit manual request waiting.
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), batch_size=100))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), pipeline_stages=harness_stages(100)))
     scenario = dispatcher.get_or_create_scenario("ask-scenario")
 
     async def run():
@@ -91,7 +91,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
             assert not (Path(scenario.trainer.candidate_backend.proposals.directory) / "requests").exists()
             response = await client.post("/reef/scenarios/ask-scenario/update", json={"training_mode": "auto"})
             assert response.status == 200
-            assert scenario.trainer.training_mode == "auto"
+            assert scenario.trainer.pipeline.training_mode == "auto"
         finally:
             await client.close()
 
@@ -530,7 +530,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
         trainer = Trainer.build(
             "agents",
             records,
-            processor_factory=lambda ctx: RecordDrivenTraceProcessor(ctx.with_config({"batch_size": 1})),
+            pipeline_factory=harness_stages(1, inference=True).build,
             candidate_backend=_RequiresBackend(written),
             training_mode="manual",
         )

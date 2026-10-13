@@ -18,9 +18,10 @@ from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.evaluation import BackendAlwaysSelectPlugin
+from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.runtime_backend import RuntimeCandidateBackend
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import ThresholdBatches, ThresholdTasks
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,23 @@ class ConfiguredRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="sft", processor=ThresholdProcessor)
+        return WeightTrainingSpec(objective="sft")
+
+
+@dataclass(frozen=True)
+class StagedRecipe(WeightTrainingRecipe):
+    """A recipe that declares its stages; their config comes from the pipeline section."""
+
+    _: KW_ONLY
+    name: str = "staged"
+
+    @classmethod
+    def training_spec(cls) -> WeightTrainingSpec:
+        return WeightTrainingSpec(objective="sft")
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(record2task=ThresholdTasks, task2batch=ThresholdBatches)
 
 
 @pytest.mark.unit
@@ -187,12 +204,32 @@ def test_service_config_names_the_setting_and_the_expected_type(settings, match)
 def test_invalid_field_values_surface_as_recipe_config_errors() -> None:
     # __post_init__ range checks (ValueError on direct construction) become
     # RecipeConfigError on the configuration path.
-    from recipes.sao import SAORecipe
+    with pytest.raises(RecipeConfigError, match="invalid ConfiguredRecipe configuration: max_staleness must be"):
+        ConfiguredRecipe.from_environment(
+            {}, config={"data": {"max_staleness": -1}}, **runtime_bindings(StubTrainingRuntime())
+        )
 
-    with pytest.raises(RecipeConfigError, match="invalid SAORecipe configuration: batch_size must be positive"):
-        SAORecipe.from_environment({}, config={"data": {"batch_size": -1}}, **runtime_bindings(StubTrainingRuntime()))
-    with pytest.raises(RecipeConfigError, match="invalid SAORecipe configuration"):
-        SAORecipe.from_environment({"REEF_SAO_BATCH_SIZE": "0"}, config={}, **runtime_bindings(StubTrainingRuntime()))
+
+@pytest.mark.unit
+def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key() -> None:
+    from recipes.sao import SAORecipe
+    from reef.pipeline_context import PipelineContext
+
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        SAORecipe.from_environment({}, config={"data": {"batch_size": 4}}, **runtime_bindings(StubTrainingRuntime()))
+    # The stage's own range check fails when the pipeline builds.
+    recipe = SAORecipe.from_environment(
+        {},
+        config={"pipeline": {"task2batch": {"config": {"batch_size": -1}}}},
+        **runtime_bindings(StubTrainingRuntime()),
+    )
+    with pytest.raises(RecipeConfigError, match="batch_size must be positive"):
+        recipe.build_pipeline(PipelineContext("math"))
+    # The removed environment fallback no longer configures the stage.
+    recipe = SAORecipe.from_environment(
+        {"REEF_SAO_BATCH_SIZE": "4"}, config={}, **runtime_bindings(StubTrainingRuntime())
+    )
+    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 128
 
 
 @pytest.mark.unit
@@ -207,18 +244,23 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 
 
 @pytest.mark.unit
-def test_default_build_uses_declared_processor_and_config_fields() -> None:
-    trainer = ConfiguredRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=2).build(
-        "scenario", SQLiteRecordStore()
+def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
+    stages = PipelineConfig.from_setting(
+        {"task2batch": {"config": {"batch_size": 2}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
+    trainer = StagedRecipe(
+        **runtime_bindings(StubTrainingRuntime(max_staleness=3)), max_staleness=3, pipeline_stages=stages
+    ).build("scenario", SQLiteRecordStore())
 
-    assert isinstance(trainer.processor, ThresholdProcessor)
+    assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
+    assert isinstance(trainer.pipeline.task2batch, ThresholdBatches)
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
     assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
     assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
     assert trainer.candidate_backend.objective == "sft"
-    assert trainer.processor.context.config["batch_size"] == 2
-    assert "max_staleness" not in trainer.processor.context.config
+    assert trainer.pipeline.batch_size == 2
+    # The shared recipe field reaches the stages as the typed context field, not as stage config.
+    assert trainer.pipeline.context.max_staleness == 3
 
 
 @pytest.mark.unit
@@ -226,7 +268,7 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
     from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
-    class NoProcessorRecipe(WeightTrainingRecipe):
+    class NoTask2BatchRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
             return WeightTrainingSpec(objective="sft")
@@ -235,9 +277,24 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
     class NoObjectiveRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(objective="", processor=ThresholdProcessor)
+            return WeightTrainingSpec(objective="")
 
-    with pytest.raises(TypeError, match=r"declares no processor.*training_spec\(\).*override build"):
-        NoProcessorRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
+        @classmethod
+        def pipeline_spec(cls) -> PipelineSpec:
+            return PipelineSpec(task2batch=ThresholdBatches)
+
+    with pytest.raises(TypeError, match=r"declares no task2batch.*pipeline_spec\(\).*override build"):
+        NoTask2BatchRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
     with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
         NoObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
+
+
+@pytest.mark.unit
+def test_opd_config_keeps_objective_options_out_of_recipe_fields() -> None:
+    from recipes.opd import OPDRecipe
+
+    values = resolve_config_field_values(OPDRecipe, {}, {})
+    assert values["max_staleness"] == 0
+    # The stage settings belong to the pipeline section, and the objective options to the backend.
+    for name in ("batch_size", "max_teacher_tokens", "teacher_checkpoint", "tokenizer_path"):
+        assert name not in recipe_config_fields(OPDRecipe)

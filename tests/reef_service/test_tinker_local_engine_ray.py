@@ -164,8 +164,9 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
         "reef": {"run-dir": str(tmp_path / "stack")},
         "recipe": {
             "implementation": "recipes.tttd.recipe:TTTDRecipe",
-            "config": {"groups-per-step": 1, "rollouts-per-group": 4, "checkpoint-every-n-versions": 1},
+            "config": {"checkpoint-every-n-versions": 1},
         },
+        "pipeline": {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
         "inference": {
             "model-path": MODEL if REAL else str(model_dir),
             "backend": "reef_service._stub_engine:create_inference",
@@ -245,18 +246,25 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
         engine = ray.get_actor("reef-test-engine", namespace=NAMESPACE)
         assert ray.get(engine.state.remote())["versions"] == [inference.serving_runtime_load_id()] * 2
 
-        from reef_service._threshold_processor import ThresholdProcessor  # noqa: F401  (import side effects none)
+        from reef_service._threshold_processor import threshold_pipeline  # noqa: F401  (import side effects none)
 
         from recipes.tttd.recipe import TTTDRecipe
         from reef.artifact import InMemoryRepositoryBackend
         from reef.core import AgentRecord, RequestType
         from reef.dispatcher import Dispatcher
         from reef.storage.sqlite import SQLiteScenarioStorage
+        from reef.train.pipeline import PipelineConfig
 
         initial = tmp_path / "initial"
         initial.mkdir()
         dispatcher = Dispatcher(
-            TTTDRecipe(training, runtime=inference, groups_per_step=1, rollouts_per_group=4),
+            TTTDRecipe(
+                training,
+                runtime=inference,
+                pipeline_stages=PipelineConfig.from_setting(
+                    raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
+                ),
+            ),
             InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "records",

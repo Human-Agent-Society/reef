@@ -8,7 +8,8 @@ scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
 
 Configured by a dotted ``implementation`` whose config carries a
 ``components`` object, one recipe config per component name; each inherits
-the deployment's ``model`` unless it names its own:
+the deployment's ``model`` unless it names its own, and each configures its
+own pipeline stages:
 
 .. code:: yaml
 
@@ -18,7 +19,7 @@ the deployment's ``model`` unless it names its own:
    components:
      weights:
        implementation: recipes.sao.recipe:SAORecipe
-       data: {batch_size: 8}
+       pipeline: {task2batch: {config: {batch_size: 8}}}
      harness:
        implementation: reef.recipe.cordis:CordisRecipe
        evolution: {adapter: pi, ...}

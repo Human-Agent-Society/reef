@@ -17,14 +17,25 @@ from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef, InMemoryRepositoryBackend
 from reef.artifact.release_chain import ArtifactReleaseChain
+from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError, ScenarioBusy
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
+from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.record2record import (
+    GroupDecision,
+    JudgingRecord2Record,
+    RecordJudging,
+    ReportContext,
+    ReportGrouping,
+    ReportRecord2Record,
+)
+from reef.record2task import JudgedTasks
 from reef.runtime.interfaces import RuntimeContractError
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
@@ -39,14 +50,13 @@ from reef.storage.commits import (
 )
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
+from reef.task2batch import Task2Batch
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
-from reef.train.processors.base import DataProcessor
-from reef.train.processors.computed import ComputedFeedbackProcessor, SupportsReceipt
-from reef.train.processors.reported import GroupDecision, ReportContext
-from reef.train.types import TrainingBatch
+from reef.train.pipeline import TrainingPipeline
+from reef.train.types import TrainDataItem, TrainingBatch
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import ThresholdBatches, threshold_pipeline
 from ._trajectories import policy_trajectory
 from .runtime_stubs import StubTrainingRuntime
 
@@ -186,8 +196,8 @@ class _ColocatedBackend(_DispatchedBackend):
         return True
 
 
-class _HybridThresholdProcessor(ThresholdProcessor):
-    """The same processor, taking instructions too."""
+class HybridThresholdBatches(ThresholdBatches):
+    """The same batches, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
@@ -207,13 +217,14 @@ class _TwoTrainerRecipe(Recipe):
             }
         )
 
-    def processor_for(self, component: str) -> type[DataProcessor]:
-        return _HybridThresholdProcessor if component in self.hybrid_components else ThresholdProcessor
+    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
+        if component in self.hybrid_components:
+            return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+        return threshold_pipeline(context)
 
     def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
         def factory_for(component: str):
-            processor = self.processor_for(component)
-            return lambda context: processor(context.with_config({"batch_size": 1}))
+            return lambda context: self.pipeline_for(component, context)
 
         return tuple(
             ComponentTrainer(
@@ -221,7 +232,7 @@ class _TwoTrainerRecipe(Recipe):
                 Trainer.build(
                     scenario,
                     records,
-                    processor_factory=factory_for(component),
+                    pipeline_factory=factory_for(component),
                     candidate_backend=backend,
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
@@ -1099,7 +1110,7 @@ class _NamedComponentsRecipe(Recipe):
                 Trainer.build(
                     scenario,
                     records,
-                    processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+                    pipeline_factory=threshold_pipeline,
                     candidate_backend=_ComponentBackend(name, self.artifact_dir),
                     algorithm_state=algorithm_states.get(name),
                     experiment_logger=experiment_logger,
@@ -1215,23 +1226,26 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     assert [item.source_agent_record_ids for item in weights.items] == [("i2", "r2")]
 
 
-class _SlottedProcessor(ThresholdProcessor):
+class _SlotGrouping(ReportGrouping):
     """Reports batch by the group and the retry slot named in their metadata; a group is ready at two slots."""
 
-    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+    def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         metadata = context.report.payload["metadata"]
         return metadata["group"], metadata["slot"]
 
-    def decide_group(self, key: Hashable, items: tuple[Any, ...]) -> GroupDecision:
-        return GroupDecision.READY if len(items) >= 2 else GroupDecision.INCOMPLETE
+    def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
+        return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
 
 
 @dataclass(frozen=True)
 class _SlottedRecipe(_TwoTrainerRecipe):
     """The two trainer recipe whose harness batches reports by group and retry slot."""
 
-    def processor_for(self, component: str) -> type[DataProcessor]:
-        return _SlottedProcessor if component == HARNESS else ThresholdProcessor
+    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
+        if component == HARNESS:
+            # The threshold pipeline with ``_SlotGrouping``.
+            return threshold_pipeline(context, record2record=ReportRecord2Record(context, _SlotGrouping()))
+        return threshold_pipeline(context)
 
 
 def _slotted_report(record_id: str, reference: str, group: str, slot: int) -> AgentRecord:
@@ -1479,26 +1493,28 @@ class _JudgedAtOnce:
         return None
 
 
-class _RetiringRetriesProcessor(ComputedFeedbackProcessor):
+class _RetiringRetriesJudging(RecordJudging):
     """A turn is judged once its successor arrives, and a retry of a turn already seen is retired, as OpenClaw-RL
     retires a client's duplicate turn."""
 
-    def __init__(self, context: Any) -> None:
-        super().__init__(context, worker=_JudgedAtOnce())
-        self._seen: set[str] = set()
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
 
-    def ingest(self, item: AgentRecord) -> None:
-        self.catch_up(time.monotonic())
+    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
         if item.payload.get("completes"):
-            self.dispatch(_Judgment(item.payload["completes"]))
-        if item.payload["turn"] in self._seen:
-            self.retire(item.agent_record_id)
+            stage.dispatch(_Judgment(item.payload["completes"]))
+        if item.payload["turn"] in self.seen:
+            stage.retire(item.agent_record_id)
             return
-        self._seen.add(item.payload["turn"])
-        self.track(item)
+        self.seen.add(item.payload["turn"])
+        stage.track(item)
 
-    async def judge(self, job: _Judgment) -> _Judgment:
+    async def judge(self, job: SupportsReceipt) -> SupportsReceipt:
         return job
+
+
+class _RetiringRetriesTasks(JudgedTasks):
+    """One-token stub samples for every judged turn."""
 
     def make_sample(self, record: AgentRecord, judgment: _Judgment) -> Any:
         return policy_trajectory(
@@ -1510,16 +1526,28 @@ class _RetiringRetriesProcessor(ComputedFeedbackProcessor):
             runtime_load_id="v1",
         )
 
-    def make_batch(self, samples: Any, batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:retiring:{batch_number}", tuple(samples))
+
+class RetiringRetriesBatches(Task2Batch):
+    """Batches the judged turns of ``_RetiringRetriesJudging``."""
+
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:retiring:{batch_number}", tasks)
 
 
 @dataclass(frozen=True)
 class _ComputedWeightsRecipe(_TwoTrainerRecipe):
     """The two trainer recipe whose weights trainer computes its own feedback."""
 
-    def processor_for(self, component: str) -> type[DataProcessor]:
-        return _RetiringRetriesProcessor if component == WEIGHTS else ThresholdProcessor
+    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
+        if component == WEIGHTS:
+            # Trains the judged turns of ``_RetiringRetriesJudging``.
+            return TrainingPipeline(
+                context,
+                record2record=JudgingRecord2Record(context, _RetiringRetriesJudging(), _JudgedAtOnce()),
+                record2task=_RetiringRetriesTasks(),
+                task2batch=RetiringRetriesBatches(context, 1),
+            )
+        return threshold_pipeline(context)
 
 
 def _turn(record_id: str, turn: str, completes: str | None = None) -> AgentRecord:
@@ -1639,9 +1667,9 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
     """A mode one component cannot run is refused before any component switches."""
     dispatcher, _ = dispatchers.open(hybrid_components=frozenset({WEIGHTS}))
     scenario = _scenario(dispatcher)
-    with pytest.raises(NotImplementedError, match=r"harness \(ThresholdProcessor\)"):
+    with pytest.raises(NotImplementedError, match=r"harness \(ThresholdBatches\)"):
         scenario.set_training_mode("hybrid")
-    assert [bound.trainer.training_mode for bound in scenario.component_trainers] == ["auto", "auto"]
+    assert [bound.trainer.pipeline.training_mode for bound in scenario.component_trainers] == ["auto", "auto"]
     with pytest.raises(ValueError, match="training_mode must be"):
         scenario.set_training_mode("bogus")
 
@@ -2213,7 +2241,7 @@ def test_commit_record_carries_component_and_base_release() -> None:
 @pytest.mark.unit
 def test_component_trainers_must_match_the_surface() -> None:
     def trainer() -> Trainer:
-        return Trainer.build("agent", SQLiteRecordStore(), processor_factory=DataProcessor)
+        return Trainer.build("agent", SQLiteRecordStore(), pipeline_factory=TrainingPipeline)
 
     flat = Surface(components={HARNESS: ComponentSurface(files=TextFileTree())})
     composed = Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface(files=TextFileTree())})
@@ -2442,3 +2470,42 @@ def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
     assert replaced.names == (HARNESS,) and replaced.components[HARNESS].files is tree
     with pytest.raises(ValueError, match="per component"):
         Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface()}, files=tree)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("pending", [False, True])
+def test_recorded_release_survives_backend_completion_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, pending: bool
+) -> None:
+    dispatcher, backends = dispatchers.open()
+    scenario = _scenario(dispatcher, 1)
+    backend = backends[HARNESS]
+    backend.hold_next = pending
+    original_head = scenario.current_artifact_ref()
+    result = scenario.prepare_training_step(HARNESS)
+    assert result is not None
+    trainer = scenario.trainer_for(HARNESS)
+    original_state = dict(trainer.state)
+
+    def fail_completion(state: Mapping[str, object]) -> None:
+        raise OSError("backend completion unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "commit_applied", fail_completion)
+        with pytest.raises(OSError, match="backend completion unavailable"):
+            scenario.commit(result, component=HARNESS)
+    (record,) = scenario.store.history()
+    expected_head = original_head if pending else record.artifact_ref
+    assert scenario.current_artifact_ref() == expected_head
+    assert scenario.scenario_step == 0
+    assert trainer.state == original_state
+    assert trainer.pending_batch is not None
+
+    scenario.commit(result, component=HARNESS)
+    assert scenario.store.history() == (record,)
+    assert scenario.current_artifact_ref() == expected_head
+    assert scenario.scenario_step == 1
+    assert trainer.state == result.state
+    assert trainer.pending_batch is None
+    assert backend.prepared == backend.evaluated == 1
+    assert scenario.repository.resolve(record.artifact_ref).local_path.is_dir()

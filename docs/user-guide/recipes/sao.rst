@@ -16,7 +16,7 @@ step produced.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/sao/``                                           |
 +-------------+------------------------------------------------------------+
-| Processor   | reported feedback, singleton                               |
+| Pipeline    | reported feedback, singleton                               |
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
@@ -42,7 +42,7 @@ for a stream of tasks where each attempt gets its own score.
 How Reef implements it
 ----------------------
 
-The processor turns every eligible ``ScoredRolloutReport`` into one
+The record-to-task stage turns every eligible ``ScoredRolloutReport`` into one
 ``TrajectoryItem``. "Single rollout" means one rollout per prompt, with no
 comparison group; ``batch_size`` such rollouts, from different prompts, form
 one optimizer step. The default is the paper's 128. Setting it to 1 makes
@@ -67,10 +67,30 @@ step; the policy's weights first move after the warmup.
 Configuration
 -------------
 
+SAO's pipeline has three stages: ``SAORecord2Record``, ``SAOTasks``, and
+``SAOBatches``. The deployment's ``pipeline`` section configures them. The
+record stage takes no config. Set the batch size in the batch stage's config:
+
+.. code:: yaml
+
+   recipe:
+     implementation: recipes.sao.recipe:SAORecipe
+     config:
+       max-staleness: 18
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 8                # MUST equal training.config.global_batch_size
+
 .. config::
 
-   batch_size | 128 | rollouts (one per prompt) per optimizer step; the paper's value. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
-   max_staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.task2batch.config.batch_size | 128 | rollouts (one per prompt) per optimizer step; the paper's value. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
+   pipeline.record2task.config | {} | the sample-assembly keys: ``accept_multi_turn_policy_samples`` (default false) trains a report that references several model calls as one multi-turn sample; ``realign_threshold`` (1024) and ``scaffold_tolerance`` (0) bound the tokens that assembly may realign.
+   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+
+Reef checks the stage configs when it loads the recipe. A ``batch-size`` key
+in ``recipe.config`` stops the deployment with a message that names its new
+place, ``pipeline.task2batch.config.batch_size``.
 
 Run the example
 ---------------
@@ -90,8 +110,8 @@ receipt. The next problem is served by the weights the previous one produced.
 
 ``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
 with the critic colocated on it and one SGLang rollout engine. The smoke
-config sets ``batch_size`` to 1, so each scored rollout adds one ``training``
-entry to the scenario's version chain:
+config sets ``pipeline.task2batch.config.batch_size`` to 1, so each scored
+rollout adds one ``training`` entry to the scenario's version chain:
 
 .. code:: bash
 

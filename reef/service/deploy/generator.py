@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.inference import http_readiness_command
 
 GENERATOR_SERVICE = "generator"
 DEFAULT_PORT = 8910
@@ -112,7 +112,7 @@ def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "name": GENERATOR_SERVICE,
         "role": "generator",
-        "command": [python, "-m", "reef.record2dataset"],
+        "command": [python, "-m", "reef.service.deploy.generator_process"],
         "endpoint": f"http://{{host}}:{generator.port}",
         "ready": http_readiness_command(python, f"http://{probe_host}:{generator.port}/healthz"),
         "ready_timeout": generator.ready_timeout,

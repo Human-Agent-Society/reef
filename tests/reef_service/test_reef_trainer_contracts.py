@@ -10,11 +10,11 @@ from reef.core import AgentRecord, RequestType
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import (
     CandidateBackend,
-    DataProcessor,
+    PipelineContext,
     PreparedStep,
-    ProcessorContext,
     Trainer,
     TrainingBatch,
+    TrainingPipeline,
     TrainStepResult,
 )
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
@@ -25,14 +25,16 @@ class ExampleBatch(TrainingBatch):
     values: tuple[str, ...] = field(kw_only=True)
 
 
-class ExampleProcessor(DataProcessor):
-    required_request_types = frozenset({RequestType.REPORT})
+class ExamplePipeline(TrainingPipeline):
+    @property
+    def required_request_types(self) -> frozenset[RequestType]:
+        return frozenset({RequestType.REPORT})
 
     @property
     def output_schema(self) -> type[ExampleBatch]:
         return ExampleBatch
 
-    def __init__(self, context: ProcessorContext, events: list[str]) -> None:
+    def __init__(self, context: PipelineContext, events: list[str]) -> None:
         super().__init__(context)
         self.events = events
         self.items: list[AgentRecord] = []
@@ -99,15 +101,15 @@ class ExampleBackend(CandidateBackend):
 
 
 @pytest.mark.unit
-def test_data_processor_is_the_no_update_default() -> None:
-    processor = DataProcessor(ProcessorContext(scenario="math"))
+def test_training_pipeline_is_the_no_update_default() -> None:
+    processor = TrainingPipeline(PipelineContext(scenario="math"))
     assert processor.ready() is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.ingest(record)
     assert processor.releasable_record_ids() == frozenset()
     # The default holds no batch-ready units, so it never becomes ready and
-    # build_batch refuses on that ground — the same refusal every engine gives.
-    with pytest.raises(RuntimeError, match="not ready"):
+    # build_batch refuses on that ground — the same refusal every pipeline gives.
+    with pytest.raises(RuntimeError, match="no batch ready"):
         processor.build_batch()
     with pytest.raises(ValueError, match="unknown batch_id"):
         processor.acknowledge("math:whatever:1")
@@ -132,8 +134,8 @@ def test_prepared_step_enforces_its_single_outcome() -> None:
 
 
 @pytest.mark.unit
-def test_custom_processors_default_to_releasing_no_records() -> None:
-    processor = ExampleProcessor(ProcessorContext("math"), [])
+def test_custom_pipelines_default_to_releasing_no_records() -> None:
+    processor = ExamplePipeline(PipelineContext("math"), [])
 
     assert processor.releasable_record_ids() == frozenset()
 
@@ -145,7 +147,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
     trainer = Trainer.build(
         "math",
         records,
-        processor_factory=lambda context: ExampleProcessor(context, events),
+        pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
     )
 
@@ -175,7 +177,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     trainer = Trainer.build(
         "math",
         records,
-        processor_factory=lambda context: ExampleProcessor(context, events),
+        pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
     )
     records.append(
@@ -235,7 +237,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
     trainer = Trainer.build(
         "math",
         records,
-        processor_factory=lambda context: ExampleProcessor(context, []),
+        pipeline_factory=lambda context: ExamplePipeline(context, []),
         candidate_backend=SkippingBackend("math", []),
     )
 
@@ -259,7 +261,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     trainer = Trainer.build(
         "math",
         records,
-        processor_factory=lambda context: ExampleProcessor(context, events),
+        pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
     )
     records.append(
@@ -289,7 +291,7 @@ def test_trainer_reads_only_new_records() -> None:
     trainer = Trainer.build(
         "math",
         records,
-        processor_factory=lambda context: ExampleProcessor(context, events),
+        pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
     )
 

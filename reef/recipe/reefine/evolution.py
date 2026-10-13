@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
@@ -34,7 +35,7 @@ from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
-from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
+from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer, verifier_reward
 from reef.train.types import TrajectoryItem

@@ -85,8 +85,8 @@ def test_declared_environment_fallbacks_are_reported(tmp_path):
         "inference": {"model-path": "/models/demo"},
     }
     resolved, _ = resolve_deployment_config(raw, None, tmp_path / "stack.yaml")
-    lines = startup_report(raw, resolved, {}, environ={"REEF_SAO_BATCH_SIZE": "4"}, from_file=True)
-    assert "  recipe.config.batch-size = 4  (environment REEF_SAO_BATCH_SIZE)" in lines
+    lines = startup_report(raw, resolved, {}, environ={"REEF_MAX_STALENESS": "4"}, from_file=True)
+    assert "  recipe.config.max-staleness = 4  (environment REEF_MAX_STALENESS)" in lines
     assert "  training.backend = slime  (automatic)" in lines
 
 

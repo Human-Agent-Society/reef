@@ -88,7 +88,7 @@ The public layout groups fields by their owner:
 * ``storage``: artifact repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
-* ``task-generation``: the task generator the generated-task recipe asks for tasks.
+* ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
 * ``generator``: the generator service that writes, checks and plays Harbor tasks.
 
 Version 2 contains no process definitions. ``service`` and ``services`` are
@@ -464,7 +464,7 @@ resolved setting with where its value came from:
    [reef]   reef.tokens = ["****"]  (file)
    [reef]   inference.model-path = /models/demo  (file)
    [reef]   inference.backend = sglang  (automatic)
-   [reef]   recipe.config.batch-size = 4  (environment REEF_SAO_BATCH_SIZE)
+   [reef]   recipe.config.max-staleness = 2  (environment REEF_MAX_STALENESS)
    [reef]   training.backend = slime  (automatic)
 
 Sources are ``file``, ``command line``, ``environment`` (the ``REEF_*``
@@ -565,8 +565,8 @@ the deployment and reaches dotted recipes as well as named presets.
 
 After selecting ``recipe.implementation`` (legacy ``reef.recipe``), Reef loads that class's declarations without
 constructing the recipe. A dotted weight-training recipe exposes its fields
-as ``--recipe.config.batch-size``, with legacy aliases
-``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
+as ``--recipe.config.max-staleness``, with legacy aliases
+``--max-staleness`` / ``--max_staleness`` / ``--reef.max_staleness``. Other dotted
 recipes use the same ``--recipe.config.*`` namespace; their internal ``data``
 section and ``--reef.data.*`` spellings remain compatibility details. ``reef serve -c stack.yaml --help`` includes the
 selected component's flags; basic ``reef serve --help`` does not load a recipe.
@@ -739,7 +739,7 @@ The budget measures UTF-8 JSON payloads, references and artifact references
 across active and archived scenarios. SQLite shares it across the record
 directory; PostgreSQL shares it across the deployment schema. Each eviction
 logs a warning with the scenario, record count, sequence range and body bytes.
-Per-scenario loss totals survive restart. Processor status exposes
+Per-scenario loss totals survive restart. The pipeline status exposes
 ``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``
 after a loss; metrics also expose ``records/evicted_count`` and
 ``records/data_incomplete``. These describe missing stored data, not proof that
@@ -765,7 +765,7 @@ version to 3. Training commits store only consumption progress. Already deleted
 bodies cannot be recovered. Do not share stores between old and new writers, or
 downgrade without restoring a compatible backup.
 
-Recipe settings such as ``batch_size`` sit beside these in the same section,
+Recipe settings such as ``max_staleness`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When
 ``reef.recipe`` is a dotted weight-training class, keys the service does not
 recognize are handed to the recipe, and the recipe rejects any key it does
@@ -789,18 +789,18 @@ user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor batches as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
 instruction, the units an automatic batch would take next, up to
-``batch_size`` and possibly none: scored traces, or
-records under ``data.batch_policy: records``. The processor defines
+``pipeline.task2batch.config.batch_size`` and possibly none: scored traces, or
+unscored records when the ``pipeline`` section names the inference stages. The processor defines
 what an instruction batch carries, independently of its automatic batching
 policy.
 For a dotted weight-training deployment this field is also accepted as
 ``reef.training_mode``. Named presets set it in their own ``data`` section.
 
-The processor receives ``ProcessorContext.training_mode`` as its initial
-batching mode. The modes share ingestion and retention; the
-``make_training_batch(batch_number, request)`` hook selects batch inputs.
-Processors declare ``supported_training_modes``; unsupported modes or missing
-instruction assembly raise ``NotImplementedError``.
+The training pipeline receives ``PipelineContext.training_mode`` as its
+initial batching mode. The modes share ingestion and retention. In ``manual``
+an instruction's batch has no record sets; in ``hybrid`` it takes the sets that
+an automatic batch would. A recipe's ``Task2Batch`` declares
+``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that
 explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
 on an inference-only recipe does not create a training backend.
@@ -866,8 +866,10 @@ Harness-evolution presets also carry an ``evolution`` section:
    implementation: reef.recipe.cordis:CordisRecipe
    model:
      path: qwen3-8b
-   data:
-     batch_size: 1
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 1
    evolution:
      adapter: pi
      propose: methods.mine:MyProposer
@@ -878,8 +880,8 @@ The preset's ``implementation`` is ``recipe`` or a dotted recipe class. Weight-t
 recipes are selected directly by dotted class in the deployment config, so the
 service can assemble their Ray training runtime; their fields are flat
 ``reef.<name>`` keys. Presets suit recipes whose runtime can be built from the
-preset or the deployment's upstream proxy. There, ``data`` holds batching
-fields and a recipe-specific section holds the rest.
+preset or the deployment's upstream proxy. There, ``data`` holds the training
+mode, ``pipeline`` holds the stage config, and a recipe-specific section holds the rest.
 
 A composite recipe serves and evolves several release components in one
 scenario, one recipe per component. Its ``components`` object carries one
@@ -887,7 +889,7 @@ recipe config per component name; each inherits the deployment's ``model``
 unless it names its own, and every component shares the deployment's
 runtime and training runtime. A composite whose component trains weights is
 deployed the way that recipe is: ``training.backend`` selects the training
-backend, the component's own ``data`` section sets its fields, and the
+backend, the component's own ``pipeline`` section configures its stages, and the
 runtime pair reaches every component. The repository base keeps one
 directory per component: the recipes' seeds are written there, a bootstrap
 model snapshot goes under the weight-training component's directory, and a
@@ -915,7 +917,7 @@ keeps the reports its own contract parses:
 
 The same composite with a weight-training component is a deployment file:
 the composite is selected by its dotted class, ``training.backend`` picks the
-backend, and the weight component's fields live under its ``data``:
+backend, and the weight component's stage config lives under its ``pipeline``:
 
 .. code:: yaml
 
@@ -926,7 +928,7 @@ backend, and the weight component's fields live under its ``data``:
        components:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
-           data: {batch_size: 8}
+           pipeline: {task2batch: {config: {batch_size: 8}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            evolution: {adapter: pi, propose: methods.mine:MyProposer, evaluate: methods.mine:MyScorer, tasks: ["..."]}
@@ -999,16 +1001,20 @@ before moving services across nodes.
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``batch_size`` goes under ``data:``; the rest goes under
-``evolution:``. `Evolve your harness
+The batch size goes in the deployment's top-level ``pipeline`` section; the
+rest goes under ``evolution:``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
 
 .. config::
 
-   data.batch_size | 1 | traces per mutation attempt
-   data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
+   pipeline.task2batch.config.batch_size | 1 | traces per mutation attempt
 
-Every valid scored report contributes a trace, including successful outcomes.
+The default stages batch every valid scored report as a trace, including
+successful outcomes. To batch recorded traffic alone, every ``batch_size``
+requests with unscored samples, set
+``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
+``pipeline.record2task.module: reef.train.cordis_backend.processor:InferenceTasks``.
+Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
 
 .. config::
 
@@ -1104,7 +1110,7 @@ Read by the weight-training stack. See `Evolve your model
    training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
+   training.config.global_batch_size | samples in one optimizer step. Must equal ``pipeline.task2batch.config.batch_size``.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy
@@ -1145,67 +1151,132 @@ lookalikes.
 The plugin interface is in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
 
-The ``task-generation`` section
--------------------------------
+The ``pipeline`` section
+------------------------
 
-Only the built-in generated-task recipe,
-``reef.record2dataset.generated_tasks:GeneratedTaskRecipe``, reads this section.
-Another weight-training recipe refuses it, and a deployment that pairs it with
-a recipe that trains no weights fails at startup. When present, Reef calls the
-named class's ``from_config`` method once for each scenario.
+A recipe's pipeline has three stages (see `Training pipeline
+<../developer-guide/processors.rst>`__). The recipe names a default class for
+each stage. This section gives each stage its config, and it can name another
+class for a stage. Every stage reads only its own ``config``; the recipe's
+``recipe.config`` holds no stage settings.
 
 .. config::
 
-   task-generation.module | a ``package.module:ClassName`` reference to a ``TaskGenerator`` subclass. Required.
-   task-generation.config | opaque mapping handed to ``from_config``; Reef never reads it
+   pipeline.record2record | the record-to-record stage: ``config``, and optionally ``module``, a ``Record2Record`` subclass
+   pipeline.record2task | the record-to-task stage: ``config``, and optionally ``module``, a ``Record2Task`` subclass
+   pipeline.task2batch | the task-to-batch stage: ``config``, and optionally ``module``, a ``Task2Batch`` subclass
 
 .. code:: yaml
 
    recipe:
-     implementation: reef.record2dataset.generated_tasks:GeneratedTaskRecipe
-     config:
-       generator-url: ${endpoints.generator}
-       rounds: 20
-       description: shell tasks with hidden state under /var and /etc
-       state-dir: ${REEF_STATE_DIR}/rounds
-   task-generation:
-     module: recipes.beta.spade:SpadeTaskGenerator
-     config:
-       generator_url: ${endpoints.generator}
-       skills: [inspection, repair]
-       state_dir: ${REEF_STATE_DIR}/generations
+     implementation: recipes.tttd.recipe:TTTDRecipe
+   pipeline:
+     record2record:
+       config:
+         groups_per_step: 8
+         rollouts_per_group: 64
 
-The class method ``from_config(config, *, scenario, environ)`` returns the
-scenario's generator. A generator that calls a remote service reads its
-credentials through environment references in ``config``. Reef checks the
-class when it loads the recipe config and rejects functions and abstract
-classes. The generator interface and the round are in `Processors
-<../developer-guide/processors.rst#task-generation-contract>`__.
+A stage without a key is the recipe's class with no config. Each recipe's page
+lists the keys of its stages. Keys are written as the stage reads them; a
+hyphen spelling is also accepted.
 
-The generated-task recipe reads these ``recipe.config`` fields:
+Reef checks each stage when it loads the recipe config, before a scenario
+starts: it imports a named class, rejects functions and abstract classes, and
+parses the stage's ``config``. An unknown key or a value out of range fails
+the startup. A setting that moved from ``recipe.config`` to a stage fails
+with the key's new place, for example ``move groups_per_step to
+pipeline.record2record.config.groups_per_step``.
+
+For each scenario, Reef builds the stages in pipeline order with the class
+method ``from_config``. A later stage receives the stages built before it, and
+it reads a value that an earlier stage owns from that stage. For example, the
+TTTD step grid is set once, in the record stage. A stage class without
+``from_config`` cannot be named here.
+
+Generated tasks
+~~~~~~~~~~~~~~~
+
+The built-in generated-task recipe,
+``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
+objective on Tinker's ``importance_sampling`` loss, so it requires the
+``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
+``GeneratedTaskTasks``, and ``GeneratedTaskBatches``. Without
+``pipeline.record2task.config.rounds`` no round runs, and the recipe trains on
+the training arm's reports only.
+
+.. code:: yaml
+
+   recipe:
+     implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+   pipeline:
+     record2record:
+       config:
+         plays_per_task: 4
+         batches_per_round: 2
+     record2task:
+       config:
+         generator_url: ${endpoints.generator}
+         rounds: 20
+         description: shell tasks with hidden state under /var and /etc
+         state_dir: ${REEF_STATE_DIR}/rounds
+         generator:
+           module: recipes.beta.spade:SpadeTaskGenerator
+           config:
+             generator_url: ${endpoints.generator}
+             skills: [inspection, repair]
+             state_dir: ${REEF_STATE_DIR}/generations
+     task2batch:
+       config:
+         tasks_per_step: 2
+
+``GeneratedTaskRecord2Record`` groups the training plays by task and requests
+the rounds:
 
 .. config::
 
-   recipe.config.tasks-per-step | 4 | complete task groups in one batch
-   recipe.config.plays-per-task | 4 | training plays of each task; a group is complete at this count. At least 2.
-   recipe.config.scaffold-tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
-   recipe.config.rounds | 0 | rounds of task generation; 0 generates nothing and trains on the training arm's reports only
-   recipe.config.batches-per-round | 1 | acknowledged batches after which the next round starts
-   recipe.config.description | what the tasks are about; every generation request carries it. Required with rounds.
-   recipe.config.generator-url | the generator service, ``${endpoints.generator}``. Required with rounds.
-   recipe.config.state-dir | where each scenario keeps its round summaries. Required with rounds.
-   recipe.config.served-model | the model the task player asks for; the deployment's by default
+   pipeline.record2record.config.plays_per_task | 4 | training plays of each task; a group is complete at this count. At least 2.
+   pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
+   pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
+   pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
-The recipe trains with the ``task_group`` objective on Tinker's
-``importance_sampling`` loss, so it requires the ``tinker`` training backend.
+``GeneratedTaskTasks`` runs the rounds and turns the training plays into
+tasks. It plays each task ``plays_per_task`` times, as its record stage
+groups them:
+
+.. config::
+
+   pipeline.record2task.config.rounds | 0 | rounds of task generation; 0 generates nothing
+   pipeline.record2task.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
+   pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
+   pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
+   pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
+   pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
+   pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+
+``GeneratedTaskBatches`` batches complete task groups:
+
+.. config::
+
+   pipeline.task2batch.config.tasks_per_step | 4 | complete task groups in one batch
+
+Reef calls the generator class's ``from_config(config, *, scenario, environ)``
+once for each scenario. A generator that calls a remote service reads its
+credentials through environment references in ``config``. The generator
+interface and the round are in `Training pipeline
+<../developer-guide/processors.rst#task-generation-contract>`__.
+
+A source session is a report, without a training arm, whose inference
+records all carry ``source_tag``. The generator service accepts at most
+512 KiB of records and files in one request, so keep
+``source_records_per_round`` small when the sessions are long.
 
 The ``generator`` section
 -------------------------
 
 Absent by default. When present, ``reef serve`` starts the generator service
-(``python -m reef.record2dataset``) before the HTTP service, which depends on
-it, and publishes its address as ``${endpoints.generator}`` for the recipe to
-consume. The generator writes, checks and plays Harbor tasks for the
+(``python -m reef.service.deploy.generator_process``) before the HTTP service, which depends on
+it, and publishes its address as ``${endpoints.generator}`` for the
+generated-task stages to consume. The generator writes, checks and plays Harbor tasks for the
 generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
@@ -1234,15 +1305,16 @@ place it on the host that has Docker.
      tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
    execution:
      generator: auto
-   recipe:
-     config:
-       generator-url: ${endpoints.generator}
+   pipeline:
+     record2task:
+       config:
+         generator_url: ${endpoints.generator}
 
 The generator reads the resolved deployment through ``REEF_CONFIG`` like the
 other children: the Reef address from ``reef.host`` and ``reef.port``, the
 token from ``reef.token``, and the served model from ``inference.model-path``
 or ``inference.upstream-model``. Without ``reef serve``,
-``python -m reef.record2dataset -c serve.yaml`` runs it from the same file.
+``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
 
 Experiment tracking
 -------------------

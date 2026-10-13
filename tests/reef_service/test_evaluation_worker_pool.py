@@ -12,11 +12,10 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train import ProcessorContext
+from reef.train import PipelineContext, TrainingPipeline
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.strategies import EpisodeScorer
-from reef.train.processors import DataProcessor
 from reef.train.trainer import Trainer
 
 from ._strategies import resolve_proposer
@@ -131,7 +130,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     trainer = Trainer(
         scenario="test",
         records=records,
-        processor=DataProcessor(ProcessorContext("test")),
+        pipeline=TrainingPipeline(PipelineContext("test")),
         candidate_backend=backend,
         candidate_evaluator=None,
         state=backend.initial_state(),

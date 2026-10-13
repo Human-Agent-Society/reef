@@ -887,7 +887,8 @@ def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
-    assert set(result) == {"schema-version", "recipe", "inference"}
+    assert set(result) == {"schema-version", "recipe", "pipeline", "inference"}
+    assert result["pipeline"] == {"task2batch": {"config": {"batch_size": 1}}}
 
 
 def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkeypatch) -> None:
@@ -897,7 +898,9 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
     evolution = _method(monkeypatch, "evolution")  # the tutorial's grader: its tasks are the three arithmetic ones
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
+    recipe_sections = {
+        key: config[key] for key in ("implementation", "model", "evolution", "data", "pipeline", "execution")
+    }
     # serve.yaml names the real binary; this run has no pi on PATH.
     recipe_sections["evolution"] = {**recipe_sections["evolution"], "binary": str(tmp_path / "fake-pi")}
     materialized = tmp_path / "harness_evolve.yaml"
@@ -919,7 +922,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.training_mode) == (1, "auto")
+    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
@@ -1108,7 +1111,9 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
+    recipe_sections = {
+        key: config[key] for key in ("implementation", "model", "evolution", "data", "pipeline", "execution")
+    }
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
@@ -1120,7 +1125,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
     assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
-    assert built.training_mode == "auto"
+    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",
@@ -1178,7 +1183,9 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert built.training_mode == "hybrid"
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
-    assert trainer.training_mode == "hybrid"
+    assert trainer.pipeline.training_mode == "hybrid"
+    # Each report is one batch: the deployment's pipeline section sets batch_size 1.
+    assert trainer.pipeline.task2batch.batch_size == 1
     trainer.close()
     records.close()
 
@@ -1233,7 +1240,9 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
+    recipe_sections = {
+        key: config[key] for key in ("implementation", "model", "evolution", "data", "pipeline", "execution")
+    }
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime

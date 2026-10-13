@@ -46,16 +46,27 @@ inference:
 recipe:
   implementation: recipes.sdpo.recipe:SDPORecipe
   config:
-    tokenizer-path: ${SDPO_MODEL_PATH}
-    groups-per-step: 32              # MUST equal the stage's SDPO_GROUPS_PER_STEP
-    rollouts-per-group: 8            # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
     max-staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
-    max-teacher-prompt-tokens: 10240 # the reference's max_reprompt_len
-    max-teacher-tokens: 18944        # the trainer's seq-length; a longer teacher sequence fails the step
-    success-reward-threshold: 0.5    # the task's reward is binary
-    include-environment-feedback: false  # Section 3's generalization sweep disables it
-    enable-thinking: false
     checkpoint-every-n-versions: 1000    # the bridge's per-step HF export is what the engines load
+# The sdpo recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
+pipeline:
+  # The sampling grid: one step is groups_per_step questions by rollouts_per_group attempts.
+  record2record:
+    config:
+      groups_per_step: 32            # MUST equal the stage's SDPO_GROUPS_PER_STEP
+      rollouts_per_group: 8          # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
+  # The teacher's tokenizer and windows.
+  record2task:
+    config:
+      tokenizer_path: ${SDPO_MODEL_PATH}
+      max_teacher_prompt_tokens: 10240  # the reference's max_reprompt_len
+      max_teacher_tokens: 18944         # the trainer's seq-length; a longer teacher sequence fails the step
+      enable_thinking: false
+  # What the teacher reads: a correct sibling's response, and the feedback when enabled.
+  task2batch:
+    config:
+      success_reward_threshold: 0.5        # the task's reward is binary
+      include_environment_feedback: false  # Section 3's generalization sweep disables it
 training:
   backend: slime
   colocate: true

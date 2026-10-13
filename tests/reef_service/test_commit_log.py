@@ -28,6 +28,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitLogScenarioStore
 from reef.storage.commits import CommitRecord
@@ -37,11 +38,13 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.algos import StepScheduling
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
+from reef.train.cordis_backend.processor import TraceBatches, TraceRecord2Record, TraceTasks
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.train.pipeline import TrainingPipeline
 
 from ._policy_recipe import TestPolicyRecipe
 from ._strategies import resolve_episode_scorer, resolve_proposer
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
 
 
 def sample_record(
@@ -483,7 +486,7 @@ class _SavedArtifactRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=self.backend,
             algorithm_state=algorithm_state,
         )
@@ -595,11 +598,16 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     assert recovered.trainer.state == {"steps": 2}
 
 
-class ProtectAllProcessor(ThresholdProcessor):
+class ProtectAllPipeline(TrainingPipeline):
     """Pairs like SFT but never releases a row: every ingested id is protected."""
 
-    def __init__(self, context) -> None:
-        super().__init__(context)
+    def __init__(self, context, batch_size: int) -> None:
+        super().__init__(
+            context,
+            record2record=ReportRecord2Record(context, ReportGrouping()),
+            record2task=ThresholdTasks(),
+            task2batch=ThresholdBatches(context, batch_size),
+        )
         self._seen: set[str] = set()
 
     def ingest(self, item) -> None:
@@ -616,9 +624,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ProtectAllProcessor(
-                context.with_config({"batch_size": self.batch_size, "min_score": self.min_score})
-            ),
+            pipeline_factory=lambda context: ProtectAllPipeline(context, self.batch_size),
             candidate_backend=candidate_backend(self.training_runtime, "sft", StepScheduling()),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
@@ -629,7 +635,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
 def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
-    The protect-all processor keeps every row physically present, so recovery
+    The protect-all pipeline keeps every row physically present, so recovery
     without the log's high-water mark would page from sequence 0, re-ingest
     the consumed pair, and train it again.
     """
@@ -726,7 +732,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
-    original_release = scenario.trainer.processor.release_records
+    original_release = scenario.trainer.pipeline.release_records
     crash = {"armed": True}
 
     def exploding_release(*args, **kwargs) -> None:
@@ -735,7 +741,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
             raise RuntimeError("simulated crash between record append and buffer release")
         original_release(*args, **kwargs)
 
-    monkeypatch.setattr(scenario.trainer.processor, "release_records", exploding_release)
+    monkeypatch.setattr(scenario.trainer.pipeline, "release_records", exploding_release)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
@@ -961,7 +967,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     These tests exercise commit-log/version-chain mechanics, not
     harness-evolution semantics specifically; they just need a concrete,
     artifact-producing Recipe. Constructs CordisBackend and
-    CordisProcessor directly, the same shape
+    the reported trace pipeline directly, the same shape
     CordisRecipe.build() has, minus the config-boot layer these
     tests never touch (see tests/reef_service/test_harness_recipe.py for
     the backend's own guarantees).
@@ -978,8 +984,6 @@ class _HarnessEvolveTestRecipe(Recipe):
         return create_harness_surface()
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
-        from reef.train.cordis_backend.processor import CordisProcessor
-
         candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
@@ -991,7 +995,12 @@ class _HarnessEvolveTestRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(context.with_config({"batch_size": self.batch_size})),
+            pipeline_factory=lambda context: TrainingPipeline(
+                context,
+                record2record=TraceRecord2Record(context),
+                record2task=TraceTasks(),
+                task2batch=TraceBatches(context, self.batch_size),
+            ),
             candidate_backend=candidate_backend,
             candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
             algorithm_state=algorithm_state,
@@ -1234,7 +1243,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert result is not None
     pending = scenario.trainer.pending_batch
     assert pending is not None
-    target = scenario.trainer.processor if failure_point == "release_records" else scenario.trainer
+    target = scenario.trainer.pipeline if failure_point == "release_records" else scenario.trainer
     original = getattr(target, failure_point)
     should_fail = True
 
@@ -1368,8 +1377,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
         assert allow_reload.wait(1)
         return reload_scenario(scenario)
 
-    original.trainer.processor.release_records = fail_release.__get__(
-        original.trainer.processor, type(original.trainer.processor)
+    original.trainer.pipeline.release_records = fail_release.__get__(
+        original.trainer.pipeline, type(original.trainer.pipeline)
     )
     dispatcher._registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))

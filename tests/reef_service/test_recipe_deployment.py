@@ -24,11 +24,10 @@ def method_config():
     return {
         "schema-version": 2,
         "inference": {"model-path": "/models/policy"},
-        "recipe": {
-            "implementation": OPENCLAW,
-            "config": {
-                "prm-url": "http://external:23001",
-                "prm-tokenizer-path": "/models/judge",
+        "recipe": {"implementation": OPENCLAW, "config": {}},
+        "pipeline": {
+            "record2record": {
+                "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"},
             },
         },
     }
@@ -75,7 +74,10 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     raw = method_config()
     config, _ = resolve_deployment_config(
         raw,
-        {"recipe.config.prm-url": "http://other:9000", "recipe.config.prm-tokenizer-path": "/models/other"},
+        {
+            "pipeline.record2record.config.prm_url": "http://other:9000",
+            "pipeline.record2record.config.prm_tokenizer_path": "/models/other",
+        },
         tmp_path / "serve.yaml",
     )
     driver, http = validate_services(config, "test")
@@ -85,14 +87,14 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     assert driver["executor"] == http["executor"] == "uni"
     assert http["depends_on"] == [driver["name"]]
     settings = service_config_from_mapping(config)
-    recipe = OpenClawRLRecipe.from_environment(
-        {},
-        config=OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path),
-        **runtime_bindings(StubTrainingRuntime()),
-    )
-    assert recipe.prm_url == "http://other:9000"
-    assert recipe.prm_tokenizer_path == "/models/other"
-    assert raw["recipe"]["config"]["prm-url"] == "http://external:23001"
+    recipe_config = OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
+    recipe_config["pipeline"] = settings.pipeline_settings
+    recipe = OpenClawRLRecipe.from_environment({}, config=recipe_config, **runtime_bindings(StubTrainingRuntime()))
+    assert recipe.stages().record2record.config == {
+        "prm_url": "http://other:9000",
+        "prm_tokenizer_path": "/models/other",
+    }
+    assert raw["pipeline"]["record2record"]["config"]["prm_url"] == "http://external:23001"
     assert "services" not in raw
 
 
@@ -172,7 +174,7 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
     port = int(external.stdout.readline())
     raw = method_config()
     endpoint = f"http://127.0.0.1:{port}"
-    raw["recipe"]["config"]["prm-url"] = endpoint
+    raw["pipeline"]["record2record"]["config"]["prm_url"] = endpoint
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in config["services"]] == ["slime-driver", "reef"]
     for process in config["services"]:
@@ -210,7 +212,7 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
         else:
             stack.start()
             assert all((tmp_path / process["name"]).exists() for process in config["services"])
-            assert stack.config["reef"]["prm_url"] == endpoint
+            assert stack.config["pipeline"]["record2record"]["config"]["prm_url"] == endpoint
     finally:
         stack.shutdown(grace=1)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)

@@ -135,8 +135,9 @@ def test_openclawrl_isolates_external_models_from_reef_training():
         assert int(command[command.index("--tp") + 1]) == len(pools[name])
         assert "RAY_ADDRESS" not in compose[name].get("environment", {})
     prm = compose["prm"]["command"]
-    assert config["reef"]["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
-    assert config["reef"]["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
+    judging = config["pipeline"]["record2record"]["config"]
+    assert judging["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
+    assert judging["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
     flags = dict(argument.removeprefix("--").split("=", 1) for argument in driver_arguments(config) if "=" in argument)
     training_gpus = int(flags["actor-num-nodes"]) * int(flags["actor-num-gpus-per-node"])

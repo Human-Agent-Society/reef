@@ -30,7 +30,7 @@ The core loop
        S-->>H: Response and receipt
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
-       opt Processor has a batch
+       opt Pipeline has a batch
          Note over S,E: Produce, evaluate, and select a candidate
          T->>G: Prepared step
          G-->>T: Candidate artifact ready
@@ -71,7 +71,7 @@ full elsewhere:
    * - Learning / training in general
      - `Write a recipe <../developer-guide/write-a-recipe.rst>`__
    * - Record eligibility
-     - `Processors <../developer-guide/processors.rst>`__
+     - `Training pipeline <../developer-guide/processors.rst>`__
    * - Evaluation
      - `Gate a candidate
        <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__

@@ -86,8 +86,9 @@ with ``RecipeConfigError``. See `Manual training
 ``requests`` contains one mapping with ``id``, ``text``, ``session``,
 ``release_id``, ``requires``, and ``untrusted=True``. In ``manual`` mode,
 ``samples`` is empty. In ``hybrid`` mode, it contains up to ``batch_size``
-samples from the next automatic batch, and may be empty. These can be scored
-traces or records under ``data.batch_policy: records``.
+samples from the next automatic batch, and may be empty. These samples are
+scored traces, or unscored records with the inference stages that "Two
+batching modes" below describes.
 
 Reef evaluates request mutations and applies the same ``evolution.publish``
 policy as for other steps. Pending agent proposals and periodic rollback
@@ -174,19 +175,30 @@ This method adds a rules node the first time a batch contains a failure:
 Two batching modes
 ~~~~~~~~~~~~~~~~~~
 
-``data.batch_policy`` selects the source of each batch:
+The deployment's ``pipeline`` section selects the source of each batch.
+``pipeline.task2batch.config.batch_size`` (default 1) sets the number of
+units in one batch.
 
-- ``reports`` (the default) batches valid reports with explicit scores. Use
-  it when a grader, test, or user action supplies an outcome.
-- ``records`` batches recorded inference requests, without requiring
-  reports. It starts a step every ``batch_size`` requests. These samples
-  have ``score=None``, which the proposer must handle. The SkillClaw night
-  example judges its own unscored samples later.
+- The recipe's default stages batch valid reports with explicit scores. Use
+  them when a grader, test, or user action supplies an outcome.
+- The inference stages batch recorded inference requests and do not require
+  reports. A step starts every ``batch_size`` requests. These samples have
+  ``score=None``, which the proposer must handle. The SkillClaw night
+  example judges its own unscored samples later. Name the stages as follows:
+
+  .. code:: yaml
+
+     pipeline:
+       record2record:
+         module: reef.record2record:InferenceRecord2Record
+       record2task:
+         module: reef.train.cordis_backend.processor:InferenceTasks
 
 Configure it
 ~~~~~~~~~~~~
 
-The recipe config names the plugin classes, the tasks, and the first-boot tree:
+The recipe config names the plugin classes, the tasks, and the first-boot
+tree. The ``pipeline`` section sets the batch size:
 
 .. code:: yaml
 
@@ -194,8 +206,6 @@ The recipe config names the plugin classes, the tasks, and the first-boot tree:
    recipe:
      implementation: reef.recipe.cordis:CordisRecipe
      config:
-       batch-size: 1
-       max-score: 0.0
        evolution:
          adapter: pi
          binary: pi
@@ -212,6 +222,10 @@ The recipe config names the plugin classes, the tasks, and the first-boot tree:
              url: https://api.openai.com
              model: gpt-4o
              api_key_env: OPENAI_API_KEY
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 1
    inference:
      upstream-model: qwen3-8b
 

@@ -6,12 +6,18 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.tasks import primary_reward
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.terminus.runner import trial_record
 from reef.train.cordis_backend.strategies import EpisodeScorer, VerifierRewardScorer, verifier_reward
 
 TASK = "/tasks/openenv-00012-003-deduction"
+
+
+def test_the_trajectory_reward_import_remains_compatible() -> None:
+    from reef.harness.episodes.trajectory import primary_reward as trajectory_primary_reward
+
+    assert trajectory_primary_reward is primary_reward
 
 
 def episode(*events: dict[str, object], exit_code: int = 0) -> EpisodeResult:

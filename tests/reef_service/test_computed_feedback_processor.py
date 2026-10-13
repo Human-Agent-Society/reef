@@ -1,22 +1,28 @@
-"""Focused unit tests for the computed-feedback processor's state machine.
+"""Focused unit tests for the computed-feedback pipeline's state machine.
 
 test_openclawrl pins the real recipe's behavior; these tests pin the
-engine mechanics themselves with a toy recipe, where recipe policy cannot
-blur the state machine.
+mechanics of a pipeline with a ``JudgingRecord2Record`` and ``JudgedTasks`` with a
+toy recipe, where recipe policy cannot blur the state machine.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from reef_service._trajectories import policy_trajectory
 
+from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
-from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker, SupportsReceipt
-from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
+from reef.pipeline_context import PipelineContext
+from reef.record2record import JudgingRecord2Record, RecordJudging
+from reef.record2task import JudgedTasks
+from reef.task2batch import Task2Batch
+from reef.train.pipeline import TrainingPipeline
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
@@ -53,22 +59,24 @@ class _FakeWorker:
         self._judgments.append(judgment)
 
 
-class _ToyProcessor(ComputedFeedbackProcessor):
-    """A record tracks itself; a record whose payload names ``completes``
-    finishes that receipt. Samples are one-token stubs."""
+class _ToyJudging(RecordJudging):
+    """A record tracks itself; a record whose payload names ``completes`` finishes that receipt."""
 
-    def ingest(self, item: AgentRecord) -> None:
-        self.catch_up(time.monotonic())
+    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
         completes = item.payload.get("completes")
         if completes:
-            self.dispatch(_Job(completes))
+            stage.dispatch(_Job(completes))
         if item.payload.get("track"):
-            self.track(item)
+            stage.track(item)
         else:
-            self.retire(item.agent_record_id)
+            stage.retire(item.agent_record_id)
 
-    async def judge(self, job: _Job) -> _Judgment:
+    async def judge(self, job: SupportsReceipt) -> SupportsReceipt:
         return _Judgment(job.receipt)
+
+
+class _ToyTasks(JudgedTasks):
+    """One-token stub samples; a judgment that is not good cannot train."""
 
     def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectoryItem | None:
         if not judgment.good:
@@ -82,8 +90,24 @@ class _ToyProcessor(ComputedFeedbackProcessor):
             runtime_load_id=record.payload.get("version", "v1"),
         )
 
-    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tuple(sample for sample in samples))
+
+class ToyBatches(Task2Batch):
+    """Batches the judged samples in the order that the stage selected them."""
+
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tasks)
+
+
+class _ToyProcessor(TrainingPipeline):
+    """Trains the judged records of ``_ToyJudging``. Samples are one-token stubs."""
+
+    def __init__(self, context: PipelineContext, *, worker: Any, batch_size: int = 1) -> None:
+        super().__init__(
+            context,
+            record2record=JudgingRecord2Record(context, _ToyJudging(), worker),
+            record2task=_ToyTasks(),
+            task2batch=ToyBatches(context, batch_size),
+        )
 
 
 def _record(agent_record_id: str, **payload) -> AgentRecord:
@@ -94,7 +118,7 @@ def _record(agent_record_id: str, **payload) -> AgentRecord:
 
 def _engine(batch_size: int = 1, worker=None) -> tuple[_ToyProcessor, _FakeWorker]:
     worker = worker if worker is not None else _FakeWorker()
-    processor = _ToyProcessor(ProcessorContext("s", {"batch_size": batch_size}), worker=worker)
+    processor = _ToyProcessor(PipelineContext("s"), worker=worker, batch_size=batch_size)
     return processor, worker
 
 
@@ -162,7 +186,7 @@ def test_stale_runtime_load_ids_drop_by_record_arrival() -> None:
 
 def test_candidates_within_max_staleness_of_the_newest_record_stay() -> None:
     worker = _FakeWorker()
-    processor = _ToyProcessor(ProcessorContext("s", {"batch_size": 3}, max_staleness=1), worker=worker)
+    processor = _ToyProcessor(PipelineContext("s", max_staleness=1), worker=worker, batch_size=3)
     for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
         processor.ingest(_record(name, track=True, version=version))
         processor.ingest(_record(f"done-{name}", completes=name))
@@ -173,7 +197,7 @@ def test_candidates_within_max_staleness_of_the_newest_record_stay() -> None:
 
 
 def test_correlate_only_mode_without_a_worker() -> None:
-    processor = _ToyProcessor(ProcessorContext("s", {"batch_size": 1}), worker=None)
+    processor = _ToyProcessor(PipelineContext("s"), worker=None)
     processor.ingest(_record("r1", track=True))
     processor.ingest(_record("r2", completes="r1"))
     assert "r1" in processor.releasable_record_ids()
@@ -186,13 +210,19 @@ def test_close_propagates_to_the_worker() -> None:
     assert worker.closed
 
 
-def test_real_worker_runs_the_judge_coroutine() -> None:
-    async def judge(job):
+class _Answers(BackgroundJobRunner):
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
         return _Judgment(job.receipt)
 
-    worker = JudgingWorker(judge)
+
+class _Crashes(BackgroundJobRunner):
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        raise RuntimeError("boom")
+
+
+def test_real_worker_runs_the_judge_coroutine() -> None:
+    worker = BackgroundJobWorker(_Answers(), thread_name="test-jobs")
     assert worker.submit(_Job("r1"))
-    import time
 
     deadline = time.monotonic() + 10.0
     judgments: list = []
@@ -204,12 +234,8 @@ def test_real_worker_runs_the_judge_coroutine() -> None:
 
 
 def test_real_worker_resolves_a_crashing_judge_as_failed() -> None:
-    async def judge(job):
-        raise RuntimeError("boom")
-
-    worker = JudgingWorker(judge)
+    worker = BackgroundJobWorker(_Crashes(), thread_name="test-jobs")
     assert worker.submit(_Job("r1"))
-    import time
 
     deadline = time.monotonic() + 10.0
     judgments: list = []

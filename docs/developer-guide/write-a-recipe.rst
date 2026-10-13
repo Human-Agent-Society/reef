@@ -73,10 +73,10 @@ A weight recipe is four pieces plus the class that binds them.
 
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(batch, state)`` to return advantages, metrics, and proposed state in a ``StepSignal``. No torch, Ray, or Slime import.
    step schedule | a ``StepScheduling`` the recipe binds beside its objective: rollout unit, optimizer step size, epochs, shuffle, and remainder handling. The objective declares only whether its loss tolerates more than one pass.
-   processor | assembles valid reports and referenced records into samples and typed batches
+   pipeline stages | the record stage, the record-to-task stage, and the task-to-batch stage that turn valid reports and referenced records into samples and typed batches; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
-   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the objective (by registered name or dotted class/instance path), and the step schedule
+   recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path) and the step schedule
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
@@ -101,8 +101,10 @@ Copy a weight-training config as described in `Evolve your model
    schema-version: 2
    recipe:
      implementation: "my_pkg.my_method:MyMethodRecipe"
-     config:
-       batch-size: 4
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 4
 
 This fragment shows only the new keys; keep the inference, storage and training
 settings from the config you copied. Reef assembles the driver and HTTP process. Set

@@ -15,24 +15,27 @@ from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.components import RECORDS_COMPONENT
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
+from reef.pipeline_context import PipelineContext
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
+from reef.record2task import Record2Task
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
+from reef.task2batch import NoBatches
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
-from reef.train.processors.base import DataProcessor
+from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import ProcessorContext
 
 
 @dataclass(frozen=True)
@@ -91,16 +94,45 @@ class Recipe:
     runtime: InferenceRuntime | None = None
     training_runtime: TrainingRuntime | None = None
 
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """Directories that belong to one scenario alone, archived when the scenario is deleted; none by default."""
-        return ()
-
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
     training_mode: str = config_field("auto")
+    #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
+    pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        # The stages' classes fail the deployment here, not the first scenario.
+        self.stages()
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        """The recipe's default stage classes. The default passes records through and makes no batch."""
+        return PipelineSpec()
+
+    def stages(self) -> PipelineConfig:
+        """The pipeline's stage classes and their configs."""
+        if self.pipeline_stages is not None:
+            return self.pipeline_stages
+        try:
+            return PipelineConfig.from_setting(None, spec=type(self).pipeline_spec(), environ={})
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+
+    def build_pipeline(self, context: PipelineContext) -> TrainingPipeline:
+        """Build the training pipeline of one scenario from :meth:`stages`, in pipeline order."""
+        try:
+            return self.stages().build(context)
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """Directories that belong to one scenario alone, archived when the scenario is deleted.
+
+        The record-to-task stage names them, for example generated tasks' round summaries.
+        """
+        stage = self.stages().record2task
+        return Record2Task.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
@@ -119,7 +151,8 @@ class Recipe:
     ) -> Recipe:
         values = os.environ if environ is None else environ
         settings = config or {}
-        resolved = resolve_config_field_values(cls, settings.get("data", {}), values)
+        data = settings.get("data", {})
+        resolved = resolve_config_field_values(cls, data, values)
         return cls.from_resolved_config(
             settings, resolved, environ=values, runtime=runtime, training_runtime=training_runtime
         )
@@ -157,8 +190,14 @@ class Recipe:
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        """Recipe-specific keyword arguments resolved from config sections."""
-        return {}
+        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages."""
+        pipeline = settings.get("pipeline")
+        if pipeline is None:
+            return {}
+        try:
+            return {"pipeline_stages": PipelineConfig.from_setting(pipeline, spec=cls.pipeline_spec(), environ=values)}
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
 
     @classmethod
     def select_weight_training(
@@ -198,7 +237,7 @@ class Recipe:
         return Trainer.build(
             scenario,
             records,
-            processor_factory=DataProcessor,
+            pipeline_factory=self.build_pipeline,
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
@@ -340,7 +379,6 @@ class WeightTrainingSpec:
     """
 
     objective: str
-    processor: type[DataProcessor] | None = None
     scheduling: StepScheduling = field(default_factory=StepScheduling)
 
     @property
@@ -356,7 +394,7 @@ class WeightTrainingRecipe(Recipe):
     Requires an independent :class:`TrainingRuntime` in ``training_runtime``
     (the first positional argument of every training recipe).
 
-    :meth:`training_spec` binds the data processor, the training objective, which declares its
+    :meth:`training_spec` binds the task-to-batch stage, the training objective, which declares its
     backend loss family, and the step schedule. Keeping that static machinery in one structured return value
     means the dataclass fields remain the recipe's instance configuration. The
     training driver reads the selected class from the same deployment config
@@ -366,8 +404,8 @@ class WeightTrainingRecipe(Recipe):
     ``max_staleness`` is the shared stale-sample admission window. Zero keeps
     exact-version training; a positive value admits same-incarnation samples
     up to that lag before the existing training path runs. The default
-    :meth:`build` also gives it to the processor as
-    ``ProcessorContext.max_staleness``.
+    :meth:`build` also gives it to the pipeline as
+    ``PipelineContext.max_staleness``.
 
     ``candidate_evaluation`` is framework-owned configuration derived from an
     optional top-level ``evaluation`` section. The plugin class it names builds one
@@ -375,8 +413,12 @@ class WeightTrainingRecipe(Recipe):
     metrics-only evaluator and selection policy without changing the recipe's
     method-specific config fields.
 
+    ``pipeline_stages`` is framework-owned configuration derived from an
+    optional top-level ``pipeline`` section: each stage's class, the recipe's
+    :meth:`pipeline_spec` unless the section names another, and its config.
+
     Configuration is declared as fields: a config field
-    (``batch_size: int = config_field(128, env="REEF_SAO_BATCH_SIZE")``, see
+    (``max_staleness: int = config_field(0, env="REEF_MAX_STALENESS")``, see
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
     environment fallback, and the type-aware parser. :meth:`service_config`
     and :meth:`from_environment` derive everything from those fields, so a
@@ -390,10 +432,10 @@ class WeightTrainingRecipe(Recipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        """Return the processor, objective and step-schedule binding for this recipe.
+        """Return the task-to-batch stage, objective and step-schedule binding for this recipe.
 
         Concrete weight recipes override this hook. A recipe with bespoke
-        trainer wiring may omit ``processor`` and override :meth:`build`.
+        trainer wiring may omit ``task2batch`` and override :meth:`build`.
         """
         return WeightTrainingSpec(objective="")
 
@@ -483,17 +525,16 @@ class WeightTrainingRecipe(Recipe):
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         cls._validate_config(settings)
-        if settings.get("task_generation") is not None:
-            raise RecipeConfigError(f"{cls.__name__} does not train on generated tasks; remove task-generation")
+        kwargs = super()._recipe_kwargs(settings, values)
         evaluation = settings.get("evaluation")
-        if evaluation is None:
-            return {}
-        if not isinstance(evaluation, Mapping):
-            raise RecipeConfigError("evaluation must be an object")
-        try:
-            return {"candidate_evaluation": CandidateEvaluationConfig.from_dict(evaluation, environ=values)}
-        except CandidateEvaluationConfigError as exc:
-            raise RecipeConfigError(str(exc)) from exc
+        if evaluation is not None:
+            if not isinstance(evaluation, Mapping):
+                raise RecipeConfigError("evaluation must be an object")
+            try:
+                kwargs["candidate_evaluation"] = CandidateEvaluationConfig.from_dict(evaluation, environ=values)
+            except CandidateEvaluationConfigError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+        return kwargs
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
@@ -504,31 +545,6 @@ class WeightTrainingRecipe(Recipe):
         as SAO refusing an ``optimization`` section.
         """
 
-    def processor_config(self) -> dict[str, Any]:
-        """The config mapping the default :meth:`build` hands the processor.
-
-        Defaults to this recipe's data config field values. The shared
-        ``max_staleness`` field is not included: the default :meth:`build`
-        passes it as the typed ``ProcessorContext.max_staleness`` instead.
-        Override this method to rename keys or add processor-only entries.
-        """
-        return {
-            name: getattr(self, name)
-            for name in recipe_config_fields(type(self))
-            if name not in ("max_staleness", "training_mode")
-        }
-
-    def build_processor(self, context: ProcessorContext) -> DataProcessor:
-        """Build the processor of one scenario with :meth:`processor_config`.
-
-        Override this method to give the processor more than its config, for
-        example a plugin built for the scenario.
-        """
-        processor_class = type(self).training_spec().processor
-        if processor_class is None:
-            raise TypeError(f"{type(self).__name__} declares no processor")
-        return processor_class(context.with_config(self.processor_config()))
-
     def build(
         self,
         scenario: str,
@@ -537,7 +553,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        """Build a trainer from this recipe's processor, objective, and report contract.
+        """Build a trainer from this recipe's pipeline, objective, and report contract.
 
         Override with ``Trainer.build`` for bespoke wiring such as a local
         training backend, and pass :attr:`report_type` through there too.
@@ -561,11 +577,10 @@ class WeightTrainingRecipe(Recipe):
         from reef.train.runtime_backend import RuntimeCandidateBackend
 
         spec = type(self).training_spec()
-        processor_class = spec.processor
-        if processor_class is None:
+        if type(self).pipeline_spec().task2batch is NoBatches:
             raise TypeError(
-                f"{type(self).__name__} declares no processor: return a DataProcessor subclass "
-                f"as `processor` from training_spec() or override build() for bespoke trainer wiring"
+                f"{type(self).__name__} declares no task2batch: return a PipelineSpec with a Task2Batch subclass "
+                f"from pipeline_spec() or override build() for bespoke trainer wiring"
             )
         if not spec.objective:
             raise TypeError(
@@ -588,7 +603,7 @@ class WeightTrainingRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=self.build_processor,
+            pipeline_factory=self.build_pipeline,
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
                 spec.objective,

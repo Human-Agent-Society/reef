@@ -39,7 +39,7 @@ from reef.recipe import (
     Recipe,
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.train import DataProcessor, Trainer
+from reef.train import Task2Batch, Trainer, TrainingPipeline
 from reef.runtime.interfaces import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
 
 # Compatibility aliases for existing imports.
@@ -59,7 +59,6 @@ __all__ = [
     "CandidateSelector",
     "CheckpointStrategy",
     "ConfiguredEvaluationPlugin",
-    "DataProcessor",
     "Dispatcher",
     "EvaluationResult",
     "EveryNVersions",
@@ -80,7 +79,9 @@ __all__ = [
     "SQLiteRecordStore",
     "Scenario",
     "SelectionDecision",
+    "Task2Batch",
     "Trainer",
+    "TrainingPipeline",
     "TrainingRuntime",
     "UpdateCandidate",
     "__version__",

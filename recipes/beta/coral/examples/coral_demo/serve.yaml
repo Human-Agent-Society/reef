@@ -20,8 +20,11 @@ inference:
 recipe:
   implementation: recipes.beta.coral.recipe:CoralRecipe
   config:
-    group-size: 2          # two scored siblings release a training group
     checkpoint-every-n-versions: 1
+pipeline:
+  record2record:
+    config:
+      group_size: 2        # two scored siblings release a training group
 training:
   backend: slime
   ready-timeout: 3600
@@ -50,7 +53,7 @@ training:
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     num-rollout: "${training.config.steps}"
     rollout-batch-size: "2"
-    n-samples-per-prompt: "${recipe.config.group-size}"
+    n-samples-per-prompt: "${pipeline.record2record.config.group_size}"
     global-batch-size: "4"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
     num-gpus-per-node: "${training.config.num_gpus}"

@@ -70,9 +70,12 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 8                      # MUST equal training.config.global_batch_size
     max-staleness: 64
     checkpoint-every-n-versions: 20
+pipeline:
+  task2batch:
+    config:
+      batch_size: 8                    # MUST equal training.config.global_batch_size
 training:
   backend: slime
   ready-timeout: 900

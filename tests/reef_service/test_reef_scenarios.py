@@ -215,7 +215,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
 
         return wrapped
 
-    scenario.trainer._processor.close = _spy("processor", scenario.trainer._processor.close)
+    scenario.trainer._pipeline.close = _spy("processor", scenario.trainer._pipeline.close)
     scenario.records.close = _spy("records", scenario.records.close)
 
     scenario.close()

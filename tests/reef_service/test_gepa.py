@@ -650,7 +650,7 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
             "seed": list(SEED),
             "gepa": block,
         },
-        "data": {"batch_size": 1},
+        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
     }
 
 

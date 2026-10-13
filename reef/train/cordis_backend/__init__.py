@@ -37,19 +37,11 @@ from reef.train.cordis_backend.backend import (
 )
 from reef.train.cordis_backend.contracts import StepProgress
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
-from reef.train.cordis_backend.processor import CordisProcessor
-from reef.train.cordis_backend.strategies import (
-    EpisodeScorer,
-    Promoter,
-    Proposer,
-    StepProposal,
-    VerifierRewardScorer,
-    untrusted_text,
-)
+from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceRecord2Record, TraceTasks
+from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, StepProposal, VerifierRewardScorer
 
 __all__ = [
     "CordisBackend",
-    "CordisProcessor",
     "EpisodeScorer",
     "FailureManifest",
     "FailureObservation",
@@ -57,6 +49,7 @@ __all__ = [
     "FloorMixin",
     "FloorPlugin",
     "HarnessCandidate",
+    "InferenceTasks",
     "Mutation",
     "MutationError",
     "Promoter",
@@ -65,6 +58,8 @@ __all__ = [
     "ScoreComparisonPlugin",
     "StepProgress",
     "StepProposal",
+    "TraceBatches",
+    "TraceRecord2Record",
+    "TraceTasks",
     "VerifierRewardScorer",
-    "untrusted_text",
 ]

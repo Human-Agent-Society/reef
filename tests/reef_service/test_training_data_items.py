@@ -225,12 +225,12 @@ def test_request_only_batch_preserves_manual_training_contract():
 
 
 def test_report_processor_reserves_and_acknowledges_mixed_data():
-    from reef.train.processors.reported import ReportedFeedbackProcessor
-    from reef.train.types import ProcessorContext
+    from reef.pipeline_context import PipelineContext
+    from reef.record2task import ReportTasks
+    from reef.task2batch import Task2Batch
+    from reef.train.pipeline import TrainingPipeline
 
-    class MixedProcessor(ReportedFeedbackProcessor):
-        exclusive_sources = True
-
+    class MixedTasks(ReportTasks):
         def make_sample(self, context):
             source = context.inferences[0]
             return (
@@ -239,10 +239,19 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 else make_trajectory(context.inferences)
             )
 
-        def make_batch(self, items, batch_number):
-            return TrainingBatch(str(batch_number), items)
+    class MixedBatches(Task2Batch):
+        def make_batch(self, tasks, batch_number):
+            return TrainingBatch(str(batch_number), tasks)
 
-    processor = MixedProcessor(ProcessorContext("mixed", {"batch_size": 2}))
+    from reef.record2record import ReportGrouping, ReportRecord2Record
+
+    context = PipelineContext("mixed")
+    processor = TrainingPipeline(
+        context,
+        record2record=ReportRecord2Record(context, ReportGrouping(), exclusive_sources=True),
+        record2task=MixedTasks(),
+        task2batch=MixedBatches(context, 2),
+    )
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
     ):

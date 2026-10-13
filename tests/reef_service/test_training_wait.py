@@ -1,7 +1,7 @@
 """The training thread's wait policy: when may it sleep forever?
 
 Regression suite for a dropped wire: #289 introduced
-``DataProcessor.derivation_pending`` so judgments landing asynchronously
+``derivation_pending`` (now ``TrainingPipeline.derivation_pending``) so judgments landing asynchronously
 wake the training thread on a bounded poll, but the dispatcher-side
 polling was lost in a merge and never reached main — on a quiet workload
 a landed judgment sat unabsorbed until the next record happened to
@@ -46,18 +46,17 @@ def _bind(
     *,
     pending: bool,
     batch_ready: bool = False,
-    processor_status: dict | None = None,
+    pipeline_status: dict | None = None,
     runtime=None,
     last_committed_step: dict | None = None,
 ) -> None:
-    processor = SimpleNamespace(derivation_pending=lambda: pending)
+    pipeline = SimpleNamespace(derivation_pending=lambda: pending, training_mode="auto")
     trainer = SimpleNamespace(
-        processor=processor,
-        training_mode="auto",
+        pipeline=pipeline,
         fail_pending_instruction=lambda error: False,
         instruction_failures=dict,
         batch_ready=lambda: batch_ready,
-        processor_status=lambda: dict(processor_status or {}),
+        pipeline_status=lambda: dict(pipeline_status or {}),
     )
     scenario = SimpleNamespace(
         trainer=trainer,
@@ -179,7 +178,7 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
             }
         ]
     }
-    _bind(dispatcher, pending=False, processor_status=outcome)
+    _bind(dispatcher, pending=False, pipeline_status=outcome)
 
     assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome
 

@@ -18,7 +18,7 @@ from reef.train.algos import StepScheduling
 from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import threshold_pipeline
 
 
 @dataclass(frozen=True)
@@ -57,13 +57,8 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(
-                context.with_config(
-                    {
-                        "batch_size": self.batch_size,
-                        "accept_multi_turn_policy_samples": True,
-                    }
-                )
+            pipeline_factory=lambda context: threshold_pipeline(
+                context, batch_size=self.batch_size, accept_multi_turn=True
             ),
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime, "sft", StepScheduling(), inference_runtime=self.runtime, scenario=scenario

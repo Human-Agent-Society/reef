@@ -69,9 +69,15 @@ recipe:
               concrete guidance learned from failing tasks.
 
               '
-    batch-size: 1
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
+
+# The harness evolution pipeline: its default stages batch every valid scored report, a passing one
+# included. batch_size 1 makes each report one evolve step.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 1
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

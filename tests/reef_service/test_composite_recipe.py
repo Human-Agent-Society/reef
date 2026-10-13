@@ -20,6 +20,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.checkpoint_strategy import EveryNVersions
@@ -32,8 +33,9 @@ from reef.surface import Surface, TextFileTree, create_config_surface, create_ha
 from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
+from reef.train.pipeline import TrainingPipeline
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import ThresholdBatches, threshold_pipeline
 
 
 class _FileBackend(CandidateBackend):
@@ -84,7 +86,7 @@ class _TreeRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -93,21 +95,26 @@ class _TreeRecipe(Recipe):
         )
 
 
-class _HybridThresholdProcessor(ThresholdProcessor):
-    """The same processor, taking instructions too."""
+class HybridThresholdBatches(ThresholdBatches):
+    """The same batches, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
 
+def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
+    """The threshold pipeline, one report per batch, taking instructions too."""
+    return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+
+
 @dataclass(frozen=True)
 class _HybridTreeRecipe(_TreeRecipe):
-    """The tree recipe with a processor that runs in every mode."""
+    """The tree recipe with a pipeline that runs in every mode."""
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: _HybridThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=hybrid_threshold_pipeline,
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -597,11 +604,11 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         surface=mixed.build_surface("agent"),
         algorithm_states={},
     )
-    assert [bound.trainer.processor.context.admitted_report_type is mixed.report_type for bound in trainers] == [
+    assert [bound.trainer.pipeline.context.admitted_report_type is mixed.report_type for bound in trainers] == [
         True,
         True,
     ]
-    assert trainers[0].trainer.report_type is ScoredRolloutReport
+    assert trainers[0].trainer.pipeline.context.report_type is ScoredRolloutReport
 
 
 @pytest.mark.unit
@@ -783,7 +790,7 @@ class _EpisodeTreeRecipe(_TreeRecipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.episode_done),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -1221,8 +1228,8 @@ def test_a_component_without_a_step_does_not_hold_the_training_mode(tmp_path: Pa
         assert scenario is not None
         assert dispatcher.set_training_mode("agent", "hybrid") == {"scenario": "agent", "training_mode": "hybrid"}
         assert scenario.training_mode == "hybrid"
-        assert scenario.trainer_for("harness").training_mode == "hybrid"
-        assert scenario.trainer_for("config").training_mode == "auto"
+        assert scenario.trainer_for("harness").pipeline.training_mode == "hybrid"
+        assert scenario.trainer_for("config").pipeline.training_mode == "auto"
     finally:
         dispatcher.close()
 
@@ -1288,12 +1295,12 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         block = dispatcher.build_training_status()["scenarios"]["agent"]
         assert block["training_mode"] == "hybrid"
         assert block["processor"] == {
-            **harness.processor_status(),
+            **harness.pipeline_status(),
             "pending_instructions": harness.pending_instructions(),
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "hybrid"
-        assert contract["processor"] == type(harness.processor).__name__
+        assert contract["processor"] == type(harness.pipeline.task2batch).__name__
     finally:
         dispatcher.close()
 
@@ -1323,8 +1330,8 @@ def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         assert scenario.training_mode == "hybrid"
-        assert scenario.trainer_for("harness").training_mode == "hybrid"
-        assert scenario.trainer_for("config").training_mode == "auto"
+        assert scenario.trainer_for("harness").pipeline.training_mode == "hybrid"
+        assert scenario.trainer_for("config").pipeline.training_mode == "auto"
     finally:
         dispatcher.close()
 

@@ -50,6 +50,7 @@ Set `GUIDANCE_EXECUTOR_MAX_TOKENS=16384` to bound each executor response during 
 Otherwise, the provider selects its default output limit. Executor service errors stop the step; they are not candidate rewards.
 
 `serve.yaml` defaults to one update with two groups of four rollouts.
+The grid is `pipeline.record2record.config` in `serve.yaml`; the harness reads it there.
 Set the grid to 8 by 16, `global-batch-size` to 128, and `steps` to 30 for
 the paper's search budget. Set `GUIDANCE_MODEL=Qwen/Qwen3-14B` for the paper's
 AHC058 and TriMul configurations. Size the GPU allocation for that model.

@@ -80,7 +80,7 @@ def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise RecipeConfigError(f"recipe.config.{section} must be an object")
     if "runtime" in recipe:
         resolved["runtime"] = recipe["runtime"]
-    for section in ("execution", "executors"):
+    for section in ("execution", "executors", "pipeline"):
         if section in config:
             resolved[section] = config[section]
     # A deployment provides its already resolved runtime. Standalone recipe

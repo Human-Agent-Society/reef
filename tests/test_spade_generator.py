@@ -21,10 +21,15 @@ from reef.core.tasks import (
     read_split_manifest,
     write_harbor_task,
 )
-from reef.record2dataset import TaskNameConflict
-from reef.record2dataset.generated_tasks import GeneratedTaskProcessor
-from reef.record2dataset.generated_tasks.processor import RoundJob
-from reef.train.types import ProcessorContext
+from reef.pipeline_context import PipelineContext
+from reef.recipe.generated_tasks import GeneratedTaskTasks
+from reef.recipe.generated_tasks.processor import (
+    GeneratedTaskRecord2Record,
+    RoundJob,
+    RoundSettings,
+    TaskGroupSettings,
+)
+from reef.record2task.generator import TaskNameConflict
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -248,16 +253,16 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    processor = GeneratedTaskProcessor(
-        ProcessorContext(
-            "spade",
-            {"plays_per_task": 2, "rounds": 1, "description": DESCRIPTION, "state_dir": str(tmp_path / "rounds")},
-        ),
+    context = PipelineContext("spade")
+    generation = GeneratedTaskTasks(
+        context,
+        RoundSettings(rounds=1, description=DESCRIPTION, state_dir=str(tmp_path / "rounds")),
+        GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=2)),
         task_generator=generator,
         task_player=service,
     )
-    outcome = asyncio.run(processor.run_round(RoundJob(receipt="round-00000", round_number=0)))
-    processor.close()
+    outcome = asyncio.run(generation.run_round(RoundJob(receipt="round-00000", round_number=0)))
+    generation.close()
     assert outcome.error == "" and [result.is_played for result in outcome.results] == [True, True]
     plays = [(call["task"], call["arm"], call["plays"], call["extra"]) for call in service.plays]
     assert plays[:2] == [

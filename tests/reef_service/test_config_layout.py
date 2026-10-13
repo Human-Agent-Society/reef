@@ -210,9 +210,9 @@ def test_versioned_null_is_kept_for_optional_fields_and_legacy_null_still_defaul
     raw = {
         "schema-version": 2,
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
-        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": None}},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"max-staleness": None}},
     }
-    with pytest.raises(DeployConfigError, match=r"recipe\.config\.batch-size does not accept null"):
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.max-staleness does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     raw["recipe"]["config"] = {"checkpoint-every-n-versions": None}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
@@ -221,6 +221,17 @@ def test_versioned_null_is_kept_for_optional_fields_and_legacy_null_still_defaul
     legacy = {"reef": {"recipe": "recipe", "port": None}, "services": []}
     config, _ = orchestrator.resolve_deployment_config(legacy, None, tmp_path / "legacy.yaml")
     assert service_config_from_mapping(config).port == 8900
+
+
+def test_versioned_recipe_config_refuses_a_stage_setting(tmp_path):
+    # batch_size belongs to the task-to-batch stage, under the pipeline section.
+    raw = {
+        "schema-version": 2,
+        "inference": {"model-path": "/models/demo"},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": 4}},
+    }
+    with pytest.raises(DeployConfigError, match=r"unknown recipe\.config field: batch_size"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
 
 
 def test_automatic_stack_rejects_unused_training_options(tmp_path):

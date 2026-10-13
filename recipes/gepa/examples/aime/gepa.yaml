@@ -96,9 +96,12 @@ recipe:
                 });
               }
 
-    # The third report closes the minibatch. Both correct and incorrect
-    # transcripts contribute to reflection.
-    batch-size: 3
+# The third report closes the minibatch. Both correct and incorrect
+# transcripts contribute to reflection.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 3
 inference:
   upstream-model: ${REEF_MODEL}
 

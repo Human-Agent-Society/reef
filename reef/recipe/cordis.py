@@ -46,7 +46,6 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint
-from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
 from reef.storage.records import RecordStore
@@ -55,9 +54,10 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import CordisBackend, FloorPlugin, ScoreComparisonPlugin, tree_files
 from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
-from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
+from reef.train.cordis_backend.processor import TraceBatches, TraceRecord2Record, TraceTasks
 from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
+from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The built-in ``evolution.selection`` names.
@@ -158,7 +158,7 @@ def _resolve_seed_entries(value: str) -> Sequence[Mapping[str, Any]]:
     return resolved
 
 
-def _selection_reference(value: object) -> PluginReference[SelectionPlugin]:
+def _selection_reference(value: object) -> PluginReference:
     """``evolution.selection``: a built-in name, or a :class:`SelectionPlugin` class reference."""
     if isinstance(value, str) and value in _SELECTION_PLUGINS:
         return PluginReference(_SELECTION_PLUGINS[value])
@@ -276,9 +276,7 @@ class CordisRecipe(Recipe):
     #: What a result becomes when another component's commit replaced its base while it was evaluated:
     #: merged onto the release served now, evaluated again, or refused and proposed again.
     on_stale: StaleResultPolicy = "merge"
-    selection: PluginReference[SelectionPlugin] = field(
-        default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False
-    )
+    selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.
     proposals_dir: str = ".reef/proposals"
@@ -292,8 +290,6 @@ class CordisRecipe(Recipe):
     agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
-    batch_size: int = config_field(1)
-    batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
     scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
 
@@ -304,6 +300,10 @@ class CordisRecipe(Recipe):
     @property
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(record2record=TraceRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
 
     @property
     def harness_adapter(self) -> str | None:
@@ -317,14 +317,10 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires an EpisodeScorer")
         if not self.tasks:
             raise ValueError("harness evolution requires tasks")
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
         settings = legacy_worker_settings(self.worker_executor, self.episode_workers, self.worker_gpus)
         _, requirements = evaluation_selection(self.score_episode, None, settings)
         object.__setattr__(self, "worker_executor", settings)
         object.__setattr__(self, "episode_workers", requirements.workers)
-        if self.batch_policy not in ("reports", "records"):
-            raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
@@ -601,6 +597,7 @@ class CordisRecipe(Recipe):
             # previous run left, which a stop mid run never closed.
             agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
         return {
+            **super()._recipe_kwargs(settings, values),
             "agent_executor": agent_executor,
             "agent_timeout_s": agent_timeout_s,
             "agent_trial_timeout_s": agent_trial_timeout_s,
@@ -793,7 +790,8 @@ class CordisRecipe(Recipe):
 
     def selection_plugin(self, candidate_backend: CordisBackend) -> CandidateEvaluationPlugin:
         """Build the scenario's ``evolution.selection`` plugin; a recipe with its own selection overrides this."""
-        return self.selection.plugin_class.from_config(self.selection.config, candidate_backend=candidate_backend)
+        selection_class = SelectionPlugin.referenced_class(self.selection)
+        return selection_class.from_config(self.selection.config, candidate_backend=candidate_backend)
 
     def _build_trainer(
         self,
@@ -813,15 +811,8 @@ class CordisRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: (
-                RecordDrivenTraceProcessor if self.batch_policy == "records" else CordisProcessor
-            )(
-                context.with_config(
-                    {
-                        "batch_size": self.batch_size,
-                        "manual_enabled": self.propose.reads_requests,
-                    }
-                )
+            pipeline_factory=lambda context: self.build_pipeline(
+                replace(context, manual_enabled=self.propose.reads_requests)
             ),
             candidate_backend=candidate_backend,
             candidate_evaluator=candidate_evaluator,

@@ -74,13 +74,15 @@ Reports and training
 - the paths for rollout ``N`` that exist, including its checkpoint record
 - whether the run trains per-scenario LoRA adapters
 
-Reef keeps no copy of the settled marker that ``RUNNING`` replaced. So recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories and ``.reef-retention``. A run with a critic also keeps its critic checkpoint directory there: ``--critic-save``, by default ``<save>-critic``. Unless all the conditions below hold, replace the whole checkpoint root with a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
+Reef keeps a copy of the settled marker that ``RUNNING`` replaced only when that marker settled a committed job; the preflight then recovers one state by itself, described below. Otherwise recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories and ``.reef-retention``. A run with a critic also keeps its critic checkpoint directory there: ``--critic-save``, by default ``<save>-critic``. Unless all the conditions below hold, replace the whole checkpoint root with a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
 
 The preflight also refuses a copy whose marker says ``REJECTING`` or ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
 
 For a first job, empty the checkpoint root, including the hidden ``.reef-retention`` directory. The preflight refuses a checkpoint record left in it. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
 
-*Full-weight run, the job saved nothing.* Recover by hand only when all of these hold:
+*Full-weight run, the job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. A marker written by an earlier release has no copy, so recover it by hand.
+
+Recover by hand only when all of these hold:
 
 1. The error says ``per-scenario LoRA: no``. The tracker names an iteration ``P`` below ``N``. The error lists no paths for rollout ``N``. ``--load`` is the same directory as ``--save``, as in the bundled configurations.
 

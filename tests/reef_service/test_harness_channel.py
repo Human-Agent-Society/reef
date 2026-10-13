@@ -57,6 +57,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import tree_files
 from ._strategies import resolve_episode_scorer, resolve_proposer
+from .test_harness_evolve_processor import harness_stages
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -159,7 +160,7 @@ def _dispatcher(
     mutations: tuple[Mutation, ...],
     *,
     bootstrap_files: dict[str, str] | None = None,
-    batch_policy: str = "reports",
+    inference_stages: bool = False,
     batch_size: int = 1,
     seed: tuple[dict, ...] = (),
     api: str = "openai",
@@ -178,8 +179,7 @@ def _dispatcher(
         adapter=adapter,
         model_metadata=model_metadata or {},
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
-        batch_policy=batch_policy,
-        batch_size=batch_size,
+        pipeline_stages=harness_stages(batch_size, inference=inference_stages),
         seed=seed,
     )
     bootstrap = tmp_path / "bootstrap"
@@ -2678,7 +2678,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
     report is ever posted."""
 
     async def run() -> None:
-        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
+        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], inference_stages=True, batch_size=2)
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:

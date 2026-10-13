@@ -143,7 +143,7 @@ def sections(tmp_path: Path, *, scorer=score_rules, adapter: str = "pi", **metho
             "seed": list(SEED),
             "meta_harness": block,
         },
-        "data": {"batch_size": 1},
+        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
     }
 
 

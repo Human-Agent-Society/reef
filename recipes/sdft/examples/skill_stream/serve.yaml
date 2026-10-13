@@ -49,11 +49,18 @@ inference:
 recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
   config:
-    batch-size: 32                     # MUST equal training.config.global_batch_size and the stage's SDFT_PROMPTS_PER_STEP
     max-staleness: 0                   # on-policy: the stage waits for each step's release before sampling again
-    tokenizer-path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer; recipe.config takes no ${} references
-    max-teacher-tokens: 8192           # the trainer's seq-length; a longer teacher sequence is skipped and counted
     checkpoint-every-n-versions: 1000  # the bridge's per-step HF export seeds the next stage; no durable artifact within a stage
+# The sdft recipe's stages. Each config is the stage's own, keyed as the stage reads it.
+pipeline:
+  # The teacher's tokenizer and window.
+  record2task:
+    config:
+      tokenizer_path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer
+      max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence is skipped and counted
+  task2batch:
+    config:
+      batch_size: 32                   # MUST equal training.config.global_batch_size and the stage's SDFT_PROMPTS_PER_STEP
 training:
   backend: slime
   colocate: true

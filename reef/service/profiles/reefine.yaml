@@ -65,9 +65,15 @@ recipe:
               concrete guidance learned from failing tasks.
 
               '
-    batch-size: 1
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual
+
+# The harness evolution pipeline with its default stages. A manual step runs one instruction alone;
+# batch_size 1 also keeps any automatic step to one report.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 1
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

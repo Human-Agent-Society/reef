@@ -55,9 +55,11 @@ from reef.runtime.interfaces import (
 )
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 from reef.runtime.recovery import (
+    COMMITTED_MARKER_KEY,
     FileTrainingJobStore,
     TrainingRecovery,
     marker_checkpoint_result,
+    marker_committed,
     marker_disposition,
     marker_in_flight,
     marker_path,
@@ -66,6 +68,7 @@ from reef.runtime.recovery import (
 
 #: Job states that hold an activated candidate Reef still has to commit or finish.
 COMMIT_PENDING_STATES = frozenset({"UPDATING_WEIGHTS", *PUBLISHED_STATES})
+
 
 # -- Staleness admission ------------------------------------------------------
 
@@ -506,7 +509,7 @@ class TrainingExecution:
                 if prepared.outcome not in {"stale", "storage_blocked"}:
                     raise RuntimeError("training preparation may only return stale or storage_blocked")
                 return prepared
-            return self._run(prepared, self._store, job_id, payload, admission_metrics)
+            return self._run(prepared, self._store, job_id, payload, admission_metrics, marker)
         raise RuntimeError("training preparation suppressed an execution failure")
 
     def _run(
@@ -516,6 +519,7 @@ class TrainingExecution:
         job_id: str,
         payload: Mapping[str, Any],
         admission_metrics: Mapping[str, Any],
+        prior_marker: Mapping[str, Any] | None,
     ) -> TrainingJobResult:
         """Train and checkpoint one admitted job, recording RUNNING then CHECKPOINT."""
         checkpoint = prepared.checkpoint
@@ -526,6 +530,12 @@ class TrainingExecution:
             "rollout_id": checkpoint.rollout_id,
             "scenario_step": checkpoint.scenario_step,
         }
+        if prior_marker is not None and marker_committed(prior_marker):
+            # RUNNING overwrites the settled marker, so keep a copy: the
+            # Slime preflight restores it when a kill leaves nothing saved.
+            running[COMMITTED_MARKER_KEY] = {
+                key: value for key, value in prior_marker.items() if key != COMMITTED_MARKER_KEY
+            }
         parent_runtime_load_id = payload.get("expected_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
@@ -720,7 +730,7 @@ class RuntimeScheduler:
         training_job = self.training_runtime.training_job_status()
         if training_job is None:
             if committed_training_job_id is not None:
-                self._finish_committed_training_job(committed_training_job_id)
+                self.finish_committed_training_job(committed_training_job_id)
             return
         status = training_job["status"]
         if self._sync_inference_admission(training_job):
@@ -743,31 +753,33 @@ class RuntimeScheduler:
         if "scenario_step" not in training_job and not marker_in_flight(training_job):
             # A settled job an earlier release recorded without its scenario step has nothing left to finish.
             return
-        job_scenario_step, training_job_id = _pending_job_identity(training_job)
+        job_scenario_step, training_job_id = pending_job_identity(training_job)
         if status == "UPDATING_WEIGHTS":
             with self.operations.measure("weight_sync"):
                 self.inference_runtime.resume_weight_update(training_job_id)
-        if (
-            status == "COMPLETE"
-            and training_job.get("commit_acknowledged") is not True
-            and scenario_step == job_scenario_step + 1
-            and committed_training_job_id is None
-            and committed_training_without_job_id
-        ):
-            # Older bridges resumed before Reef committed and could not write
-            # their job identity into the old commit schema. The exact
-            # next-step training record is the strongest durable migration
-            # proof available; rollback/non-training commits are excluded.
-            self._finish_committed_training_job(training_job_id)
-            return
-        if scenario_step > job_scenario_step and committed_training_job_id == training_job_id:
-            self._finish_committed_training_job(training_job_id)
+        # Other components can advance the scenario; only this job's commit can finish it.
+        if committed_training_job_id is not None:
+            committed = scenario_step > job_scenario_step and committed_training_job_id == training_job_id
+        else:
+            # Older bridges lack job IDs and require an unacknowledged COMPLETE marker at the exact next step.
+            committed = (
+                committed_training_without_job_id
+                and status == "COMPLETE"
+                and training_job.get("commit_acknowledged") is not True
+                and scenario_step == job_scenario_step + 1
+            )
+        if committed:
+            self.finish_committed_training_job(training_job_id)
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str, *, scenario: str | None = None) -> None:
         """Release a selected update only after its matching durable commit."""
         self.recover_pending_step(scenario_step, scenario=scenario, committed_training_job_id=training_job_id)
 
-    def _finish_committed_training_job(self, training_job_id: str) -> None:
+    def finish_committed_training_job(self, training_job_id: str) -> None:
+        """Acknowledge the matched job before publishing its identity and reopening admission.
+
+        If either acknowledgement fails, admission stays closed; retry completes the same job.
+        """
         self.inference_runtime.acknowledge_publication(training_job_id)
         self.training_runtime.commit_candidate(training_job_id)
         self.inference_runtime.mark_published()
@@ -800,7 +812,7 @@ class RuntimeScheduler:
         return result
 
 
-def _pending_job_identity(training_job: Mapping[str, Any]) -> tuple[int, str]:
+def pending_job_identity(training_job: Mapping[str, Any]) -> tuple[int, str]:
     job_scenario_step = training_job.get("scenario_step")
     training_job_id = training_job.get("training_job_id")
     if (

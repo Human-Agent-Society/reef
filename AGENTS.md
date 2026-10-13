@@ -48,14 +48,18 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/core/` | Shared value types, wire contracts, and errors |
 | `reef/dispatcher.py`, `reef/scenario/` | Coordination, scenario state, commit ordering, and recovery |
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
-| `reef/recipe/`, `reef/train/` | Recipe contracts, processors, training, evaluation, and backend integrations |
+| `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, evaluation, and backend integrations |
 | `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
 | `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
 | `reef/surface/` | Delivery of published artifacts |
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
-| `reef/record2dataset/` | The generator service: a designer prompt for Harbor tasks, the authoring gate and oracle check, task player jobs; the built-in generated-task recipe |
+| `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
+| `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
+| `reef/record2task/` | The record-to-task stage: one record set into tasks (`Record2Task`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
+| `reef/task2batch/` | The task-to-batch stage: the tasks of the selected record sets into one batch (`Task2Batch`) |
+| `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |
 

@@ -173,10 +173,10 @@ class Dispatcher:
     """
 
     storage_retry_seconds: float = 5.0
-    # Poll cadence while a processor reports asynchronous derivation in flight
-    # (see DataProcessor.derivation_pending): its judgments land without a new
-    # record ever setting the ready event, so readiness is re-checked on a
-    # bounded interval instead of sleeping until the next accept.
+    # Poll interval while a trainer reports background work (see
+    # Trainer.derivation_pending). A judgment can make a batch ready, but no
+    # new record sets the ready event. Thus the worker checks readiness at
+    # this interval, and does not wait for the next accept.
     derivation_poll_seconds: float = 1.0
     # One drain, plus one more after reloading the scenario from durable state.
     drain_attempts: int = 2
@@ -423,13 +423,14 @@ class Dispatcher:
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
             current = self._registry.require(scenario)
-            processor = current.trainer.processor
+            pipeline = current.trainer.pipeline
             return {
                 "scenario": scenario,
-                "processor": type(processor).__name__,
-                "training_mode": current.trainer.training_mode,
-                "status": dict(current.trainer.processor_status()),
-                "required_request_types": sorted(rt.value for rt in processor.required_request_types),
+                # The key keeps its name for callers; the value names the recipe's task-to-batch stage.
+                "processor": type(pipeline.task2batch).__name__,
+                "training_mode": current.trainer.pipeline.training_mode,
+                "status": dict(current.trainer.pipeline_status()),
+                "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
             }
 
     def promote(self, scenario: str, release_id: str) -> ArtifactRef:
@@ -737,7 +738,7 @@ class Dispatcher:
                 metrics["training/error"] = int(any(key[0] == current.name for key in self._training.errors))
                 if current.training_runtime is not None:
                     metrics["training/checkpoint_storage_blocked"] = int(self._training.storage_status is not None)
-            current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
+            current.trainer.pipeline.experiment_logger.log(metrics, namespace="operations")
         except Exception as exc:
             logger.warning("operational metrics unavailable for scenario %r (%s)", current.name, type(exc).__name__)
 
@@ -1113,7 +1114,7 @@ class Dispatcher:
         for name in self._training_scenario_names():
             current = self._registry.get_optional(name)
             if current is not None and any(
-                bound.trainer.processor.derivation_pending() for bound in current.component_trainers
+                bound.trainer.pipeline.derivation_pending() for bound in current.component_trainers
             ):
                 timeout = (
                     self.derivation_poll_seconds if timeout is None else min(timeout, self.derivation_poll_seconds)
@@ -1420,8 +1421,8 @@ class Dispatcher:
         if batch_ready:
             self._warn_if_undrained(scenario_name, last_drain)
         # The stepping trainer's status is read once and reported again in its component block.
-        stepping_processor_status = stepping_trainer.processor_status()
-        processor = dict(stepping_processor_status)
+        stepping_pipeline_status = stepping_trainer.pipeline_status()
+        processor = dict(stepping_pipeline_status)
         if "buffered_requests" in processor:
             # Include instructions still unread in storage alongside the buffered ones.
             processor["pending_instructions"] = stepping_trainer.pending_instructions()
@@ -1433,7 +1434,7 @@ class Dispatcher:
             "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
-            "training_mode": stepping_trainer.training_mode,
+            "training_mode": stepping_trainer.pipeline.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
@@ -1450,11 +1451,11 @@ class Dispatcher:
                 last = current.last_commit_for(bound.component)
                 components[str(bound.component)] = {
                     "batch_ready": bound.trainer.batch_ready(),
-                    "training_mode": bound.trainer.training_mode,
+                    "training_mode": bound.trainer.pipeline.training_mode,
                     "processor": dict(
-                        stepping_processor_status
+                        stepping_pipeline_status
                         if bound.trainer is stepping_trainer
-                        else bound.trainer.processor_status()
+                        else bound.trainer.pipeline_status()
                     ),
                     "stale_refusals_total": self.stale_refusals_total(scenario_name, bound.component),
                     "last_committed_step": (

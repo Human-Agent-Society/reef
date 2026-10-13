@@ -53,7 +53,7 @@ class ConfiguredEvaluationPlugin(CandidateEvaluationPlugin, Plugin):
 class CandidateEvaluationConfig:
     """The ``evaluation`` section: a checked plugin class and its opaque configuration."""
 
-    plugin: PluginReference[ConfiguredEvaluationPlugin]
+    plugin: PluginReference
     environ: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
@@ -77,7 +77,7 @@ def build_candidate_evaluation(
     scenario: str,
 ) -> CandidateEvaluationPlugin:
     """Build one scenario's external candidate evaluation plugin."""
-    return config.plugin.plugin_class.from_config(
+    return ConfiguredEvaluationPlugin.referenced_class(config.plugin).from_config(
         config.plugin.config,
         runtime=runtime,
         training_runtime=training_runtime,

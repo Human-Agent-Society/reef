@@ -3,7 +3,6 @@ schema-version: 2
 recipe:
   implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
   config:
-    batch-size: 1
     evolution:
       adapter: terminus
       binary: reef-terminus
@@ -31,6 +30,11 @@ recipe:
         max_candidates: 4
         max_target_episodes: 1424  # Four gates, two sides, 89 tasks, two repeats.
       max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
+# Each report is one trace batch.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 1
 inference:
   upstream-url: ${REEF_UPSTREAM_URL}
   upstream-model: ${REEF_MODEL}

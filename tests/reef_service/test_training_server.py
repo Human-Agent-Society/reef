@@ -22,7 +22,7 @@ from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
-GENERATED_TASK_RECIPE = "reef.record2dataset.generated_tasks:GeneratedTaskRecipe"
+GENERATED_TASK_RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
 
 
 def test_configured_handler_rejects_a_function() -> None:
@@ -75,7 +75,6 @@ def stub_runtimes(**kwargs):
 
 def _settings(**overrides) -> ServiceConfig:
     recipe_settings = {
-        "batch_size": 2,
         "checkpoint_every_n_versions": 3,
         **overrides.pop("recipe_settings", {}),
     }
@@ -154,14 +153,14 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
 
 
 @pytest.mark.unit
-def test_service_config_reads_the_task_generation_section() -> None:
-    section = {"module": "recipes.beta.spade:SpadeTaskGenerator", "config": {"count": 8}}
+def test_service_config_reads_the_pipeline_section() -> None:
+    section = {"record2task": {"module": "reef.recipe.generated_tasks:GeneratedTaskTasks", "config": {"rounds": 1}}}
 
-    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": section})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": section})
 
-    assert args.task_generation_settings == section
-    with pytest.raises(ValueError, match="task-generation must be an object"):
-        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": "spade"})
+    assert args.pipeline_settings == section
+    with pytest.raises(ValueError, match="pipeline must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": "generated"})
 
 
 @pytest.mark.unit
@@ -386,14 +385,15 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            recipe_settings={"batch_size": 4, "checkpoint_every_n_versions": 5},
+            recipe_settings={"checkpoint_every_n_versions": 5},
+            pipeline_settings={"task2batch": {"config": {"batch_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
         connector=lambda **kwargs: stub_runtimes(),
     )
     recipe = dispatcher._recipe
-    captured["batch_size"] = recipe.batch_size
+    captured["batch_size"] = recipe.stages().task2batch.config["batch_size"]
     captured["checkpoint_strategy"] = recipe.checkpoint_strategy
 
     assert captured == {"batch_size": 4, "checkpoint_strategy": EveryNVersions(5)}
@@ -445,41 +445,51 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
 
 
 @pytest.mark.unit
-def test_build_dispatcher_hands_the_task_generation_section_to_the_generated_task_recipe(
-    monkeypatch, tmp_path
-) -> None:
+def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
         "factory",
         lambda *args, **kwargs: lambda scenario: object(),
     )
-    task_generation = {"module": "reef_service.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+    generator = {"module": "reef_service.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+    pipeline = {
+        "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
+        "record2task": {
+            "module": "reef.recipe.generated_tasks:GeneratedTaskTasks",
+            "config": {"generator": generator},
+        },
+    }
 
     settings = _settings(
-        recipe=GENERATED_TASK_RECIPE,
-        task_generation_settings=task_generation,
-        agent_record_dir=str(tmp_path / "agent-record"),
+        recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, agent_record_dir=str(tmp_path / "ar")
     )
     dispatcher = deploy.build_dispatcher(
-        dataclasses.replace(settings, recipe_settings={"plays_per_task": 2}),
-        connector=lambda **kwargs: stub_runtimes(),
+        dataclasses.replace(settings, recipe_settings={}), connector=lambda **kwargs: stub_runtimes()
     )
 
-    recipe = dispatcher._recipe
-    assert recipe.task_generation is not None
-    assert recipe.task_generation.plugin.plugin_class.__name__ == "ScriptedGenerator"
-    assert recipe.task_generation.plugin.config == {"count": 1}
+    stages = dispatcher._recipe.pipeline_stages
+    # A stage the section leaves out is the recipe's own, with no config.
+    assert stages is not None and stages.task2batch.plugin_class.__name__ == "GeneratedTaskBatches"
+    assert stages.task2batch.config == {}
+    assert (
+        stages.record2record is not None and stages.record2record.plugin_class.__name__ == "GeneratedTaskRecord2Record"
+    )
+    assert stages.record2task is not None and stages.record2task.plugin_class.__name__ == "GeneratedTaskTasks"
+    assert stages.record2task.config == {"generator": generator}
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("recipe", "error", "message"),
     [
-        (OPENCLAWRL_RECIPE, RecipeConfigError, "does not train on generated tasks"),
-        ("recipe", ValueError, "task-generation section requires a weight-training recipe"),
+        (OPENCLAWRL_RECIPE, RecipeConfigError, "must name a class that inherits Record2Task"),
+        # A recipe that trains no weights reads the section too, and refuses the same mistake.
+        ("reef.recipe.base:Recipe", RecipeConfigError, "must name a class that inherits Record2Task"),
+        # A preset sets its pipeline section in its own file.
+        ("recipe", ValueError, "set its pipeline section in the preset file"),
     ],
 )
-def test_build_dispatcher_rejects_task_generation_for_another_recipe(
+def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
     monkeypatch, tmp_path, recipe, error, message
 ) -> None:
     monkeypatch.setattr(
@@ -492,7 +502,7 @@ def test_build_dispatcher_rejects_task_generation_for_another_recipe(
         deploy.build_dispatcher(
             _settings(
                 recipe=recipe,
-                task_generation_settings={"module": "reef_service.test_generated_tasks:ScriptedGenerator"},
+                pipeline_settings={"record2task": {"module": "reef_service.test_generated_tasks:ScriptedGenerator"}},
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),
             connector=lambda **kwargs: stub_runtimes(),
@@ -522,8 +532,28 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
             connector=lambda **kwargs: stub_runtimes(),
         )
     # The error lists what the recipe would consume.
-    assert "reef.batch_size" in str(excinfo.value)
+    assert "reef.max_staleness" in str(excinfo.value)
     assert "reef.checkpoint_every_n_versions" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_build_dispatcher_refuses_a_stage_setting_with_its_pipeline_key(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        deploy.build_dispatcher(
+            _settings(
+                recipe=OPENCLAWRL_RECIPE,
+                recipe_settings={"batch_size": 4},
+                agent_record_dir=str(tmp_path / "agent-record"),
+            ),
+            environ={},
+            connector=lambda **kwargs: stub_runtimes(),
+        )
 
 
 @pytest.mark.unit

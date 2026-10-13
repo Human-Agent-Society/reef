@@ -22,15 +22,15 @@ from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.inference.http import InferenceProxyRuntime
+from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
 from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.train.types import ProcessorContext
 
 from ._strategies import resolve_episode_scorer, resolve_proposer
+from .test_harness_evolve_processor import harness_stages
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "skillclaw"
 
@@ -366,7 +366,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert type(built).__name__ == "SkillClawRecipe"
     assert built.name == "skillclaw"
     assert built.selection.plugin_class is BackendAlwaysSelectPlugin
-    assert built.batch_size == 60
+    assert built.stages().task2batch.config == {"batch_size": 60}
     assert [entry["id"] for entry in built.seed] == ["alpha"]
     assert built.seed[0]["config"]["name"] == "alpha"
     assert len(built.tasks) == 3
@@ -431,7 +431,7 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
             agent_record_id=agent_record_id,
         )
 
-    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 3}))
+    processor = harness_stages(3).build(PipelineContext("s"))
     for index, score in enumerate((1.0, 0.0), start=1):
         processor.ingest(_inference(f"inf-{index}"))
         processor.ingest(_report(f"rep-{index}", score, f"inf-{index}"))
@@ -466,7 +466,7 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
         binary=str(make_binary(tmp_path)),
         seed=SEED,
         selection=PluginReference(BackendAlwaysSelectPlugin),
-        batch_size=batch_size,
+        pipeline_stages=harness_stages(batch_size),
         runtime=runtime(),
     )
 

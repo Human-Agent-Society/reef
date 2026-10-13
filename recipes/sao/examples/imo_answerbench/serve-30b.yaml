@@ -41,9 +41,12 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: ${SAO_BATCH}           # MUST equal training.config.global_batch_size
     max-staleness: 18
     checkpoint-every-n-versions: 1
+pipeline:
+  task2batch:
+    config:
+      batch_size: ${SAO_BATCH}         # MUST equal training.config.global_batch_size
 training:
   backend: slime
   colocate: true

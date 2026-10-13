@@ -49,7 +49,8 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
     built = ReefineRecipe.from_environment(
         {},
         config={
-            "data": {"training_mode": "hybrid", "batch_size": 3},
+            "data": {"training_mode": "hybrid"},
+            "pipeline": {"task2batch": {"config": {"batch_size": 3}}},
             "evolution": {
                 "tasks": ["[fib] Compute fib(90)."],
                 "selection": "score_comparison",
@@ -61,7 +62,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
         },
     )
     assert isinstance(built, ReefineRecipe)
-    assert built.training_mode == "hybrid" and built.batch_size == 3
+    assert built.training_mode == "hybrid" and built.stages().task2batch.config == {"batch_size": 3}
     assert built.seed == () and built.review_kinds == ()
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 

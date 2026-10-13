@@ -338,10 +338,10 @@ runs instructions only and never batches on traffic; harness evolution
 runs an instruction alone, without samples. ``hybrid`` batches on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units an automatic batch would take next, up to
-``batch_size`` and possibly none, ride beside it as the batch's samples
-(scored traces, or records under
-``data.batch_policy: records``), so the proposer reads the request next
-to them; with none queued the step batches as ``auto`` does.
+``pipeline.task2batch.config.batch_size`` and possibly none, ride beside it
+as the batch's samples (scored traces, or unscored records when the
+``pipeline`` section names the inference stages), so the proposer reads the
+request next to them; with none queued the step batches as ``auto`` does.
 
 .. code:: bash
 

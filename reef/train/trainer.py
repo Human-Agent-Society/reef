@@ -1,12 +1,12 @@
 """The trainer: record consumption, candidate selection, and commit preparation.
 
-A trainer pages records into its processor and runs every training step
+A trainer pages records into its pipeline and runs every training step
 through its bound backend. Dispatched backends reserve the batch first so
 long-running work happens outside scenario locks.
 Backends expose prepare/evaluate/settle phases; the trainer executes one
 configured candidate evaluator between preparation and settlement, defaulting
 to backend evaluation plus ``AlwaysSelectMixin``. Consumption progress is committed
-before processor memory is released. Storage owns disk eviction independently;
+before pipeline memory is released. Storage owns disk eviction independently;
 new training commits never retire record bodies.
 """
 
@@ -27,11 +27,12 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
+from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.train.processors.base import DataProcessor, InstructionFailure
-from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
+from reef.train.pipeline import InstructionFailure, TrainingPipeline
+from reef.train.types import PreparedCommit, TrainingBatch, TrainStepResult
 
 
 @dataclass
@@ -45,7 +46,7 @@ class _PendingStep:
     batch: TrainingBatch
     result: TrainStepResult | None
     prepared_commit: PreparedCommit | None = None
-    # Set once the processor has the batch back and the step consumed these ids on its own, so no acknowledgement.
+    # Set once the pipeline has the batch back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
     #: The release served when the batch was reserved: what the step was prepared against.
     base_release_id: str | None = None
@@ -87,7 +88,7 @@ class Trainer:
         scenario: str,
         records: RecordStore,
         *,
-        processor_factory: Callable[[ProcessorContext], DataProcessor],
+        pipeline_factory: Callable[[PipelineContext], TrainingPipeline],
         candidate_backend: CandidateBackend | None = None,
         candidate_evaluator: CandidateEvaluationPlugin | None = None,
         algorithm_state: Mapping[str, Any] | None = None,
@@ -100,8 +101,8 @@ class Trainer:
             raise ValueError("candidate evaluation requires a candidate backend")
         if candidate_evaluator is not None and not isinstance(candidate_evaluator, CandidateEvaluationPlugin):
             raise TypeError("candidate_evaluator must inherit CandidateEvaluationPlugin")
-        processor = processor_factory(
-            ProcessorContext(
+        pipeline = pipeline_factory(
+            PipelineContext(
                 scenario=scenario,
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
@@ -109,15 +110,15 @@ class Trainer:
                 max_staleness=max_staleness,
             )
         )
-        if processor.training_mode != training_mode:
-            processor.close()
-            raise ValueError("processor_factory must preserve the requested training_mode")
+        if pipeline.training_mode != training_mode:
+            pipeline.close()
+            raise ValueError("pipeline_factory must preserve the requested training_mode")
         default_state = candidate_backend.initial_state() if candidate_backend is not None else {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         return cls(
             scenario=scenario,
             records=records,
-            processor=processor,
+            pipeline=pipeline,
             candidate_backend=candidate_backend,
             candidate_evaluator=candidate_evaluator,
             state=initial_state,
@@ -128,14 +129,14 @@ class Trainer:
         *,
         scenario: str,
         records: RecordStore,
-        processor: DataProcessor,
+        pipeline: TrainingPipeline,
         candidate_backend: CandidateBackend | None,
         candidate_evaluator: CandidateEvaluationPlugin | None,
         state: Mapping[str, Any],
     ) -> None:
         self._scenario = scenario
         self._records = records
-        self._processor = processor
+        self._pipeline = pipeline
         self._candidate_backend = candidate_backend
         if candidate_backend is None:
             self._candidate_evaluator = None
@@ -157,9 +158,9 @@ class Trainer:
     def operational_metrics(self) -> dict[str, float | int]:
         """Sample backlog and execution separately; a reserved batch can be running.
 
-        Unread records are not necessarily trainable. Processor counts retain
+        Unread records are not necessarily trainable. Pipeline counts retain
         their recipe-defined names rather than being guessed into batch depth.
-        A busy processor omits its gauges for this sample instead of blocking
+        A busy pipeline omits its gauges for this sample instead of blocking
         execution metrics behind ingestion or commit work.
         """
         loss = self._records.loss(self.scenario)
@@ -182,9 +183,9 @@ class Trainer:
                 max(0.0, time.time() - oldest[0][1].created_at) if oldest else 0.0
             )
             values["training/reserved_batches"] = int(self._pending is not None)
-            values["training/auto_enabled"] = int(self.training_mode in {"auto", "hybrid"})
-            processor_metrics = {**self._processor.status(), **self._processor.operational_metrics()}
-            for name, value in processor_metrics.items():
+            values["training/auto_enabled"] = int(self._pipeline.training_mode in {"auto", "hybrid"})
+            pipeline_metrics = {**self._pipeline.status(), **self._pipeline.operational_metrics()}
+            for name, value in pipeline_metrics.items():
                 if isinstance(value, (int, float)) and math.isfinite(value):
                     values[f"processor/{name}"] = int(value) if isinstance(value, bool) else value
         finally:
@@ -195,27 +196,18 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    @property
-    def training_mode(self) -> str:
-        """The mode selected for subsequent batches."""
-        return self._processor.training_mode
-
     def set_training_mode(self, training_mode: str) -> None:
         """Serialize mode selection with record ingestion and batch reservation."""
         with self._lock:
-            self._processor.set_training_mode(training_mode)
-
-    def supports_training_mode(self, training_mode: str) -> bool:
-        """Whether the processor can run in ``training_mode``."""
-        return training_mode in self._processor.supported_training_modes
+            self._pipeline.set_training_mode(training_mode)
 
     def pending_instructions(self) -> int:
-        """Instructions accepted and not yet consumed: the ones the processor buffers plus those unread in storage."""
+        """Instructions accepted and not yet consumed: the ones the pipeline buffers plus those unread in storage."""
         with self._lock:
             unread = self._records.count(
                 self.scenario, request_type=RequestType.TRAIN, after_sequence=self._data_sequence
             )
-            return self._processor.buffered_requests() + unread
+            return self._pipeline.buffered_requests() + unread
 
     def fail_pending_instruction(self, error: str) -> bool:
         """Mark the reserved instruction as failed, so its next batch is a skip row; False when none is reserved."""
@@ -224,32 +216,27 @@ class Trainer:
             if pending is None or pending.result is not None or pending.batch.request is None:
                 return False
             metadata = {} if self._candidate_backend is None else self._candidate_backend.failed_step_metrics()
-            self._processor.mark_request_failed(pending.batch.request.id, error, metadata)
+            self._pipeline.mark_request_failed(pending.batch.request.id, error, metadata)
             return True
 
     def instruction_failures(self) -> Mapping[str, InstructionFailure]:
         """The failed instructions this trainer still holds, for the trainer that replaces it."""
         with self._lock:
-            return self._processor.request_failures()
+            return self._pipeline.request_failures()
 
     def set_instruction_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
-        """Carry failed instructions into this trainer's processor; a rebuilt scenario starts without them."""
+        """Carry failed instructions into this trainer's pipeline; a rebuilt scenario starts without them."""
         with self._lock:
-            self._processor.set_request_failures(failures)
+            self._pipeline.set_request_failures(failures)
 
     @property
-    def processor(self) -> DataProcessor:
-        return self._processor
-
-    @property
-    def report_type(self) -> type[ReportBase] | None:
-        """The report type selected by the recipe that built this trainer."""
-        return self._processor.context.report_type
+    def pipeline(self) -> TrainingPipeline:
+        return self._pipeline
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits, when several trainers share one scenario."""
         with self._lock:
-            self._processor.admit_reports_of(report_type)
+            self._pipeline.admit_reports_of(report_type)
 
     @property
     def candidate_backend(self) -> CandidateBackend | None:
@@ -291,34 +278,34 @@ class Trainer:
     def batch_ready(self) -> bool:
         """Whether a reserved or buildable batch is waiting on the training thread."""
         with self._lock:
-            return self._pending is not None or self._processor.ready()
+            return self._pending is not None or self._pipeline.ready()
 
-    def processor_status(self) -> Mapping[str, Any]:
-        """Return caller-visible processor state under the processor's lock."""
+    def pipeline_status(self) -> Mapping[str, Any]:
+        """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
             loss = self._records.loss(self.scenario)
             if not loss.record_count:
-                return dict(self._processor.status())
+                return dict(self._pipeline.status())
             return {
-                **self._processor.status(),
+                **self._pipeline.status(),
                 "record_data_incomplete": loss.record_count > 0,
                 "evicted_record_count": loss.record_count,
                 "evicted_body_bytes": loss.body_bytes,
             }
 
     def _build_validated_batch(self) -> TrainingBatch:
-        """Build the next batch and hold the processor to its declared schema.
+        """Build the next batch and hold the pipeline to its declared schema.
 
-        ``DataProcessor.output_schema`` is the processor's published contract
-        for what a candidate backend will receive; enforcing it at the only
-        place batches enter the trainer turns a drifting processor into a loud
-        error instead of a backend-side shape failure.
+        ``Task2Batch.output_schema`` is the recipe's published contract for
+        what a candidate backend will receive; enforcing it at the only place
+        batches enter the trainer turns a drifting recipe into a loud error
+        instead of a backend-side shape failure.
         """
-        batch = self._processor.build_batch()
-        schema = self._processor.output_schema
+        batch = self._pipeline.build_batch()
+        schema = self._pipeline.output_schema
         if not isinstance(batch, schema):
             raise TypeError(
-                f"{type(self._processor).__name__} declared output_schema "
+                f"{type(self._pipeline.task2batch).__name__} declared output_schema "
                 f"{schema.__name__} but built {type(batch).__name__}"
             )
         return batch
@@ -342,8 +329,8 @@ class Trainer:
                 )
                 self.skipped_record_ids.add(item.agent_record_id)
                 return
-        if item.request_type in self.processor.required_request_types:
-            self._processor.ingest(item)
+        if item.request_type in self.pipeline.required_request_types:
+            self._pipeline.ingest(item)
 
     def _consume_data(self) -> None:
         while True:
@@ -358,7 +345,7 @@ class Trainer:
                 self.ingest_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if self._processor.ready():
+                if self._pipeline.ready():
                     return
 
     def run_once(self, scenario_step: int = 0, *, base_release_id: str | None = None) -> TrainStepResult | None:
@@ -366,7 +353,7 @@ class Trainer:
 
         Returns ``None`` when this trainer has no candidate backend (it
         only advances record consumption, because a non-training scenario still
-        has to advance its record cursor) or when the processor is not yet
+        has to advance its record cursor) or when the pipeline is not yet
         ready to produce a batch. ``base_release_id`` names the release served
         now; a batch reserved by this call is prepared against it.
         """
@@ -387,7 +374,7 @@ class Trainer:
                 kept = self._pending.prepared
             else:
                 self._consume_data()
-                if not self._processor.ready():
+                if not self._pipeline.ready():
                     return None
                 batch = self._build_validated_batch()
                 self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
@@ -420,7 +407,7 @@ class Trainer:
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
         request = batch.request
-        error = None if request is None else self._processor.request_failure(request.id)
+        error = None if request is None else self._pipeline.request_failure(request.id)
         if request is not None and error is not None:
             # Committed without the backend: the failed instruction is consumed alone and the catalog row names why.
             return StepExecution("commit", self._skip_failed_instruction(batch, request, error))
@@ -452,14 +439,14 @@ class Trainer:
             raise
 
     def _skip_failed_instruction(self, batch: TrainingBatch, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the units beside it go back to the processor for a batch a proposer reads."""
+        """Consume the instruction alone; the units beside it go back to the pipeline for a batch a proposer reads."""
         with self._lock:
             pending = self._pending
             if pending is None or pending.batch_id != batch.batch_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
-            metadata = dict(self._processor.request_failure_metrics(request.id))
-            self._processor.release_batch(batch.batch_id)
-            pending.consumed_ids = self._processor.discard_request(request.id)
+            metadata = dict(self._pipeline.request_failure_metrics(request.id))
+            self._pipeline.release_batch(batch.batch_id)
+            pending.consumed_ids = self._pipeline.discard_request(request.id)
         metrics = {**metadata, "skipped": "instruction failed", "error": error}
         return TrainStepResult(dict(self._state), metrics)
 
@@ -483,7 +470,7 @@ class Trainer:
                     self._pending.base_release_id = base_release_id
                 return self._pending.batch
             self._consume_data()
-            if not self._processor.ready():
+            if not self._pipeline.ready():
                 return None
             batch = self._build_validated_batch()
             self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
@@ -497,7 +484,7 @@ class Trainer:
         the right data, and the backend must evaluate it against the release
         served now. ``keep_candidate`` keeps the prepared candidate too, so the
         next step evaluates it again instead of proposing anew. A batch the
-        processor already took back (an earlier attempt acknowledged it and its
+        pipeline already took back (an earlier attempt acknowledged it and its
         commit failed) stays taken: the next step prepares it again and records
         the rows that attempt consumed, and never acknowledges it twice.
         """
@@ -555,7 +542,7 @@ class Trainer:
     def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
         """Prepare the pending result without exposing its state as committed.
 
-        Acknowledging a processor mutates its in-memory batch bookkeeping, so
+        Acknowledging a pipeline mutates its in-memory batch bookkeeping, so
         the prepared value is cached and reused after a publication retry. The
         trainer's algorithm state and pending reservation remain unchanged
         until :meth:`commit` is called after the scenario's artifact and commit
@@ -581,8 +568,8 @@ class Trainer:
                 raise TypeError("training step state must be a mapping")
             consumed = self._pending.consumed_ids
             if consumed is None:
-                consumed = self._processor.acknowledge(batch_id)
-            released = self._processor.releasable_record_ids()
+                consumed = self._pipeline.acknowledge(batch_id)
+            released = self._pipeline.releasable_record_ids()
             loss = self._records.loss(self.scenario)
             metrics = dict(result.metrics)
             if loss.record_count > 0:
@@ -626,7 +613,7 @@ class Trainer:
                 return
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
-            self._processor.release_records(prepared.released_ids)
+            self._pipeline.release_records(prepared.released_ids)
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
@@ -656,7 +643,7 @@ class Trainer:
     def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
         """Drop the reserved batch: its rows are consumed without a commit, on a consumption receipt.
 
-        A batch the processor already took back (a failed instruction, an
+        A batch the pipeline already took back (a failed instruction, an
         attempt whose commit failed) is not acknowledged twice. ``component``
         names the trainer of a composite scenario in the receipt, so recovery
         skips those rows for that trainer alone.
@@ -667,9 +654,8 @@ class Trainer:
             batch_id = self._pending.batch_id
             consumed = self._pending.consumed_ids
             if consumed is None:
-                self._processor.dropped(batch_id)
-                consumed = self._processor.acknowledge(batch_id)
-            released = self._processor.releasable_record_ids()
+                consumed = self._pipeline.acknowledge(batch_id, trained=False)
+            released = self._pipeline.releasable_record_ids()
             metadata: dict[str, Any] = {"outcome": "stale", "metrics": dict(metrics or {})}
             if component is not None:
                 metadata["component"] = component
@@ -680,7 +666,7 @@ class Trainer:
                 metadata=metadata,
             )
             self.consumed_record_ids.update(consumed | released)
-            self._processor.release_records(released)
+            self._pipeline.release_records(released)
             self._pending = None
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
@@ -690,26 +676,26 @@ class Trainer:
             backend.commit_applied(state)
 
     def close(self) -> None:
-        """Release processor and backend resources owned by the trainer.
+        """Release pipeline and backend resources owned by the trainer.
 
-        Held under the trainer lock so a processor is never closed while a
+        Held under the trainer lock so a pipeline is never closed while a
         batch is being ingested or built on the training thread.
         """
         with self._lock:
             try:
-                self._processor.close()
+                self._pipeline.close()
             finally:
                 if self._candidate_backend is not None:
                     self._candidate_backend.close()
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
-        """Rebuild processor memory from retained rows at or below a watermark.
+        """Rebuild pipeline memory from retained rows at or below a watermark.
 
         The committed high-water mark is a consumption cursor, not a liveness
         boundary: consumption stops the moment a batch is ready, so the cursor
         passes rows of the next, still-incomplete step, and retention keeps
-        them stored. Only processor memory knew about them, and a rebuilt
-        processor starts empty: without this replay, a report arriving after
+        them stored. Only pipeline memory knew about them, and a rebuilt
+        pipeline starts empty: without this replay, a report arriving after
         recovery waits forever on a reference that can never be ingested
         again. ``consumed_ids`` names the rows committed batches consumed —
         the commit log records them per step because retention may keep a
