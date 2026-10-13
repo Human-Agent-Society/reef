@@ -202,7 +202,9 @@ def workspace_mutations(
             mutations.append(Mutation("update", entry_id, {"name": kind, "config": config}))
     mutations.extend(Mutation("remove", entry_id) for entry_id in current if entry_id not in seen)
     # A new id another kind of the tree holds (a config entry, say) is settled the text proposer's way.
-    mutations.extend(evolution._request_mutations(creates, nodes, entries))
+    created, refused = evolution._request_mutations(creates, nodes, entries)
+    mutations.extend(created)
+    problems.extend(refused)
     return mutations, problems
 
 

@@ -32,6 +32,46 @@ from reef.recipe.reefine import evolution
 #: An extension pi's admission refuses: it writes to the session's stdout while it has a UI.
 LOUD = extension("loud", 'export default function (pi) { console.log("hi"); }\n')
 
+#: A retire of the brevity rule ENTRIES holds, as the prompt asks the model to write one.
+RETIRE = {"id": "brevity", "name": "rules", "remove": True}
+
+
+def test_a_request_that_retires_a_held_rule_gets_a_remove_mutation() -> None:
+    """Outcome 3 of #521: the text proposer can retire an entry by id, so a request to stop a behavior takes the
+    old rule out instead of piling a contradicting one beside it; the review reads the removal, so its notes name
+    the removed entry, and the prompt offers the remove form at all."""
+    model = Model(designed(RETIRE), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("remove", "brevity")]
+    assert proposal.mutations[0].options is None
+    review_prompt = model.prompts[2]
+    assert '"op": "remove"' in review_prompt and '"id": "brevity"' in review_prompt
+    assert '"remove": true' in model.prompts[1]
+
+
+def test_a_remove_of_an_entry_the_tree_does_not_hold_is_refused_into_the_notes() -> None:
+    """A remove naming no held entry is refused, never turned into a create or an update: the answer's notes name
+    the refused remove, and the answer's other entries still land."""
+    unheld = {"id": "no-such-rule", "name": "rules", "remove": True}
+    model = Model(designed(skill("run-tests"), unheld), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
+    assert proposal.notes["dropped"] == ["rules 'no-such-rule' was dropped: the tree holds no such entry to remove"]
+
+
+def test_a_remove_cannot_touch_a_reserved_entry_and_a_mangled_one_is_named_in_the_retry() -> None:
+    """A remove of one of reef's own entries is dropped before the tree is read, and a remove whose id is no
+    entry name leaves the answer with nothing usable: the retry names why, so the model can write it again."""
+    model = Model(designed({"id": "reef-requests", "name": "skill", "remove": True}))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.mutations == () and "dropped_attempts" in proposal.notes
+    mangled = {"id": "no such rule", "name": "rules", "remove": True}
+    model = Model(designed(mangled), designed(RETIRE), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("remove", "brevity")]
+    (dropped,) = proposal.notes["dropped_attempts"]
+    assert "answer 1:" in dropped and "rules 'no such rule' was dropped: a remove" in dropped
+
 
 def test_entries_the_harness_refuses_are_sent_back_and_written_again() -> None:
     model = Model(designed(LOUD), designed(skill("run-tests")), json.dumps(REVIEW))
