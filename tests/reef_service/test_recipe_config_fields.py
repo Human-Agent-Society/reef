@@ -241,3 +241,16 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
         NoProcessorRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
     with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
         NoObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
+
+
+@pytest.mark.unit
+def test_opd_config_keeps_objective_options_out_of_recipe_fields() -> None:
+    from recipes.opd import OPDRecipe
+
+    values = resolve_config_field_values(OPDRecipe, {"batch_size": "4", "max_teacher_tokens": "2048"}, {})
+    assert values["batch_size"] == 4
+    assert values["max_teacher_tokens"] == 2048
+    assert values["max_staleness"] == 0
+    assert "teacher_checkpoint" not in recipe_config_fields(OPDRecipe)
+    # The teacher reads the recorded ids, so the recipe renders no prompt and needs no tokenizer.
+    assert "tokenizer_path" not in recipe_config_fields(OPDRecipe)

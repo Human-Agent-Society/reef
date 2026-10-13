@@ -99,6 +99,14 @@ def _config_id(path: Path) -> str:
     return str(path.relative_to(REPO_ROOT))
 
 
+def _set_test_endpoints(config: dict) -> None:
+    """Simulate endpoint publication after Ray chooses each service's host."""
+    endpoints = config.setdefault("endpoints", {})
+    for service in config.get("services", []):
+        if service.get("endpoint"):
+            endpoints[service["name"]] = service["endpoint"].format(host="127.0.0.1")
+
+
 def _resolved_strings(config: dict, value):
     """Yield every string after applying the orchestrator's config pass."""
     from reef.service.deploy.config_utils import interpolate_config
@@ -151,6 +159,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
+        "--vocab-size",
+        "--norm-epsilon",
+        "--untie-embeddings-and-output-weights",
         "--pipeline-model-parallel-size",
         "--position-embedding-type",
         "--qk-layernorm",
@@ -175,6 +186,10 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # example's ``run.sh`` normally supplies these before invoking ``reef serve``;
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
+    "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
+    "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
+    "OPD_ADAPTER_PATH": "/root/models/Qwen3.5-9B-SFT-adapter",
+    "OPD_TEACHER_PATH": "/root/models/Qwen3.5-9B",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
@@ -260,6 +275,7 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
 
     services = {service["name"]: service for service in config["services"]}
     from reef.service.deploy.process import _command_argv
+    from reef.service.training_driver import _resolve_training_recipe
     from reef.train.slime_backend.launch import driver_arguments
 
     tokens = _command_argv(config, services["slime-driver"]["command"])
@@ -270,7 +286,7 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     assert "REEF_TRAINING_LOSS" not in driver_env
     recipe = config["reef"]["recipe"]
     return [
-        *driver_arguments(config),
+        *driver_arguments(config, loss_family=_resolve_training_recipe(config)[0]),
         *tokens[tokens.index(module) + 1 :],
     ], recipe
 
@@ -302,6 +318,7 @@ def _parse_config(config_path: Path):
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
+    _set_test_endpoints(config)
     tokens, recipe = _driver_tokens(config)
     _loss_family, resolved_recipe = _resolve_training_recipe(config)
     spec = resolve_loss_family(_loss_family)
@@ -438,6 +455,7 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
 
+    _set_test_endpoints(config)
     settings = service_config_from_mapping(config)
     if settings.inference_handler_factory is not None:
         assert callable(inference_handler_factory_for(settings.inference_handler_factory))
@@ -504,7 +522,14 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     # Slime pre-train pass after the YAML's initial --disable flag.
     configure_reef_loss_args(args)
 
-    spec.validate_backend_args(args, recipe=recipe)
+    # Paths are representative placeholders; tokenizer compatibility has its
+    # own contract tests and is checked against real models during GPU startup.
+    with patch("reef.train.slime_backend.distill.teacher_engine.validate_teacher_tokenizer") as validate_tokenizers:
+        spec.validate_backend_args(args, recipe=recipe)
+    if getattr(args, "distill_teacher_url", ""):
+        validate_tokenizers.assert_called_once_with(args.hf_checkpoint, args.distill_teacher_model_path)
+    else:
+        validate_tokenizers.assert_not_called()
     validate_bridge_args(args, spec)
 
 

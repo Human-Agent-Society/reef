@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.inference import http_readiness_command
 
 GENERATOR_SERVICE = "generator"
 DEFAULT_PORT = 8910
