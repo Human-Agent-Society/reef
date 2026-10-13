@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
+from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -12,7 +14,12 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.observability import ExperimentTracker, NullExperimentLogger
+from reef.observability import (
+    ExperimentTracker,
+    NullExperimentLogger,
+    TrainingExperimentContext,
+    TrainingExperimentEvent,
+)
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, InferenceHandler, ModelCandidate, PreparedTrainingStep
 from reef.scenario import ReleaseNotRestorable
@@ -208,7 +215,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
 
 @pytest.mark.unit
 def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_path, monkeypatch) -> None:
-    value, _, _ = dispatcher(tmp_path)
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     created = value.get_or_create_scenario("math").releases()[0]["release_id"]
     train(value, 1)
     scenario = value.get_or_create_scenario("math")
@@ -241,6 +249,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
     assert len(scenario.store.history()) == 2
+    assert len(tracker.rollbacks) == 1
+    assert tracker.rollbacks[0].produced_artifact_ref == recorded.artifact_ref
 
 
 @pytest.mark.unit
@@ -428,3 +438,79 @@ def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_p
         value.rollback("math", created)
     assert not training.inference.inference_admission_status["open"]
     assert scenario.current_artifact_ref() == head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tracker_fails", [False, True])
+def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracker_fails: bool
+) -> None:
+    tracker = RecordingExperimentTracker()
+
+    def correlation(context: TrainingExperimentContext) -> dict[str, str]:
+        if tracker_fails:
+            raise ConnectionError("tracker unavailable")
+        return {"experiment/run_id": f"run-{context.run_segment}"}
+
+    record_event = tracker.record
+    recorded = Event()
+
+    def record(event: TrainingExperimentEvent) -> None:
+        record_event(event)
+        recorded.set()
+        if tracker_fails:
+            raise ConnectionError("tracker unavailable")
+
+    monkeypatch.setattr(tracker, "correlation_metrics", correlation)
+    monkeypatch.setattr(tracker, "record", record)
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    try:
+        train(value, 1)
+        scenario = value.get_or_create_scenario("math")
+        assert recorded.wait(5), "commit event was not reported"
+        (event,) = tracker.events
+        (commit,) = scenario.store.history()
+        assert event.metrics == commit.metrics
+        assert event.context.backend == "RuntimeCandidateBackend"
+        assert event.context.backend_config["runtime"] == "RollbackRuntime"
+        assert event.training_job_id == "job-0"
+        assert event.produced_runtime_load_id == "w1"
+        assert event.checkpoint_path == str(runtime.checkpoint_dir / "0")
+        if tracker_fails:
+            assert "experiment/run_id" not in commit.metrics
+        else:
+            assert commit.metrics["experiment/run_id"] == "run-0"
+    finally:
+        value.close()
+
+
+@pytest.mark.unit
+def test_experiment_events_follow_settled_state_and_resumed_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    observed = []
+
+    def record(event) -> None:
+        observed.append((event.context.step, scenario.scenario_step, scenario.current_artifact_ref()))
+
+    def rollback(event) -> None:
+        observed.append((event.step, scenario.scenario_step, scenario.current_artifact_ref()))
+        observed.append(runtime.inference.inference_admission_status["open"])
+
+    monkeypatch.setattr(tracker, "record", record)
+    monkeypatch.setattr(tracker, "record_rollback", rollback)
+    try:
+        train(value, 1)
+        for _ in range(1000):
+            if observed:
+                break
+            time.sleep(0.001)
+        trained = scenario.current_artifact_ref()
+        restored = value.rollback("math", initial.release_id)
+        assert observed == [(1, 1, trained), (2, 2, restored), True]
+    finally:
+        value.close()

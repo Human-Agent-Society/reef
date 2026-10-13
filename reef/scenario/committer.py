@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import AbstractContextManager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -29,6 +29,8 @@ from reef.artifact.artifact import (
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
+from reef.observability.base import TrainingExperimentContext
+from reef.observability.commits import CommitExperimentObserver
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
@@ -93,6 +95,7 @@ class ScenarioCommitter:
         scenario_step: int = 0,
         store: ScenarioStore,
         recovered_head_record: CommitRecord | None = None,
+        experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         if not isinstance(scenario_step, int) or scenario_step < 0:
             raise ValueError("scenario_step must be non-negative")
@@ -109,6 +112,7 @@ class ScenarioCommitter:
         self._trainer = trainers[0].trainer
         self._step = scenario_step
         self._store = store
+        self.experiment_observer = experiment_observer
         self._lock = RLock()
         # A lone trainer's preparation holds the operation lock across proposer
         # calls and evaluation episodes, neither of which changes committed
@@ -358,7 +362,7 @@ class ScenarioCommitter:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._lock, self._publication_lock:
+        with self.experiment_reporting(), self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if current_ref.release_id == release_id:
                 return current_ref
@@ -542,7 +546,7 @@ class ScenarioCommitter:
         served at once rather than held for review for the same reason. Returns the
         new head, or ``None`` when the served release already carries the content.
         """
-        with self._lock, self._publication_lock:
+        with self.experiment_reporting(), self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if isinstance(current_ref, LiveWeightArtifactRef):
                 return None
@@ -593,7 +597,7 @@ class ScenarioCommitter:
         forward, so refusing it would leave that job unfinished and inference
         admission paused for good.
         """
-        with self._lock, self._publication_lock:
+        with self.experiment_reporting(), self._lock, self._publication_lock:
             bound = self.bound_trainer(component)
             trainer, component = bound.trainer, bound.component
             self.settled_sibling = None
@@ -642,6 +646,8 @@ class ScenarioCommitter:
                 )
                 # The record names the base its batch was reserved against; the metrics say what it landed on.
                 result = trainer.add_commit_metrics(result, {"merged_onto": served})
+            if not retrying:
+                result = self.prepare_experiment(result, trainer, next_step, component)
             prepared = trainer.prepare_commit(result)
             recorded = self._recorded_training_retry(prepared, result, next_step, component)
             if recorded is not None:
@@ -682,6 +688,47 @@ class ScenarioCommitter:
             if publication.component is None:
                 publication = SavedArtifactPublication(publication.artifact, component)
             return self._commit_saved_artifact(result, publication, prepared, trainer, component)
+
+    def experiment_reporting(self) -> AbstractContextManager[None]:
+        if self.experiment_observer is None:
+            return nullcontext()
+        return self.experiment_observer.reporting()
+
+    def prepare_experiment(
+        self, result: TrainStepResult, trainer: Trainer, step: int, component: str | None
+    ) -> TrainStepResult:
+        observer = self.experiment_observer
+        if observer is None:
+            return result
+        backend = trainer.candidate_backend
+        try:
+            backend_config = None if backend is None else dict(backend.experiment_config())
+        except Exception:
+            logger.exception("training backend failed to describe experiment configuration")
+            backend_config = None
+        context = TrainingExperimentContext(
+            scenario=self._name,
+            recipe=observer.recipe,
+            step=step,
+            source_artifact_ref=self._artifacts.current,
+            run_segment=observer.run_segment,
+            run_step=observer.run_step,
+            backend=None if backend is None else type(backend).__name__,
+            backend_config=backend_config,
+            component=self.component_on_record(component),
+        )
+        correlation = observer.prepare(
+            context,
+            source_runtime_load_id=result.source_runtime_load_id,
+            produced_runtime_load_id=result.runtime_load_id,
+            checkpoint_path=result.checkpoint_path,
+        )
+        if correlation:
+            try:
+                return trainer.add_commit_metrics(result, correlation)
+            except RuntimeError:
+                logger.exception("experiment correlation could not annotate the pending result")
+        return result
 
     def _should_checkpoint(self, result: TrainStepResult) -> bool:
         return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)

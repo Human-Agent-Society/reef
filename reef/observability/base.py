@@ -71,9 +71,9 @@ class NullExperimentLogger(ExperimentLogger):
 class ExperimentTracker:
     """Process-level provider that binds scenario loggers and commit events.
 
-    Implementations must treat tracking as a side effect: Dispatcher also
-    isolates provider failures so an observer can never become part of the
-    durable update transaction.
+    Implementations must treat tracking as a side effect. The storage observer
+    isolates event failures, and commit preparation isolates correlation failures,
+    so tracking never becomes part of the durable update transaction.
     """
 
     @property

@@ -1831,7 +1831,6 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     assert manifest["files"] == {"harness.txt": "harness step 1"}
     catalog = service.harness_releases(headers)["releases"]
     assert [row.get("component") for row in catalog] == [None, HARNESS]
-    assert dispatcher._experiment_context(scenario, WEIGHTS).component == WEIGHTS
 
 
 @pytest.mark.unit
@@ -2381,8 +2380,9 @@ def test_a_harness_cycle_in_flight_never_commits_a_result_the_weights_commit_set
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("fault", ["append", "install"])
 def test_a_commit_that_settles_a_sibling_record_gives_each_step_its_own_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers, fault: str
 ) -> None:
     """The weights commit settled the harness record first: the harness step gets its event at step 1, from its
     record, and the weights commit gets its event at step 2, the step it took."""
@@ -2391,7 +2391,7 @@ def test_a_commit_that_settles_a_sibling_record_gives_each_step_its_own_event(
     scenario = _scenario(dispatcher, 1, 2)
     batch = scenario.reserve_training_batch(WEIGHTS)
     assert batch is not None
-    _harness_record_durable_then_failed(dispatcher, scenario, monkeypatch)
+    _harness_record_durable_then_failed(dispatcher, scenario, monkeypatch, fault)
     assert dispatcher.run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
     history = scenario.store.history()
     assert [(row.step, row.component) for row in history] == [(1, HARNESS), (2, WEIGHTS)]

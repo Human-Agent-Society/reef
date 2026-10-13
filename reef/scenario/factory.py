@@ -36,7 +36,8 @@ from reef.core.components import (
 )
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
-from reef.observability import ExperimentTracker
+from reef.observability import ExperimentTracker, NullExperimentTracker
+from reef.observability.commits import CommitExperimentObserver
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario.binding import ScenarioBinding
@@ -375,6 +376,17 @@ class ScenarioFactory:
                     f"scenario {name!r} runs a trainer per component: each recovers from its own commits, "
                     "which needs durable commit storage"
                 )
+            experiment_observer = None
+            if not isinstance(self._experiment_tracker, NullExperimentTracker):
+                experiment_observer = CommitExperimentObserver(
+                    self._experiment_tracker,
+                    scenario=name,
+                    recipe=recipe.name,
+                    source_artifact_ref=repository.require_current_artifact(),
+                    scenario_step=scenario_step,
+                    store=store,
+                )
+                store = experiment_observer.store
             scenario = Scenario(
                 name=name,
                 model_config=model_config,
@@ -393,6 +405,7 @@ class ScenarioFactory:
                 scenario_step=scenario_step,
                 store=store,
                 recovered_head_record=head_record,
+                experiment_observer=experiment_observer,
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed

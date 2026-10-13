@@ -13,6 +13,7 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
+from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
@@ -43,6 +44,7 @@ class Scenario:
         scenario_step: int = 0,
         process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
+        experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
             ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
@@ -77,6 +79,7 @@ class Scenario:
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
+            experiment_observer=experiment_observer,
         )
 
     @property
