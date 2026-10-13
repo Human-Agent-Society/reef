@@ -705,6 +705,8 @@ shown above; the repository examples all use version 2.
    reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
    reef.inference_timeout_s | 300.0 | per-request timeout
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
+   reef.routing_manifest | | path to the routing manifest (YAML); setting it enables model routing: ``reef serve`` validates the manifest, hosts the Semantic Router and Envoy processes declared under ``reef.routing_deployment``, and only accepts requests once the routing stack is ready. Unset keeps the deployment fully non-routing
+   reef.routing_deployment | {} | the pinned upstream processes Reef hosts while routing is enabled; the ``semantic-router`` and ``envoy`` entries each carry a required ``command`` (str or list, config-interpolated, e.g. ``${reef.routing_manifest}``), plus optional ``ready``, ``ready_timeout`` and ``endpoint``. Reef pins no upstream SR version itself: the deployment's command does
    reef.checkpoint_every_n_versions | 1 | how often a version becomes durable
 
 Storage paths default under ``.reef/``, which the basic and sao stacks keep;
