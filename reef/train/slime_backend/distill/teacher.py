@@ -1,6 +1,8 @@
-"""The teacher of a distillation family: whose weights it runs on, and the forward-only pass that scores the samples.
+"""The teacher on the actor: whose weights it runs on, and the forward-only pass that scores the samples.
 
-The weights are the student's own (the current ones, or a slow-moving copy
+This is the first of a distillation family's two teacher paths; a teacher
+served by its own engine is scored by ``teacher_engine`` on the bridge. The
+weights here are the student's own (the current ones, or a slow-moving copy
 of them: the SDFT reference's ``ref_model`` that moves toward the policy by
 the update rate after every step, a frozen snapshot at rate 0) or another
 model's, loaded once from its checkpoint. They live in the actor's weight

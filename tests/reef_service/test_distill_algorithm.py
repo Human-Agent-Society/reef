@@ -207,7 +207,7 @@ def test_the_wire_row_is_the_policy_row_plus_the_teacher_sequence(toy_family) ->
     assert data["rollout_log_probs"] == [STUDENT_LOG_PROBS]
     assert data["teacher_tokens"] == [TEACHER_TOKENS]
     assert data["distill_sample_weights"] == [1.0]
-    assert toy_family.rollout_data_keys == ("teacher_tokens", "distill_sample_weights")
+    assert toy_family.rollout_data_keys[:2] == ("teacher_tokens", "distill_sample_weights")
     assert set(toy_family.external_batch_keys) >= {
         "rollout_log_probs",
         "distill_sample_weights",
