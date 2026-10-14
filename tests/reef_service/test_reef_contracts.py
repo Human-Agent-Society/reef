@@ -283,7 +283,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
     runtime = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
-    assert runtime.trainer.processor.output_schema is TrainingBatch
+    assert runtime.trainer.pipeline.output_schema is TrainingBatch
     assert runtime.trainer.candidate_backend is None
 
 

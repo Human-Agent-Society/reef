@@ -21,6 +21,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from reef.evaluation.harness import FailureObservation
+
 MANIFEST_KIND = "reef-failure-manifest/1"
 
 #: Failure stages, each tied to one observation locus: ``launch`` (the
@@ -56,22 +58,6 @@ def fingerprint(task: str, stage: str, cause: str) -> str:
     """The stable identity of one failure mode across steps and restarts."""
     key = "\x1f".join((task, stage, normalize_cause(cause)))
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
-
-
-@dataclass(frozen=True)
-class FailureObservation:
-    """One failed episode as the evaluation saw it, before any diffing."""
-
-    task: str
-    stage: str
-    cause: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {"task": self.task, "stage": self.stage, "cause": self.cause}
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> FailureObservation:
-        return cls(task=str(value["task"]), stage=str(value["stage"]), cause=str(value["cause"]))
 
 
 @dataclass(frozen=True)

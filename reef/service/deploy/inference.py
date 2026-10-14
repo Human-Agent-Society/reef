@@ -154,11 +154,12 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
 
 # Only these environment fallbacks belong to configuration-free startup.
 # Existing files continue to opt in through their own environment references.
+#: The public fields command-line startup reads from the environment.
 _ENVIRONMENT_FIELDS = {
-    "upstream_url": "REEF_UPSTREAM_URL",
-    "upstream_model": "REEF_UPSTREAM_MODEL",
-    "upstream_api_key": "REEF_UPSTREAM_API_KEY",
-    "token": "REEF_TOKEN",
+    ("inference", "upstream-url"): "REEF_UPSTREAM_URL",
+    ("inference", "upstream-model"): "REEF_UPSTREAM_MODEL",
+    ("inference", "upstream-api-key"): "REEF_UPSTREAM_API_KEY",
+    ("reef", "token"): "REEF_TOKEN",
 }
 _CONFIGURED_FIELDS = {
     "teacher_model_path",
@@ -178,25 +179,26 @@ _CONFIGURED_FIELDS = {
     "training_settings",
     "training_backend_options",
     "evaluation_settings",
-    "task_generation_settings",
+    "pipeline_settings",
 }
 
 
 def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
-    """Seed optional environment fallbacks before selecting component schemas."""
-    reef: dict[str, Any] = {"recipe": "recipe", "host": "127.0.0.1"}
-    for field, variable in _ENVIRONMENT_FIELDS.items():
+    """The public layout that startup without a file begins from: only the environment fallbacks."""
+    config: dict[str, Any] = {}
+    for (section, name), variable in _ENVIRONMENT_FIELDS.items():
         if environ.get(variable, "").strip():
-            reef[field] = environ[variable]
-    return {"reef": reef, "run_dir": ".reef/run"}
+            config.setdefault(section, {})[name] = environ[variable]
+    return config
 
 
 def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
-    if unsupported or "training" in config or "evaluation" in config or "task-generation" in config:
+    # The pipeline section belongs to any recipe; the recipe reads it.
+    if unsupported or "training" in config or "evaluation" in config:
         raise DeployConfigError(
-            "select a weight-training recipe for training; custom process stacks require unversioned legacy YAML"
+            "select a weight-training recipe for training; Reef does not start custom process stacks"
         )
     settings = service_config_from_mapping(config)
     if config.get("reef", {}).get("runtime"):
@@ -309,14 +311,11 @@ def resolve_hf_snapshot(repo_id: str) -> str:
         raise DeployConfigError(f"failed to download HF model {value}: {exc}") from exc
 
 
-def resolve_model_paths(config: dict[str, Any]) -> bool:
+def resolve_model_paths(config: dict[str, Any]) -> None:
     """Download HF repo IDs for model paths and replace them with local snapshot paths.
 
-    Handles ``reef.model_path`` and ``training.megatron_checkpoint_path``.
-    Returns True if any path was changed (i.e. the config dict no longer
-    matches what's on disk).
+    Handles ``reef.model_path``, ``reef.teacher_model_path`` and ``training.megatron_checkpoint_path``.
     """
-    changed = False
     reef_section = config.get("reef")
     if isinstance(reef_section, dict):
         for name in ("model_path", "teacher_model_path"):
@@ -325,15 +324,12 @@ def resolve_model_paths(config: dict[str, Any]) -> bool:
                 if resolved != reef_section[name]:
                     _log(f"downloaded HF model {reef_section[name]} -> {resolved}")
                     reef_section[name] = resolved
-                    changed = True
     training_section = config.get("training")
     if isinstance(training_section, dict) and isinstance(training_section.get("megatron_checkpoint_path"), str):
         resolved = resolve_hf_snapshot(training_section["megatron_checkpoint_path"])
         if resolved != training_section["megatron_checkpoint_path"]:
             _log(f"downloaded HF model {training_section['megatron_checkpoint_path']} -> {resolved}")
             training_section["megatron_checkpoint_path"] = resolved
-            changed = True
-    return changed
 
 
 def _log(msg: str) -> None:

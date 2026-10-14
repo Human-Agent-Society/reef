@@ -359,19 +359,18 @@ guess GPU needs. Slime training/rollout still require specialized Ray launchers.
 Whole-stack deployment configuration
 ------------------------------------
 
-Version 2 has no public process list: Reef assembles native inference/training
+A configuration file has no process list: Reef assembles native inference/training
 and HTTP processes using the same Executor factory as the model workers.
 Method services such as a PRM are deployed independently and recipes consume
 their endpoints; the one auxiliary child Reef assembles is the generator
-service of a ``generator`` section, under the ``generator`` executor role. The explicit ``services`` and
-``execution.services`` examples below apply only to unversioned legacy stacks. The orchestrator only handles dependencies, readiness, endpoint
+service of a ``generator`` section, under the ``generator`` executor role.
+The orchestrator only handles dependencies, readiness, endpoint
 publication, log tailing, failure detection and reverse-order shutdown. It
 does not contain local process or Ray placement operations.
 
 Omitted selectors (or YAML ``null``) use ``auto``. Existing YAML without
 resource reservations or a Ray placement-group context continues to launch
-services locally and Slime workers through Ray. No ``execution.services``
-setting is needed for those defaults. Local-controller training stacks declare
+services locally and Slime workers through Ray. Local-controller training stacks declare
 the training/rollout roles so ``reef serve`` can prepare their shared runtime
 before launching the driver (see below).
 
@@ -400,8 +399,7 @@ specialized Ray requirement and service resource reservations remain
 component-specific, rather than pretending to implement vLLM's TP/PP launcher.
 
 Each selector accepts a built-in name, import path, inline ``backend/options``
-object, or a named profile under ``executors``. ``services[].executor``
-overrides ``execution.services`` for that service. Explicit Slime command-line
+object, or a named profile under ``executors``. Explicit Slime command-line
 flags override the corresponding role selection; they also accept profile
 names. Profiles for training and rollout carry domain-launcher options, not
 necessarily Ray actor options. The reserved Slime launch arguments (``args``,
@@ -912,7 +910,7 @@ server groups or actor handles directly.
 Verification
 ~~~~~~~~~~~~
 
-CPU tests cover legacy configs, custom service/rollout executors, resource
+CPU tests cover custom service/rollout executors, resource
 selection, dependency ordering, endpoint propagation, rollback, process-tree
 cleanup, bounded probes and owner-lease loss. To run the real Ray/HTTP tests:
 

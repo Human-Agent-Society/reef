@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from reef_service._training_deployment import LocalDeployment
+from tests.support._training_deployment import LocalDeployment
 
 from reef.runtime.deployment import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
@@ -24,13 +24,12 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.train.runtime_backend import RuntimeCandidateBackend
 
-BACKEND = "reef_service._training_deployment:LocalDeployment"
+BACKEND = "tests.support._training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
 def deployment():
     return {
-        "schema-version": 2,
         "recipe": {"implementation": RECIPE},
         "inference": {"model-path": "/models/test"},
         "training": {"backend": BACKEND, "options": {"lora-rank": 8, "checkpoint-layers": True}},
@@ -47,7 +46,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         "recipe.config.max-staleness": "2",
     }
     file_config, _ = resolve_deployment_config(deployment(), overrides, tmp_path / "serve.yaml")
-    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli", standard=True)
+    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         assert [process["name"] for process in config["services"]] == ["reef"]
         assert "execution" not in config
@@ -104,7 +103,7 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
 
 
 def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
-    from reef_service._training_deployment import runtime_factory
+    from tests.support._training_deployment import runtime_factory
 
     from reef.inference.http import InferenceProxyRuntime
 
@@ -140,8 +139,9 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
 
 def test_in_process_serving_boots_on_cpu_without_loading_slime_or_ray(tmp_path):
     marker = tmp_path / "runtime"
-    # Supply only the cookbook to the child; keep Reef resolved from the installed wheel.
+    # Supply the cookbook and test support; keep Reef resolved from the installed wheel.
     (tmp_path / "recipes").symlink_to(Path(__file__).resolve().parents[2] / "recipes", target_is_directory=True)
+    (tmp_path / "tests").symlink_to(Path(__file__).resolve().parents[1], target_is_directory=True)
     distribution = tmp_path / "reef_test_backend-0.0.0.dist-info"
     distribution.mkdir()
     (distribution / "METADATA").write_text("Name: reef-test-backend\nVersion: 0.0.0\n")
@@ -171,9 +171,7 @@ main(sys.argv[1:])
     # The launched HTTP interpreter uses the same dependency guard.
     (tmp_path / "sitecustomize.py").write_text(script[: script.index("from reef.cli import main")])
     env = {key: value for key, value in os.environ.items() if not key.startswith("REEF_")}
-    env["PYTHONPATH"] = os.pathsep.join(
-        (str(tmp_path), str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", ""))
-    )
+    env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), env.get("PYTHONPATH", "")))
     log_path = tmp_path / "serve.log"
     with log_path.open("w") as log:
         process = subprocess.Popen(

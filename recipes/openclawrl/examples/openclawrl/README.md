@@ -274,15 +274,16 @@ the first reply passes directly.
 ## Configuration ownership
 
 The Reef YAML contains no `service` or `services` sections. HTTP settings use
-`reef.*`; Reef assembles inference and training. OpenClawRL consumes an
-independently deployed PRM through `recipe.config.prm-url` and
-`recipe.config.prm-tokenizer-path`. The tokenizer must match the served PRM.
-CLI overrides use the same paths, for example:
+`reef.*`; Reef assembles inference and training. OpenClawRL's judging stage
+consumes an independently deployed PRM through
+`pipeline.record2record.config.prm_url` and
+`pipeline.record2record.config.prm_tokenizer_path`. The tokenizer must match
+the served PRM. CLI overrides use the same paths, for example:
 
 ```bash
 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml \
-  --recipe.config.prm-url http://prm-host:23001 \
-  --recipe.config.prm-tokenizer-path /models/prm-tokenizer
+  --pipeline.record2record.config.prm_url http://prm-host:23001 \
+  --pipeline.record2record.config.prm_tokenizer_path /models/prm-tokenizer
 ```
 
 The example's Compose file owns PRM and student-model launch arguments, health
@@ -290,5 +291,5 @@ checks and GPU assignments. Configure native SGLang options in those containers'
 commands. The student-model endpoint belongs to the user-simulation harness;
 Reef does not receive it. To use an existing PRM in the Compose example, remove
 the `prm` container and Reef's Compose `depends_on: prm` entry, then update the
-two recipe client fields. PRM request timeouts and scoring errors remain the
-OpenClawRL recipe's responsibility.
+two PRM fields under `pipeline.record2record.config`. PRM request timeouts and
+scoring errors remain the OpenClawRL recipe's responsibility.

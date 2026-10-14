@@ -98,7 +98,7 @@ PUCT chooses G parents
   -> Reef stores exact tokens, response loss mask, and rollout log-probabilities
   -> sandbox executes each generated program; the official verifier gives rewards
   -> harness reports every reward against its exact inference receipt
-  -> TTTDProcessor waits for the complete G × R step and removes constant groups
+  -> TTTDRecord2Record waits for the complete G × R step; TTTDBatches removes constant groups
   -> Slime prepares adaptive-beta entropic leave-one-out advantages from the reserved batch
   -> Slime applies frozen-base token KL and un-clipped importance sampling
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
@@ -180,11 +180,12 @@ TTTD_TASK=circle_packing_26 ./run.sh
 and sizes the memory limits for it — the packing tasks need a longer context
 (`32768`) on the same GPUs, so they get a smaller per-GPU token budget.
 
-The step grid lives in two places and both must agree, or Reef waits for
-coordinates the harness never sends: `GROUPS_PER_STEP` and
-`ROLLOUTS_PER_GROUP` in `harness/harbor_agent.py`, and `groups_per_step`,
-`rollouts_per_group`, and `--global-batch-size` (their product) in
-`serve.yaml`. A one-step plumbing smoke sets both sides to 2 x 2 and
+The step grid has one source: `groups_per_step` and `rollouts_per_group` under
+`pipeline.record2record.config` in `serve.yaml`. `harness/harbor_agent.py`
+reads them as `GROUPS_PER_STEP` and `ROLLOUTS_PER_GROUP`, so the harness sends
+exactly the coordinates that Reef waits for. Slime's `--global-batch-size` in
+`serve.yaml` must equal their product. A one-step plumbing smoke sets the grid
+to 2 x 2 and
 `enable_thinking: false` in the stack's `training.config`, so a short completion
 is not spent entirely in the reasoning channel before it emits a program. Two
 rollouts per group are enough to exercise the path but not to train: TTTD's
@@ -197,8 +198,8 @@ no GPU, Ray, or model download on this machine, the paper's LoRA, Adam, KL and
 sampling settings, and the reduced 2 x 2 grid for one step. Point the harness at
 it with `TTTD_STACK=serve-tinker.yaml`, export `TINKER_API_KEY` and
 `TTTD_STATE_DIR`, start `python -m reef serve -c serve-tinker.yaml` and run
-`run.py` as `run.sh` does. Raise `rollouts-per-group` (and `batch-size`, which
-must equal `groups-per-step`) before reading anything into the update.
+`run.py` as `run.sh` does. Raise `rollouts_per_group` before reading anything
+into the update; Tinker's `batch-size` follows `groups_per_step`.
 
 `work/erdos_min_overlap/` holds this problem's checkpoints, artifacts,
 scenario records, and PUCT state; a second problem needs its own directory so

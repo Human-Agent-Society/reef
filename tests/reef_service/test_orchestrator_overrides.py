@@ -100,14 +100,16 @@ def test_cli_exits_with_status_2_on_unknown_short_option(capsys: pytest.CaptureF
 
 
 def test_cli_exits_with_status_2_before_starting_services_for_an_invalid_path(tmp_path, capsys) -> None:
+    from reef.cli import main as cli_main
+
     config_path = tmp_path / "reef.yaml"
-    config_path.write_text("reef:\n  artifact_dir: /data/artifacts\n")
+    config_path.write_text("reef:\n  port: 8000\n")
 
     with pytest.raises(SystemExit) as excinfo:
-        main(["--config", str(config_path), "--reef.artifact_dir.foo", "1"])
+        cli_main(["serve", "--config", str(config_path), "--reef.port.foo", "1"])
 
     assert excinfo.value.code == 2
-    assert "reef.artifact_dir" in capsys.readouterr().err
+    assert "reef.port" in capsys.readouterr().err
 
 
 @pytest.mark.unit
@@ -118,31 +120,31 @@ def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness(
     deployment without a token or without a harness gets a line with no token or none."""
     from reef.service.deploy.orchestrator import install_hint
 
-    config = {"evolution": {"adapter": "pi"}, "reef": {"host": "0.0.0.0", "port": 8901, "token": "reef-local"}}
+    config = {"reef": {"evolution": {"adapter": "pi"}, "host": "0.0.0.0", "port": 8901, "token": "reef-local"}}
     assert install_hint(config) == (
         'export REEF_TOKEN=reef-local; curl -fsS -H "Authorization: Bearer $REEF_TOKEN" '
         "'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash"
     )
-    assert install_hint({"evolution": {"adapter": "opencode"}, "reef": {"tokens": ["a", "b"]}}) == (
+    assert install_hint({"reef": {"evolution": {"adapter": "opencode"}, "tokens": ["a", "b"]}}) == (
         'export REEF_TOKEN=a; curl -fsS -H "Authorization: Bearer $REEF_TOKEN" '
         "'http://127.0.0.1:8900/reef/harness/install?adapter=opencode' | bash"
     )
     # An unset ${REEF_TOKEN} in the config interpolates to an empty token: no authentication, no token in the line.
-    assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"port": 8900, "token": ""}}) == (
+    assert install_hint({"reef": {"evolution": {"adapter": "pi"}, "port": 8900, "token": ""}}) == (
         "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
     )
-    assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"host": "127.0.0.1", "port": 8900}}) == (
+    assert install_hint({"reef": {"evolution": {"adapter": "pi"}, "host": "127.0.0.1", "port": 8900}}) == (
         "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
     )
     assert install_hint({"reef": {"recipe": "recipe"}}) is None
     # terminus has no install script: the line would print a command that answers 400.
-    assert install_hint({"evolution": {"adapter": "terminus"}, "reef": {"port": 8900}}) is None
+    assert install_hint({"reef": {"evolution": {"adapter": "terminus"}, "port": 8900}}) is None
 
 
 @pytest.mark.unit
 def test_the_shipped_reefine_profile_gets_the_install_line_for_the_adapter_it_evolves(monkeypatch) -> None:
-    """The profile is schema-version 2, which resolves the recipe's evolution section under ``reef``: the line names
-    the adapter an override selects, at the port the profile listens on."""
+    """The profile's evolution section resolves under ``reef``: the line names the adapter an override selects, at
+    the port the profile listens on."""
     import reef.service.deploy.orchestrator as orchestrator
     from reef.service.deploy.orchestrator import install_hint, resolve_deployment_config
 

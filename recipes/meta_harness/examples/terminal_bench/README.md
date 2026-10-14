@@ -167,9 +167,9 @@ The command therefore does not reproduce the exact comparison protocol.
 From the repository root:
 
 ```bash
-pytest tests/test_meta_harness_terminal_bench.py \
-  tests/reef_service/test_meta_harness.py \
-  tests/reef_service/test_meta_harness_artifact_transactions.py
+pytest tests/recipes/meta_harness/test_meta_harness_terminal_bench.py \
+  tests/recipes/meta_harness/test_meta_harness.py \
+  tests/recipes/meta_harness/test_meta_harness_artifact_transactions.py
 pre-commit run --all-files
 ```
 

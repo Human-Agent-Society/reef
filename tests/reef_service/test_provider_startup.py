@@ -156,14 +156,14 @@ def test_model_defaults_preserve_the_last_explicit_alias(captured_stack, field):
 @pytest.mark.usefixtures("provider_environment")
 def test_provider_temp_config_is_removed_if_stack_preparation_fails(tmp_path, monkeypatch):
     written = []
-    original_write = orchestrator._write_override_config
+    original_write = orchestrator._write_resolved_config
 
     def write(config):
         path = original_write(config)
         written.append(path)
         return path
 
-    monkeypatch.setattr(orchestrator, "_write_override_config", write)
+    monkeypatch.setattr(orchestrator, "_write_resolved_config", write)
     (tmp_path / ".reef").write_text("not a directory")
     with pytest.raises(OSError):
         orchestrator._run_orchestrator(None, {"upstream-url": "http://localhost:8000", "upstream-model": "demo"})

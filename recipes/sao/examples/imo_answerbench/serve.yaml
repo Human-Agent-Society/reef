@@ -2,7 +2,7 @@
 #
 # SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) samples one
 # rollout per prompt with no comparison group, and trains on batch_size of them
-# per optimizer step (the paper: 128, the recipe default). This smoke config
+# per optimizer step (the paper: 128, the default). This smoke config
 # sets batch_size 1 so the dispatcher runs a full train step the moment a
 # rollout's score arrives; that is a different estimator from the paper's and
 # is only here so the loop is visible end to end on two GPUs. The value model
@@ -22,7 +22,6 @@
 #
 # Started by run.sh; state under ./work.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -39,9 +38,13 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 1                      # smoke only; the paper and the recipe default are 128. MUST equal training.config.global_batch_size
     max-staleness: 18
     checkpoint-every-n-versions: 1
+# SAO's stages. The batch stage trains on batch_size scored rollouts per optimizer step.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 1                    # smoke only; the paper and the stage default are 128. MUST equal training.config.global_batch_size
 training:
   backend: slime
   ready-timeout: 900

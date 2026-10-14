@@ -12,19 +12,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.executor import LocalExecutor
-from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
-from reef.harness.tree.render import render_composition
-from reef.recipe import RecipeConfigError
-from reef.recipe.cordis import CordisRecipe
-from reef.train.cordis_backend import CordisBackend, Mutation
-from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, EpisodeEvaluationWorker, ScoreComparisonPlugin
-from ._strategies import resolve_episode_scorer, resolve_proposer
-
-from .test_harness_recipe import (
+from tests.reef_service.test_harness_recipe import (
     MODEL,
     _ChatBinding,
     batch,
@@ -34,6 +22,18 @@ from .test_harness_recipe import (
     runtime,
     seeded_state,
 )
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+
+from reef.evaluation.harness import EpisodeEvaluationWorker, ScoreComparisonPlugin
+from reef.harness.adapters import get_adapter
+from reef.harness.episodes.executor import LocalExecutor
+from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
+from reef.harness.tree.nodes import RECORD_TEXT_CAP
+from reef.harness.tree.render import render_composition
+from reef.recipe import RecipeConfigError
+from reef.recipe.cordis import CordisRecipe
+from reef.train.cordis_backend import CordisBackend, Mutation
 
 # A harness shaped like the native loop: the root session, one delegated checker
 # turn under agents/, and the rendered rules echoed into the header for the scorer.
@@ -593,7 +593,7 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
     """Per agent, the usage on the assistant messages and compactions of a
     native trajectory adds up beside the turn and tool counters, and the
     side's sum keeps every counter."""
-    from reef.train.cordis_backend.backend import _agent_work, _sum_agents
+    from reef.harness.episodes.trajectory import agent_work, sum_agents
 
     trajectory = [
         {"type": "session", "data": {"agent": "root"}},
@@ -606,12 +606,12 @@ def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
         {"type": "step/start", "data": {"step": 1}},
         {"type": "assistant/message", "data": {"step": 1, "usage": {"input_tokens": 7, "output_tokens": 1}}},
     ]
-    work = _agent_work(trajectory)
+    work = agent_work(trajectory)
     assert work == {
         "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 130, "output_tokens": 15},
         "checker": {"turns": 1, "steps": 1, "tool_calls": 0, "tool_errors": 0, "input_tokens": 7, "output_tokens": 1},
     }
-    assert _sum_agents([work, {"root": {"turns": 1, "steps": 1, "tool_calls": 2, "tool_errors": 0}}]) == {
+    assert sum_agents([work, {"root": {"turns": 1, "steps": 1, "tool_calls": 2, "tool_errors": 0}}]) == {
         "checker": work["checker"],
         "root": {"turns": 2, "steps": 3, "tool_calls": 2, "tool_errors": 0, "input_tokens": 130, "output_tokens": 15},
     }

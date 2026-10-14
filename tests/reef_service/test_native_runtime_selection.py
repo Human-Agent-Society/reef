@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from tests.runtime.test_executor_runtime import Coordinator
 
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.sglang.chat import SGLangInferenceHandler
@@ -16,8 +17,6 @@ from reef.service.assembly import _connect_training_runtime
 from reef.service.deploy.service_config import ServiceConfig
 from reef.train.runtime import ExecutorTrainingRuntime
 from reef.train.slime_backend.runtime import SlimeTrainingRuntime
-
-from .test_executor_runtime import Coordinator
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("outer wait expired"), ValueError("invalid job"), None])

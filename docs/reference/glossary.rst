@@ -118,13 +118,16 @@ How a published artifact reaches whoever uses it: runtime loading, inference
 hooks, and an optional client-pulled file tree, composed as fields on one
 ``Surface`` value.
 
-Processor
----------
+Training pipeline
+-----------------
 
-The method's data-side component. It assembles records and feedback into a
-typed training batch. Reported feedback uses valid reports with existing
-inference references; computed feedback derives its signal from traffic.
-The engines share batching, consumption, and retention contracts.
+The method's data side. Three stages turn records into a typed training
+batch: the record-to-record stage decides which records train, the
+record-to-task stage turns each record set into tasks, and the task-to-batch
+stage shapes the tasks into a batch. Reported feedback uses valid reports with
+existing inference references; computed feedback derives its signal from
+traffic. Reef's ``TrainingPipeline`` drives the stages and owns batching,
+consumption, and retention.
 
 Training objective
 ------------------

@@ -49,7 +49,6 @@ def _report(raw, overrides, path):
 
 def test_file_command_line_automatic_and_default_sources(tmp_path):
     raw = {
-        "schema-version": 2,
         "reef": {"port": 8000},
         "inference": {"model-path": "/models/demo", "options": {"mem-fraction-static": 0.8}, "upstream-api-key": None},
     }
@@ -70,7 +69,7 @@ def test_file_command_line_automatic_and_default_sources(tmp_path):
 def test_command_line_startup_reports_environment_and_flag_sources(monkeypatch):
     environ = {"REEF_UPSTREAM_URL": "http://localhost:8000", "REEF_TOKEN": "env-secret"}
     base = command_line_config(environ)
-    resolved, _ = resolve_deployment_config(base, {"upstream-model": "demo"}, "<cli>", standard=True)
+    resolved, _ = resolve_deployment_config(base, {"upstream-model": "demo"}, "<cli>")
     lines = startup_report(base, resolved, {"upstream-model": "demo"}, environ=environ, from_file=False)
     assert "  inference.upstream-url = http://localhost:8000  (environment)" in lines
     assert "  inference.upstream-model = demo  (command line)" in lines
@@ -80,13 +79,12 @@ def test_command_line_startup_reports_environment_and_flag_sources(monkeypatch):
 
 def test_declared_environment_fallbacks_are_reported(tmp_path):
     raw = {
-        "schema-version": 2,
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
         "inference": {"model-path": "/models/demo"},
     }
     resolved, _ = resolve_deployment_config(raw, None, tmp_path / "stack.yaml")
-    lines = startup_report(raw, resolved, {}, environ={"REEF_SAO_BATCH_SIZE": "4"}, from_file=True)
-    assert "  recipe.config.batch-size = 4  (environment REEF_SAO_BATCH_SIZE)" in lines
+    lines = startup_report(raw, resolved, {}, environ={"REEF_MAX_STALENESS": "4"}, from_file=True)
+    assert "  recipe.config.max-staleness = 4  (environment REEF_MAX_STALENESS)" in lines
     assert "  training.backend = slime  (automatic)" in lines
 
 
@@ -115,7 +113,6 @@ def test_serve_logs_the_config_source_and_masked_settings(tmp_path, monkeypatch,
     path.write_text(
         yaml.safe_dump(
             {
-                "schema-version": 2,
                 "reef": {"tokens": ["file-secret"]},
                 "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "demo"},
             }
@@ -123,33 +120,16 @@ def test_serve_logs_the_config_source_and_masked_settings(tmp_path, monkeypatch,
     )
     assert orchestrator._run_orchestrator(str(path), {"reef.port": "9000"}) == 0
     err = capsys.readouterr().err
-    assert f"[reef] config: {path} (schema-version 2)" in err
+    assert f"[reef] config: {path}\n" in err
     assert "[reef]   reef.port = 9000  (command line)" in err
     assert "[reef]   inference.upstream-model = demo  (file)" in err
     assert '[reef]   reef.tokens = ["****"]  (file)' in err
     assert "file-secret" not in err
 
 
-@pytest.mark.usefixtures("idle_stack")
-def test_serve_names_a_profile_and_an_unversioned_file(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    legacy = tmp_path / "legacy.yaml"
-    legacy.write_text(
-        yaml.safe_dump(
-            {
-                "reef": {"recipe": "recipe", "upstream_url": "http://x", "upstream_model": "m"},
-                "services": [{"name": "reef", "command": ["${REEF_PYTHON}", "-m", "reef.service"]}],
-            }
-        )
-    )
-    assert orchestrator._run_orchestrator(str(legacy), None) == 0
-    err = capsys.readouterr().err
-    assert f"[reef] config: {legacy} (unversioned layout)" in err
-    assert "[reef]   inference.upstream-model = m  (file)" in err
+def test_config_source_names_a_profile():
     profile = Path(orchestrator.PROFILES_DIR) / "demo-profile.yaml"
-    assert (
-        orchestrator._config_source(profile, True) == f"config: profile demo-profile at {profile} (schema-version 2)"
-    )
+    assert orchestrator._config_source(profile) == f"config: profile demo-profile at {profile}"
 
 
 @pytest.mark.usefixtures("idle_stack")
@@ -161,17 +141,13 @@ def test_print_config_lists_every_setting_and_starts_nothing(tmp_path, monkeypat
     monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
     monkeypatch.chdir(tmp_path)
     path = tmp_path / "stack.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {"schema-version": 2, "reef": {"token": "file-secret"}, "inference": {"model-path": "org/model"}}
-        )
-    )
+    path.write_text(yaml.safe_dump({"reef": {"token": "file-secret"}, "inference": {"model-path": "org/model"}}))
     with pytest.raises(SystemExit) as result:
         cli_main(["serve", "-c", str(path), "--print-config", "--reef.port", "9000"])
     assert result.value.code == 0
     output = capsys.readouterr()
     lines = output.out.splitlines()
-    assert lines[0] == f"config: {path} (schema-version 2)"
+    assert lines[0] == f"config: {path}"
     assert "  reef.port = 9000  (command line)" in lines
     assert "  inference.model-path = org/model  (file)" in lines
     assert "  reef.token = ****  (file)" in lines

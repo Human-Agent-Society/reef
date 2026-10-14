@@ -1,7 +1,7 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
 # OpenClawRL Compose owns PRM and user-simulation services independently.
 # Reef assembles driver + HTTP and a local Ray runtime for Slime.
-# The whole method is the cookbook `openclawrl` recipe: its processor
+# The whole method is the cookbook `openclawrl` recipe: its judging stage
 # correlates sessions from the harness's conversation-unique
 # x-reef-tag-session value, with trace matching as a fallback, and judges next
 # states through the independently deployed PRM endpoint. Clients use reef as their inference
@@ -29,7 +29,6 @@
 #   HF model directory at inference.model-path (bridge mode loads HF weights
 #   directly; no torch_dist conversion needed).
 
-schema-version: 2
 reef:
   ready-timeout: 3600
   host: 0.0.0.0
@@ -63,25 +62,31 @@ inference:
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
   config:
-    batch-size: 16                     # MUST equal training.config.global_batch_size
     checkpoint-every-n-versions: 1
-    # The recipe consumes this external service; Reef does not launch or schedule it.
-    prm-url: http://127.0.0.1:23001
-    prm-tokenizer-path: /root/models/Qwen3-4B-Thinking-2507
-    # Thinking-model PRM under judge load: single votes need minutes. Upstream
-    # never times judge calls out (httpx timeout=None); 3600s is effectively
-    # that while still freeing a truly wedged socket. 300s was punishing long
-    # turns: votes timed out -> 0.0 -> no verdict, so degenerate long replies
-    # escaped the -1 upstream would deliver. (The directive teacher no longer
-    # calls this server at all — candidates go to the train actor's Megatron
-    # teacher pass, which computes exact log-probs on the trainer's own
-    # tempered scale.)
-    prm-timeout-s: 3600
-    prm-max-hint-candidates: 3
-    # The judged population, one JSON line per batch (upstream's
-    # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
-    # "the judges disagree" from "the judges never ran".
-    prm-record-file: /var/lib/reef/prm-records.jsonl
+pipeline:
+  # The judging stage: sessions correlated, and each turn judged by the PRM.
+  record2record:
+    config:
+      # The recipe consumes this external service; Reef does not launch or schedule it.
+      prm_url: http://127.0.0.1:23001
+      prm_tokenizer_path: /root/models/Qwen3-4B-Thinking-2507
+      # Thinking-model PRM under judge load: single votes need minutes. Upstream
+      # never times judge calls out (httpx timeout=None); 3600s is effectively
+      # that while still freeing a truly wedged socket. 300s was punishing long
+      # turns: votes timed out -> 0.0 -> no verdict, so degenerate long replies
+      # escaped the -1 upstream would deliver. (The directive teacher no longer
+      # calls this server at all — candidates go to the train actor's Megatron
+      # teacher pass, which computes exact log-probs on the trainer's own
+      # tempered scale.)
+      prm_timeout_s: 3600
+      prm_max_hint_candidates: 3
+  task2batch:
+    config:
+      batch_size: 16                   # MUST equal training.config.global_batch_size
+      # The judged population, one JSON line per batch (upstream's
+      # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
+      # "the judges disagree" from "the judges never ran".
+      prm_record_file: /var/lib/reef/prm-records.jsonl
 training:
   backend: slime
   ready-timeout: 900

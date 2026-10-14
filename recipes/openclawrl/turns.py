@@ -3,7 +3,7 @@
 :class:`TurnJob` is everything one turn's judgment needs;
 :class:`TurnJudgment` is what the judge answers. The worker that runs
 judgments lives on the shared engine
-(:class:`reef.train.processors.computed.JudgingWorker`).
+(:class:`reef.background_jobs.BackgroundJobWorker`).
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from recipes.openclawrl.sessions import Binding
+from reef.background_jobs import SupportsReceipt
 from reef.core.records_types import AgentRecord
-from reef.train.processors.computed import SupportsReceipt
 from reef.train.types import TrajectoryItem
 
 

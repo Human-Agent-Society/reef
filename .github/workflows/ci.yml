@@ -460,26 +460,20 @@ jobs:
           sleep 6
           cleanup
           trap - EXIT
-      # Run the service suite against the installed wheels, still outside the
-      # repo so the source tree cannot shadow them. Excluded: tests that
-      # import the slime package (the wheel does not bundle it) or Slime's
-      # optional dependencies.
+      # Select wheel-compatible contracts across their owner directories.
+      # Stay outside the repo so the source tree cannot shadow the wheels.
       - run: uv pip install --system --python python pytest pytest-xdist==3.8.0 "psutil>=5.9"
       # Exercise the repository cookbook as an external consumer of the
-      # installed Reef wheel. Linking only recipes/ keeps the source reef/
-      # package off sys.path, so it cannot shadow the wheel under test.
-      - run: ln -s "${{ github.workspace }}/recipes" "${{ runner.temp }}/recipes"
-      - run: >
-          python -m pytest ${{ github.workspace }}/tests/reef_service
-          -n 4 --dist loadfile
-          --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_multi_scenario_bridge.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_configs.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_parity.py
-          --ignore=${{ github.workspace }}/tests/reef_service/test_weight_version.py
-          -p no:cacheprovider
+      # installed Reef wheel. Link recipes and test support without exposing
+      # the source reef/ package on sys.path.
+      - run: |
+          ln -s "$GITHUB_WORKSPACE/recipes" "$RUNNER_TEMP/recipes"
+          ln -s "$GITHUB_WORKSPACE/tests" "$RUNNER_TEMP/tests"
+      - name: Run installed-wheel contracts
+        run: |
+          mapfile -t wheel_tests < "$GITHUB_WORKSPACE/tests/packaging/wheel-tests.txt"
+          python -m pytest "${wheel_tests[@]/#/$GITHUB_WORKSPACE/}" \
+            -n 4 --dist loadfile -p no:cacheprovider
         working-directory: ${{ runner.temp }}
         env:
           GIT_CONFIG_GLOBAL: /dev/null

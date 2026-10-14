@@ -30,9 +30,8 @@ Config files are selected explicitly with -c; REEF_CONFIG and ./reef.yaml
 are not discovered by the launcher.
 
 ``reef serve -c <stack>.yaml`` assembles the configured components and starts
-their processes in dependency order. Only unversioned legacy files declare
-a ``services`` list. Each service's ``ready`` probe must pass before the next
-starts. After all services are up, Reef blocks until SIGTERM/SIGINT; a
+their processes in dependency order. Each process's readiness probe must pass
+before its dependents start. After all services are up, Reef blocks until SIGTERM/SIGINT; a
 watchdog thread detects unexpected exits and tears the stack down.
 
 The Reef HTTP child receives the effective configuration from the launcher.
@@ -40,11 +39,10 @@ The Reef HTTP child receives the effective configuration from the launcher.
 Config overrides:
   Public settings below share type conversion with YAML. Explicit CLI
   values override YAML; omitted settings use the dataclass defaults.
-  Use the full public namespace; legacy aliases remain accepted.
+  Use the full public namespace; short aliases remain accepted.
   Lists and objects take one quoted JSON/YAML value, including [] or {}.
   Selected recipe/runtime fields share these rules; use -c <file> --help
-  to inspect their definitions. Versioned files reject unknown public
-  fields; legacy custom-stack keys retain their compatibility parsing.
+  to inspect their definitions. Unknown fields and flags are errors.
 
   Examples:
     reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
@@ -232,8 +230,8 @@ def _apply_overrides(
                 prefix = ".".join(parts[: index + 1])
                 raise InvalidOverrideError(f"override path {prefix!r} is not a section")
             node = existing
-        # Public fields are converted by argparse, just like YAML values.
-        # Keep generic recipe/custom-stack overrides on their legacy path.
+        # Declared fields are converted by their parser, just like YAML values;
+        # a leaf of an opaque object keeps its YAML reading.
         node[parts[-1]] = str(raw_value) if declared is not None else _coerce_value(raw_value)
     return config
 

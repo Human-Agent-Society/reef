@@ -74,7 +74,7 @@ jobs:
           REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
           REEF_REAL_PI_SESSION_OUT: ${{ runner.temp }}/real-pi-session.jsonl
       # The raw session the episode wrote: the refresh source for the
-      # hermetic fixture at tests/reef_service/data/pi_session_real/.
+      # hermetic fixture at tests/harness/data/pi_session_real/.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-pi-session
@@ -161,7 +161,7 @@ jobs:
         env:
           REEF_REAL_HERMES_BINARY: ${{ runner.temp }}/hermes/venv/bin/hermes
 
-  # The same guard for Terminus 2 (tests/reef_service/test_terminus_agent.py),
+  # The same guard for Terminus 2 (tests/harness/test_terminus_agent.py),
   # whose real dependency is a Python package rather than a pinned binary: that
   # harbor still accepts the trial the runner builds and resolves its skill
   # roots. A full episode needs Docker and a model, so it stays the opt-in
@@ -181,4 +181,4 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . pytest
-      - run: python -m pytest tests/reef_service/test_terminus_agent.py -v
+      - run: python -m pytest tests/harness/test_terminus_agent.py -v

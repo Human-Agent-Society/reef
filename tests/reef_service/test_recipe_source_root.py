@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import recipe_source_root
 from reef.service.deploy.execution import service_executor_config
 from reef.service.deploy.orchestrator import _run_orchestrator
@@ -115,16 +116,17 @@ def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, 
     marker = tmp_path / "imported_from.txt"
     probe = "import probe_recipes.method as m, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(m.__file__)"
     config_path.write_text(
+        "recipe:\n"
+        "  implementation: probe_recipes.method:Recipe\n"
         "reef:\n"
-        "  recipe: probe_recipes.method:Recipe\n"
-        f"run_dir: {tmp_path / 'run'}\n"
-        "services:\n"
-        "  - name: probe\n"
-        f"    executor: {backend}\n"
-        f'    command: ["${{REEF_PYTHON}}", "-c", {probe!r}, "{marker}"]\n'
+        f"  run-dir: {tmp_path / 'run'}\n"
+        "inference:\n"
+        "  upstream-url: http://127.0.0.1:9\n"
+        "  upstream-model: demo\n"
     )
+    probe_service = {"name": "probe", "executor": backend, "command": [sys.executable, "-c", probe, str(marker)]}
+    monkeypatch.setattr(orchestrator, "validate_services", lambda config, path: [probe_service])
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    monkeypatch.delenv("REEF_PYTHON", raising=False)
     monkeypatch.chdir(config_path.parent)
     monkeypatch.setattr(sys, "path", list(sys.path))
     handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}

@@ -15,6 +15,16 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tests.reef_service.test_harness_recipe import (
+    MODEL,
+    PI_FAKE,
+    RULES,
+    batch,
+    evaluate,
+    make_binary,
+    run_backend_step,
+)
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor, SandboxExecutor, SandboxUnavailable
@@ -29,9 +39,6 @@ from reef.harness.episodes.vendor_install import (
 from reef.runtime.executor.config import ExecutorSettings
 from reef.service.install_script import render_install_script
 from reef.train.cordis_backend import CordisBackend, Mutation
-from ._strategies import resolve_episode_scorer, resolve_proposer
-
-from .test_harness_recipe import MODEL, PI_FAKE, RULES, batch, evaluate, make_binary, run_backend_step
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 

@@ -16,8 +16,6 @@ ENV_PREFIX = "SLIME_CONTRACT_"
 def install_paths() -> None:
     current = Path(__file__).resolve()
     repo_root = current.parents[2]
-    sys.path.insert(0, str(current.parent))
-    sys.path.insert(0, str(current.parents[1]))
     sys.path.insert(0, str(repo_root))
 
 

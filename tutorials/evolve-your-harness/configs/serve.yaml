@@ -4,10 +4,9 @@
 # This file also carries the harness_evolve recipe (the `recipe` section) and the
 # model binding it shares with the service (the `inference` section). The recipe
 # registry reads named recipe configs from REEF_RECIPE_CONFIG_DIR, so run.sh copies
-# those sections into work/recipes/harness_evolve.yaml, together with optional
-# execution/executors sections.
+# those sections into work/recipes/harness_evolve.yaml, together with the optional
+# pipeline, execution and executors sections.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -69,9 +68,15 @@ recipe:
               Starter skill. The evolution loop replaces this placeholder with
               concrete guidance learned from failing tasks.
 
-    batch-size: 1
     # The default: nobody asks in this demo, and auto refuses POST /reef/train.
     training-mode: auto
+
+# The harness evolution pipeline: its default stages batch every valid scored report, a passing one
+# included. batch_size 1 makes each report one evolve step.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 1
 
 inference:
   upstream-url: http://127.0.0.1:8000

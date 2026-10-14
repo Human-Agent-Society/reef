@@ -4,21 +4,23 @@
 bindings, adapter resolution, paired episodes, scoring, and publication.  It
 only binds the history-aware proposal policy and its population selector.
 
-Example method block::
+Example recipe section::
 
-    implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
-    evolution:
-      adapter: pi
-      evaluate: harness.scoring:score_episode
-      tasks: ["validation task one", "validation task two"]
-      models:
-        proposer: {url: https://api.openai.com, model: gpt-5, api_key_env: OPENAI_API_KEY}
-      meta_harness:
-        archive: ${REEF_WORK}/meta-harness
-        mode: full_history
-        max_candidates: 20
-        max_target_episodes: 200
-        max_nodes: 32
+    recipe:
+      implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
+      config:
+        evolution:
+          adapter: pi
+          evaluate: harness.scoring:score_episode
+          tasks: ["validation task one", "validation task two"]
+          models:
+            proposer: {url: https://api.openai.com, model: gpt-5, api_key_env: OPENAI_API_KEY}
+          meta_harness:
+            archive: ${REEF_WORK}/meta-harness
+            mode: full_history
+            max_candidates: 20
+            max_target_episodes: 200
+            max_nodes: 32
 
 The archive path is a post-commit JSON mirror.  Reef's algorithm state is
 always authoritative, including after restart.

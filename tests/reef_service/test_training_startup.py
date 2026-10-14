@@ -22,8 +22,8 @@ RECIPE = "recipes.sao.recipe:SAORecipe"
 
 def training_config():
     return {
-        "schema-version": 2,
-        "recipe": {"implementation": RECIPE, "config": {"batch-size": 1}},
+        "recipe": {"implementation": RECIPE},
+        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"lr": 0.000001, "use-critic": True}},
     }
@@ -40,7 +40,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     overrides = {
         "recipe.implementation": RECIPE,
         "inference.model-path": "/models/demo",
-        "recipe.config.batch-size": "2",
+        "pipeline.task2batch.config.batch_size": "2",
         "training.options.lr": "0.000002",
         "training.options.use-critic": "true",
         "training.ray-namespace": "custom",
@@ -48,10 +48,10 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         "training.ready-timeout": "45",
     }
     file_config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
-    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli", standard=True)
+    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
-        assert reef["batch_size"] == 2
+        assert config["pipeline"] == {"task2batch": {"config": {"batch_size": 2}}}
         assert reef["training_backend_options"] == {
             "lr": "0.000002",
             "use-critic": True,
@@ -97,7 +97,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"inference.options.pp-size": "2"}, "managed by Reef"),
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
         ({"execution.training.backend": "uni"}, "requires execution.training.backend: ray"),
-        ({"recipe.config.batch-szie": "2"}, "unknown configuration flag"),
+        ({"recipe.config.max-stalenes": "2"}, "unknown configuration flag"),
         ({"inference.backend": "vllm"}, "update-weight-transport: disk"),
         (
             {
@@ -161,15 +161,6 @@ def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, m
     assert match in capsys.readouterr().err
 
 
-def test_explicit_services_preserve_custom_training_topology(tmp_path):
-    raw = {"reef": {"recipe": RECIPE, "model_path": "/models/demo", "training_backend": "custom"}}
-    raw["services"] = [{"name": "custom-driver", "command": ["custom"]}]
-    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    assert config["services"] == raw["services"]
-    assert "execution" not in config
-    assert "inference_handler_factory" not in config["reef"]
-
-
 @pytest.mark.parametrize("checkpoint", ["/models/demo", "${inference.model-path}"])
 def test_native_checkpoint_tracks_the_resolved_model_path(tmp_path, checkpoint):
     raw = training_config()
@@ -201,7 +192,6 @@ def test_cli_only_training_resolves_public_config_references(tmp_path):
             "training.options.save": "${training.config.checkpoint_dir}/megatron",
         },
         tmp_path / "cli",
-        standard=True,
     )
     options = config["reef"]["training_backend_options"]
     assert interpolate_config(config, options["hf-checkpoint"]) == "/models/demo"
@@ -245,7 +235,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
                 RECIPE,
                 "--inference.model-path",
                 "org/model",
-                "--recipe.config.batch-size",
+                "--pipeline.task2batch.config.batch_size",
                 "2",
                 "--training.options.use-critic",
                 "true",
@@ -255,7 +245,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     assert downloads == ["org/model"]
     reef = configs[0]["reef"]
     assert reef["model_path"] == "/downloaded/snapshot"
-    assert reef["batch_size"] == 2
+    assert configs[0]["pipeline"] == {"task2batch": {"config": {"batch_size": 2}}}
     assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
     assert not paths[0].exists()
     assert not (tmp_path / "reef.yaml").exists()
@@ -278,7 +268,9 @@ assert config['services'][-1]['name'] == 'reef'
     raw = training_config()
     raw["recipe"]["implementation"] = recipe
     if "openclawrl" in recipe:
-        raw["recipe"]["config"].update(prm_url="http://external:23001", prm_tokenizer_path="/models/judge")
+        raw["pipeline"]["record2record"] = {
+            "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"}
+        }
     result = subprocess.run(
         [sys.executable, "-c", script, json.dumps(raw), str(tmp_path / "serve.yaml")],
         capture_output=True,

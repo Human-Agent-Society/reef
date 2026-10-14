@@ -29,9 +29,8 @@ import json
 import logging
 import shlex
 import tempfile
-from collections.abc import Coroutine
 from pathlib import Path
-from typing import NamedTuple, TypeVar
+from typing import NamedTuple
 
 from harbor.environments.base import BaseEnvironment
 
@@ -241,9 +240,6 @@ main()
 '''
 
 
-Result = TypeVar("Result")
-
-
 class ToolOutcome(NamedTuple):
     """One tool call's output, or the engine timeout the benchmark ends a run on."""
 
@@ -275,26 +271,26 @@ class ContainerTools(Workspace):
         self.python = python
         self.logger = logger or logging.getLogger(__name__)
 
-    def await_result(self, coroutine: Coroutine[object, object, Result], timeout_s: float) -> Result:
-        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result(timeout=timeout_s)
-
     def install(self) -> None:
         """Put the executor script in the container, where the agent user can read it."""
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as handle:
             handle.write(TOOL_SCRIPT)
             local = Path(handle.name)
         try:
-            self.await_result(self.environment.upload_file(local, SCRIPT_PATH), EXEC_MARGIN_S)
-            self.await_result(self.environment.exec(f"chmod 644 {SCRIPT_PATH}"), EXEC_MARGIN_S)
+            upload = asyncio.run_coroutine_threadsafe(self.environment.upload_file(local, SCRIPT_PATH), self.loop)
+            upload.result(timeout=EXEC_MARGIN_S)
+            chmod = asyncio.run_coroutine_threadsafe(self.environment.exec(f"chmod 644 {SCRIPT_PATH}"), self.loop)
+            chmod.result(timeout=EXEC_MARGIN_S)
         finally:
             local.unlink(missing_ok=True)
 
     def run(self, call: dict[str, JsonValue], timeout_s: float) -> dict[str, JsonValue]:
         encoded = base64.b64encode(json.dumps(call).encode("utf-8")).decode("ascii")
         command = f"printf %s {encoded} | base64 -d | {shlex.quote(self.python)} {SCRIPT_PATH}"
-        result = self.await_result(
-            self.environment.exec(command, user=self.user, timeout_sec=int(timeout_s)), timeout_s + 60.0
+        execution = asyncio.run_coroutine_threadsafe(
+            self.environment.exec(command, user=self.user, timeout_sec=int(timeout_s)), self.loop
         )
+        result = execution.result(timeout=timeout_s + 60.0)
         lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
         try:
             payload = json.loads(lines[-1]) if lines else None

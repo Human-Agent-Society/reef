@@ -1,58 +1,111 @@
-"""SAO reported-feedback processor: one completed rollout, one training unit."""
+"""SAO's record-to-task and task-to-batch stages: one scored rollout, one training unit."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Self
+
+from reef.core.config import config_option
 from reef.core.records_types import AgentRecord
-from reef.train.processors.common import make_policy_trajectory
-from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, SampleAssembly
-from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.pipeline_context import PipelineContext
+from reef.record2record import Record2Record, ReportContext
+from reef.record2task import Record2Task, ReportTasks
+from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2task.samples import make_policy_trajectory, recorded_training
+from reef.task2batch import Task2Batch
+from reef.task2batch.base import BatchSettings
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 
-def make_sao_sample(item: AgentRecord, reward: float) -> TrajectoryItem:
-    """Convert inference data and its evaluated reward into an SAO sample.
+class SAOSampleAssembly(SampleAssembly):
+    """The shared assembly with SAO's two extra fields on each single-call sample.
 
-    ``make_policy_trajectory`` captures the shared ATIF training fields, so SAO and the
-    group-relative processors resolve every shared field identically —
-    including the ``runtime_load_id`` fallback chain the durable runtime needs
-    to identify a training job's producing version. SAO then fills the two
-    fields that path leaves at their defaults: ``action_mask`` (read from
+    ``make_policy_trajectory`` reads the shared training fields, so SAO and
+    the group-relative recipes resolve every shared field identically,
+    including the ``runtime_load_id`` fallback chain the durable runtime
+    needs to identify a training job's producing version. SAO then fills the
+    two fields that path leaves at their defaults: ``action_mask`` (read from
     ``response.training`` first, the top-level payload second) and
     ``rollout_created_at``, for the backend's queue-age metric.
     """
-    base = make_policy_trajectory(item, reward)
-    payload = item.payload
-    response = payload.get("response", {})
-    training = response.get("training", {}) if isinstance(response, dict) else {}
-    action_mask = training.get("action_mask", payload.get("action_mask", ())) if isinstance(training, dict) else ()
-    return base.with_training(action_mask=[int(value) for value in action_mask], rollout_created_at=item.created_at)
+
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+        base = make_policy_trajectory(record, score)
+        action_mask = recorded_training(record.payload).get("action_mask", record.payload.get("action_mask", ()))
+        return base.with_training(
+            action_mask=[int(value) for value in action_mask], rollout_created_at=record.created_at
+        )
 
 
-class SAOProcessor(ReportedFeedbackProcessor):
-    """Turn scored rollouts into independently-scheduled SAO samples.
+class SAOTasks(ReportTasks):
+    """One scored rollout as one SAO task, with ``action_mask`` and ``rollout_created_at``.
+
+    Config: the sample-assembly keys of ``SampleAssemblySettings``.
+    """
+
+    def __init__(self, settings: SampleAssemblySettings) -> None:
+        self.assembly = SAOSampleAssembly(settings)
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        environ: Mapping[str, str],
+    ) -> Self:
+        return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
+
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+        sample = self.assembly.build(context, context.require_score())
+        if not sample.training.get("action_mask", []):
+            sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
+        return sample
+
+
+@dataclass(frozen=True)
+class SAOBatchSettings(BatchSettings):
+    """The config of ``SAOBatches``."""
+
+    # The default is the paper's rollouts per optimizer step (arXiv:2607.07508, §4.1).
+    batch_size: int = config_option(
+        128,
+        help=(
+            "The scored rollouts, from as many prompts, in one optimizer step. It must equal the "
+            "driver's --global-batch-size. 1 trains on every rollout and is a smoke setting only."
+        ),
+    )
+
+
+class SAOBatches(Task2Batch):
+    """Batch scored rollouts as independently scheduled SAO samples.
 
     Single-Rollout Asynchronous Optimization ships each completed rollout on
-    its own — no comparison group, no slowest-sample barrier. The dispatcher
+    its own — no comparison group, no slowest-sample barrier. The pipeline
     collects ``batch_size`` accepted rollouts (from as many prompts) into one
-    training step; the recipe default is the paper's 128, and 1 trains once
-    per accepted rollout for smoke runs.
+    training step; the default is the paper's 128, and 1 trains once per
+    accepted rollout for smoke runs.
 
     SAO reuses ``TrajectoryItem`` / ``TrainingBatch`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
     tensors; malformed training input fails explicitly.
+
+    Config: ``batch_size`` (``SAOBatchSettings``).
     """
 
-    output_schema = TrainingBatch
-    exclusive_sources = True
-
-    def __init__(self, context: ProcessorContext) -> None:
-        self._assembly = SampleAssembly.from_config(context, make_sample=make_sao_sample)
-        super().__init__(context)
-
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
-        sample = self._assembly.build(context, context.require_score())
-        if not sample.training.get("action_mask", []):
-            sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
-        return sample
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        record2task: Record2Task,
+        environ: Mapping[str, str],
+    ) -> Self:
+        return cls(context, SAOBatchSettings.parse(config, plugin_class=cls).batch_size)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
         return TrainingBatch(f"{self.scenario}:sao:{batch_number}", items)

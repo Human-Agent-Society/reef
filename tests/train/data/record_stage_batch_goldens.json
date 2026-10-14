@@ -1,0 +1,1853 @@
+{
+ "computed_exact_version": [
+  {
+   "batch_id": "s:toy:1",
+   "consumed": [
+    "a",
+    "b",
+    "bad-d",
+    "c",
+    "e"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "c"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:3",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "e"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:3",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "released": [
+    "a",
+    "b",
+    "bad-d",
+    "c",
+    "e"
+   ],
+   "request": null
+  }
+ ],
+ "computed_window": [
+  {
+   "batch_id": "s:toy:1",
+   "consumed": [
+    "a",
+    "b"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "a"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:1",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "b"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:2",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "released": [
+    "a",
+    "b"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:toy:2",
+   "consumed": [
+    "bad-d",
+    "c",
+    "e"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "c"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:3",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "e"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "runtime_load_id": "e:3",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    }
+   ],
+   "released": [
+    "bad-d",
+    "c",
+    "e"
+   ],
+   "request": null
+  }
+ ],
+ "coral": [
+  {
+   "batch_id": "s:coral:p0:1",
+   "consumed": [
+    "i1",
+    "i1-retry",
+    "i2",
+    "r1",
+    "r1-retry",
+    "r2"
+   ],
+   "items": [
+    {
+     "group": "p0",
+     "recipe": {
+      "coral": {
+       "agent_id": "agent-1",
+       "commit_hash": "c-a",
+       "group": "p0",
+       "parent_hash": "p0",
+       "release_id": null,
+       "run_id": "run-1",
+       "status": "improved"
+      }
+     },
+     "reward": 0.3,
+     "sources": [
+      "i1",
+      "r1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "wv-1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "p0",
+     "recipe": {
+      "coral": {
+       "agent_id": "agent-1",
+       "commit_hash": "c-b",
+       "group": "p0",
+       "parent_hash": "p0",
+       "release_id": null,
+       "run_id": "run-1",
+       "status": "improved"
+      }
+     },
+     "reward": 0.9,
+     "sources": [
+      "i2",
+      "r2"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "wv-1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i1",
+    "i1-retry",
+    "i2",
+    "r1",
+    "r1-retry",
+    "r2"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:coral:__coral_root__:2",
+   "consumed": [
+    "i3",
+    "i4",
+    "r3",
+    "r4"
+   ],
+   "items": [
+    {
+     "group": "__coral_root__",
+     "recipe": {
+      "coral": {
+       "agent_id": "agent-1",
+       "commit_hash": "c-c",
+       "group": "__coral_root__",
+       "parent_hash": null,
+       "release_id": null,
+       "run_id": "run-1",
+       "status": "improved"
+      }
+     },
+     "reward": 0.5,
+     "sources": [
+      "i3",
+      "r3"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "wv-1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "__coral_root__",
+     "recipe": {
+      "coral": {
+       "agent_id": "agent-1",
+       "commit_hash": "c-d",
+       "group": "__coral_root__",
+       "parent_hash": null,
+       "release_id": null,
+       "run_id": "run-1",
+       "status": "improved"
+      }
+     },
+     "reward": 0.6,
+     "sources": [
+      "i4",
+      "r4"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "wv-1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i3",
+    "i4",
+    "r3",
+    "r4"
+   ],
+   "request": null
+  }
+ ],
+ "cordis_hybrid": [
+  {
+   "batch_id": "s:harness_evolve:1",
+   "consumed": [
+    "i-c-0",
+    "i-c-1",
+    "r-c-0",
+    "r-c-1"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.0,
+     "sources": [
+      "i-c-0",
+      "r-c-0"
+     ],
+     "training": {}
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-c-1",
+      "r-c-1"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [
+    "i-c-0",
+    "i-c-1",
+    "r-c-0",
+    "r-c-1"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:harness_evolve:2",
+   "consumed": [
+    "i-c-2",
+    "i-c-3",
+    "r-c-2",
+    "r-c-3"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 2.0,
+     "sources": [
+      "i-c-2",
+      "r-c-2"
+     ],
+     "training": {}
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 3.0,
+     "sources": [
+      "i-c-3",
+      "r-c-3"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [
+    "i-c-2",
+    "i-c-3",
+    "r-c-2",
+    "r-c-3"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:harness_evolve:3",
+   "consumed": [
+    "i-c-4",
+    "i-c-5",
+    "r-c-4",
+    "r-c-5"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 4.0,
+     "sources": [
+      "i-c-4",
+      "r-c-4"
+     ],
+     "training": {}
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 5.0,
+     "sources": [
+      "i-c-5",
+      "r-c-5"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [
+    "i-c-4",
+    "i-c-5",
+    "r-c-4",
+    "r-c-5"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:instruction:train-1",
+   "consumed": [
+    "train-1"
+   ],
+   "items": [],
+   "released": [
+    "train-1"
+   ],
+   "request": "train-1"
+  },
+  {
+   "batch_id": "s:instruction:train-2",
+   "consumed": [
+    "i-c-6",
+    "r-c-6",
+    "train-2"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-c-6",
+      "r-c-6"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [
+    "i-c-6",
+    "r-c-6",
+    "train-2"
+   ],
+   "request": "train-2"
+  }
+ ],
+ "cordis_manual_cap": [
+  {
+   "batch_id": "s:instruction:train-1",
+   "consumed": [
+    "i-c-0",
+    "i-c-1",
+    "r-c-0",
+    "r-c-1",
+    "train-1"
+   ],
+   "items": [],
+   "released": [
+    "i-c-0",
+    "i-c-1",
+    "r-c-0",
+    "r-c-1",
+    "train-1"
+   ],
+   "request": "train-1"
+  },
+  {
+   "batch_id": "s:instruction:train-2",
+   "consumed": [
+    "i-c-2",
+    "r-c-2",
+    "train-2"
+   ],
+   "items": [],
+   "released": [
+    "i-c-2",
+    "r-c-2",
+    "train-2"
+   ],
+   "request": "train-2"
+  }
+ ],
+ "distill_overflow": [
+  {
+   "batch_id": "s:teacher:1",
+   "consumed": [
+    "i0",
+    "r0"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.0,
+     "sources": [
+      "i0",
+      "r0"
+     ],
+     "training": {
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       102,
+       103,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i0",
+    "r0"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:teacher:2",
+   "consumed": [
+    "i1",
+    "i2",
+    "r1",
+    "r2"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.0,
+     "sources": [
+      "i2",
+      "r2"
+     ],
+     "training": {
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       102,
+       103,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i1",
+    "i2",
+    "r1",
+    "r2"
+   ],
+   "request": null
+  }
+ ],
+ "generated_tasks": [
+  {
+   "batch_id": "s:generated-tasks:1",
+   "consumed": [
+    "i-0",
+    "i-1",
+    "i-2",
+    "i-3",
+    "i-4",
+    "r-0",
+    "r-1",
+    "r-2",
+    "r-3",
+    "r-4"
+   ],
+   "items": [
+    {
+     "group": "t0",
+     "recipe": {
+      "task": {
+       "digest": "abababababababababababababababababababababababababababababababab",
+       "name": "t0",
+       "path": "/tasks/t0"
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "i-0",
+      "r-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "r1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "t0",
+     "recipe": {
+      "task": {
+       "digest": "abababababababababababababababababababababababababababababababab",
+       "name": "t0",
+       "path": "/tasks/t0"
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i-3",
+      "r-3"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "r1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "t1",
+     "recipe": {
+      "task": {
+       "digest": "abababababababababababababababababababababababababababababababab",
+       "name": "t1",
+       "path": "/tasks/t1"
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i-1",
+      "r-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "r1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "t1",
+     "recipe": {
+      "task": {
+       "digest": "abababababababababababababababababababababababababababababababab",
+       "name": "t1",
+       "path": "/tasks/t1"
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "i-4",
+      "r-4"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": "r1",
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-0",
+    "i-1",
+    "i-2",
+    "i-3",
+    "i-4",
+    "r-0",
+    "r-1",
+    "r-2",
+    "r-3",
+    "r-4"
+   ],
+   "request": null
+  }
+ ],
+ "ordered_groups": [
+  {
+   "batch_id": "s:slots:1",
+   "consumed": [
+    "i-a-0",
+    "i-single-0",
+    "i-z-0",
+    "r-a-0",
+    "r-single-0",
+    "r-z-0"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-single-0",
+      "r-single-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-a-0",
+      "r-a-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-z-0",
+      "r-z-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-a-0",
+    "i-single-0",
+    "i-z-0",
+    "r-a-0",
+    "r-single-0",
+    "r-z-0"
+   ],
+   "request": null
+  }
+ ],
+ "sdpo": [
+  {
+   "batch_id": "s:sdpo:1",
+   "consumed": [
+    "report-s0r0",
+    "report-s0r1",
+    "s0r0",
+    "s0r1"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {
+      "sdpo": {
+       "feedback": "",
+       "group": 0,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "release_id": "slime-v3",
+       "response": "Answer from s0r0",
+       "rollout": 0,
+       "step": 0,
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "s0r0",
+      "report-s0r0"
+     ],
+     "training": {
+      "distill_sample_weight": 0.0,
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {
+      "sdpo": {
+       "feedback": "",
+       "group": 0,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "release_id": "slime-v3",
+       "response": "Answer from s0r1",
+       "rollout": 1,
+       "step": 0,
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "s0r1",
+      "report-s0r1"
+     ],
+     "training": {
+      "distill_sample_weight": 1.0,
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       102,
+       103,
+       104,
+       105,
+       106,
+       107,
+       108,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "report-s0r0",
+    "report-s0r1",
+    "s0r0",
+    "s0r1"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:sdpo:2",
+   "consumed": [
+    "report-s1r0",
+    "report-s1r1",
+    "report-s2r0",
+    "report-s2r1",
+    "s1r0",
+    "s1r1",
+    "s2r0",
+    "s2r1"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {
+      "sdpo": {
+       "feedback": "",
+       "group": 0,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "release_id": "slime-v3",
+       "response": "Answer from s2r0",
+       "rollout": 0,
+       "step": 2,
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "s2r0",
+      "report-s2r0"
+     ],
+     "training": {
+      "distill_sample_weight": 0.0,
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {
+      "sdpo": {
+       "feedback": "",
+       "group": 0,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "release_id": "slime-v3",
+       "response": "Answer from s2r1",
+       "rollout": 1,
+       "step": 2,
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "s2r1",
+      "report-s2r1"
+     ],
+     "training": {
+      "distill_sample_weight": 1.0,
+      "loss_mask": [
+       1,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2,
+       -0.3
+      ],
+      "runtime_load_id": null,
+      "teacher_tokens": [
+       100,
+       101,
+       102,
+       103,
+       104,
+       105,
+       106,
+       107,
+       108,
+       1,
+       2,
+       3
+      ],
+      "tokens": [
+       5,
+       6,
+       7,
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "report-s1r0",
+    "report-s1r1",
+    "report-s2r0",
+    "report-s2r1",
+    "s1r0",
+    "s1r1",
+    "s2r0",
+    "s2r1"
+   ],
+   "request": null
+  }
+ ],
+ "slots_and_discards": [
+  {
+   "batch_id": "s:slots:1",
+   "consumed": [
+    "i-g1-0",
+    "i-g1-1",
+    "i-g1-retry",
+    "r-g1-0",
+    "r-g1-1",
+    "r-g1-retry"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-g1-0",
+      "r-g1-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-g1-1",
+      "r-g1-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-g1-0",
+    "i-g1-1",
+    "i-g1-retry",
+    "r-g1-0",
+    "r-g1-1",
+    "r-g1-retry"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:slots:2",
+   "consumed": [
+    "i-g1-2",
+    "i-g1-3",
+    "i-g2-0",
+    "i-g2-1",
+    "i-g2-2",
+    "r-g1-2",
+    "r-g1-3",
+    "r-g2-0",
+    "r-g2-1",
+    "r-g2-2"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-g1-2",
+      "r-g1-2"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-g1-3",
+      "r-g1-3"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-g1-2",
+    "i-g1-3",
+    "i-g2-0",
+    "i-g2-1",
+    "i-g2-2",
+    "r-g1-2",
+    "r-g1-3",
+    "r-g2-0",
+    "r-g2-1",
+    "r-g2-2"
+   ],
+   "request": null
+  }
+ ],
+ "tttd": [
+  {
+   "batch_id": "s:tttd:1",
+   "consumed": [
+    "i-0-0-0",
+    "i-0-0-1",
+    "i-0-1-0",
+    "i-0-1-1",
+    "i-1-0-0",
+    "i-1-0-1",
+    "i-1-1-0",
+    "i-1-1-1",
+    "r-0-0-0",
+    "r-0-0-1",
+    "r-0-1-0",
+    "r-0-1-1",
+    "r-1-0-0",
+    "r-1-0-1",
+    "r-1-1-0",
+    "r-1-1-1"
+   ],
+   "items": [
+    {
+     "group": "0",
+     "recipe": {
+      "tttd": {
+       "group": 0,
+       "release_id": "v1",
+       "rollout": 0,
+       "step": 1
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i-1-0-0",
+      "r-1-0-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "0",
+     "recipe": {
+      "tttd": {
+       "group": 0,
+       "release_id": "v1",
+       "rollout": 1,
+       "step": 1
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "i-1-0-1",
+      "r-1-0-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "1",
+     "recipe": {
+      "tttd": {
+       "group": 1,
+       "release_id": "v1",
+       "rollout": 0,
+       "step": 1
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i-1-1-0",
+      "r-1-1-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": "1",
+     "recipe": {
+      "tttd": {
+       "group": 1,
+       "release_id": "v1",
+       "rollout": 1,
+       "step": 1
+      }
+     },
+     "reward": 1.0,
+     "sources": [
+      "i-1-1-1",
+      "r-1-1-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-0-0-0",
+    "i-0-0-1",
+    "i-0-1-0",
+    "i-0-1-1",
+    "i-1-0-0",
+    "i-1-0-1",
+    "i-1-1-0",
+    "i-1-1-1",
+    "r-0-0-0",
+    "r-0-0-1",
+    "r-0-1-0",
+    "r-0-1-1",
+    "r-1-0-0",
+    "r-1-0-1",
+    "r-1-1-0",
+    "r-1-1-1"
+   ],
+   "request": null
+  }
+ ],
+ "ungrouped": [
+  {
+   "batch_id": "s:threshold:1",
+   "consumed": [
+    "i-a-0",
+    "i-a-1",
+    "r-a-0",
+    "r-a-1"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-a-0",
+      "r-a-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.5,
+     "sources": [
+      "i-a-1",
+      "r-a-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-a-0",
+    "i-a-1",
+    "r-a-0",
+    "r-a-1"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:threshold:2",
+   "consumed": [
+    "i-a-2",
+    "i-a-3",
+    "r-a-2",
+    "r-a-3"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.0,
+     "sources": [
+      "i-a-2",
+      "r-a-2"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-a-3",
+      "r-a-3"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-a-2",
+    "i-a-3",
+    "r-a-2",
+    "r-a-3"
+   ],
+   "request": null
+  }
+ ],
+ "ungrouped_reload": [
+  {
+   "batch_id": "s:threshold:1",
+   "consumed": [
+    "i-a-0",
+    "i-a-1",
+    "r-a-0",
+    "r-a-1"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-a-0",
+      "r-a-0"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.5,
+     "sources": [
+      "i-a-1",
+      "r-a-1"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-a-0",
+    "i-a-1",
+    "r-a-0",
+    "r-a-1"
+   ],
+   "request": null
+  },
+  {
+   "batch_id": "s:threshold:1",
+   "consumed": [
+    "i-a-2",
+    "i-a-3",
+    "r-a-2",
+    "r-a-3"
+   ],
+   "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 0.0,
+     "sources": [
+      "i-a-2",
+      "r-a-2"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "i-a-3",
+      "r-a-3"
+     ],
+     "training": {
+      "loss_mask": [
+       0,
+       1,
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1,
+       -0.2
+      ],
+      "runtime_load_id": null,
+      "tokens": [
+       1,
+       2,
+       3
+      ]
+     }
+    }
+   ],
+   "released": [
+    "i-a-2",
+    "i-a-3",
+    "r-a-2",
+    "r-a-3"
+   ],
+   "request": null
+  }
+ ]
+}

@@ -7,7 +7,8 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
@@ -26,8 +27,6 @@ from reef.runtime.interfaces import (
 )
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
-
-from ._policy_recipe import TestPolicyRecipe
 
 _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
@@ -430,8 +429,8 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.training_job_id == "job-0"
     assert event.source_runtime_load_id == "v0"
     assert event.produced_runtime_load_id == "job:job-0"
-    assert scenario.trainer.processor.experiment_logger is tracker.loggers["math"]
-    scenario.trainer.processor.experiment_logger.log({"accepted": 1}, namespace="processor")
+    assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]
+    scenario.trainer.pipeline.experiment_logger.log({"accepted": 1}, namespace="processor")
     assert tracker.loggers["math"].logged == [
         ("recipe", {"batch_size": 1}),
         ("processor", {"accepted": 1}),
