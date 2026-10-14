@@ -910,6 +910,68 @@ def test_a_restarted_processor_keeps_the_split_its_summaries_recorded(tmp_path: 
     assert [call["is_reporting"] for call in player.plays if call["arm"] == "plain"] == [False, False]
 
 
+def test_a_round_that_holds_out_every_task_is_followed_at_once(tmp_path: Path) -> None:
+    # The generator service marks every task of one generation with the round's source records, so a
+    # whole round is one component: the draw holds all of it out, and no batch can ever come from it.
+    same_source = (
+        GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000)),
+        GeneratedTask(task_for("harbor-00000-001", "designer-0", 9001)),
+    )
+    task_generator = ScriptedGenerator([same_source, generated(1, 5), generated(2, 6)])
+    worker = DeferredWorker()
+    p, player = rounds(tmp_path, task_generator, worker=worker, eval_fraction=0.5, split_seed=3)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    worker.finish()
+    assert not p.ready(), "round 0 holds out both tasks, so no batch can come"
+    assert [job.round_number for job in worker.submitted] == [0, 1], "the next round follows at once"
+    worker.finish()
+    assert not p.ready(), "round 1 holds out its task too"
+    assert [job.round_number for job in worker.submitted] == [0, 1, 2]
+    worker.finish()
+    assert not p.ready(), "the cap is reached"
+    assert summary_splits(tmp_path, 0) == {"harbor-00000-000": "eval", "harbor-00000-001": "eval"}
+    assert summary_splits(tmp_path, 1) == {"harbor-00001-005": "eval"}
+    assert summary_splits(tmp_path, 2) == {"harbor-00002-006": "eval"}
+    assert p.status()["task_generation"]["completed"] == 3
+    assert [call["is_reporting"] for call in player.plays if call["arm"] == "plain"] == [False] * 4
+
+
+def test_a_fresh_task_that_shares_a_record_with_a_placed_task_takes_its_split(tmp_path: Path) -> None:
+    # Round 0 with seed 1 places designer-0 in the train split (harbor-00000-001 takes the eval one).
+    # Round 1's harbor-00001-001 shares designer-7 with harbor-00001-000, which is placed train through
+    # designer-0: the whole component takes the train split, whatever the draw would hold alone.
+    bridged = dataclasses.replace(
+        task_for("harbor-00001-000", "designer-0", 9010), source_agent_record_ids=("designer-0", "designer-7")
+    )
+    task_generator = ScriptedGenerator(
+        [
+            generated(0, 0, 1),
+            (GeneratedTask(bridged), GeneratedTask(task_for("harbor-00001-001", "designer-7", 9011))),
+        ]
+    )
+    worker = DeferredWorker()
+    p, player = rounds(tmp_path, task_generator, worker=worker, eval_fraction=0.5, split_seed=1, tasks_per_step=1)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    played(p, "t-0", 0, 1.0)
+    played(p, "t-0", 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    worker.finish()
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0, 1]
+    worker.finish()
+    assert not p.ready()
+    assert summary_splits(tmp_path, 0)["harbor-00000-000"] == "train", "the seed places designer-0 in train"
+    assert summary_splits(tmp_path, 1) == {
+        "harbor-00001-000": "train",
+        "harbor-00001-001": "train",
+    }, "the tasks that share a source record share the placed split"
+    assert [(call["task"], call["is_reporting"]) for call in player.plays if call["arm"] == "plain"] == [
+        ("harbor-00000-000", True),
+        ("harbor-00000-001", False),
+        ("harbor-00001-000", True),
+        ("harbor-00001-001", True),
+    ]
+
+
 def test_without_an_eval_fraction_every_task_trains_as_the_recipe_always_did(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, player = rounds(tmp_path, task_generator)

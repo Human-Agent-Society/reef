@@ -1168,9 +1168,14 @@ tasks. It plays each task ``plays_per_task`` times, as its record stage
 groups them. With ``eval_fraction`` above 0, it decides each task's split
 before any task is played: tasks that share a source record share a split, a
 task placed in an earlier round keeps its split, and an eval task plays every
-arm while its training plays report nothing, so no batch trains on it. Each
-round's split goes into ``manifest-<round>.json`` beside the round summary,
-under ``state_dir``:
+arm while its training plays report nothing, so no batch trains on it. The
+draw decides whole components, so a fresh task that shares a source record
+with a placed task takes the placed split. When the generator marks every
+task of a round with the same source records, as the generator service does
+for rebuilt sessions, the split decides whole rounds. A round that holds
+every task out makes no batch to wait for, so the next one follows at once.
+Each round's split goes into ``manifest-<round>.json`` beside the round
+summary, under ``state_dir``:
 
 .. config::
 

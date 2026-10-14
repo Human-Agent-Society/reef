@@ -22,9 +22,9 @@ One round is one job on a private worker, off the trainer's thread:
 
 The first round starts when the pipeline first looks for a batch. The next round starts after
 ``batches_per_round`` batches were acknowledged since the previous round started. Its episodes train
-while it runs, so the generator always writes for the policy that trains now. A round that played no
-task is followed at once. A summary of each round goes under ``state_dir/<scenario>``; a restart
-reads it to continue with the next round.
+while it runs, so the generator always writes for the policy that trains now. A round that can make
+no batch — it played nothing, or held every task out — is followed at once. A summary of each round
+goes under ``state_dir/<scenario>``; a restart reads it to continue with the next round.
 
 Only the training arm, labeled ``plain``, trains. The record stage releases reports of other arms, and
 reports without an arm, such as a generator's own reports, without assembling them. A generated task
@@ -52,6 +52,7 @@ from reef.core.tasks import (
     TaskGenerator,
     TaskPlayResult,
     TaskSplit,
+    task_groups,
     write_split_manifest,
 )
 from reef.harness.client.tasks import TaskPlay
@@ -173,11 +174,16 @@ def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, .
 
 @dataclass(frozen=True)
 class RoundOutcome(SupportsReceipt):
-    """What the worker hands back for one round."""
+    """What the worker hands back for one round.
+
+    ``trained_tasks`` counts the played tasks whose training plays report: a round that holds none
+    makes no batch to wait for, so the next one follows at once.
+    """
 
     round_number: int
     results: tuple[TaskPlayResult, ...]
     error: str
+    trained_tasks: int = 0
 
 
 def episode_assembly(scaffold_tolerance: int = DEFAULT_SCAFFOLD_TOLERANCE) -> SampleAssembly:
@@ -488,7 +494,11 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         self.next_round += 1
 
     def absorb_finished_rounds(self) -> None:
-        """Take the rounds that the worker finished, and tell the record stage whether each one played no task."""
+        """Take the rounds that the worker finished, and tell the record stage which ones can make no batch.
+
+        A round that trained nothing — it played nothing, or held every task out — makes no batch to
+        wait for, so the next one is due at once.
+        """
         if self.worker is None:
             raise RuntimeError("no round worker to poll")
         for outcome in self.worker.poll():
@@ -512,7 +522,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 played,
                 len(outcome.results),
             )
-            self.round_stage.round_finished(played_none=played == 0)
+            self.round_stage.round_finished(played_none=outcome.trained_tasks == 0)
 
     def background_jobs_running(self) -> bool:
         return self.round_in_flight is not None
@@ -597,21 +607,26 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             error = error or str(exc) or type(exc).__name__
             logger.exception("the task generator did not take the results of round %d", job.round_number)
         self.write_round_summary(job.round_number, kept, error, reported_plays, job.source_records, splits)
-        return RoundOutcome(receipt=job.receipt, round_number=job.round_number, results=kept, error=error)
+        trained = sum(
+            1 for result in kept if result.is_played and splits.get(result.task.name, TRAIN_SPLIT) != EVAL_SPLIT
+        )
+        return RoundOutcome(
+            receipt=job.receipt, round_number=job.round_number, results=kept, error=error, trained_tasks=trained
+        )
 
     def place_splits(self, tasks: tuple[HarborTask, ...]) -> Mapping[str, str]:
         """Decide each valid task's split before any task is played.
 
         A task keeps the split an earlier round gave it, and a task that shares a source record with a
-        placed task takes its split; the round's other tasks are drawn by source in a seeded random order
-        until the eval fraction of them is held. An empty mapping when no eval fraction is set: every
-        task trains, as the recipe always did.
+        placed task takes its split. The seeded draw decides whole components of the round's other tasks
+        until the eval fraction of them is held, so tasks that share a source record never land in
+        different splits, across rounds or within one. An empty mapping when no eval fraction is set:
+        every task trains, as the recipe always did.
         """
         if self.eval_fraction <= 0 or not tasks:
             return {}
         splits: dict[str, str] = {}
         fresh: list[HarborTask] = []
-        seen: set[str] = set()
         for task in tasks:
             placed = self.split_by_name.get(task.name)
             if placed is None:
@@ -625,16 +640,43 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 )
             if placed is not None:
                 splits[task.name] = placed
-            elif task.name not in seen:
-                # Two tasks of one round share a name only to be refused at write time; the draw takes one.
-                seen.add(task.name)
+            else:
                 fresh.append(task)
         if fresh:
-            drawn = split_generation(tuple(fresh), eval_fraction=self.eval_fraction, seed=self.split_seed)
-            for name in drawn.train:
-                splits[name] = TRAIN_SPLIT
-            for name in drawn.eval:
-                splits[name] = EVAL_SPLIT
+            # The draw decides whole components, so tasks that share a source record share a split: a
+            # fresh task that reaches a placed record — one an earlier round placed, or one this round's
+            # placed tasks carry — takes the placed split with every task it connects to. A component
+            # that reaches records placed in both splits takes the first placed split in its name order.
+            record_splits = dict(self.split_by_record)
+            for task in tasks:
+                placed = splits.get(task.name)
+                if placed is not None:
+                    for record_id in task.source_agent_record_ids:
+                        record_splits.setdefault(record_id, placed)
+            by_name = {task.name: task for task in fresh}
+            free: list[HarborTask] = []
+            for group in task_groups({task.name: task.source_agent_record_ids for task in fresh}):
+                members = [by_name[name] for name in group]
+                placed = next(
+                    (
+                        record_splits[record_id]
+                        for member in members
+                        for record_id in member.source_agent_record_ids
+                        if record_id in record_splits
+                    ),
+                    None,
+                )
+                if placed is None:
+                    free.extend(members)
+                else:
+                    for member in members:
+                        splits[member.name] = placed
+            if free:
+                drawn = split_generation(tuple(free), eval_fraction=self.eval_fraction, seed=self.split_seed)
+                for name in drawn.train:
+                    splits[name] = TRAIN_SPLIT
+                for name in drawn.eval:
+                    splits[name] = EVAL_SPLIT
         for task in tasks:
             split = splits.get(task.name)
             if split is not None:
