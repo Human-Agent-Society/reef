@@ -170,9 +170,8 @@ class RuntimeCandidateBackend(CandidateBackend):
         self.reject_candidate(
             candidate,
             SelectionDecision(
-                "reject",
+                False,
                 "reef_abort",
-                "1",
                 "candidate processing failed before settlement",
                 evaluation,
             ),

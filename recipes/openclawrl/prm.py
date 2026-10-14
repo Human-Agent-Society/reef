@@ -9,7 +9,7 @@ a timeout, and failures degrade instead of blocking — a failed judge call is
 a failed vote feeding the same tie rules, a failed prefill returns ``None``
 and the turn trains RL-only.
 
-:mod:`recipes.openclawrl.processor` owns when these are called; this
+:mod:`recipes.openclawrl.judging` owns when these are called; this
 module owns what one call does.
 """
 
@@ -23,7 +23,6 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -434,28 +433,3 @@ class DirectiveTeacher:
             logger.exception("teacher templating failed; the candidate drops")
             return None
         return [int(v) for v in prompt_ids] + [int(v) for v in native_tokens[-response_token_count:]]
-
-
-def build_clients(config: Mapping[str, Any]) -> tuple[Any, Any, Any]:
-    """The judge's PRM clients as the recipe config describes them; the
-    all-``None`` triple (no ``prm_url``) is correlate-only mode.
-
-    Defaults mirror ``OpenClawRLRecipe``'s config fields; the recipe always sends
-    every value; the fallbacks serve direct construction in tests.
-    """
-    url = str(config.get("prm_url", "") or "").strip()
-    if not url:
-        return None, None, None
-    tokenizer_path = str(config.get("prm_tokenizer_path", "") or "").strip()
-    if not tokenizer_path:
-        raise ValueError("OpenClaw-RL judging requires prm_tokenizer_path next to prm_url")
-    generate_url = url.rstrip("/") + "/generate"
-    prm = PRMJudge(
-        generate_url=generate_url,
-        tokenizer_path=tokenizer_path,
-        m=int(config.get("prm_m", 3)),
-        temperature=float(config.get("prm_temperature", 0.6)),
-        max_tokens=int(config.get("prm_max_tokens", 8192)),
-        timeout_s=float(config.get("prm_timeout_s", 120.0)),
-    )
-    return prm, DirectiveTeacher(tokenizer_path=tokenizer_path), ResponseRenderer(tokenizer_path)

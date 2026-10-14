@@ -16,6 +16,7 @@ import pytest
 
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import GEPAProposer, ScoreFeedback
+from reef.evaluation.harness import EpisodeEvaluationWorker, EpisodeScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.e2b import E2BExecutor
 from reef.harness.episodes.executor import EpisodeTimeout, build_executor
@@ -23,9 +24,8 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import run_episode
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent import launch_pi
-from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _StepCalls
-from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer
-
+from reef.train.cordis_backend.backend import _StepCalls
+from reef.train.cordis_backend.strategies import AgentHost
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")
 

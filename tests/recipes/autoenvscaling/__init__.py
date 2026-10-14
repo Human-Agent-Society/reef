@@ -1,0 +1,1 @@
+"""Recipes autoenvscaling test suite."""

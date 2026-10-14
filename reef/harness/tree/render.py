@@ -206,6 +206,13 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
     return files
 
 
+def tree_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The entries list as the file ``files.tree`` names, verbatim; empty for an adapter that declares none."""
+    if descriptor.tree_path is None:
+        return {}
+    return {descriptor.tree_path: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
+
+
 def apply_adapter_renderer(descriptor: AdapterDescriptor, files: dict[str, str]) -> dict[str, str]:
     """Run the adapter's renderer steps over the engine's files, whose config files are JSON objects.
 

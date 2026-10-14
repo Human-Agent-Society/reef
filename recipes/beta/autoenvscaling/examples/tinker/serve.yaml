@@ -1,0 +1,90 @@
+# AutoEnvScaling on Tinker: a coding agent rebuilds recorded sessions as Harbor tasks, and the served model trains on them.
+# The built-in generated-task recipe plays and trains; AutoEnvScaling is the task generator.
+# Supply TINKER_API_KEY, E2B_API_KEY and REEF_AUTOENVSCALING_DESIGNER_TOKEN through the shell, never here.
+# REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SOURCES_PATH lists the
+# recorded sessions; REEF_AUTOENVSCALING_DESIGNER_URL is the Reef that serves the agent's model and holds the sessions.
+# The generator service runs under the same interpreter as Reef.
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/stack
+  # The Tinker runtime downloads tokenizer files and saves the initial checkpoint before /healthz answers.
+  ready-timeout: 600
+inference:
+  model-path: Qwen/Qwen3-8B
+  # An agent's episode is many turns.
+  timeout-s: 1800
+# The generator service: writes, checks and plays the agent's tasks, on the host that has Docker and harbor.
+generator:
+  tasks-root: ${REEF_AUTOENVSCALING_STATE_DIR}/tasks
+  # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
+  agent:
+    name: terminus-2
+    model_name: openai/{model}
+    # Optional: an upstream that serves only the Responses API needs model_name: "openai/responses/{model}".
+    kwargs:
+      api_base: "{base_url}/v1"
+      llm_kwargs:
+        api_key: "{api_key}"
+        extra_body:
+          chat_template_kwargs:
+            enable_thinking: false
+recipe:
+  implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+  config:
+    checkpoint-every-n-versions: 1
+# The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
+pipeline:
+  # The training plays of each task form one group; the next round is due after batches_per_round batches trained.
+  record2record:
+    config:
+      plays_per_task: 4
+      batches_per_round: 2
+  # The rounds: one generation of tasks each, played through the generator service.
+  record2task:
+    config:
+      generator_url: ${endpoints.generator}
+      rounds: 20
+      # The stage requires a description; the generator takes what the tasks are from its sources file.
+      description: coding tasks rebuilt from recorded coding-agent sessions
+      state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/rounds
+      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+      scaffold_tolerance: 8
+      # The task generator: count sessions rebuilt for each round, a pass-rate band to mark the tasks in reach.
+      generator:
+        module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
+        config:
+          generator_url: ${endpoints.generator}
+          state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
+          sources_path: ${REEF_AUTOENVSCALING_SOURCES_PATH}
+          count: 8
+          # A played task is in the band when the Reasoning Agent passes a quarter to three quarters of its episodes.
+          band_low: 0.25
+          band_high: 0.75
+          # The Designer: pi on a strong model, its calls recorded on the Designer's Reef.
+          agent_model: gpt-6-sol
+          agent_reef_url: ${REEF_AUTOENVSCALING_DESIGNER_URL}
+          agent_token_env: REEF_AUTOENVSCALING_DESIGNER_TOKEN
+          # Optional: an upstream that serves only the Responses API needs agent_api: responses.
+          agent_api: openai
+          # A model call on the same Reef reviews each task's tests; a task they grade on what the instruction does
+          # not state is refused.
+          review: refuse
+  # A batch is tasks_per_step complete task groups.
+  task2batch:
+    config:
+      tasks_per_step: 2
+training:
+  backend: tinker
+  ready-timeout: 1800
+  timeout-s: 1800
+  options:
+    state-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/tinker
+    lora-rank: 32
+    learning-rate: 0.00004
+storage:
+  artifact-repository: ${REEF_AUTOENVSCALING_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/agent-record

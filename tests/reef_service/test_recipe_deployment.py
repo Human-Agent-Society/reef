@@ -8,7 +8,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from reef_service.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import runtime_bindings
 
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -22,13 +22,11 @@ OPENCLAW = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 
 def method_config():
     return {
-        "schema-version": 2,
         "inference": {"model-path": "/models/policy"},
-        "recipe": {
-            "implementation": OPENCLAW,
-            "config": {
-                "prm-url": "http://external:23001",
-                "prm-tokenizer-path": "/models/judge",
+        "recipe": {"implementation": OPENCLAW, "config": {}},
+        "pipeline": {
+            "record2record": {
+                "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"},
             },
         },
     }
@@ -36,37 +34,31 @@ def method_config():
 
 @pytest.mark.parametrize("section", ["service", "services"])
 @pytest.mark.parametrize("payload", [{}, [], None])
-def test_versioned_config_rejects_process_sections_even_when_empty(tmp_path, section, payload):
+def test_config_rejects_process_sections_even_when_empty(tmp_path, section, payload):
     raw = {**method_config(), section: payload}
-    with pytest.raises(DeployConfigError, match="does not accept service/services"):
+    with pytest.raises(DeployConfigError, match="service/services are not accepted"):
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 def test_standalone_recipe_cannot_reintroduce_process_execution():
-    from reef.recipe.config import recipe_config_from_mapping
+    from reef.recipe.config import recipe_config_from_file_layout
     from reef.recipe.errors import RecipeConfigError
 
     raw = {**method_config(), "execution": {"services": "ray"}}
-    with pytest.raises(RecipeConfigError, match="legacy process stacks"):
-        recipe_config_from_mapping(raw)
+    with pytest.raises(RecipeConfigError, match=r"execution\.services is not accepted"):
+        recipe_config_from_file_layout(raw)
 
 
 @pytest.mark.parametrize("flag", ["service.port", "services", "execution.services.backend"])
 @pytest.mark.parametrize("from_file", [False, True])
 def test_cli_cannot_reintroduce_process_configuration(tmp_path, flag, from_file):
     raw = method_config() if from_file else command_line_config({})
-    with pytest.raises(DeployConfigError, match=r"unknown configuration flag|legacy process stacks"):
-        resolve_deployment_config(raw, {flag: "uni"}, tmp_path / "serve.yaml", standard=not from_file)
-
-
-def test_legacy_processes_remain_explicit(tmp_path):
-    raw = {"reef": {"recipe": OPENCLAW}, "services": [{"name": "custom", "command": ["custom"]}]}
-    config, _ = resolve_deployment_config(raw, None, tmp_path / "legacy.yaml")
-    assert config["services"] == raw["services"]
+    with pytest.raises(DeployConfigError, match=r"unknown configuration flag|execution\.services is not accepted"):
+        resolve_deployment_config(raw, {flag: "uni"}, tmp_path / "serve.yaml")
 
 
 def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_path):
-    from reef_service.runtime_stubs import StubTrainingRuntime
+    from tests.support.runtime_stubs import StubTrainingRuntime
 
     from recipes.openclawrl.recipe import OpenClawRLRecipe
     from reef.service.assembly import _recipe_owned_settings
@@ -75,7 +67,10 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     raw = method_config()
     config, _ = resolve_deployment_config(
         raw,
-        {"recipe.config.prm-url": "http://other:9000", "recipe.config.prm-tokenizer-path": "/models/other"},
+        {
+            "pipeline.record2record.config.prm_url": "http://other:9000",
+            "pipeline.record2record.config.prm_tokenizer_path": "/models/other",
+        },
         tmp_path / "serve.yaml",
     )
     driver, http = validate_services(config, "test")
@@ -85,14 +80,14 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     assert driver["executor"] == http["executor"] == "uni"
     assert http["depends_on"] == [driver["name"]]
     settings = service_config_from_mapping(config)
-    recipe = OpenClawRLRecipe.from_environment(
-        {},
-        config=OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path),
-        **runtime_bindings(StubTrainingRuntime()),
-    )
-    assert recipe.prm_url == "http://other:9000"
-    assert recipe.prm_tokenizer_path == "/models/other"
-    assert raw["recipe"]["config"]["prm-url"] == "http://external:23001"
+    recipe_config = OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
+    recipe_config["pipeline"] = settings.pipeline_settings
+    recipe = OpenClawRLRecipe.from_environment({}, config=recipe_config, **runtime_bindings(StubTrainingRuntime()))
+    assert recipe.stages().record2record.config == {
+        "prm_url": "http://other:9000",
+        "prm_tokenizer_path": "/models/other",
+    }
+    assert raw["pipeline"]["record2record"]["config"]["prm_url"] == "http://external:23001"
     assert "services" not in raw
 
 
@@ -114,7 +109,6 @@ def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     from reef.service.deploy.service_config import service_config_from_mapping
 
     raw = {
-        "schema-version": 2,
         "recipe": {
             "implementation": "reef.recipe.base:Recipe",
             "runtime": {"type": "inference_proxy", "base-url": "http://localhost:8000"},
@@ -172,7 +166,7 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
     port = int(external.stdout.readline())
     raw = method_config()
     endpoint = f"http://127.0.0.1:{port}"
-    raw["recipe"]["config"]["prm-url"] = endpoint
+    raw["pipeline"]["record2record"]["config"]["prm_url"] = endpoint
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in config["services"]] == ["slime-driver", "reef"]
     for process in config["services"]:
@@ -210,7 +204,7 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
         else:
             stack.start()
             assert all((tmp_path / process["name"]).exists() for process in config["services"])
-            assert stack.config["reef"]["prm_url"] == endpoint
+            assert stack.config["pipeline"]["record2record"]["config"]["prm_url"] == endpoint
     finally:
         stack.shutdown(grace=1)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)

@@ -11,9 +11,9 @@ Reproduction of [Self-Distillation Policy Optimization](https://arxiv.org/abs/26
 
 ```text
 sdpo/
-  recipe.py          SDPORecipe: training spec, loss family "sdpo"; its report contract is report.SDPOReport
+  recipe.py          SDPORecipe: training spec, pipeline spec, loss family "sdpo"; its report contract is report.SDPOReport
   report.py          SDPOReport: TeacherContextReport plus the attempt's step, group and rollout
-  processor.py       the shared DistillProcessor with a whole sampling grid as its batch unit
+  processor.py       SDPORecord2Record, SDPOTasks and SDPOBatches: a whole sampling grid as one batch
   objective.py       selects the sdpo loss; one optimizer step per grid
   slime/             the loss family: SDPO's defaults and hook names on the Slime backend's distillation base
   examples/
@@ -22,4 +22,4 @@ sdpo/
 
 ## Where the rest is documented
 
-[The sdpo recipe page](../../docs/user-guide/recipes/sdpo.rst) covers the report contract, configuration and the driver flags, and [Loss families](../../docs/developer-guide/loss-families.rst) describes how the family plugs into the Slime backend.
+[The sdpo recipe page](../../docs/user-guide/recipes/sdpo.rst) covers the report contract, the `pipeline` configuration of the stages and the driver flags, and [Loss families](../../docs/developer-guide/loss-families.rst) describes how the family plugs into the Slime backend.

@@ -23,7 +23,7 @@ Candidate evaluation is part of this contract, not a separate subsystem:
 every ``Recipe`` carries ``candidate_evaluation``, built from the top-level
 ``evaluation`` section of its config, and the trainer runs it between
 prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``; built-in policies
-and configuration live in ``reef.train.evaluation``. The recipe chooses and
+and configuration live in ``reef.evaluation``. The recipe chooses and
 configures the policy.
 
 Reefine is bundled; other learning methods live outside the core package. The repository's sibling

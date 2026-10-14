@@ -425,7 +425,7 @@ def prepare_bridge(
     slime_executor_class(getattr(args, "reef_executor_backend", "auto"))
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
-    # tests/reef_service/test_dependency_boundaries.py).
+    # tests/contributing/test_dependency_boundaries.py).
     from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
     lora = megatron_lora_enabled(args)

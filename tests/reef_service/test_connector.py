@@ -138,7 +138,8 @@ def test_snapshot_names_each_scenario_adapter():
     ]
 
 
-def test_release_summary_keeps_request_mutation_and_selection_codes_without_text():
+@pytest.mark.parametrize("legacy_selection", [False, True])
+def test_release_summary_keeps_request_mutation_and_selection_codes_without_text(legacy_selection: bool) -> None:
     """A published request step as the catalog lists it: ids, kinds, counts and codes leave; every text stays."""
     row = release_summary(
         {
@@ -173,7 +174,7 @@ def test_release_summary_keeps_request_mutation_and_selection_codes_without_text
                     {"op": "update", "id": "settings", "options": {"config": {"allow": ["private"]}}},
                 ],
                 "selection": {
-                    "outcome": "select",
+                    **({"outcome": "select"} if legacy_selection else {"selected": True}),
                     "policy": "floor",
                     "reason": "private reason text",
                     "candidate_id": "private-candidate",
@@ -204,7 +205,7 @@ def test_release_summary_keeps_request_mutation_and_selection_codes_without_text
                 {"op": "update", "id": "settings"},
             ],
             "selection": {
-                "outcome": "select",
+                "selected": True,
                 "policy": "floor",
                 "metrics": {"passed": 1, "failed": 0, "floor_score": 1.0},
                 "evaluation": {"evaluator": "harness_episode_pairs"},
@@ -218,6 +219,26 @@ def test_release_summary_keeps_request_mutation_and_selection_codes_without_text
     )
     assert failed == {"operation": "training", "metrics": {"skipped": True}, "result": "failed"}
     assert "result" not in release_summary({"operation": "creation", "metrics": {}})
+
+
+@pytest.mark.parametrize("selected", [True, False])
+@pytest.mark.parametrize("legacy_selection", [False, True])
+def test_release_summary_preserves_selection_flag(selected: bool, legacy_selection: bool) -> None:
+    if legacy_selection:
+        selection = {"outcome": "select" if selected else "reject", "policy": "demo"}
+    else:
+        selection = {"selected": selected, "policy": "demo"}
+    row = release_summary({"operation": "training", "metrics": {"selection": selection}})
+
+    assert row["metrics"]["selection"] == {"selected": selected, "policy": "demo"}
+
+
+def test_release_summary_prefers_selected_over_legacy_outcome() -> None:
+    row = release_summary(
+        {"operation": "training", "metrics": {"selection": {"selected": False, "outcome": "select"}}}
+    )
+
+    assert row["metrics"]["selection"] == {"selected": False}
 
 
 def test_release_summary_names_proposal_and_recheck_steps_without_text():

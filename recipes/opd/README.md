@@ -5,14 +5,14 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 - Method: [Thinking Machines Lab, On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - Reference implementation: the [tinker-cookbook distillation recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/dfe4d77e8e8c/tinker_cookbook/recipes/distillation) at `dfe4d77e8e8c`. The Reef implementation configures the Slime backend's distillation base (`reef/train/slime_backend/distill/`) and makes no Tinker API calls.
 - Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`).
-- Claim scope: none yet. Experiments are tracked in [#682](https://github.com/Human-Agent-Society/reef/issues/682) under roadmap [#502](https://github.com/Human-Agent-Society/reef/issues/502).
+- Claim scope: the implementation follows the reference recipe. Experiments are tracked in [#682](https://github.com/Human-Agent-Society/reef/issues/682) under roadmap [#502](https://github.com/Human-Agent-Society/reef/issues/502).
 
 ## Layout
 
 ```text
 opd/
-  recipe.py          OPDRecipe: training spec, loss family "opd"; its report contract is TeacherContextReport
-  processor.py       the shared DistillProcessor reading the recorded prompt and response ids as the teacher sequence
+  recipe.py          OPDRecipe: training spec, loss family "opd", and its stages; its report contract is TeacherContextReport
+  processor.py       OPDTasks and OPDBatches: the recorded prompt and response ids as the teacher sequence
   objective.py       selects the opd loss; one optimizer step per batch
   slime/             the loss family: OPD's defaults on the Slime backend's distillation base
 ```

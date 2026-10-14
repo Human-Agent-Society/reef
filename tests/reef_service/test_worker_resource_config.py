@@ -1,7 +1,9 @@
 """Worker sizing is generic; only component capability checks know the role."""
 
 import pytest
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
+from reef.evaluation.harness import evaluation_executor_config, evaluation_selection
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
@@ -9,8 +11,6 @@ from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, select_executor
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.service.deploy.execution import service_executor_config
-from reef.train.cordis_backend.execution import evaluation_executor_config, evaluation_selection
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 
 def scorer(task, result):

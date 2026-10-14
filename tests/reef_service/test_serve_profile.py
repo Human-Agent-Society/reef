@@ -142,7 +142,7 @@ def test_the_reefine_profile_loads_and_boots_its_recipe(monkeypatch, tmp_path) -
     assert built.model_binding().model == "gemma4:26b"
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
-    assert trainer.training_mode == "manual"
+    assert trainer.pipeline.training_mode == "manual"
     trainer.close()
     records.close()
 

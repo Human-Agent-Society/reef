@@ -20,7 +20,7 @@ exclude: |
       |tttd/examples/guidance_ttt/solutions/(lasso_qwen3_8b|trimul_qwen3_14b)\.py$
       |meta_harness/results/reef_harness\.py$
     )
-    |tests/reef_service/data/harness_goldens/
+    |tests/harness/data/harness_goldens/
   )
 
 repos:
@@ -39,6 +39,11 @@ repos:
       - id: readme-i18n
         name: Check README translation pairing
         entry: python .github/scripts/check_readme_i18n.py
+        language: system
+        pass_filenames: false
+      - id: test-layout
+        name: Check test placement and installed-wheel selection
+        entry: python .github/scripts/check_test_layout.py
         language: system
         pass_filenames: false
 

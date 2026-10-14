@@ -6,7 +6,7 @@ requires torch. Slime's Megatron workers resolve the hook functions by path
 (``--custom-advantage-function-path`` / ``--custom-pg-loss-function-path``),
 which keeps the vendored tree free of SAO-specific branches. CPU parity tests
 compare these tensor transcriptions against an independent pure-Python oracle
-(``tests/reef_service/reference_algorithms/sao.py``).
+(``tests/support/reference_algorithms/sao.py``).
 """
 
 from __future__ import annotations

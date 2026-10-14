@@ -17,7 +17,7 @@ level up. Boundaries this package holds:
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
-any ``RepositoryBackendFactory``. ``tests/reef_service/test_reef_git_lfs.py``
+any ``RepositoryBackendFactory``. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
 Backends used with a scenario commit log must subclass

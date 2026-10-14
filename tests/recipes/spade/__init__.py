@@ -1,0 +1,1 @@
+"""Recipes spade test suite."""

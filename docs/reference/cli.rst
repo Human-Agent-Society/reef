@@ -63,7 +63,7 @@ starts the same profile and says so on stderr.
 Overriding config values
 ------------------------
 
-Canonical CLI paths match ``schema-version: 2`` YAML. Declared fields use the
+Canonical CLI paths match the sections of a configuration file. Declared fields use the
 same type parser for both inputs; explicit CLI values override YAML. Opaque
 component objects support leaf overrides, validated by their owning component.
 
@@ -74,7 +74,7 @@ component objects support leaf overrides, validated by their owning component.
      --training.config.checkpoint_dir /tmp/ckpt
 
 Use public namespaces to move a stack's state without editing its config.
-Legacy bare and ``reef.*`` aliases remain accepted for compatibility:
+Bare and ``reef.*`` aliases remain accepted:
 
 .. code:: bash
 
@@ -86,10 +86,9 @@ Legacy bare and ``reef.*`` aliases remain accepted for compatibility:
 Where it writes
 ---------------
 
-Each service gets a log and a PID file under ``run_dir``, which defaults to
-``.reef/run`` (``/tmp/reef-stack`` for a legacy stack that sets it there).
-Reef writes its own state, including records, commit logs,
-and the Git-backed release chain, to the ``reef.*_dir`` paths in the config.
+Each service gets a log and a PID file under ``reef.run-dir``, which defaults
+to ``.reef/run``. Reef writes its own state, including records, commit logs,
+and the Git-backed release chain, to the ``storage.*`` paths in the config.
 
 Connect to the API platform
 --------------------------

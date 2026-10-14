@@ -11,38 +11,34 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import math
-import tarfile
 import tempfile
 import threading
 import time
 import weakref
 from collections import deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
-from io import BytesIO
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.evaluation import (
-    CandidateEvaluationPlugin,
-    CandidateEvaluator,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
-from reef.core.plugins import PluginConfigError
+from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
+from reef.evaluation.harness import (
+    EVALUATION_SIDES,
+    EpisodeScorer,
+    FailureObservation,
+    HarnessCandidate,
+    HarnessEpisodeEvaluator,
+    evaluation_selection,
+)
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
 from reef.harness.episodes.e2b import E2BExecutor
-from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
+from reef.harness.episodes.executor import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError, final_assistant_text
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.mutations import (
     Mutation,
@@ -50,232 +46,53 @@ from reef.harness.tree.mutations import (
     _load_error,
     _loader_entries,
     _native_refusal,
-    _nodes_from,
     admit_mutations,
+    nodes_from_entries,
 )
 from reef.harness.tree.nodes import (
     ALWAYS_REVIEWED_KINDS,
     NODE_KINDS,
     RESERVED_ENTRY_IDS,
+    clip_record_text,
     directive_shaped,
-    redact_secret_shaped,
     secret_shaped,
 )
-from reef.harness.tree.render import render_composition
-from reef.runtime.executor import Executor, WorkerSpec
+from reef.harness.tree.render import render_composition, tree_files
+from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import STALE_RESULT_POLICIES, CandidateBackend, PreparedStep, StaleResultPolicy
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
-from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
-from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
+from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
-from reef.train.cordis_backend.strategies import (
-    AgentHost,
-    EpisodeScorer,
-    Promoter,
-    Proposer,
-    ProposerCalls,
-    StepProposal,
-)
-from reef.train.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
+from reef.train.cordis_backend.strategies import AgentHost, Promoter, Proposer, ProposerCalls, StepProposal
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
-
-@dataclass(repr=False)
-class EpisodeEvaluationWorker:
-    """Only episode/scorer state crosses the process boundary, never the recipe tree."""
-
-    descriptor: AdapterDescriptor
-    scorer: EpisodeScorer
-    binary: str | None
-    timeout: float
-    executor: EpisodeExecutor
-    forbid_residue: bool
-    owner_lease: bool = False
-    transfer_records: bool = False
-
-    def __post_init__(self) -> None:
-        self.executor.preflight()
-
-    def run(
-        self, files: Mapping[str, str], task: str, keep_dir: Path | None = None, models: ModelBindings | None = None
-    ) -> _ScoredEpisode:
-        if keep_dir is None or not self.transfer_records:
-            return self._run_and_score(files, task, keep_dir, models)
-        # Remote workers must not interpret the driver's path as a local path.
-        # Keep the trajectory on the worker, then return it with the scored result.
-        with tempfile.TemporaryDirectory(prefix="reef-worker-record-") as temporary:
-            record_dir = Path(temporary) / "episode"
-            scored = self._run_and_score(files, task, record_dir, models)
-            buffer = BytesIO()
-            with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-                archive.add(record_dir, arcname=".")
-            return replace(scored, record_archive=buffer.getvalue())
-
-    def _run_and_score(
-        self, files: Mapping[str, str], task: str, keep_dir: Path | None, models: ModelBindings | None
-    ) -> _ScoredEpisode:
-        """Score one side's episode; a ``None`` score marks an episode that
-        could not run. The observation keeps what the exception handling
-        would otherwise discard: the failure's stage and cause. A native turn
-        that ended on an error could not run either; any other nonzero exit
-        still scores, as before, and is observed alongside the score.
-        The residue counts files the episode left outside the cleanup
-        whitelist; with ``forbid_residue`` a littering episode scores as one
-        that could not run. ``keep_dir`` receives the episode's trajectory
-        files before its root is removed; a copy that fails is not an
-        episode failure and propagates, so the step aborts instead of
-        scoring a result shaped by a disk error."""
-        token = EPISODE_OWNER_LEASE.set(self.owner_lease)
-        try:
-            result = run_episode(
-                self.descriptor,
-                files,
-                task,
-                binary=self.binary,
-                timeout=self.timeout,
-                executor=self.executor,
-                keep_dir=keep_dir,
-            )
-        except EpisodeError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
-            _write_episode_record(keep_dir, task, None, scored)
-            return scored
-        except TrajectoryError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
-            _write_episode_record(keep_dir, task, None, scored)
-            return scored
-        finally:
-            EPISODE_OWNER_LEASE.reset(token)
-        scored = self._score_result(result, task, models)
-        _write_episode_record(keep_dir, task, result, scored)
-        return scored
-
-    def _score_result(self, result: EpisodeResult, task: str, models: ModelBindings | None = None) -> _ScoredEpisode:
-        """The score and the observations of an episode that ran."""
-        residue = len(result.residue)
-        agents = _agent_work(result.trajectory)
-        path = _stage_path(result.trajectory)
-        if residue and self.forbid_residue:
-            cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
-            )
-        trial_error = _failed_trial_error(result.trajectory)
-        if trial_error:
-            # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
-            # start): no answer was given, so it ranks below every real score instead of tying a zero.
-            return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
-            )
-        if path.get("error") is not None:
-            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
-            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
-            # score instead of tying a zero.
-            error = path["error"]
-            cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
-            if path.get("errored_agent"):
-                cause = f"agent {path['errored_agent']}: {cause}"
-            # A loop turn walks no graph: the failure names the loop when the root's header does.
-            stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
-        score = float(
-            self.scorer.score(task, result) if models is None else self.scorer.score_with_models(task, result, models)
-        )
-        if not math.isfinite(score):
-            raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
-        reply = final_assistant_text(result.trajectory)
-        if result.exit_code != 0:
-            stderr_lines = result.stderr.strip().splitlines()
-            cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
-            )
-        # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
-        # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
-        return _ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
-
-
-def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
-    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
-    for event in trajectory:
-        if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
-            return str(event["error"])
-    return ""
-
-
-@dataclass(frozen=True, kw_only=True)
-class HarnessCandidate(UpdateCandidate):
-    """One rendered harness mutation compared with the current composition."""
-
-    candidate_files: Mapping[str, str]
-    current_files: Mapping[str, str]
-    candidate_entries: tuple[Mapping[str, Any], ...]
-    current_entries: tuple[Mapping[str, Any], ...]
-    mutations: tuple[Mutation, ...]
-    #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
-    evaluation_tasks: tuple[str, ...] = ()
-    #: Legacy constructor keyword; new candidates use evaluation_tasks.
-    gate_tasks: tuple[str, ...] = ()
-    #: The candidate is the rollback target, so selecting it rolls back.
-    recheck: bool = False
-    #: The inbox proposal these mutations came from, settled with the result; None for the method's own.
-    proposal_id: str | None = None
-    #: The step record directory claimed for it at prepare time; ``None`` with the record off.
-    record_dir: Path | None = None
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-
-
-#: Characters kept per text in the step record; a longer text ends in a clip marker.
-RECORD_TEXT_CAP = 20_000
 #: The record file of an attempt directory that re-evaluated a kept candidate; it names the first attempt.
 RECORD_REEVALUATION_FILE = "reevaluation.json"
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
-RECORD_EPISODES_DIR = "episodes"
-RECORD_EPISODE_FILE = "episode.json"
-#: The trees an evaluation step runs, in pairing order; a policy that evaluates the candidate alone names the first only.
-EVALUATION_SIDES: tuple[str, ...] = ("candidate", "current")
-
-
-def _clip(text: str) -> str:
-    """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
-
-    The record holds model traffic and proposals before the tree boundary
-    saw them, so the boundary's credential tripwire runs here too."""
-    text = redact_secret_shaped(text)
-    if len(text) <= RECORD_TEXT_CAP:
-        return text
-    return f"{text[:RECORD_TEXT_CAP]}... [clipped {len(text) - RECORD_TEXT_CAP} chars]"
 
 
 def _bounded(value: Any) -> Any:
     """A copy of a request value that JSON can write, with every string redacted and cut at the record cap."""
     if isinstance(value, str):
-        return _clip(value)
+        return clip_record_text(value)
     if isinstance(value, Mapping):
         return {str(key): _bounded(item) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, bytes):
         return [_bounded(item) for item in value]
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _clip(str(value))
+    return clip_record_text(str(value))
 
 
 def _mutation_record(mutation: Mutation) -> dict[str, Any]:
     """A mutation as the commit record, the rejected history and the step record persist it: op, id and full options."""
     options = None if mutation.options is None else dict(mutation.options)
     return {"op": mutation.op, "id": mutation.id, "options": options}
-
-
-def _episode_name(side: str, task_index: int, repeat: int) -> str:
-    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
-    return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
 def _prompt_of(sample: TrajectoryItem) -> str | None:
@@ -438,10 +255,10 @@ class _BudgetedBinding(ModelBinding):
             reply = self._inner.chat(messages, **kwargs)
         except BaseException as exc:
             # The failed call is the step's decision too: the record keeps it before the error propagates.
-            entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
+            entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
             raise
         else:
-            entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
+            entry["reply"] = clip_record_text(reply) if isinstance(reply, str) else _bounded(reply)
             return reply
         finally:
             # A provider may spend its budget on reasoning and return no final text; retain that response on error too.
@@ -487,7 +304,7 @@ class _BudgetedBinding(ModelBinding):
         try:
             response = self._inner.complete(body, **kwargs)
         except BaseException as exc:
-            entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
+            entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
             self._calls.record(entry)
             self._note_answer(entry)
@@ -526,135 +343,6 @@ def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBinding
         served=wrap(models.served),
         named={name: wrap(models[name]) for name in models if name != "served"},
     )
-
-
-def tree_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """The entries list as the file ``files.tree`` names, verbatim; empty for an adapter that declares none."""
-    if descriptor.tree_path is None:
-        return {}
-    return {descriptor.tree_path: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
-
-
-class ScoreComparisonMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that selects when wins exceed losses by ``min_win_margin`` (0: plain majority)."""
-
-    def __init__(self, *, min_win_margin: int = 0) -> None:
-        if isinstance(min_win_margin, bool) or not isinstance(min_win_margin, int) or min_win_margin < 0:
-            raise ValueError("min_win_margin must be an integer of at least 0")
-        super().__init__()
-        self._min_win_margin = min_win_margin
-
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        candidate_scores, current_scores = _score_vectors(evaluation)
-        wins, losses = _score_comparison_tally(candidate_scores, current_scores)
-        ties = len(candidate_scores) - wins - losses
-        selected = wins - losses > self._min_win_margin
-        metrics: dict[str, Any] = {"wins": wins, "losses": losses, "ties": ties}
-        if self._min_win_margin:
-            metrics["min_win_margin"] = self._min_win_margin
-        return SelectionDecision(
-            outcome="select" if selected else "reject",
-            policy="score_comparison",
-            policy_version="1",
-            reason=(
-                f"candidate won {wins} task pairings and lost {losses}"
-                if selected
-                else f"candidate did not exceed its {losses} losses with {wins} wins"
-            ),
-            evaluation=evaluation,
-            metrics=metrics,
-        )
-
-
-class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin, SelectionPlugin):
-    """Cordis's default evaluation: measure through the candidate backend, decide by score comparison."""
-
-    def __init__(self, candidate_backend: Any, *, min_win_margin: int = 0) -> None:
-        super().__init__(min_win_margin=min_win_margin)
-        self._candidate_backend = candidate_backend
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
-        unknown = sorted(str(key) for key in config if key != "min_win_margin")
-        if unknown:
-            raise PluginConfigError(f"the score_comparison selection takes min_win_margin, not {', '.join(unknown)}")
-        return cls(candidate_backend, min_win_margin=config.get("min_win_margin", 0))
-
-
-class FloorMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that selects when every evaluation task scores at least ``floor_score``.
-
-    A floor is absolute, not a comparison: only the candidate's scores are
-    read, and an episode that could not run (score ``None``) missed it.
-    """
-
-    def __init__(self, *, floor_score: float = 1.0) -> None:
-        if (
-            isinstance(floor_score, bool)
-            or not isinstance(floor_score, (int, float))
-            or not math.isfinite(floor_score)
-            or floor_score <= 0
-        ):
-            raise ValueError("floor_score must be a positive number")
-        super().__init__()
-        self._floor_score = float(floor_score)
-
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        scores = tuple(evaluation.metrics.get("candidate_scores", ()))
-        passed = sum(1 for score in scores if score is not None and score >= self._floor_score)
-        failed = len(scores) - passed
-        if not scores:
-            reason = "no evaluation task was scored"
-        elif failed:
-            reason = f"candidate missed the floor on {failed} of {len(scores)} tasks"
-        else:
-            reason = f"candidate met the floor on all {len(scores)} tasks"
-        return SelectionDecision(
-            outcome="select" if scores and not failed else "reject",
-            policy="floor",
-            policy_version="1",
-            reason=reason,
-            evaluation=evaluation,
-            metrics={"passed": passed, "failed": failed, "floor_score": self._floor_score},
-        )
-
-
-class FloorPlugin(FloorMixin, BackendEvaluateMixin, SelectionPlugin):
-    """Evaluate the candidate alone through the candidate backend, decide by the floor; the current release is not run."""
-
-    def __init__(self, candidate_backend: Any, *, floor_score: float = 1.0) -> None:
-        super().__init__(floor_score=floor_score)
-        self._candidate_backend = candidate_backend
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        return self._candidate_backend.evaluate(candidate, sides=("candidate",))
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
-        unknown = sorted(str(key) for key in config if key != "floor_score")
-        if unknown:
-            raise PluginConfigError(f"the floor selection takes floor_score, not {', '.join(unknown)}")
-        return cls(candidate_backend, floor_score=config.get("floor_score", 1.0))
-
-
-def _score_vectors(
-    evaluation: EvaluationResult,
-) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
-    candidate = tuple(evaluation.metrics.get("candidate_scores", ()))
-    current = tuple(evaluation.metrics.get("current_scores", ()))
-    return candidate, current
-
-
-def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[float | None, ...]) -> tuple[int, int]:
-    wins = losses = 0
-    for candidate_score, current_score in zip(candidate, current, strict=True):
-        candidate_rank = candidate_score if candidate_score is not None else float("-inf")
-        current_rank = current_score if current_score is not None else float("-inf")
-        if candidate_rank > current_rank:
-            wins += 1
-        elif candidate_rank < current_rank:
-            losses += 1
-    return wins, losses
 
 
 class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
@@ -726,14 +414,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._loader = Loader(self._ctx, NODE_KINDS.get)
         self._descriptor = descriptor
         self._propose = propose
-        self._score_episode = score_episode
         self._tasks = tasks
         self._models = models
         self._model_resolver = model_resolver
-        # The served binding renders into episodes only. It is resolved once
-        # here so an adapter without a matching model_binding refuses boot,
-        # not the first step.
-        self._binding_nodes = models.served.compose_nodes(descriptor)
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -753,12 +436,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
-        self._worker_selection, self._worker_requirements = evaluation_selection(
+        worker_selection, worker_requirements = evaluation_selection(
             score_episode, episode_workers, worker_executor or ExecutorSettings(), worker_gpus
         )
-        Executor.get_class(self._worker_selection.settings.backend)
-        self._episode_timeout_s = float(episode_timeout_s)
-        self._episode_repeats = episode_repeats
+        Executor.get_class(worker_selection.settings.backend)
         if on_stale not in STALE_RESULT_POLICIES:
             raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         self.on_stale = on_stale
@@ -835,25 +516,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._agent_executor = agent_executor
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_trial_timeout_s = float(agent_trial_timeout_s)
-        self._evaluation_pool = EvaluationWorkerPool(
-            self._worker_selection,
-            self._worker_requirements,
-            WorkerSpec(
-                EpisodeEvaluationWorker,
-                args=(
-                    descriptor,
-                    score_episode,
-                    self._binary,
-                    self._episode_timeout_s,
-                    self._executor,
-                    forbid_residue,
-                    self._worker_selection.settings.backend != "uni",
-                    self._worker_selection.settings.backend not in ("uni", "mp"),
-                ),
-            ),
+        # The served binding renders into episodes only. The evaluator resolves
+        # it here, so an adapter without a matching model_binding refuses boot,
+        # not the first step.
+        self._episode_evaluator = HarnessEpisodeEvaluator(
+            descriptor=descriptor,
+            scorer=score_episode,
+            tasks=tasks,
+            models=models,
+            binary=self._binary,
+            episode_timeout_s=float(episode_timeout_s),
+            episode_repeats=episode_repeats,
+            executor=self._executor,
+            forbid_residue=forbid_residue,
+            worker_selection=worker_selection,
+            worker_requirements=worker_requirements,
         )
         # Direct Python users should close explicitly; GC is a fallback only.
-        self._pool_finalizer = weakref.finalize(self, self._evaluation_pool.close)
+        self._pool_finalizer = weakref.finalize(self, self._episode_evaluator.close)
 
     def close(self) -> None:
         self._pool_finalizer()
@@ -941,7 +621,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         entries = [dict(shipped[str(entry.get("id"))]) if entry.get("id") in stale else entry for entry in entries]
         entries.extend(dict(shipped[entry_id]) for entry_id in stale if entry_id not in present)
         published = {
-            **render_composition(_nodes_from(entries), self._descriptor),
+            **render_composition(nodes_from_entries(entries), self._descriptor),
             **tree_files(self._descriptor, entries),
         }
         artifact = Artifact.local(_write_rendered_files(published))
@@ -997,7 +677,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         samples = trajectories(batch)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
-            self._binding_nodes = self._models.served.compose_nodes(self._descriptor)
+            self._episode_evaluator.use_models(self._models)
         steps = int(state.get("steps", 0)) + 1
         entries = state.get("entries")
         if entries is not None:
@@ -1237,82 +917,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         )
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
-        """Run the evaluation episodes of the named ``sides`` and return their scores.
-
-        The default runs the candidate and the current tree as pairs. A policy
-        that evaluates the candidate alone (a floor) passes ``("candidate",)``: no
-        current episode runs, ``current_scores`` is empty and the other
-        ``current_*`` keys are absent, and ``evaluation_sides`` records the choice.
-        """
+        """Run the evaluation episodes of the named ``sides`` with :class:`HarnessEpisodeEvaluator`."""
         candidate = self._require_harness_candidate(candidate)
-        sides = tuple(sides)
-        if not sides or any(side not in EVALUATION_SIDES for side in sides):
-            raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
-        # Episodes run against the tree plus the model binding. The binding
-        # is appended at render time and never enters the candidate's files,
-        # so the published artifact carries no endpoint or credential.
-        entries = {"candidate": candidate.candidate_entries, "current": candidate.current_entries}
-        files = {side: self._render_for_episode(entries[side]) for side in sides}
-        # Episodes interleave candidate and current inside each pairing, so
-        # anything that drifts during the run (upstream load, rate limits)
-        # lands on both sides of a pair instead of one whole side. A repeat
-        # is one more pairing of the same task; the selector compares the
-        # vectors positionally, so every pairing tallies on its own. Each
-        # episode is independent work in its own root, so with more than one
-        # worker the pairings run in one pool - a large task set costs one
-        # wave instead of a long turn-taking pass - and the results are read
-        # back in submission order either way.
-        # An older candidate carries no evaluation_tasks and falls back to the seed set.
-        evaluation_tasks = candidate.evaluation_tasks or candidate.gate_tasks or self._tasks
-        episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
-        pairings = [
-            (files[side], task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
-            for index, task in enumerate(evaluation_tasks)
-            for repeat in range(self._episode_repeats)
-            for side in sides
-        ]
         progress = self._step_progress
         if progress is not None:
             # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
-            self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
-        scored = self._evaluate_pairings(pairings)
-        runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
-        tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
-        scores = {side: tuple(run.score for run in runs[side]) for side in sides}
-        metrics: dict[str, Any] = {
-            "candidate_scores": scores.get("candidate", ()),
-            "current_scores": scores.get("current", ()),
-            "episode_failures": sum(score is None for side in sides for score in scores[side]),
-            "episode_repeats": self._episode_repeats,
-        }
-        for side in sides:
-            # Failure observations ride the evaluation so settlement can
-            # build the committed side's manifest from the decision alone.
-            metrics[f"{side}_failures"] = tuple(run.failure.to_dict() for run in runs[side] if run.failure is not None)
-            metrics[f"{side}_residue"] = sum(run.residue for run in runs[side])
-            metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
-            # Per agent sums over the side's episodes, so a result says which agent did the work.
-            metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
-            # Per episode, in pairing order: the root's stage path and how its turn ended.
-            metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
-        if "candidate" in sides:
-            # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
-            metrics["candidate_episodes"] = [
-                {
-                    "task": clip_redacted(task, EPISODE_SUMMARY_CHARS),
-                    "score": run.score,
-                    "failure": (
-                        None if run.failure is None else clip_redacted(run.failure.cause, EPISODE_SUMMARY_CHARS)
-                    ),
-                    "reply": None if run.reply is None else clip_redacted(run.reply, EPISODE_SUMMARY_CHARS),
-                    # Only when missing, so a summary of an ordinary episode keeps its shape.
-                    **({} if run.transcript_read else {"transcript_read": False}),
-                }
-                for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
-            ]
-        if sides != EVALUATION_SIDES:
-            metrics["evaluation_sides"] = list(sides)
-        return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
+            episodes_total = self._episode_evaluator.episode_count(candidate, len(tuple(sides)))
+            self._step_progress = replace(progress, phase="evaluating", episodes_total=episodes_total)
+        return self._episode_evaluator.evaluate(candidate, sides=sides)
 
     def settle_step(
         self,
@@ -1567,27 +1179,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
     @staticmethod
-    def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
-        return _agent_work(trajectory)
-
-    def _evaluate_pairings(self, pairings):
-        scored = self._evaluation_pool.evaluate(pairings, models=self._models)
-        for pairing, result in zip(pairings, scored, strict=True):
-            if result.record_archive is not None:
-                keep_dir = pairing[2]
-                try:
-                    # Never merge into an earlier episode's record. Extraction
-                    # rejects path traversal, escaping links and special files.
-                    keep_dir.mkdir(parents=True)
-                    with tarfile.open(fileobj=BytesIO(result.record_archive), mode="r:gz") as archive:
-                        archive.extractall(keep_dir, filter="data")
-                except (OSError, tarfile.TarError) as exc:
-                    raise TrajectoryKeepError(
-                        f"cannot keep remote episode trajectory under {keep_dir}: {exc}"
-                    ) from exc
-        return scored
-
-    @staticmethod
     def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:
         """Node kinds the mutations touch; update and remove read the kind off the pre-mutation tree."""
         # The kind after the mutation: an update cannot change it (_apply refuses), and a remove reads it
@@ -1608,18 +1199,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
         }
 
-    def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-        """The tree plus the model binding, and the entries list beside them where the adapter carries one."""
-        files = render_composition((*_nodes_from(entries), *self._binding_nodes), self._descriptor)
-        return {**files, **tree_files(self._descriptor, entries)}
-
     def _nodes(self) -> tuple[tuple[str, Any], ...]:
         """The enabled composition in tree order, as (kind, config) pairs."""
-        return _nodes_from(self._entries())
+        return nodes_from_entries(self._entries())
 
     @staticmethod
     def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
-        return _nodes_from(entries)
+        return nodes_from_entries(entries)
 
     def _entries(self) -> list[EntryOptions]:
         """Live entry options in tree order."""
@@ -1700,137 +1286,6 @@ def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
     if not mutations:
         raise MutationError(f"proposal {proposal.id} carries no mutations")
     return tuple(mutations)
-
-
-@dataclass(frozen=True)
-class _ScoredEpisode:
-    """One evaluation episode as the evaluation keeps it: the score, or why it has none, and what the trajectory showed."""
-
-    score: float | None
-    failure: FailureObservation | None
-    residue: int = 0
-    agents: dict[str, dict[str, int]] = field(default_factory=dict)
-    #: The root's stage path and end reason; ``None`` when no trajectory was read.
-    path: dict[str, Any] | None = None
-    #: The final assistant text the trajectory holds, the reply a text grader reads; ``None`` when it holds none.
-    reply: str | None = None
-    #: Whether the reader found a session log; a scored episode without one left a text grader nothing to read.
-    transcript_read: bool = True
-    #: Remote workers return the kept trajectory; the driver owns its durable path.
-    record_archive: bytes | None = field(default=None, repr=False)
-
-
-#: How many candidate episodes a step's evaluation summarizes, and how much of each text it keeps: a summary for
-#: the pages, never the traffic.
-EPISODE_SUMMARIES = 8
-EPISODE_SUMMARY_CHARS = 240
-
-
-def clip_redacted(text: str, limit: int) -> str:
-    """``text`` redacted as the record is, cut at ``limit`` characters with an ellipsis marker."""
-    text = redact_secret_shaped(text).strip()
-    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
-
-
-def _write_episode_record(
-    keep_dir: Path | None, task: str, result: EpisodeResult | None, scored: _ScoredEpisode
-) -> None:
-    """``episode.json`` beside the kept trajectory: what the scorer saw, so a result can be re-derived from the record."""
-    if keep_dir is None:
-        return
-    record = {
-        "task": _clip(task),
-        "score": scored.score,
-        "failure": None if scored.failure is None else scored.failure.to_dict(),
-        "path": scored.path,
-        "exit_code": None if result is None else result.exit_code,
-        "stdout": None if result is None else _clip(result.stdout),
-        "stderr": None if result is None else _clip(result.stderr),
-        "residue": None if result is None else [_clip(str(path)) for path in result.residue],
-    }
-    # An episode that never wrote an event has no trajectory copy, so the directory may not exist yet.
-    keep_dir.mkdir(parents=True, exist_ok=True)
-    with open(keep_dir / RECORD_EPISODE_FILE, "x", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, indent=2, default=str) + "\n")
-
-
-def _root_header(trajectory: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
-    """The root's ``session`` line of a native-jsonl trajectory (the agents' files sort first); empty for other formats."""
-    for event in trajectory:
-        data = event.get("data") or {}
-        if event.get("type") == "session" and str(data.get("agent") or "root") == "root":
-            return data
-    return {}
-
-
-def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
-    stages: list[str] = []
-    reason: str | None = None
-    errors: dict[str, Mapping[str, Any]] = {}
-    agent: str | None = None
-    for event in trajectory:
-        type_, data = event.get("type"), event.get("data") or {}
-        if type_ == "session":
-            agent = str(data.get("agent") or "root")
-        elif type_ == "turn/end" and agent is not None:
-            details = data.get("reason") or {}
-            kind = details.get("kind")
-            if kind == "error" and isinstance(details.get("error"), Mapping):
-                errors[agent] = details["error"]
-            if agent == "root":
-                reason = None if kind is None else str(kind)
-        elif agent != "root":
-            continue
-        elif type_ == "stage/exit":
-            stages.append(str(data.get("stage")))
-    path: dict[str, Any] = {"stages": stages, "reason": reason}
-    # The root's own error, else the error of an agent whose failure ended the run before the root wrote its end:
-    # a subagent's model error aborts the whole run with no root turn/end.
-    errored = "root" if "root" in errors else next((name for name in errors if reason is None), None)
-    if errored is not None:
-        path["error"] = dict(errors[errored])
-        if errored != "root":
-            path["errored_agent"] = errored
-    return path
-
-
-#: The counters a result carries per agent; the token pair is what the endpoint reported, zero when it reported none.
-AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
-
-
-def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
-    """Turns, steps, tool calls, tool errors and reported tokens per agent of a
-    native-jsonl trajectory; empty for other formats."""
-    work: dict[str, dict[str, int]] = {}
-    agent: str | None = None
-    for event in trajectory:
-        type_, data = event.get("type"), event.get("data") or {}
-        if type_ == "session":
-            agent = str(data.get("agent") or "root")
-            work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
-        elif agent is None:
-            continue
-        elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
-            work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
-            work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
-        elif type_ == "step/start":
-            work[agent]["steps"] += 1
-        elif type_ == "tool/call":
-            work[agent]["tool_calls"] += 1
-        elif type_ == "tool/result" and data.get("is_error"):
-            work[agent]["tool_errors"] += 1
-    return work
-
-
-def _sum_agents(runs: Any) -> dict[str, dict[str, int]]:
-    total: dict[str, dict[str, int]] = {}
-    for work in runs:
-        for agent, counts in work.items():
-            sums = total.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))
-            for key, value in counts.items():
-                sums[key] = sums.get(key, 0) + value
-    return {agent: total[agent] for agent in sorted(total)}
 
 
 def _write_rendered_files(files: Mapping[str, str]) -> Path:

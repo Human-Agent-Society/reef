@@ -637,7 +637,7 @@ lower than teacher-only. The RFC does not predeclare a quality tolerance;
 the example PR must state and justify its threshold before reporting success.
 
 The example receives an entrypoint contract test in
-``tests/test_example_entrypoints.py`` and a deterministic CPU/container test
+``tests/contributing/test_example_entrypoints.py`` and a deterministic CPU/container test
 with fake student, teacher, and verifier services. A GPU reproduction records
 the real model result but is not required in ordinary CPU CI.
 

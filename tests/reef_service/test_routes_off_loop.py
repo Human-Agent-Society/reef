@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.scenario.test_component_trainers import _dispatcher
 
 from reef.service.app import create_app
-
-from .test_component_trainers import _dispatcher
 
 
 @pytest.mark.unit

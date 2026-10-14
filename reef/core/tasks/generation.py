@@ -1,9 +1,9 @@
 """The task generation contract: the request, the generated tasks, and their play results.
 
-A deployment selects one :class:`TaskGenerator` in its ``task-generation``
-section. A recipe that trains on generated tasks asks the generator for tasks,
-validates each one, plays the valid ones, and sends the results back to the
-generator. This module holds the values, their field validation, and the
+A deployment selects one :class:`TaskGenerator` in its
+``pipeline.record2task.config.generator`` setting. A recipe that trains on
+generated tasks asks the generator for tasks, validates each one, plays the
+valid ones, and sends the results back to the generator. This module holds the values, their field validation, and the
 generator interface. Consumers own file reads, transport limits, and execution.
 """
 
@@ -187,7 +187,7 @@ class TaskPlayResult:
 class TaskGenerator(Plugin, ABC):
     """Makes tasks for one scenario, and adapts to how the agent played them.
 
-    A deployment names the class in its ``task-generation`` section. Reef calls
+    A deployment names the class in ``pipeline.record2task.config.generator``. Reef calls
     :meth:`from_config` once for each scenario. A generator gets what it needs
     from its config and from these calls only; it does not read the recipe's
     settings.

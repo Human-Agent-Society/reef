@@ -13,7 +13,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.observability.commits import CommitExperimentObserver
+from reef.observability.commits import CommitExperimentObserver, LoadedExperimentReports
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStore, RecordObserver
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -215,4 +215,55 @@ def test_pending_and_rejected_commits_keep_the_served_source_and_resume_without_
         assert tracker.events[-1].context.run_step == 2
     finally:
         store.close()
+        storage.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("recovering", [False, True])
+def test_nested_loads_deliver_in_commit_order_after_all_scopes_exit(tmp_path, recovering):
+    from contextlib import nullcontext
+
+    storage = SQLiteScenarioStorage(tmp_path)
+    tracker = RecordingTracker()
+    reports = LoadedExperimentReports()
+    delivery = reports.delivery_for("math", tracker)
+    first = CommitExperimentObserver(
+        tracker,
+        scenario="math",
+        recipe="recipe",
+        source_artifact_ref=ArtifactRef("seed", "seed", None),
+        scenario_step=0,
+        store=storage.open("math"),
+        delivery=delivery,
+    )
+    second = None
+    try:
+        # Recovery can nest a load under an existing commit's reporting scope.
+        with first.reporting() if recovering else nullcontext():
+            with reports.scope():
+                if not recovering:
+                    reports.defer(first)
+                first.store.commit_step(expected_step=0, commit=training_record(1))
+                second = CommitExperimentObserver(
+                    tracker,
+                    scenario="math",
+                    recipe="recipe",
+                    source_artifact_ref=training_record(1).artifact_ref,
+                    scenario_step=1,
+                    store=storage.open("math"),
+                    delivery=reports.delivery_for("math", tracker),
+                )
+                with reports.scope():
+                    reports.defer(second)
+                    second.store.commit_step(expected_step=1, commit=training_record(2))
+                assert tracker.events == []
+            if recovering:
+                assert tracker.events == []
+        assert [event.context.step for event in tracker.events] == [1, 2]
+        delivery.flush()
+        assert [event.context.step for event in tracker.events] == [1, 2]
+    finally:
+        first.store.close()
+        if second is not None:
+            second.store.close()
         storage.close()

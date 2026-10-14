@@ -11,8 +11,8 @@ Reproduction of [Self-Distillation Fine-Tuning](https://arxiv.org/abs/2601.19897
 
 ```text
 sdft/
-  recipe.py          SDFTRecipe: training spec, loss family "sdft"; its report contract is reef.core.reports.TeacherContextReport
-  processor.py       the shared DistillProcessor with the demonstration appended to the recorded request
+  recipe.py          SDFTRecipe: training spec, pipeline spec, loss family "sdft"; its report contract is reef.core.reports.TeacherContextReport
+  processor.py       SDFTTasks: the shared DistillTasks with the demonstration appended to the recorded request; SDFTBatches
   objective.py       selects the sdft loss; the recipe binds the per-sample step schedule
   slime/             the loss family: SDFT's defaults and hook names on the Slime backend's distillation base
   examples/
@@ -21,4 +21,4 @@ sdft/
 
 ## Where the rest is documented
 
-[The sdft recipe page](../../docs/user-guide/recipes/sdft.rst) covers the report contract, configuration and the driver flags, and [Loss families](../../docs/developer-guide/loss-families.rst) describes how the family plugs into the Slime backend.
+[The sdft recipe page](../../docs/user-guide/recipes/sdft.rst) covers the report contract, the `pipeline` configuration of the stages and the driver flags, and [Loss families](../../docs/developer-guide/loss-families.rst) describes how the family plugs into the Slime backend.

@@ -9,6 +9,7 @@ the class only; the recipe builds the plugin later with the class method
 Each plugin base declares its own ``from_config`` with the arguments that
 plugin needs; :class:`Plugin` is their common base. :class:`ConfiguredPlugin`
 is the base for plugins that need only their configuration.
+:class:`PluginSettings` is the base of the dataclass a plugin's config parses into.
 """
 
 from __future__ import annotations
@@ -17,11 +18,10 @@ import importlib
 import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Generic, Self, TypeVar
+from typing import Any, Self
 
+from reef.core.config import Settings
 from reef.core.errors import ReefError
-
-PluginT = TypeVar("PluginT")
 
 
 class PluginConfigError(ReefError, ValueError):
@@ -29,14 +29,17 @@ class PluginConfigError(ReefError, ValueError):
 
 
 @dataclass(frozen=True)
-class PluginReference(Generic[PluginT]):
-    """A checked plugin class and the configuration its ``from_config`` receives."""
+class PluginReference:
+    """A checked plugin class and the configuration its ``from_config`` receives.
 
-    plugin_class: type[PluginT]
+    A plugin base reads the class back as its own subclass with ``referenced_class``.
+    """
+
+    plugin_class: type[Plugin]
     config: Mapping[str, Any] = field(default_factory=dict)
 
 
-def plugin_reference(value: object, base: type[PluginT], *, setting: str) -> PluginReference[PluginT]:
+def plugin_reference(value: object, base: type[Plugin], *, setting: str) -> PluginReference:
     """Read one plugin setting: import the class it names and check that it inherits ``base``."""
     if isinstance(value, str):
         reference: object = value
@@ -75,9 +78,16 @@ class Plugin:
     """
 
     @classmethod
-    def reference(cls, value: object, *, setting: str) -> PluginReference[Self]:
+    def reference(cls, value: object, *, setting: str) -> PluginReference:
         """Read one setting that names a subclass of this plugin base."""
         return plugin_reference(value, cls, setting=setting)
+
+    @classmethod
+    def referenced_class(cls, reference: PluginReference) -> type[Self]:
+        """The class that ``reference`` names, as a subclass of this plugin base."""
+        if not issubclass(reference.plugin_class, cls):
+            raise PluginConfigError(f"{reference.plugin_class.__name__} does not inherit {cls.__name__}")
+        return reference.plugin_class
 
 
 class ConfiguredPlugin(Plugin):
@@ -99,13 +109,35 @@ class ConfiguredPlugin(Plugin):
         if isinstance(value, cls):
             return value
         reference = cls.reference(value, setting=setting)
-        return reference.plugin_class.from_config(reference.config)
+        return cls.referenced_class(reference).from_config(reference.config)
+
+
+class PluginSettings(Settings):
+    """Base of the settings dataclass that a plugin's config parses into, in the plugin's ``from_config``."""
+
+    @classmethod
+    def parse(cls, config: Mapping[str, Any], *, plugin_class: type[Plugin]) -> Self:
+        """Parse the config of ``plugin_class``, which names the config in errors; a bad config is a ``PluginConfigError``."""
+        if cls is NoSettings and config:
+            names = ", ".join(sorted(map(str, config)))
+            raise PluginConfigError(f"{plugin_class.__name__} takes no config, got {names}")
+        try:
+            return cls.from_config(config, setting=plugin_class.__name__)
+        except ValueError as exc:
+            raise PluginConfigError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class NoSettings(PluginSettings):
+    """The settings of a plugin that takes no config. An empty config parses into it; any key is refused."""
 
 
 __all__ = [
     "ConfiguredPlugin",
+    "NoSettings",
     "Plugin",
     "PluginConfigError",
     "PluginReference",
+    "PluginSettings",
     "plugin_reference",
 ]

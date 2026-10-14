@@ -31,10 +31,11 @@ Implementation
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
   settings again in ``reef/service/``.
-- Put the method's record-to-batch behavior in
-  ``<method-package>/processor.py``, subclassing a processor contract
-  from ``reef/train/processors/``; extend those contracts only when they do
-  not already express it.
+- Put the method's record-to-task and task-to-batch stages in
+  ``<method-package>/processor.py``, subclassing ``ReportTasks`` or
+  ``JudgedTasks`` (``reef/record2task/``) and ``Task2Batch``
+  (``reef/task2batch/``), and its record stage in the recipe module.
+  Extend those contracts only when they do not already express it.
 - Put the method's backend-neutral training objective in
   ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
   contract). Backend-specific payload
@@ -51,15 +52,15 @@ Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
 
 - Add dotted-resolution and configuration tests in
-  ``tests/reef_service/test_reef_recipes.py`` and
-  ``tests/reef_service/test_recipe_config_fields.py``.
-- Add method behavior tests under ``tests/reef_service/``. Add an integration
+  ``tests/reef_recipe/test_reef_recipes.py`` and
+  ``tests/reef_recipe/test_recipe_config_fields.py``.
+- Add method behavior tests under ``tests/recipes/<method>/``. Add an integration
   contract when the method calls into a concrete backend.
 - Put every runnable configuration beside its method under
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant processor, objective, or surface
+  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or surface
   reference if its public contract changes.
 
 Add a training integration
@@ -110,7 +111,7 @@ Tests and documentation
   ``tests/plugin_contracts/``.
 - Put service-facing lifecycle and wire contracts in ``tests/reef_service/``.
 - Prove that importing backend-neutral Reef modules does not import the
-  framework. Extend ``tests/reef_service/test_dependency_boundaries.py`` when
+  framework. Extend ``tests/contributing/test_dependency_boundaries.py`` when
   a new package dependency rule is added.
 - Update the ``reef/train`` package docstring, the Integration API,
   deployment guidance, and the configuration reference.
@@ -187,9 +188,9 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   ``FileTree`` under ``reef/surface/``.
 - Build the surface from the owning recipe; do not make the surface choose a
   method or evaluate a candidate.
-- Test surface behavior in ``tests/reef_service/test_surfaces.py`` or the
+- Test surface behavior in ``tests/surface/test_surfaces.py`` or the
   closest artifact-specific surface test. Test storage backends against the
-  contracts in ``tests/reef_service/test_reef_artifacts.py``.
+  contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, rollback, and recovery tests whenever persistence or
   activation ordering changes. Persisted-format changes require an RFC and a
   compatibility contract.
@@ -233,9 +234,9 @@ under ``recipes/<name>/examples/`` or in the external harness.
   ``reef.harness_adapters`` entry-point group that resolves to an
   ``AdapterDescriptor`` or a zero-argument descriptor factory.
 - Add descriptor and golden-render coverage in
-  ``tests/reef_service/test_harness_render.py``. Add episode, cleanup, install,
+  ``tests/harness/test_harness_render.py``. Add episode, cleanup, install,
   and trajectory tests for the capabilities the descriptor declares.
-- Put golden trees under ``tests/reef_service/data/harness_goldens/`` and a
+- Put golden trees under ``tests/harness/data/harness_goldens/`` and a
   real-binary smoke test under ``tests/smoke/`` when CI can install the pinned
   harness version.
 - Update `HTTP API <../reference/http-api.rst>`__ when the public

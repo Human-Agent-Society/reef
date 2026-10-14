@@ -25,6 +25,8 @@ import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.train.test_harness_evolve_processor import harness_stages
 
 import reef.harness.adapters
 import reef.service.routes.system as system_routes
@@ -37,7 +39,7 @@ from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, 
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
-from reef.harness.tree.render import render_composition
+from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
@@ -55,8 +57,6 @@ from reef.service.install_script import (
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.backend import tree_files
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -159,7 +159,7 @@ def _dispatcher(
     mutations: tuple[Mutation, ...],
     *,
     bootstrap_files: dict[str, str] | None = None,
-    batch_policy: str = "reports",
+    inference_stages: bool = False,
     batch_size: int = 1,
     seed: tuple[dict, ...] = (),
     api: str = "openai",
@@ -178,8 +178,7 @@ def _dispatcher(
         adapter=adapter,
         model_metadata=model_metadata or {},
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
-        batch_policy=batch_policy,
-        batch_size=batch_size,
+        pipeline_stages=harness_stages(batch_size, inference=inference_stages),
         seed=seed,
     )
     bootstrap = tmp_path / "bootstrap"
@@ -352,7 +351,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
             assert scenario["scenario_step"] == committed["step"] == 1
             assert committed["metrics"]["published"] is False
             assert committed["metrics"]["selected"] is False
-            assert committed["metrics"]["selection"]["outcome"] == "reject"
+            assert committed["metrics"]["selection"]["selected"] is False
             response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
             assert response.status == 404
         finally:
@@ -2678,7 +2677,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
     report is ever posted."""
 
     async def run() -> None:
-        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
+        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], inference_stages=True, batch_size=2)
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
         await client.start_server()
         try:

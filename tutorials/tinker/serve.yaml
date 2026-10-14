@@ -1,5 +1,4 @@
 # Four short rollouts and one optimizer step; synthetic smoke rewards, not an evaluation.
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -14,9 +13,13 @@ inference:
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
   config:
-    groups-per-step: 1
-    rollouts-per-group: 4
     checkpoint-every-n-versions: 1
+# TTTD's step grid: one group of four rollouts.
+pipeline:
+  record2record:
+    config:
+      groups_per_step: 1
+      rollouts_per_group: 4
 training:
   backend: tinker
   ready-timeout: 1800

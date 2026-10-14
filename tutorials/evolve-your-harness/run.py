@@ -88,8 +88,9 @@ def main():
             {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
             references=[receipt],
         )
-        # The recipe batches valid scored reports, passing ones included (data.batch_policy: reports), and
-        # batch_size: 1 makes each report its own batch: one submitted report is one step this run triggers.
+        # The recipe's default stages batch valid scored reports, passing ones included, and
+        # pipeline.task2batch.config.batch_size: 1 makes each report its own batch: one submitted report is one
+        # step this run triggers.
         batched += 1
         if score == 0.0:
             failures += 1
@@ -286,8 +287,9 @@ def native_main():
         prefix = task.split(maxsplit=1)[0]
         score = evolution.grade_text(task, result["text"])
         report(score, prefix)
-        # The recipe batches valid scored reports, passing ones included (data.batch_policy: reports), and
-        # batch_size: 1 makes each report its own batch: one submitted report is one step this run triggers.
+        # The recipe's default stages batch valid scored reports, passing ones included, and
+        # pipeline.task2batch.config.batch_size: 1 makes each report its own batch: one submitted report is one
+        # step this run triggers.
         batched += 1
         if score == 0.0:
             failures += 1

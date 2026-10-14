@@ -67,7 +67,7 @@ Register the spec by reference from the package ``__init__`` —
 ``register_loss_family_ref("<name>", "my_method.slime:MyMethodAlgorithm")``
 (:mod:`reef.train.algos.registry`) — so the service never imports
 the Slime side and the driver imports it on first resolve. Naming conventions, enforced by
-``tests/reef_service/test_slime_algorithm_contract.py``: the spec class is
+``tests/slime_backend/test_slime_algorithm_contract.py``: the spec class is
 ``<Pkg>Algorithm`` and its driver options ``<Pkg>Settings``, both importable
 from the family package root; ``@objective`` entry points are ``<pkg>_loss``,
 ``<pkg>_advantages``, ``<pkg>_actor_init`` / ``<pkg>_actor_pre_train``; family

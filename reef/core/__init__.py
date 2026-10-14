@@ -20,7 +20,7 @@ The boundary is directional: core imports nothing above it. In particular
 ``reef.core`` never imports ``reef.artifact`` — ``artifact_ref`` lives here
 so identity can be shared without pulling in storage, and
 ``artifacts/artifact.py`` re-exports it. Pinned by
-``tests/reef_service/test_dependency_boundaries.py``.
+``tests/contributing/test_dependency_boundaries.py``.
 """
 
 from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans

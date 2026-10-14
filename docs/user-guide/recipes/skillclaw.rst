@@ -16,7 +16,7 @@ observation changes the pool, and the next day measures what changed.
 +-------------+--------------------------------------------------------------+
 | Package     | ``recipes/skillclaw/``                                       |
 +-------------+--------------------------------------------------------------+
-| Processor   | reported feedback, producing trace items                     |
+| Pipeline    | reported feedback, producing trace items                     |
 +-------------+--------------------------------------------------------------+
 | Needs       | a Reef process, the ``pi`` binary, and Docker for the        |
 |             | Harbor tasks. Reef itself needs no GPU.                      |
@@ -64,8 +64,8 @@ Configuration
 
 ``recipes/skillclaw/skillclaw.yaml`` is the recipe config the driver boots. It
 names ``recipes.skillclaw.recipe:SkillClawRecipe`` as its ``implementation``
-and sets ``batch_size: 60``, so every report of the
-day batches and the day's last one triggers the night. The engine's keys are
+and sets ``pipeline.task2batch.config.batch_size: 60``, so every report of
+the day batches and the day's last one triggers the night. The engine's keys are
 in `Recipe configuration
 <../../reference/configuration.rst#recipe-configuration>`__.
 

@@ -1,4 +1,4 @@
-"""Versioned layout and native backend transport public contracts."""
+"""Configuration file layout and native backend transport public contracts."""
 
 from __future__ import annotations
 
@@ -24,7 +24,6 @@ from reef.service.deploy.service_config import normalize_service_config, service
 def test_public_layout_and_cli_preserve_values_and_opaque_options():
     config = translate_layout(
         {
-            "schema-version": 2,
             "reef": {"port": 8000, "token": "001"},
             "inference": {
                 "model-path": "org/model",
@@ -57,7 +56,6 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
 def test_request_handler_configuration_is_independent_of_native_backend_selection():
     config = translate_layout(
         {
-            "schema-version": 2,
             "inference": {
                 "backend": "sglang",
                 "handler-factory": "example.handlers.InitialHandler",
@@ -86,19 +84,20 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
 @pytest.mark.parametrize(
     "value, message",
     [
-        ({"schema-version": 3}, "unsupported"),
-        ({"schema-version": True}, "unsupported"),
-        ({"schema-version": 2, "service": {}}, "does not accept service/services"),
-        ({"schema-version": 2, "services": []}, "does not accept service/services"),
-        ({"schema-version": 2, "infernce": {}}, "unknown config sections"),
-        ({"schema-version": 2, "inference": {"model-pth": {}}}, "unknown config fields"),
-        ({"schema-version": 2, "inference": {"backend-factory": "example.Factory"}}, "unknown config fields"),
-        ({"schema-version": 2, "inference": {"backend-config": {}}}, "unknown config fields"),
-        ({"schema-version": 2, "reef": "oops"}, "must be an object"),
-        ({"schema-version": 2, "inference": {"model-path": "a", "model_path": "b"}}, "duplicate"),
+        ({"service": {}}, "service/services are not accepted"),
+        ({"services": []}, "service/services are not accepted"),
+        ({"execution": {"services": "uni"}}, "execution.services is not accepted"),
+        ({"infernce": {}}, "unknown config sections"),
+        ({"implementation": "recipe"}, "unknown config sections"),
+        ({"reef": {"recipe": "recipe"}}, r"unknown config fields: reef\.recipe"),
+        ({"inference": {"model-pth": {}}}, "unknown config fields"),
+        ({"inference": {"backend-factory": "example.Factory"}}, "unknown config fields"),
+        ({"inference": {"backend-config": {}}}, "unknown config fields"),
+        ({"reef": "oops"}, "must be an object"),
+        ({"inference": {"model-path": "a", "model_path": "b"}}, "duplicate"),
     ],
 )
-def test_invalid_versioned_layout_fails(value, message):
+def test_invalid_layout_fails(value, message):
     with pytest.raises(DeployConfigError, match=message):
         translate_layout(value)
 
@@ -106,7 +105,6 @@ def test_invalid_versioned_layout_fails(value, message):
 def test_component_yaml_spelling_and_public_references():
     config = translate_layout(
         {
-            "schema-version": 2,
             "reef": {"port": 9001},
             "execution": {"evolution": {"backend": "uni", "resources": {"cpus-per-worker": 0.5}}},
             "inference": {"options": {"custom": "${reef.port}"}},
@@ -152,8 +150,8 @@ def test_native_option_aliases_and_object_replacement():
         native_arguments({"foo_bar": 1, "foo-bar": 2})
 
 
-def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, monkeypatch):
-    raw = {"schema-version": 2, "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001"}}
+def test_files_always_pass_resolved_config_to_children(tmp_path, monkeypatch):
+    raw = {"inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001"}}
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(raw))
     captured = {}
@@ -179,53 +177,54 @@ def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, mon
     assert orchestrator._run_orchestrator(str(path)) == 0
     assert captured["path"] != path and not captured["path"].exists()
     assert captured["config"]["reef"]["upstream_model"] == "001"
-    assert "schema-version" not in captured["config"]
     assert yaml.safe_load(path.read_text()) == raw
 
 
-def test_versioned_files_reject_repeated_yaml_keys_with_their_lines(tmp_path):
-    text = "reef:\n  port: 8000\n  port: 9000\ninference:\n  options:\n    lr: 1\n    lr: 2\n"
-    versioned = tmp_path / "config.yaml"
-    versioned.write_text("schema-version: 2\n" + text)
+def test_files_reject_repeated_yaml_keys_with_their_lines(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("reef:\n  port: 8000\n  port: 9000\ninference:\n  options:\n    lr: 1\n    lr: 2\n")
     with pytest.raises(
-        DeployConfigError, match=r"reef\.port \(lines 3 and 4\); inference\.options\.lr \(lines 7 and 8\)"
+        DeployConfigError, match=r"reef\.port \(lines 2 and 3\); inference\.options\.lr \(lines 6 and 7\)"
     ):
-        load_config(versioned)
-    legacy = tmp_path / "legacy.yaml"
-    legacy.write_text(text)
-    assert load_config(legacy)["reef"]["port"] == 9000
+        load_config(path)
 
 
 @pytest.mark.parametrize(
     "section, field",
     [("reef", "port"), ("reef", "host"), ("inference", "timeout-s"), ("training", "ready-timeout")],
 )
-def test_versioned_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, field):
-    raw = {"schema-version": 2, section: {field: None}}
+def test_null_is_rejected_where_the_field_is_not_optional(tmp_path, section, field):
+    raw = {section: {field: None}}
     with pytest.raises(DeployConfigError, match=rf"{section}\.{field} does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
 
 
-def test_versioned_null_is_kept_for_optional_fields_and_legacy_null_still_defaults(tmp_path):
+def test_null_is_kept_for_optional_fields(tmp_path):
     raw = {
-        "schema-version": 2,
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001", "upstream-api-key": None},
-        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": None}},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"max-staleness": None}},
     }
-    with pytest.raises(DeployConfigError, match=r"recipe\.config\.batch-size does not accept null"):
+    with pytest.raises(DeployConfigError, match=r"recipe\.config\.max-staleness does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     raw["recipe"]["config"] = {"checkpoint-every-n-versions": None}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
     config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     assert config["reef"]["checkpoint_every_n_versions"] is None
-    legacy = {"reef": {"recipe": "recipe", "port": None}, "services": []}
-    config, _ = orchestrator.resolve_deployment_config(legacy, None, tmp_path / "legacy.yaml")
-    assert service_config_from_mapping(config).port == 8900
+
+
+def test_recipe_config_refuses_a_stage_setting(tmp_path):
+    # batch_size belongs to the task-to-batch stage, under the pipeline section.
+    raw = {
+        "inference": {"model-path": "/models/demo"},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": 4}},
+    }
+    with pytest.raises(DeployConfigError, match=r"unknown recipe\.config field: batch_size"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
 
 
 def test_automatic_stack_rejects_unused_training_options(tmp_path):
     path = tmp_path / "config.yaml"
-    path.write_text(yaml.safe_dump({"schema-version": 2, "training": {"options": {"lr": 1e-6}}}))
+    path.write_text(yaml.safe_dump({"training": {"options": {"lr": 1e-6}}}))
     with pytest.raises(DeployConfigError, match="select a weight-training recipe"):
         orchestrator._run_orchestrator(str(path))
 
@@ -253,12 +252,10 @@ def test_shipped_reef_yamls_use_the_public_layout():
             if "work" in path.relative_to(root).parts:
                 continue
             text = path.read_text()
-            if not re.search(r"(?m)^(schema-version|reef|implementation):", text):
+            if not re.search(r"(?m)^(reef|recipe|implementation):", text):
                 continue
             configs.append(path)
-            config = yaml.safe_load(text)
-            assert config.get("schema-version") == 2, path
-            assert not {"service", "services", "implementation", "data", "evolution"} & config.keys(), path
+            translate_layout(yaml.safe_load(text))
     assert len(configs) >= 15
 
 
@@ -284,7 +281,6 @@ def test_declared_recipe_sections_support_leaf_overrides():
 @pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])
 def test_standalone_inference_capacity_is_one_engine(tmp_path, num_gpus, tp, valid):
     raw = {
-        "schema-version": 2,
         "inference": {
             "model-path": "/models/demo",
             "num-gpus": num_gpus,
@@ -303,7 +299,6 @@ def test_standalone_inference_capacity_is_one_engine(tmp_path, num_gpus, tp, val
 
 def test_provider_without_local_model_rejects_gpu_request(tmp_path):
     raw = {
-        "schema-version": 2,
         "inference": {
             "upstream-url": "http://localhost:8000",
             "upstream-model": "demo",

@@ -129,7 +129,9 @@ class ScenarioFactory:
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
         self._storage = scenario_storage
-        self.loaded_experiment_reports = loaded_experiment_reports
+        self.loaded_experiment_reports = (
+            loaded_experiment_reports if loaded_experiment_reports is not None else LoadedExperimentReports()
+        )
 
     def has_registration(self, scenario: str) -> bool:
         """True when the scenario is durably registered with the backend."""
@@ -368,7 +370,8 @@ class ScenarioFactory:
                 experiment_logger=experiment_logger,
             )
             if any(
-                bound.trainer.candidate_backend is not None and bound.trainer.training_mode != recipe.training_mode
+                bound.trainer.candidate_backend is not None
+                and bound.trainer.pipeline.training_mode != recipe.training_mode
                 for bound in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
@@ -387,6 +390,7 @@ class ScenarioFactory:
                     source_artifact_ref=repository.require_current_artifact(),
                     scenario_step=scenario_step,
                     store=store,
+                    delivery=self.loaded_experiment_reports.delivery_for(name, self._experiment_tracker),
                 )
                 store = experiment_observer.store
             scenario = Scenario(
@@ -430,7 +434,7 @@ class ScenarioFactory:
                     scenario.reingest(up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=bound.component)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
-            if experiment_observer is not None and self.loaded_experiment_reports is not None:
+            if experiment_observer is not None:
                 self.loaded_experiment_reports.defer(experiment_observer)
             scenario.publish_shipped_content()
             return scenario

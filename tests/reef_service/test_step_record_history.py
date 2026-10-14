@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_proposals import _dispatcher as _instruction_dispatcher
-from reef_service.test_harness_proposals import _recipe
-from reef_service.test_harness_requests import _request
-from reef_service.test_release_page import FIRST, SCENARIO, _committed, _dispatcher
+from tests.reef_service.test_harness_proposals import _dispatcher as _instruction_dispatcher
+from tests.reef_service.test_harness_proposals import _recipe
+from tests.reef_service.test_harness_requests import _request
+from tests.reef_service.test_release_page import FIRST, SCENARIO, _committed, _dispatcher
 
 from reef.service.app import create_app
 from reef.train.cordis_backend.record_history import MAX_RECORD_BYTES, read_step_records

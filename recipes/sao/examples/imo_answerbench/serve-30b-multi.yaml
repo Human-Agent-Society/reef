@@ -6,7 +6,6 @@
 # fed by stream.py with SAO_IN_FLIGHT rollouts open. Weights reach the
 # engines by NCCL broadcast after every step. Generation window 24k.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -38,11 +37,14 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: ${SAO_BATCH}           # MUST equal training.config.global_batch_size
     max-staleness: 4
     # Artifacts are full model copies. Publishing one paused generation long enough for the
     # SGLang scheduler watchdog (300 s) to kill the engines; keep the HF exports instead.
     checkpoint-every-n-versions: 100000
+pipeline:
+  task2batch:
+    config:
+      batch_size: ${SAO_BATCH}         # MUST equal training.config.global_batch_size
 training:
   backend: slime
   colocate: false

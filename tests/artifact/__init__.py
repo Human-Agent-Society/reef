@@ -1,0 +1,1 @@
+"""Artifact test suite."""

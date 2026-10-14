@@ -50,15 +50,14 @@ CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
 model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
 with any other prefix still needs an upstream URL.
 
-Versioned configuration layout
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Configuration file layout
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The canonical CLI paths match the sections of a ``schema-version: 2`` file.
+The canonical CLI paths match the sections of a configuration file.
 For example, the local inference command above can also use:
 
 .. code:: yaml
 
-   schema-version: 2
    reef:
      host: 127.0.0.1
      port: 8900
@@ -88,11 +87,11 @@ The public layout groups fields by their owner:
 * ``storage``: artifact repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
-* ``task-generation``: the task generator the generated-task recipe asks for tasks.
+* ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
 * ``generator``: the generator service that writes, checks and plays Harbor tasks.
 
-Version 2 contains no process definitions. ``service`` and ``services`` are
-rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
+A configuration file contains no process definitions. ``service`` and
+``services`` are rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
 or training backend determine the processes, dependencies and connections.
 ``training.config`` holds workload variables such as checkpoint directories;
 native training flags belong in ``training.options`` and engine flags in ``inference.options``.
@@ -217,30 +216,13 @@ Encoder engines keep the weights they started with. Weight updates go only to
 the other engines of the model. When a model with an encoder group trains,
 keep its vision encoder frozen.
 
-Migration from the previous version 2 training configuration:
-
-.. list-table::
-   :header-rows: 1
-
-   * - Previous field
-     - Replacement
-   * - ``training.options.rollout-num-gpus``
-     - ``inference.num-gpus``
-   * - ``training.options.rollout-num-gpus-per-engine``
-     - ``inference.tensor-parallel-size`` (tensor-parallel engines)
-   * - ``training.options.sglang-context-length`` (and other ``sglang-*`` options)
-     - ``inference.options.context-length`` (remove the prefix)
-   * - ``training.options.sglang-router-port``
-     - ``inference.options.router-port``
-   * - ``training.options.colocate`` (with ``offload-train`` and ``offload-rollout``)
-     - ``training.colocate``
-
-Managed launches reject the previous inference flags in ``training.options``,
-even if their values agree with the new fields. Native options cannot override
+Managed launches reject inference flags in ``training.options``, such as
+``rollout-num-gpus``, ``rollout-num-gpus-per-engine``, ``sglang-*`` and
+``colocate``, even if their values agree with the ``inference`` fields and
+``training.colocate``. Native options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
 prefill/decode-disaggregated inference topologies are not supported by this
-managed path yet. Unversioned explicit process stacks keep their native flags
-for those legacy deployments. Reef binds ``training.options.hf-checkpoint`` to
+managed path yet. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
 
@@ -331,10 +313,9 @@ one.
 The launcher translates public paths to the existing internal service and
 recipe contracts before starting children. Config references such as
 ``${reef.port}`` and ``${inference.model-path}`` use the same field mapping.
-Existing unversioned files retain their ``reef``, ``training`` and ``services``
-layout and defaults, including the HTTP service's ``0.0.0.0`` bind address.
-Version 2 defaults to loopback. Its ``reef`` section contains only declared
-HTTP settings; legacy model/recipe fields move to their owning public sections.
+The HTTP service binds to loopback by default. The ``reef`` section contains
+only declared HTTP settings; model and recipe fields belong to their owning
+sections.
 
 Native backend options
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -362,9 +343,9 @@ A field override preserves its YAML siblings; an explicit whole object,
 such as ``--inference.options '{}'``, replaces the entire object. Model,
 served-model name, TP size, bind address, authentication and unsupported
 multi-node launch controls cannot be overridden through native options in
-managed serving. Use public fields; explicit custom process definitions belong only to unversioned legacy deployments.
+managed serving. Use the public fields for those settings.
 
-For Slime, a versioned training stack can contain:
+For Slime, a training stack can contain:
 
 .. code:: yaml
 
@@ -378,9 +359,7 @@ Override an individual native flag with
 options reach ``reef.service.training_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
 argument handling and Slime's native parser. Automatic training launches use
-only this effective config and ignore an ambient ``SLIME_ARGS_FILE``. Explicit
-unversioned ``services`` stacks retain ``SLIME_ARGS_FILE`` and driver command flags, which
-take precedence over the options object; avoid specifying a flag in both places.
+only this effective config and ignore an ambient ``SLIME_ARGS_FILE``.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
@@ -436,8 +415,8 @@ caches only a successful result. Tokenizer or template errors propagate to the
 request; they do not silently disable reasoning separation. An explicit value
 bypasses this detection.
 
-Explicit file selection and legacy compatibility
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Explicit file selection
+~~~~~~~~~~~~~~~~~~~~~~~
 
 Relative config paths resolve from the directory where you run the command.
 With no ``-c`` or explicit ``--recipe`` profile, Reef uses CLI inference inputs;
@@ -451,12 +430,12 @@ installation for your config. From outside a checkout,
 pass an absolute path to a cookbook config.
 
 Before any model download or process start, the launcher logs the selected
-source (file, profile, or command line, with its layout) and then every
-resolved setting with where its value came from:
+source (file, profile, or command line) and then every resolved setting with
+where its value came from:
 
 .. code:: text
 
-   [reef] config: /srv/reef/stack.yaml (schema-version 2)
+   [reef] config: /srv/reef/stack.yaml
    [reef] resolved settings:
    [reef]   recipe.implementation = recipes.sao.recipe:SAORecipe  (file)
    [reef]   reef.host = 127.0.0.1  (default)
@@ -464,7 +443,7 @@ resolved setting with where its value came from:
    [reef]   reef.tokens = ["****"]  (file)
    [reef]   inference.model-path = /models/demo  (file)
    [reef]   inference.backend = sglang  (automatic)
-   [reef]   recipe.config.batch-size = 4  (environment REEF_SAO_BATCH_SIZE)
+   [reef]   recipe.config.max-staleness = 2  (environment REEF_MAX_STALENESS)
    [reef]   training.backend = slime  (automatic)
 
 Sources are ``file``, ``command line``, ``environment`` (the ``REEF_*``
@@ -483,31 +462,14 @@ shown as written; the snapshot is resolved only at startup.
 
 .. code:: bash
 
-   reef serve -c stack.yaml --reef.port 9000 --print-config Relative state paths still use
-the launch directory. Unversioned legacy stacks can use ``services[].cwd``
-to override a process working directory.
+   reef serve -c stack.yaml --reef.port 9000 --print-config
 
-.. code:: yaml
-
-   reef:
-     host: 0.0.0.0
-     port: 8900
-     recipe: recipe
-     token: ${REEF_TOKEN}
-     upstream_url: ${REEF_UPSTREAM_URL}
-     upstream_api_key: ${REEF_UPSTREAM_API_KEY}
-
-   services:
-     - name: reef
-       command: ["${REEF_PYTHON}", "-m", "reef.service"]
-       ready: curl -sf http://127.0.0.1:${reef.port}/healthz
-
-Values interpolate from the environment with ``${VAR}`` and from the config
-itself with ``${dotted.path}``. Use full public paths for command-line overrides,
-including legacy files: ``--inference.model-path /models/demo`` or
-``--training.config.checkpoint_dir /tmp/ckpt``. Legacy files default to
-``/tmp/reef-stack/`` logs; version 2 uses ``.reef/run/``. Set ``reef.run-dir``
-in version 2 (legacy ``run_dir``) to move them.
+Relative state paths use the launch directory. Values interpolate from the
+environment with ``${VAR}`` and from the config itself with ``${dotted.path}``.
+Use full public paths for command-line overrides:
+``--inference.model-path /models/demo`` or
+``--training.config.checkpoint_dir /tmp/ckpt``. Logs go to ``.reef/run/``;
+set ``reef.run-dir`` to move them.
 
 Configuration-free startup accepts public settings and the selected weight
 recipe's declared fields, plus native inference or training options for the
@@ -544,36 +506,31 @@ objects are preserved, and an explicit container replaces the YAML value:
 
 The parsed public values are also supplied to service commands and the HTTP
 child's config. An empty string, as an unset ``${VAR}`` reference expands to,
-is treated as an omitted service value and keeps its default. In
-``schema-version: 2`` files an explicit ``null`` is a value: optional fields
-resolve to null and any other field rejects it (see below). Unversioned files
-keep treating null as omitted. ``reef.token`` and ``reef.tokens`` remain
+is treated as an omitted service value and keeps its default. An explicit
+``null`` is a value: optional fields resolve to null and any other field
+rejects it (see below). ``reef.token`` and ``reef.tokens`` remain
 distinct inputs whose credentials are combined. The selected Recipe, runtime adapter and executor
-settings use the same field parser. Only undeclared custom-stack mappings
-retain generic YAML coercion; the ``services`` layout is unchanged.
+settings use the same field parser.
 
 Component configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Shipped examples and profiles use version 2, including standalone recipe files
-loaded by embedding scripts. ``recipe_config_from_mapping`` / ``load_recipe_config``
-translate their public envelope into the existing recipe construction contract.
+Standalone recipe files loaded by embedding scripts use the same layout.
+``load_recipe_config`` and ``recipe_config_from_file_layout`` translate it into the
+existing recipe construction contract.
 Recipes may declare opaque sections in ``config_sections``; for example, Cordis
 owns ``recipe.config.evolution``. Those sections use object/leaf CLI overrides,
 then their recipe validates the payload. Executor placement remains shared with
 the deployment and reaches dotted recipes as well as named presets.
 
-After selecting ``recipe.implementation`` (legacy ``reef.recipe``), Reef loads that class's declarations without
+After selecting ``recipe.implementation``, Reef loads that class's declarations without
 constructing the recipe. A dotted weight-training recipe exposes its fields
-as ``--recipe.config.batch-size``, with legacy aliases
-``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
-recipes use the same ``--recipe.config.*`` namespace; their internal ``data``
-section and ``--reef.data.*`` spellings remain compatibility details. ``reef serve -c stack.yaml --help`` includes the
+as ``--recipe.config.max-staleness``, with the aliases
+``--max-staleness`` / ``--max_staleness`` / ``--reef.max_staleness``. Other dotted
+recipes use the same ``--recipe.config.*`` namespace; their ``--reef.data.*``
+spellings remain accepted aliases. ``reef serve -c stack.yaml --help`` includes the
 selected component's flags; basic ``reef serve --help`` does not load a recipe.
 The selected package must be importable in the launcher and child environments.
-When a profile file also declares its recipe ``implementation``, its fields
-use the top-level ``--data.<field>`` and ``--runtime.<field>`` paths. The HTTP
-child receives that merged preset instead of reloading the original file.
 
 Declared component fields follow **CLI > YAML > declared environment fallback
 > dataclass default**. False, zero, empty strings and empty containers remain
@@ -582,17 +539,14 @@ wins, and boolean fields support ``--no-...``. A declaration that conflicts
 with a public option is rejected. The normalized values retain their types
 when handed to the HTTP child.
 
-In ``schema-version: 2`` files, ``null`` is distinct from omission for every
-declared field: an optional field (``str | None`` and similar) resolves to
-null, and writing ``null`` for any other field is an error naming the field,
-rather than a silent fall back to its default. Omit the field to use the
-default. The literal string ``null`` remains text for string fields. A version
-2 file that repeats a YAML key, ``reef.port`` twice for example, is rejected
-with both line numbers instead of the last occurrence silently winning, and
-two spellings of one field (``model-path`` and ``model_path``) are a duplicate
-field error. For compatibility, unversioned files keep YAML's
-last-occurrence-wins reading and an empty/null flat weight-recipe key remains
-omitted there. Recipe floats
+``null`` is distinct from omission for every declared field: an optional
+field (``str | None`` and similar) resolves to null, and writing ``null`` for
+any other field is an error naming the field, rather than a silent fall back
+to its default. Omit the field to use the default. The literal string
+``null`` remains text for string fields. A file that repeats a YAML key,
+``reef.port`` twice for example, is rejected with both line numbers instead of
+the last occurrence silently winning, and two spellings of one field
+(``model-path`` and ``model_path``) are a duplicate field error. Recipe floats
 retain their historical non-finite support; a recipe can declare
 ``allow_nonfinite=False`` to require finite values. Service fields and backend
 resource/timeouts require finite values. Errors identify the field and expected
@@ -682,30 +636,28 @@ actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
 LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
 a PRM engine and a student model.
 
-Legacy ``reef`` section
-----------------------
+Service and storage settings
+----------------------------
 
-The fields below describe the unversioned compatibility contract. New files
-use ``recipe.implementation``, ``reef``, ``inference`` and ``storage`` as
-shown above; the repository examples all use version 2.
+The HTTP service reads these fields from the ``recipe``, ``reef``,
+``inference`` and ``storage`` sections.
 
 .. config::
 
-   reef.recipe | the recipe this deployment serves. Required.
-   reef.host | 0.0.0.0 | bind address
+   recipe.implementation | recipe | the recipe this deployment serves
+   reef.host | 127.0.0.1 | bind address
    reef.port | 8900 | bind port
-   reef.served_url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
-   reef.console_origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
+   reef.served-url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
+   reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
-   reef.model_path | a local HF model directory or a repo id, downloaded on start
-   reef.upstream_url | the OpenAI-compatible provider, with no ``/v1`` suffix
-   reef.upstream_api_key | its credential. Reef is the only party that sees it.
-   reef.upstream_model | the model to request upstream
-   reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
-   reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
-   reef.inference_timeout_s | 300.0 | per-request timeout
-   reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
-   reef.checkpoint_every_n_versions | 1 | how often a version becomes durable
+   reef.allow-implicit-scenario-creation | true | when false, an unknown scenario is HTTP 404
+   inference.model-path | a local HF model directory or a repo id, downloaded on start
+   inference.upstream-url | the OpenAI-compatible provider, with no ``/v1`` suffix
+   inference.upstream-api-key | its credential. Reef is the only party that sees it.
+   inference.upstream-model | the model to request upstream
+   inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
+   inference.url | the address the training backend reports | the local engine; set only to front the engines with something else
+   recipe.config.checkpoint-every-n-versions | 1 | how often a version becomes durable, for a weight-training recipe
 
 Storage paths default under ``.reef/``, which the basic and sao stacks keep;
 the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere
@@ -713,12 +665,12 @@ persistent.
 
 .. config::
 
-   reef.artifact_repository | .reef/artifacts.git | the Git-backed release chain
-   reef.artifact_work_dir | .reef/artifact-work | materialization scratch
-   reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
-   reef.agent_record_dir | .reef/agent-record | the record store
-   reef.agent_record_retention_days | 7.0 | deprecated compatibility setting; automatic cleanup no longer expires data by age
-   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
+   storage.artifact-repository | .reef/artifacts.git | the Git-backed release chain
+   storage.artifact-work-dir | .reef/artifact-work | materialization scratch
+   storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
+   storage.agent-record-dir | .reef/agent-record | the record store
+   storage.agent-record-retention-days | 7.0 | deprecated compatibility setting; automatic cleanup no longer expires data by age
+   storage.agent-record-retention-max-bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
 .. warning::
 
@@ -730,14 +682,14 @@ Storage manages cleanup independently: the HTTP service runs a sweep at startup
 and every 60 seconds. When the total record-body size exceeds the configured
 budget, storage evicts the oldest records by stored creation time, breaking ties
 by append sequence. Both consumed and unconsumed data are eligible; processors
-cannot protect disk records from capacity eviction. The legacy
-``agent_record_retention_days`` option is accepted but has no cleanup effect.
+cannot protect disk records from capacity eviction. The deprecated
+``storage.agent-record-retention-days`` option is accepted but has no cleanup effect.
 
 The budget measures UTF-8 JSON payloads, references and artifact references
 across active and archived scenarios. SQLite shares it across the record
 directory; PostgreSQL shares it across the deployment schema. Each eviction
 logs a warning with the scenario, record count, sequence range and body bytes.
-Per-scenario loss totals survive restart. Processor status exposes
+Per-scenario loss totals survive restart. The pipeline status exposes
 ``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``
 after a loss; metrics also expose ``records/evicted_count`` and
 ``records/data_incomplete``. These describe missing stored data, not proof that
@@ -763,23 +715,19 @@ version to 3. Training commits store only consumption progress. Already deleted
 bodies cannot be recovered. Do not share stores between old and new writers, or
 downgrade without restoring a compatible backup.
 
-Recipe settings such as ``batch_size`` sit beside these in the same section,
-along with any others the recipe declares with ``config_field``. When
-``reef.recipe`` is a dotted weight-training class, keys the service does not
-recognize are handed to the recipe, and the recipe rejects any key it does
-not declare. With the core ``recipe`` or a named preset, the recipe reads its
-configuration from the preset, and unrecognized keys here are silently
-ignored.
+Recipe settings such as ``max_staleness``, and any others the recipe declares
+with ``config_field``, go under ``recipe.config``. A field the selected recipe
+does not declare is an error. With a named preset, the recipe reads its
+configuration from the preset file.
 
 Recipe configuration
 --------------------
 
-Version 2 puts declared recipe fields under ``recipe.config`` and the runtime
-under ``recipe.runtime``. Harness settings live in ``recipe.config.evolution``.
-The ``data``, ``evolution`` and ``runtime`` paths below also name the existing
-Python recipe contract and remain accepted by legacy presets.
+A configuration file puts declared recipe fields under ``recipe.config`` and
+the runtime under ``recipe.runtime``. Harness settings live in
+``recipe.config.evolution``.
 
-``data.training_mode`` is shared by all recipes and defaults to ``auto``.
+``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
 In ``auto``, the recipe's processor decides when its data can form a batch,
 and ``POST /reef/train`` is refused. In ``manual``, inference and reports
 cannot authorize training by themselves; ``POST /reef/train`` supplies the
@@ -787,26 +735,25 @@ user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor batches as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
 instruction, the units an automatic batch would take next, up to
-``batch_size`` and possibly none: scored traces, or
-records under ``data.batch_policy: records``. The processor defines
+``pipeline.task2batch.config.batch_size`` and possibly none: scored traces, or
+unscored records when the ``pipeline`` section names the inference stages. The processor defines
 what an instruction batch carries, independently of its automatic batching
 policy.
-For a dotted weight-training deployment this field is also accepted as
-``reef.training_mode``. Named presets set it in their own ``data`` section.
 
-The processor receives ``ProcessorContext.training_mode`` as its initial
-batching mode. The modes share ingestion and retention; the
-``make_training_batch(batch_number, request)`` hook selects batch inputs.
-Processors declare ``supported_training_modes``; unsupported modes or missing
-instruction assembly raise ``NotImplementedError``.
+The training pipeline receives ``PipelineContext.training_mode`` as its
+initial batching mode. The modes share ingestion and retention. In ``manual``
+an instruction's batch has no record sets; in ``hybrid`` it takes the sets that
+an automatic batch would. A recipe's ``Task2Batch`` declares
+``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that
 explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
 on an inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
-   data:
-     training_mode: hybrid
+   recipe:
+     config:
+       training_mode: hybrid
 
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
@@ -820,14 +767,14 @@ warning, at the switch to ``manual`` and as reports arrive.
 
 .. config::
 
-   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
+   recipe.config.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
 
 A recipe is selected three ways:
 
-- **The core record-only recipe:** ``recipe: recipe``
-- **A dotted class:** ``recipe: "my_pkg.my_method:MyMethodRecipe"``
-- **A named preset:** ``recipe: my-preset``, resolved to ``my-preset.yaml``
-  under ``REEF_RECIPE_CONFIG_DIR``
+- **The core record-only recipe:** ``recipe.implementation: recipe``
+- **A dotted class:** ``recipe.implementation: "my_pkg.my_method:MyMethodRecipe"``
+- **A named preset:** ``recipe.implementation: my-preset``, resolved to
+  ``my-preset.yaml`` under ``REEF_RECIPE_CONFIG_DIR``
 
 There is no recipe-implementation registry. A bare name other than ``recipe``
 is always a preset name; it never imports a learning method implicitly.
@@ -839,54 +786,61 @@ appends that directory to ``PYTHONPATH`` for every service it starts. This is
 how ``recipes.sao.recipe:SAORecipe`` resolves from a source checkout: the
 ``recipes/`` cookbook sits next to the example's ``serve.yaml``, so the
 launcher does not export ``PYTHONPATH`` itself. Entries already in
-``PYTHONPATH`` keep their precedence. Python process definitions and legacy
-stacks can set a process environment explicitly.
+``PYTHONPATH`` keep their precedence.
 
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
 The one kind of preset reef bundles is a recipe's profile under
 ``reef/service/profiles/``: ``reef serve --recipe <name>`` points this
-variable at that directory and reads the profile as both the deployment
-config and the preset (see `the CLI reference <cli.rst>`__).
+variable at that directory and starts the profile as the deployment config
+(see `the CLI reference <cli.rst>`__).
 
-A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
-in a preset. A preset carries its own ``implementation``, ``model``, and
-``data`` sections, plus an optional ``runtime`` section when the recipe
-builds its own runtime instead of using the deployment's upstream proxy.
-When using the deployment's runtime, a preset may omit ``model.path`` to
-inherit that runtime's model (``reef.upstream_model`` for an upstream proxy).
-An explicit ``model.path`` takes precedence. A preset with its own ``runtime``
-section must still supply its own non-empty ``model.path``.
-Harness-evolution presets also carry an ``evolution`` section:
+A preset uses the configuration file layout and is read as-is. ``${VAR}``
+interpolates in a deployment config, never in a preset. A preset carries its
+``recipe.implementation`` and ``recipe.config``, plus an optional
+``recipe.runtime`` when the recipe builds its own runtime instead of using the
+deployment's upstream proxy. ``inference.upstream-model`` or
+``inference.model-path`` names the preset's model. When using the deployment's
+runtime, a preset may omit the model to inherit that runtime's model
+(``inference.upstream-model`` for an upstream proxy). An explicit model takes
+precedence. A preset with its own ``recipe.runtime`` must still name its own
+model. Harness-evolution presets also carry ``recipe.config.evolution``:
 
 .. code:: yaml
 
-   implementation: reef.recipe.cordis:CordisRecipe
-   model:
-     path: qwen3-8b
-   data:
-     batch_size: 1
-   evolution:
-     adapter: pi
-     propose: methods.mine:MyProposer
-     evaluate: methods.mine:MyScorer
-     tasks: ["..."]
+   recipe:
+     implementation: reef.recipe.cordis:CordisRecipe
+     config:
+       evolution:
+         adapter: pi
+         propose: methods.mine:MyProposer
+         evaluate: methods.mine:MyScorer
+         tasks: ["..."]
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 1
+   inference:
+     upstream-model: qwen3-8b
 
-The preset's ``implementation`` is ``recipe`` or a dotted recipe class. Weight-training
-recipes are selected directly by dotted class in the deployment config, so the
-service can assemble their Ray training runtime; their fields are flat
-``reef.<name>`` keys. Presets suit recipes whose runtime can be built from the
-preset or the deployment's upstream proxy. There, ``data`` holds batching
-fields and a recipe-specific section holds the rest.
+The preset's ``recipe.implementation`` is ``recipe`` or a dotted recipe class.
+Weight-training recipes are selected directly by dotted class in the deployment
+config, so the service can assemble their Ray training runtime. Presets suit
+recipes whose runtime can be built from the preset or the deployment's
+upstream proxy. There, ``recipe.config`` holds the training mode and the
+recipe's own sections, and ``pipeline`` holds the stage config.
 
 A composite recipe serves and evolves several release components in one
-scenario, one recipe per component. Its ``components`` object carries one
-recipe config per component name; each inherits the deployment's ``model``
-unless it names its own, and every component shares the deployment's
-runtime and training runtime. A composite whose component trains weights is
-deployed the way that recipe is: ``training.backend`` selects the training
-backend, the component's own ``data`` section sets its fields, and the
-runtime pair reaches every component. The repository base keeps one
+scenario, one recipe per component. Its ``components`` object maps each
+component name to a section with the shape of the top-level ``recipe``
+section: ``implementation`` names the recipe class, and ``config`` holds the
+recipe's fields and sections. A component also keeps its own ``pipeline``
+stage config under ``config``. A component has no ``runtime``: every
+component uses the deployment's model, runtime and training runtime. A
+composite whose component trains weights is deployed the way that recipe is:
+``training.backend`` selects the training backend, and the runtime pair
+reaches every component. A top-level ``pipeline`` or ``evaluation`` section
+goes to the component that trains weights. The repository base keeps one
 directory per component: the recipes' seeds are written there, a bootstrap
 model snapshot goes under the weight-training component's directory, and a
 component whose recipe seeds nothing starts empty. Each component's trainer
@@ -897,43 +851,47 @@ keeps the reports its own contract parses:
 
 .. code:: yaml
 
-   implementation: reef.recipe.composite:CompositeRecipe
-   model:
-     path: qwen3-8b
-   components:
-     harness:
-       implementation: reef.recipe.cordis:CordisRecipe
-       evolution:
-         adapter: pi
-         propose: methods.mine:MyProposer
-         evaluate: methods.mine:MyScorer
-         tasks: ["..."]
+   recipe:
+     implementation: reef.recipe.composite:CompositeRecipe
      config:
-       implementation: my_pkg.config:ConfigRecipe
+       components:
+         harness:
+           implementation: reef.recipe.cordis:CordisRecipe
+           config:
+             evolution:
+               adapter: pi
+               propose: methods.mine:MyProposer
+               evaluate: methods.mine:MyScorer
+               tasks: ["..."]
+         config:
+           implementation: my_pkg.config:ConfigRecipe
+   inference:
+     upstream-model: qwen3-8b
 
 The same composite with a weight-training component is a deployment file:
 the composite is selected by its dotted class, ``training.backend`` picks the
-backend, and the weight component's fields live under its ``data``:
+backend, and the weight component's stage config lives under its ``config.pipeline``:
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: reef.recipe.composite:CompositeRecipe
      config:
        components:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
-           data: {batch_size: 8}
+           config:
+             pipeline: {task2batch: {config: {batch_size: 8}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
-           evolution: {adapter: pi, propose: methods.mine:MyProposer, evaluate: methods.mine:MyScorer, tasks: ["..."]}
+           config:
+             evolution: {adapter: pi, propose: methods.mine:MyProposer, evaluate: methods.mine:MyScorer, tasks: ["..."]}
    inference:
      model-path: Qwen/Qwen3-8B
    training:
      backend: slime
 
-A preset's ``runtime.type: executor_training`` selects an executor-backed
+A preset's ``recipe.runtime.type: executor_training`` selects an executor-backed
 training coordinator. Its ``executor`` mapping accepts ``backend`` (default
 ``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
 ``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
@@ -945,10 +903,8 @@ contracts and examples.
 Stack execution backends
 ------------------------
 
-Version 2 chooses native process placement in backend implementation code;
-``execution.services`` is rejected. Unversioned custom stacks retain
-``execution.services`` and per-process ``services[].executor`` overrides.
-``execution.training`` and ``execution.rollout``
+Reef chooses native process placement in backend implementation code;
+``execution.services`` is rejected. ``execution.training`` and ``execution.rollout``
 select the Slime training-worker and rollout-control executors (both default
 ``auto``, resolving to ``ray``). All selectors accept a backend name/import path or a profile under
 ``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
@@ -958,7 +914,7 @@ be finite nonnegative numbers. Numeric environment interpolation is accepted.
 
 ``execution.generator`` selects the executor of the generator service a
 ``generator`` section adds (default ``auto``, one local process); it accepts
-what ``execution.services`` accepts, with one worker.
+the service executor settings below, with one worker.
 
 ``execution.evolution`` selects harness evaluation workers (default ``auto``).
 Unlike Slime, ordinary harness evolution calls external model endpoints and
@@ -986,32 +942,30 @@ Explicit service selectors and Slime CLI flags override the corresponding role
 defaults. Backend startup failures never silently fall back to another backend.
 
 For Ray services, ``resources`` supplies actor launch options such as
-``num_gpus`` and ``num_cpus``; do not also set ``cuda``. A service can publish
-``endpoint: http://{host}:23001`` and dependents can use
-``${endpoints.SERVICE_NAME}``. Readiness runs on the service's execution node,
-and dependencies are topologically sorted. Local services advertise localhost
-unless ``advertise_host`` is set. See the `whole-stack examples and backend
-contracts <../developer-guide/executors.rst#whole-stack-deployment-configuration>`__
-before moving services across nodes.
+``num_gpus`` and ``num_cpus``.
 
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
-``batch_size`` goes under ``data:``; the rest goes under
-``evolution:``. `Evolve your harness
+The batch size goes in the deployment's top-level ``pipeline`` section; the
+rest goes under ``recipe.config.evolution``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
 
 .. config::
 
-   data.batch_size | 1 | traces per mutation attempt
-   data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
+   pipeline.task2batch.config.batch_size | 1 | traces per mutation attempt
 
-Every valid scored report contributes a trace, including successful outcomes.
+The default stages batch every valid scored report as a trace, including
+successful outcomes. To batch recorded traffic alone, every ``batch_size``
+requests with unscored samples, set
+``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
+``pipeline.record2task.module: reef.train.cordis_backend.processor:InferenceTasks``.
+Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
 
 .. config::
 
    evolution.propose | a ``Proposer`` class: ``package.module:ClassName``, or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives
-   evolution.evaluate | an ``EpisodeScorer`` class, in the same form; ``reef.train.cordis_backend.strategies:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest``
+   evolution.evaluate | an ``EpisodeScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest``
    evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the current release is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
    evolution.floor_score | 1.0 | the score every evaluation task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
@@ -1044,37 +998,15 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
-   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``, and a kept candidate evaluated again under ``on_stale: reevaluate`` writes its ``episodes/`` under the next attempt directory with ``reevaluation.json`` naming the first; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
 against. The step record holds the proposer's raw traffic and every evaluation
 episode's session log, so treat its directory like the commit log.
-
-Legacy process definitions
---------------------------
-
-The following fields apply only to unversioned legacy files. Version 2 rejects
-``services`` and automatically assembles the selected components. Move custom
-process dependencies into the owning recipe package, or use an external
-deployment tool for infrastructure orchestration.
-
-Each entry is one process. ``command`` can be a command-line string or an argv
-list. Prefer the list form when exact argument boundaries matter; existing
-string commands retain their current ``shlex`` parsing.
-
-.. config::
-
-   services[].name | the service's id, used by ``depends_on``; unique within one stack
-   services[].command | the command line string or argv list to run
-   services[].ready | a shell command or argument list that succeeds once the service is up; lists run without a shell
-   services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
-   services[].depends_on | services that must be ready first
-   services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
-   services[].env | extra environment variables
 
 The ``inference`` section
 -------------------------
@@ -1102,7 +1034,7 @@ Read by the weight-training stack. See `Evolve your model
    training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
+   training.config.global_batch_size | samples in one optimizer step. Must equal ``pipeline.task2batch.config.batch_size``.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy
@@ -1143,67 +1075,132 @@ lookalikes.
 The plugin interface is in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
 
-The ``task-generation`` section
--------------------------------
+The ``pipeline`` section
+------------------------
 
-Only the built-in generated-task recipe,
-``reef.record2dataset.generated_tasks:GeneratedTaskRecipe``, reads this section.
-Another weight-training recipe refuses it, and a deployment that pairs it with
-a recipe that trains no weights fails at startup. When present, Reef calls the
-named class's ``from_config`` method once for each scenario.
+A recipe's pipeline has three stages (see `Training pipeline
+<../developer-guide/processors.rst>`__). The recipe names a default class for
+each stage. This section gives each stage its config, and it can name another
+class for a stage. Every stage reads only its own ``config``; the recipe's
+``recipe.config`` holds no stage settings.
 
 .. config::
 
-   task-generation.module | a ``package.module:ClassName`` reference to a ``TaskGenerator`` subclass. Required.
-   task-generation.config | opaque mapping handed to ``from_config``; Reef never reads it
+   pipeline.record2record | the record-to-record stage: ``config``, and optionally ``module``, a ``Record2Record`` subclass
+   pipeline.record2task | the record-to-task stage: ``config``, and optionally ``module``, a ``Record2Task`` subclass
+   pipeline.task2batch | the task-to-batch stage: ``config``, and optionally ``module``, a ``Task2Batch`` subclass
 
 .. code:: yaml
 
    recipe:
-     implementation: reef.record2dataset.generated_tasks:GeneratedTaskRecipe
-     config:
-       generator-url: ${endpoints.generator}
-       rounds: 20
-       description: shell tasks with hidden state under /var and /etc
-       state-dir: ${REEF_STATE_DIR}/rounds
-   task-generation:
-     module: recipes.beta.spade:SpadeTaskGenerator
-     config:
-       generator_url: ${endpoints.generator}
-       skills: [inspection, repair]
-       state_dir: ${REEF_STATE_DIR}/generations
+     implementation: recipes.tttd.recipe:TTTDRecipe
+   pipeline:
+     record2record:
+       config:
+         groups_per_step: 8
+         rollouts_per_group: 64
 
-The class method ``from_config(config, *, scenario, environ)`` returns the
-scenario's generator. A generator that calls a remote service reads its
-credentials through environment references in ``config``. Reef checks the
-class when it loads the recipe config and rejects functions and abstract
-classes. The generator interface and the round are in `Processors
-<../developer-guide/processors.rst#task-generation-contract>`__.
+A stage without a key is the recipe's class with no config. Each recipe's page
+lists the keys of its stages. Keys are written as the stage reads them; a
+hyphen spelling is also accepted.
 
-The generated-task recipe reads these ``recipe.config`` fields:
+Reef checks each stage when it loads the recipe config, before a scenario
+starts: it imports a named class, rejects functions and abstract classes, and
+parses the stage's ``config``. An unknown key or a value out of range fails
+the startup. A setting that moved from ``recipe.config`` to a stage fails
+with the key's new place, for example ``move groups_per_step to
+pipeline.record2record.config.groups_per_step``.
+
+For each scenario, Reef builds the stages in pipeline order with the class
+method ``from_config``. A later stage receives the stages built before it, and
+it reads a value that an earlier stage owns from that stage. For example, the
+TTTD step grid is set once, in the record stage. A stage class without
+``from_config`` cannot be named here.
+
+Generated tasks
+~~~~~~~~~~~~~~~
+
+The built-in generated-task recipe,
+``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
+objective on Tinker's ``importance_sampling`` loss, so it requires the
+``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
+``GeneratedTaskTasks``, and ``GeneratedTaskBatches``. Without
+``pipeline.record2task.config.rounds`` no round runs, and the recipe trains on
+the training arm's reports only.
+
+.. code:: yaml
+
+   recipe:
+     implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+   pipeline:
+     record2record:
+       config:
+         plays_per_task: 4
+         batches_per_round: 2
+     record2task:
+       config:
+         generator_url: ${endpoints.generator}
+         rounds: 20
+         description: shell tasks with hidden state under /var and /etc
+         state_dir: ${REEF_STATE_DIR}/rounds
+         generator:
+           module: recipes.beta.spade:SpadeTaskGenerator
+           config:
+             generator_url: ${endpoints.generator}
+             skills: [inspection, repair]
+             state_dir: ${REEF_STATE_DIR}/generations
+     task2batch:
+       config:
+         tasks_per_step: 2
+
+``GeneratedTaskRecord2Record`` groups the training plays by task and requests
+the rounds:
 
 .. config::
 
-   recipe.config.tasks-per-step | 4 | complete task groups in one batch
-   recipe.config.plays-per-task | 4 | training plays of each task; a group is complete at this count. At least 2.
-   recipe.config.scaffold-tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
-   recipe.config.rounds | 0 | rounds of task generation; 0 generates nothing and trains on the training arm's reports only
-   recipe.config.batches-per-round | 1 | acknowledged batches after which the next round starts
-   recipe.config.description | what the tasks are about; every generation request carries it. Required with rounds.
-   recipe.config.generator-url | the generator service, ``${endpoints.generator}``. Required with rounds.
-   recipe.config.state-dir | where each scenario keeps its round summaries. Required with rounds.
-   recipe.config.served-model | the model the task player asks for; the deployment's by default
+   pipeline.record2record.config.plays_per_task | 4 | training plays of each task; a group is complete at this count, or at the plays that reported when fewer did. At least 2.
+   pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
+   pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
+   pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
-The recipe trains with the ``task_group`` objective on Tinker's
-``importance_sampling`` loss, so it requires the ``tinker`` training backend.
+``GeneratedTaskTasks`` runs the rounds and turns the training plays into
+tasks. It plays each task ``plays_per_task`` times, as its record stage
+groups them:
+
+.. config::
+
+   pipeline.record2task.config.rounds | 0 | rounds of task generation; 0 generates nothing
+   pipeline.record2task.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
+   pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
+   pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
+   pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
+   pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
+   pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+
+``GeneratedTaskBatches`` batches complete task groups:
+
+.. config::
+
+   pipeline.task2batch.config.tasks_per_step | 4 | complete task groups in one batch
+
+Reef calls the generator class's ``from_config(config, *, scenario, environ)``
+once for each scenario. A generator that calls a remote service reads its
+credentials through environment references in ``config``. The generator
+interface and the round are in `Training pipeline
+<../developer-guide/processors.rst#task-generation-contract>`__.
+
+A source session is a report, without a training arm, whose inference
+records all carry ``source_tag``. The generator service accepts at most
+512 KiB of records and files in one request, so keep
+``source_records_per_round`` small when the sessions are long.
 
 The ``generator`` section
 -------------------------
 
 Absent by default. When present, ``reef serve`` starts the generator service
-(``python -m reef.record2dataset``) before the HTTP service, which depends on
-it, and publishes its address as ``${endpoints.generator}`` for the recipe to
-consume. The generator writes, checks and plays Harbor tasks for the
+(``python -m reef.service.deploy.generator_process``) before the HTTP service, which depends on
+it, and publishes its address as ``${endpoints.generator}`` for the
+generated-task stages to consume. The generator writes, checks and plays Harbor tasks for the
 generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
@@ -1215,7 +1212,7 @@ place it on the host that has Docker.
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
    generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials
-   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders
+   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
    generator.concurrency | 2 | episodes in flight per play request
@@ -1223,7 +1220,8 @@ place it on the host that has Docker.
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default
    generator.designer-timeout-s | 1800 | seconds one designer call may take; ``inference.timeout-s`` must allow it too
-   generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
+   generator.designer-api | the API the designer asks through: ``openai`` (Chat Completions) or ``responses`` (the Responses API). The default is ``responses`` when designer calls go to this deployment and its ``inference.upstream-api`` is ``responses``, and ``openai`` otherwise
+   generator.designer-options | extra fields of the designer's request, e.g. ``{"reasoning_effort": "none"}``; with ``designer-api: responses``, Responses fields such as ``{"reasoning": {"effort": "low"}}``
    generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
 
 .. code:: yaml
@@ -1232,15 +1230,16 @@ place it on the host that has Docker.
      tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
    execution:
      generator: auto
-   recipe:
-     config:
-       generator-url: ${endpoints.generator}
+   pipeline:
+     record2task:
+       config:
+         generator_url: ${endpoints.generator}
 
 The generator reads the resolved deployment through ``REEF_CONFIG`` like the
 other children: the Reef address from ``reef.host`` and ``reef.port``, the
 token from ``reef.token``, and the served model from ``inference.model-path``
 or ``inference.upstream-model``. Without ``reef serve``,
-``python -m reef.record2dataset -c serve.yaml`` runs it from the same file.
+``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
 
 Experiment tracking
 -------------------
