@@ -597,97 +597,101 @@ class ScenarioCommitter:
         forward, so refusing it would leave that job unfinished and inference
         admission paused for good.
         """
-        with self.experiment_reporting(), self._lock, self._publication_lock:
-            bound = self.bound_trainer(component)
-            trainer, component = bound.trainer, bound.component
-            self.settled_sibling = None
-            self.settle_sibling_record(component)
-            if trainer.result_on_record(result):
-                # A sibling's commit settled this trainer's durable record after the caller read the result.
-                raise SettledTrainingResultError(
-                    f"scenario {self._name!r} component {component!r}: its result is on record already"
-                )
-            next_step = self._step + 1
-            surface = self._binding.surface
-            # Refuse a stale base before the trainer acknowledges its batch, so
-            # the batch stays whole for another preparation; a batch an earlier
-            # attempt acknowledged stays taken, and its retry records what that
-            # attempt consumed. Only another trainer can move the head under a
-            # reserved batch: a lone trainer finds its own failed attempt's
-            # head, and a step already in the log is a retry after a lost
-            # acknowledgment. Neither is stale. A result with no candidate (a
-            # skip) was not evaluated against any release, so it never is.
-            records = self._store.history()
-            retrying = bool(records) and records[-1].step == next_step
-            base = trainer.pending_base_release_id
-            served = self._artifacts.current.release_id
-            if (
-                not retrying
-                and len(self.trainers) > 1
-                and base is not None
-                and base != served
-                and trainer.pending_has_candidate
-            ):
-                # A pending candidate comes from a local backend: a dispatched result carries none.
-                backend = trainer.candidate_backend
-                policy = "merge" if backend is None else backend.stale_result_policy
-                if policy != "merge":
-                    raise StaleTrainingResultError(
-                        f"scenario {self._name!r} component {component!r} prepared its result against release "
-                        f"{base!r} but {served!r} is served now",
-                        policy=policy,
+        with self.experiment_reporting(), self._lock:
+            with self._publication_lock:
+                bound = self.bound_trainer(component)
+                trainer, component = bound.trainer, bound.component
+                self.settled_sibling = None
+                self.settle_sibling_record(component)
+                if trainer.result_on_record(result):
+                    # A sibling's commit settled this trainer's durable record after the caller read the result.
+                    raise SettledTrainingResultError(
+                        f"scenario {self._name!r} component {component!r}: its result is on record already"
                     )
-                logger.info(
-                    "scenario %r component %r: merging a result reserved against release %r onto %r",
-                    self._name,
-                    component,
-                    base,
-                    served,
-                )
-                # The record names the base its batch was reserved against; the metrics say what it landed on.
-                result = trainer.add_commit_metrics(result, {"merged_onto": served})
+                next_step = self._step + 1
+                surface = self._binding.surface
+                # Refuse a stale base before the trainer acknowledges its batch, so
+                # the batch stays whole for another preparation; a batch an earlier
+                # attempt acknowledged stays taken, and its retry records what that
+                # attempt consumed. Only another trainer can move the head under a
+                # reserved batch: a lone trainer finds its own failed attempt's
+                # head, and a step already in the log is a retry after a lost
+                # acknowledgment. Neither is stale. A result with no candidate (a
+                # skip) was not evaluated against any release, so it never is.
+                records = self._store.history()
+                retrying = bool(records) and records[-1].step == next_step
+                base = trainer.pending_base_release_id
+                served = self._artifacts.current.release_id
+                if (
+                    not retrying
+                    and len(self.trainers) > 1
+                    and base is not None
+                    and base != served
+                    and trainer.pending_has_candidate
+                ):
+                    # A pending candidate comes from a local backend: a dispatched result carries none.
+                    backend = trainer.candidate_backend
+                    policy = "merge" if backend is None else backend.stale_result_policy
+                    if policy != "merge":
+                        raise StaleTrainingResultError(
+                            f"scenario {self._name!r} component {component!r} prepared its result against release "
+                            f"{base!r} but {served!r} is served now",
+                            policy=policy,
+                        )
+                    logger.info(
+                        "scenario %r component %r: merging a result reserved against release %r onto %r",
+                        self._name,
+                        component,
+                        base,
+                        served,
+                    )
+                    # The record names the base its batch was reserved against; the metrics say what it landed on.
+                    result = trainer.add_commit_metrics(result, {"merged_onto": served})
+            # The operation lock keeps the step and source stable while tracker
+            # I/O runs; published artifact readers need only the publication lock.
             if not retrying:
                 result = self.prepare_experiment(result, trainer, next_step, component)
-            prepared = trainer.prepare_commit(result)
-            recorded = self._recorded_training_retry(prepared, result, next_step, component)
-            if recorded is not None:
-                recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
-                self._reconcile_recorded_artifact(recorded)
-                self._settle_trainer_commit(prepared, recorded, next_step, trainer)
-                return result.state
+            with self._publication_lock:
+                prepared = trainer.prepare_commit(result)
+                recorded = self._recorded_training_retry(prepared, result, next_step, component)
+                if recorded is not None:
+                    recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
+                    self._reconcile_recorded_artifact(recorded)
+                    self._settle_trainer_commit(prepared, recorded, next_step, trainer)
+                    return result.state
 
-            if self._store.durable:
-                self._synchronize_checkpoint()
-            publication = result.publication
-            if isinstance(publication, DurableWeightsPublication):
-                # Checkpoint policy lives here, so a backend that exported
-                # weights hands over both options and this is the only place
-                # that picks one.
-                if self._should_checkpoint(result):
-                    publication = SavedArtifactPublication(
-                        Artifact.local(
-                            Path(publication.checkpoint_path),
-                            metadata={"runtime_load_id": publication.runtime_load_id},
-                        ),
-                        surface.loader_component,
-                    )
-                else:
-                    publication = LiveWeightPublication(publication.runtime_load_id)
+                if self._store.durable:
+                    self._synchronize_checkpoint()
+                publication = result.publication
+                if isinstance(publication, DurableWeightsPublication):
+                    # Checkpoint policy lives here, so a backend that exported
+                    # weights hands over both options and this is the only place
+                    # that picks one.
+                    if self._should_checkpoint(result):
+                        publication = SavedArtifactPublication(
+                            Artifact.local(
+                                Path(publication.checkpoint_path),
+                                metadata={"runtime_load_id": publication.runtime_load_id},
+                            ),
+                            surface.loader_component,
+                        )
+                    else:
+                        publication = LiveWeightPublication(publication.runtime_load_id)
 
-            if isinstance(publication, LiveWeightPublication):
-                if not surface.single:
-                    # A live release names an engine load and nothing else, so it
-                    # cannot carry the other components; every step must checkpoint.
-                    raise ReefError(
-                        f"scenario {self._name!r} serves components {list(surface.names)}: "
-                        "live weights cannot be published without a checkpoint"
-                    )
-                return self._commit_live_weights(result, publication, prepared, trainer)
-            if isinstance(publication, NoArtifactPublication):
-                return self._commit_without_artifact(result, prepared, trainer, component)
-            if publication.component is None:
-                publication = SavedArtifactPublication(publication.artifact, component)
-            return self._commit_saved_artifact(result, publication, prepared, trainer, component)
+                if isinstance(publication, LiveWeightPublication):
+                    if not surface.single:
+                        # A live release names an engine load and nothing else, so it
+                        # cannot carry the other components; every step must checkpoint.
+                        raise ReefError(
+                            f"scenario {self._name!r} serves components {list(surface.names)}: "
+                            "live weights cannot be published without a checkpoint"
+                        )
+                    return self._commit_live_weights(result, publication, prepared, trainer)
+                if isinstance(publication, NoArtifactPublication):
+                    return self._commit_without_artifact(result, prepared, trainer, component)
+                if publication.component is None:
+                    publication = SavedArtifactPublication(publication.artifact, component)
+                return self._commit_saved_artifact(result, publication, prepared, trainer, component)
 
     def experiment_reporting(self) -> AbstractContextManager[None]:
         if self.experiment_observer is None:

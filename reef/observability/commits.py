@@ -13,7 +13,7 @@ import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from threading import Lock
+from threading import RLock
 
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
@@ -59,7 +59,7 @@ class CommitExperimentObserver(RecordObserver):
         self.durable = store.durable
         self.store: ScenarioStore = ObservedScenarioStore(store, self)
         self.prepared: PreparedExperiment | None = None
-        self.delivery_lock = Lock()
+        self.delivery_lock = RLock()
         self.defer_delivery = False
         self.pending_events: list[TrainingExperimentEvent | RollbackExperimentEvent] = []
 
@@ -67,11 +67,15 @@ class CommitExperimentObserver(RecordObserver):
     def reporting(self) -> Iterator[None]:
         """Serialize reports, but let publication finish before calling the provider.
 
-        Enter before acquiring commit locks, so a successful commit publishes
-        its state and resumes admission before the observed events are delivered.
+        Enter before acquiring registry and commit locks. Nested scopes collect
+        events until the outermost scope exits, after publication and admission
+        recovery and after the caller releases its registry lock.
         If settlement fails, still report the rows that reached storage.
         """
         with self.delivery_lock:
+            if self.defer_delivery:
+                yield
+                return
             self.defer_delivery = True
             try:
                 yield

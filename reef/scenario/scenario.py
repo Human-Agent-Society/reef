@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -314,6 +314,10 @@ class Scenario:
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
+
+    def experiment_reporting(self) -> AbstractContextManager[None]:
+        """Deliver observed commits after the caller releases its coordination locks."""
+        return self._committer.experiment_reporting()
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)

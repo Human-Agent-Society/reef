@@ -431,9 +431,15 @@ class Dispatcher:
         return self.rollback(scenario, release_id, operation="promote")
 
     def rollback(self, scenario: str, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
-        with self._registry.lock_for(scenario):
-            current = self._registry.require(scenario)
-            return current.rollback(release_id, operation=operation)
+        while True:
+            with self._registry.lock_for(scenario):
+                current = self._registry.require(scenario)
+            # Wait for earlier reports without blocking scenario resolution.
+            with current.experiment_reporting(), self._registry.lock_for(scenario):
+                if self._registry.get_optional(scenario) is not current:
+                    # Reload or deletion won the gap before the reporting scope.
+                    continue
+                return current.rollback(release_id, operation=operation)
 
     def current_artifact(
         self,
@@ -911,7 +917,7 @@ class Dispatcher:
             # Keep only the short commit and recovery window under the scenario
             # registry lock. Candidate generation above can take minutes and must
             # not block record acceptance for this scenario.
-            with self._registry.lock_for(scenario):
+            with current.experiment_reporting(), self._registry.lock_for(scenario):
                 if self._lifecycle.local_cycles_stopped.is_set():
                     # The service stopped under this cycle: its model calls may have failed as the routes went away.
                     logger.info(
@@ -1110,7 +1116,7 @@ class Dispatcher:
             if execution.outcome not in ("drop", "commit"):
                 raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
             # The registry lock keeps a local worker's reload out between the instance check and the commit.
-            with self._registry.lock_for(current.name):
+            with current.experiment_reporting(), self._registry.lock_for(current.name):
                 loaded = self._registry.get_optional(current.name)
                 if loaded is None:
                     raise RuntimeContractError(

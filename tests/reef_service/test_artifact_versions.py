@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
@@ -512,5 +514,155 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
         trained = scenario.current_artifact_ref()
         restored = value.rollback("math", initial.release_id)
         assert observed == [(1, 1, trained), (2, 2, restored), True]
+    finally:
+        value.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["rollback", "promote"])
+def test_slow_rollback_tracker_does_not_block_scenario_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    entered, release = Event(), Event()
+    record_rollback = tracker.record_rollback
+
+    def record(event) -> None:
+        entered.set()
+        release.wait(10)
+        record_rollback(event)
+
+    try:
+        train(value, 1)
+        monkeypatch.setattr(tracker, "record_rollback", record)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rollback = executor.submit(value.rollback, "math", initial.release_id, operation=operation)
+            try:
+                assert entered.wait(5), "rollback tracker was not called"
+                assert runtime.inference.inference_admission_status["open"]
+                lookup = executor.submit(value.get_or_create_scenario, "math")
+                assert lookup.result(timeout=2) is scenario
+                assert not rollback.done(), "tracker must remain blocked during the read"
+            finally:
+                release.set()
+            restored = rollback.result(timeout=5)
+        assert tracker.rollbacks[0].produced_artifact_ref == restored
+        assert scenario.store.history()[-1].operation == operation
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    entered, release, recorded = Event(), Event(), Event()
+    record_event = tracker.record
+
+    def correlation(context: TrainingExperimentContext) -> dict[str, str]:
+        entered.set()
+        release.wait(10)
+        return {"experiment/run_id": f"run-{context.run_segment}"}
+
+    def record(event: TrainingExperimentEvent) -> None:
+        record_event(event)
+        recorded.set()
+
+    monkeypatch.setattr(tracker, "correlation_metrics", correlation)
+    monkeypatch.setattr(tracker, "record", record)
+    try:
+        value.accept_record(inference(1))
+        value.accept_record(report(1))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                assert entered.wait(5), "correlation tracker was not called"
+                read = executor.submit(scenario.artifact_with_metrics)
+                artifact, _ = read.result(timeout=2)
+                assert artifact.ref == initial
+                assert not recorded.is_set(), "commit must wait for correlation metadata"
+            finally:
+                release.set()
+        assert recorded.wait(5), "commit event was not reported"
+        (event,) = tracker.events
+        (commit,) = scenario.store.history()
+        assert commit.metrics["experiment/run_id"] == "run-0"
+        assert event.metrics == commit.metrics
+        assert event.context.step == commit.step == 1
+        assert event.context.source_artifact_ref == initial
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_slow_training_tracker_does_not_block_scenario_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    entered, release, recorded = Event(), Event(), Event()
+    record_event = tracker.record
+
+    def record(event: TrainingExperimentEvent) -> None:
+        entered.set()
+        release.wait(10)
+        record_event(event)
+        recorded.set()
+
+    monkeypatch.setattr(tracker, "record", record)
+    try:
+        value.accept_record(inference(1))
+        value.accept_record(report(1))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                assert entered.wait(5), "training tracker was not called"
+                lookup = executor.submit(value.get_or_create_scenario, "math")
+                assert lookup.result(timeout=2) is scenario
+                assert not recorded.is_set(), "tracker must remain blocked during the read"
+            finally:
+                release.set()
+        assert recorded.wait(5)
+        assert len(tracker.events) == 1
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_rollback_uses_reloaded_scenario_after_waiting_for_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    reporting = scenario.experiment_reporting
+
+    @contextmanager
+    def reload_before_reporting():
+        with value._registry.lock_for("math"):
+            value._registry.reload("math")
+        with reporting():
+            yield
+
+    try:
+        train(value, 1)
+        monkeypatch.setattr(scenario, "experiment_reporting", reload_before_reporting)
+        restored = value.rollback("math", initial.release_id)
+        current = value.get_or_create_scenario("math")
+        assert current is not scenario
+        assert current.current_artifact_ref() == restored
+        assert current.scenario_step == 2
+        assert len(tracker.rollbacks) == 1
+        assert tracker.rollbacks[0].produced_artifact_ref == restored
     finally:
         value.close()
