@@ -950,6 +950,10 @@ Harness evolution keys
 The batch size goes in the deployment's top-level ``pipeline`` section; the
 rest goes under ``recipe.config.evolution``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
+The built-in Reefine recipe instead defaults to ``selection: reefine``;
+see its `independent evaluation configuration
+<../user-guide/recipes/reefine.rst#independent-evaluation>`__ for request
+contexts, protected tasks and reviewer bindings.
 
 .. config::
 

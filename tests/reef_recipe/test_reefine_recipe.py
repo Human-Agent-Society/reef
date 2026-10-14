@@ -11,7 +11,8 @@ from pathlib import Path
 import pytest
 
 from reef.core.plugins import PluginReference
-from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
+from reef.evaluation.harness import ScoreComparisonPlugin
+from reef.evaluation.reefine import ReefineEvaluation
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
@@ -34,8 +35,9 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
-    # The floor: the candidate alone must pass every evaluation task; the current release is not run.
-    assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
+    # Independent evaluation decides whether the requested change and protected capabilities pass.
+    assert built.selection.plugin_class is ReefineEvaluation
+    assert built.selection.config["settings"].reviewer_model == "served"
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -110,7 +112,7 @@ recipe = build_named_recipe('reefine', os.environ, config_directory=path.parent,
 assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
 assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
-assert recipe.selection.plugin_class.__name__ == 'FloorPlugin'
+assert recipe.selection.plugin_class.__name__ == 'ReefineEvaluation'
 assert recipe.base_artifact_files()
 assert recipe.model_binding().model == 'test-model'
 """

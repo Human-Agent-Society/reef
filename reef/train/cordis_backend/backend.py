@@ -415,6 +415,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._descriptor = descriptor
         self._propose = propose
         self._tasks = tasks
+        self.episode_scorer = score_episode
         self._models = models
         self._model_resolver = model_resolver
         if (
@@ -423,6 +424,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             or episode_timeout_s <= 0
         ):
             raise ValueError("episode_timeout_s must be a positive number")
+        self.episode_timeout_seconds = float(episode_timeout_s)
         if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
             raise ValueError("episode_repeats must be an integer of at least 1")
         if not isinstance(forbid_residue, bool):
@@ -1000,11 +1002,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
+            feedback = decision.metrics.get("request_feedback")
             rejected.append(
                 {
                     "step": int(prepared.state["steps"]),
                     "mutations": [_mutation_record(mutation) for mutation in candidate.mutations],
                     "reason": decision.reason,
+                    **({"feedback": feedback} if feedback is not None else {}),
                 }
             )
             state["rejected_proposals"] = rejected[-self._max_rejected_history :]

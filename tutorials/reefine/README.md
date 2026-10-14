@@ -8,7 +8,8 @@ review, install, and try a change in a normal `reef-pi` session.
 
 Use the repository environment from the [development guide](../../docs/contributing/development.rst).
 The `python3` on your PATH must import `reef` and `reef_client`.
-Have Node.js, npm, `rg`, and `fd` available for pi.
+Have Node.js, npm, `rg`, and `fd` available for pi. Install Git LFS and run
+`git lfs install` before creating versioned harness artifacts.
 Start a model endpoint that supports tool calls. Keep port `8901` free.
 
 In a terminal at the repository root:
@@ -97,9 +98,11 @@ Use the version shown in the result in place of `<version>`:
 /versions <version>
 ```
 
-Read the design, usage instructions, and review notes. The default evaluation
-checks that the harness can run `echo reef-ok` and return its output.
-Passing this health task does not prove that your requested behavior works.
+Read the design, usage instructions, and independent evaluation results.
+The default `selection: reefine` requires requested behavior, harness health,
+protected-task comparisons, and a fresh model review to pass.
+Use `evolution.evaluation` to configure application fixtures, protected tasks,
+and the reviewer model. Explicit `selection: floor` keeps health-only selection.
 Rejected or skipped requests leave the served version unchanged.
 
 If you accept the change, install it:
@@ -168,15 +171,19 @@ export REEF_TOKEN=reef-local                  # Matches configs/deployment.yaml.
 `bugfix` adds a second agent's review to the test-and-fix request.
 `research` requests the paper-reading workflow. The exact requests are in
 [demos/bugfix.md](demos/bugfix.md) and [demos/research.md](demos/research.md).
+The research demo supplies an arXiv paper and requires network access, `curl`,
+and `pdftotext`. It verifies the downloaded PDF, extracted text, and citation.
+It requires no academic API key.
 
 **The demos automatically promote pending extensions and run `setup --yes`.**
 They do not pause for the manual review described above. Unmet requirements
 or refused installation stop a demo with exit code `2`.
-If no change is selected, its test session uses the previously installed harness.
+A failed evaluation or installed-harness verification stops the demo and saves
+the result. Both demos test the installed harness in a fresh workspace.
 
 The [scripted deployment](configs/deployment.yaml) uses the text proposer and
 stores state under `work/`. The built-in profile used above can use an agent
-proposer where supported. Both use manual training and a health evaluation.
+proposer where supported. Both use manual training and independent evaluation.
 The script sets proposer limits of 900 seconds and 16,384 tokens by default.
 
 Measurement submits up to 12 fixed skill and rule requests, one at a time.
@@ -193,7 +200,7 @@ Runs reuse `work/deployment/`. Move `work/` aside before a run to start fresh.
 Recorded runs from September 6–8, 2026 used `gemma4:26b` on a Mac mini M4
 with 32 GB of memory. They used three arithmetic tasks and `selection: always`,
 which published changes regardless of evaluation results.
-They do not validate the current health task.
+They do not validate the current independent evaluator.
 
 - Bug-fix sessions reproduced, fixed, and tested the bug, but did not obtain a second agent's review.
 - Research sessions answered from memory or used a local search tool, but downloaded and read no paper.

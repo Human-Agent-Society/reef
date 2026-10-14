@@ -9,6 +9,14 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ServedComposition:
+    """The published harness composition used as the evaluation baseline."""
+
+    release_id: str
+    entries: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True)
 class UpdateCandidate:
     """One update that has been produced but not selected for serving.
 

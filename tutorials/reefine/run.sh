@@ -1,6 +1,6 @@
 #!/bin/bash
 # Reefine on reef-pi, end to end. Usage: ./run.sh bugfix | research | measure [--n N]
-# Starts reef serve on configs/deployment.yaml, waits for /healthz, installs
+# Starts reef serve with a case configuration derived from configs/deployment.yaml, waits for /healthz, installs
 # the served tree under work/harness, runs run.py <mode>, stops the service.
 # State and logs go to ./work. Setup (once): see README.
 set -e
@@ -12,7 +12,10 @@ case "$MODE" in
     *) echo "usage: ./run.sh bugfix | research | measure [--n N]" >&2; exit 2 ;;
 esac
 shift
-mkdir -p work
+DEMO_WORK="${REEF_DEMO_WORK_DIR:-$PWD/work}"
+mkdir -p "$DEMO_WORK"
+DEMO_WORK="$(cd "$DEMO_WORK" && pwd)"
+export REEF_DEMO_WORK_DIR="$DEMO_WORK"
 
 # The model server and the model: ollama on this machine unless the environment says otherwise.
 export REEF_UPSTREAM_URL="${REEF_UPSTREAM_URL:-http://127.0.0.1:11434}"
@@ -26,7 +29,6 @@ export REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"
 # depend on those defaults.
 export REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"
 
-TUTORIAL="$PWD"
 REPO="$(cd ../.. && pwd)"
 # The install script's import check and reef serve run from this checkout; the wrapper it writes bakes this interpreter.
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
@@ -37,15 +39,17 @@ if curl -sf http://127.0.0.1:8901/healthz > /dev/null 2>&1; then
     exit 1
 fi
 
-# Start Reef from the repository root, where deployment.yaml's state directories are relative to,
+# Start Reef from the repository root with the generated absolute state paths,
 # and stop it again when this script exits.
-(cd "$REPO" && exec python3 -m reef serve -c "$TUTORIAL/configs/deployment.yaml") > work/reef.log 2>&1 &
+python3 run.py prepare "$MODE"
+(cd "$REPO" && exec python3 -m reef serve -c "$DEMO_WORK/deployment.yaml") > "$DEMO_WORK/reef.log" 2>&1 &
 SERVE_PID=$!
-trap 'kill "$SERVE_PID" 2>/dev/null' EXIT
+# Wait for the launcher to finish stopping its service before releasing this run.
+trap 'kill "$SERVE_PID" 2>/dev/null || true; wait "$SERVE_PID" 2>/dev/null || true' EXIT
 
 # Wait until Reef answers; a dead orchestrator fails fast with its log.
 while ! curl -sf http://127.0.0.1:8901/healthz > /dev/null; do
-    kill -0 "$SERVE_PID" 2>/dev/null || { cat work/reef.log >&2; exit 1; }
+    kill -0 "$SERVE_PID" 2>/dev/null || { cat "$DEMO_WORK/reef.log" >&2; exit 1; }
     sleep 1
 done
 

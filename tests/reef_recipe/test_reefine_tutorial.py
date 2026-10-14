@@ -1,7 +1,4 @@
-"""Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the harness
-requests defaults and the evaluation's floor over the one health task, the driver parses, the demo requests and the
-measurement's fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the
-README examples have valid shell syntax and local links resolve."""
+"""Tutorial configuration, request admission, application fixtures and independent show checks."""
 
 from __future__ import annotations
 
@@ -12,13 +9,13 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import Mock
 
 import pytest
 from tests.support.config_helpers import load_harness_deployment as load_config
 
-from reef.core.plugins import PluginReference
 from reef.dispatcher import training_request_refusal
-from reef.evaluation.harness import FloorPlugin
+from reef.evaluation.reefine import ReefineEvaluation
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe import reefine
 from reef.recipe.reefine import ReefineRecipe, evolution
@@ -56,10 +53,8 @@ def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_floor(monkeypatch) -> None:
-    """The demos use the built-in recipe with tutorial-local state, training_mode manual (one step per
-    accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
-    so a change publishes when the tree still works and a code_extension still waits."""
+def test_deployment_yaml_builds_manual_reefine_with_independent_evaluation(monkeypatch) -> None:
+    """Manual requests use the formal Reefine evaluator; extension changes still require promotion."""
     from reef.recipe.registry import build_named_recipe
     from reef.service.assembly import _upstream_runtime
 
@@ -73,9 +68,9 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
     section = config["evolution"]
     assert section["requests"] is True and section["version_check"] is True
     assert section["review_kinds"] == ["code_extension"]
-    assert section["selection"] == "floor"
+    assert section["selection"] == "reefine"
     assert config["data"]["training_mode"] == "manual"
-    # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
+    # Health remains one required check alongside request behavior, regressions and change review.
     assert section["tasks"] == [HEALTH_TASK]
     assert load_config(profile_path("reefine"))["evolution"]["tasks"] == [HEALTH_TASK]
     assert evolution.grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
@@ -104,7 +99,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
     assert built.review_kinds == ("code_extension",)
     # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
-    assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
+    assert built.selection.plugin_class is ReefineEvaluation
     assert built.model_binding().model == "provider/model-a"
     assert [entry["id"] for entry in built.seed] == [
         "answer-style",
@@ -157,6 +152,67 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
         assert demo in run_module.SHOW_PROMPTS
     assert "reproduce it first with a failing test" in run_module.request_text("bugfix")
     assert "answer with citations" in run_module.request_text("research")
+
+
+@pytest.mark.parametrize(
+    "earlier_request", [{"id": "previous-request", "text": "same request"}, {"text": "same request"}]
+)
+def test_the_driver_waits_for_the_accepted_request_id(
+    run_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    earlier_request: dict[str, str],
+) -> None:
+    earlier = {
+        "operation": "training",
+        "release_id": "previous-release",
+        "pending": True,
+        "metrics": {"steps": 4, "training_request": earlier_request},
+    }
+    current = {
+        "operation": "training",
+        "release_id": "current-release",
+        "metrics": {
+            "steps": 5,
+            "selected": True,
+            "training_request": {"id": "accepted-request", "text": "same request"},
+        },
+    }
+    client = Mock(spec=run_module.ReefClient)
+    client.get.side_effect = [
+        {"state": "proposing", "checks": []},
+        {"releases": [earlier]},
+        {},
+        {"state": "selected", "checks": []},
+        {"releases": [earlier, current]},
+        {},
+    ]
+    monkeypatch.setattr(run_module.time, "sleep", Mock())
+
+    rows, selected = run_module.wait_for_step(client, "accepted-request", 0, run_module.time.monotonic() + 30)
+
+    assert rows == [earlier, current]
+    assert selected is current
+    assert "an earlier request's step" in capsys.readouterr().out
+
+
+def test_the_driver_times_out_without_the_accepted_request_id(
+    run_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    earlier = {
+        "operation": "training",
+        "release_id": "previous-release",
+        "metrics": {"steps": 4, "training_request": {"id": "previous-request", "text": "same request"}},
+    }
+    client = Mock(spec=run_module.ReefClient)
+    client.get.side_effect = [{"state": "queued", "checks": []}, {"releases": [earlier]}, {}]
+    monkeypatch.setattr(run_module.time, "sleep", Mock())
+    monkeypatch.setattr(run_module.time, "monotonic", Mock(side_effect=[0.0, 0.0, 2.0]))
+
+    rows, selected = run_module.wait_for_step(client, "accepted-request", 0, 1.0)
+
+    assert rows == [earlier]
+    assert selected is None
 
 
 def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> None:
@@ -269,7 +325,7 @@ def test_the_driver_reads_the_wrapper_as_it_prints_and_spools() -> None:
     # The phrases of the request store era are gone from both sides: nothing files, nothing reports a batch.
     for phrase in ("the step runs with this batch", "filed (", "_rearm"):
         assert phrase not in wrapper and phrase not in driver, phrase
-    assert '"training_request")' in driver and '"request")' not in driver
+    assert '"training_request")' in driver
     assert "{time.time_ns():020d}" in wrapper and r"-(\d{20})-" in driver
 
 
@@ -306,6 +362,73 @@ def test_readme_local_links_and_terminology() -> None:
         assert (TUTORIAL / link.partition("#")[0]).exists(), link
     for pattern in DROPPED_WORDS:
         assert re.search(pattern, readme, re.IGNORECASE) is None, pattern
+    for needle in ("./run.sh bugfix", "REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
+        assert needle in readme
+    assert "selection: reefine" in readme and "selection: floor" in readme
+    assert "selection: always" in readme and "independent" in readme
+
+
+@pytest.mark.parametrize("review_error", [False, True])
+def test_show_checks_native_review_errors_instead_of_losing_them_in_provider_messages(
+    run_module, tmp_path, review_error
+):
+    import json
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "adder.py").write_text("def sum_to(n):\n    return sum(range(1, n + 1))\n")
+    sessions = tmp_path / "show-sessions"
+    sessions.mkdir()
+    events = [{"type": "session", "id": "parent"}]
+    operations = [
+        ("write", {"path": "test_adder.py"}, "test added", False),
+        ("bash", {"command": "pytest test_adder.py"}, "1 failed", True),
+        ("edit", {"path": "adder.py"}, "edited", False),
+        ("bash", {"command": "pytest test_adder.py"}, "1 passed", False),
+        (
+            "review_diff",
+            {"diff": "adder.py diff"},
+            "Review agent exited with code 1" if review_error else "APPROVE",
+            review_error,
+        ),
+        ("edit", {"path": "test_adder.py"}, "test description updated", False),
+    ]
+    for index, (name, arguments, output, error) in enumerate(operations):
+        events.extend(
+            [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "toolCall", "id": str(index), "name": name, "arguments": arguments}],
+                    }
+                },
+                {
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": str(index),
+                        "content": [{"type": "text", "text": output}],
+                        "isError": error,
+                    }
+                },
+            ]
+        )
+    if not review_error:
+        events.extend(
+            [
+                {"type": "session", "id": "reviewer"},
+                {"message": {"role": "user", "content": [{"type": "text", "text": "Review this diff"}]}},
+                {
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "stop",
+                        "content": [{"type": "text", "text": "APPROVE"}],
+                    }
+                },
+            ]
+        )
+    (sessions / "session.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
+    result = run_module.verify_show("bugfix", {"exit": 0, "answer": "Done"}, tmp_path)
+    assert result.passed is not review_error
 
 
 def test_the_tutorial_is_listed_beside_the_other() -> None:
@@ -344,3 +467,59 @@ def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
     assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
     assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh
+
+
+@pytest.mark.parametrize("observed_source,extract_exit", [("full", 0), ("excerpt", 0), ("claim", 0), ("full", 1)])
+def test_research_checks_custom_tool_output_against_retained_pdf(
+    run_module, tmp_path, monkeypatch, observed_source, extract_exit
+):
+    import json
+
+    from tutorials.reefine import checks
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "2202.01446.pdf").write_bytes(b"%PDF-test")
+    source_text = "arXiv:2202.01446 " + "Comparison sorting requires logarithmic information. " * 40
+    (workspace / "2202.01446.txt").write_text(source_text)
+    monkeypatch.setattr(
+        checks.subprocess,
+        "run",
+        Mock(return_value=subprocess.CompletedProcess([], extract_exit, source_text, "")),
+    )
+    sessions = tmp_path / "show-sessions"
+    sessions.mkdir()
+    if observed_source == "full":
+        observed_text = source_text
+    elif observed_source == "excerpt":
+        observed_text = source_text[400:]
+    else:
+        observed_text = "Research complete"
+    events = [
+        {"type": "session", "id": "research"},
+        {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "toolCall", "id": "read", "name": "paper_reader", "arguments": {"id": "2202.01446"}}
+                ],
+            }
+        },
+        {
+            "message": {
+                "role": "toolResult",
+                "toolCallId": "read",
+                "content": [{"type": "text", "text": observed_text}],
+                "isError": False,
+            }
+        },
+        {
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "The bound follows from arXiv:2202.01446."}],
+            }
+        },
+    ]
+    (sessions / "session.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
+    result = run_module.verify_show("research", {"exit": 0, "answer": "arXiv:2202.01446"}, tmp_path)
+    assert result.passed is (observed_source != "claim" and extract_exit == 0)

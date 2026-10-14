@@ -75,7 +75,7 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
+      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w "rich>=15,<16"
       - run: python -m mypy
 
   select-tests:
@@ -172,7 +172,7 @@ jobs:
       # for the CEO-Bench harness tests, the OpenTelemetry SDK for the
       # record tracing exporter; keeping them here avoids expanding
       # Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w "rich>=15,<16" numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -341,7 +341,15 @@ jobs:
           }
           # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
           expected_core = {
-              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+              "aiohttp",
+              "alembic",
+              "huggingface-hub",
+              "pyyaml",
+              "reef-client",
+              "reef-eval",
+              "rich",
+              "sqlalchemy",
+              "tomli-w",
           }
           assert core == expected_core, core
           slime = {

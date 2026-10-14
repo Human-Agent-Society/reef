@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from reef.core.evaluation import ServedComposition as ServedComposition
 from reef.harness.tree.mutations import Mutation
 from reef.train.cordis_backend.proposals import ProposalInbox
 
@@ -51,6 +52,7 @@ class StepProgress:
     step_record: str | None
     episodes_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
+    checks: tuple[Mapping[str, object], ...] = ()
 
 
 class StepProgressReader(ABC):
@@ -63,3 +65,10 @@ class StepProgressReader(ABC):
 
 # Compatibility for adapters that implement the earlier interface name.
 ProposalGate = ProposalValidator
+
+
+class ServedCompositionConsumer(ABC):
+    """Receive the actual serving head before preparation, including stale re-evaluation."""
+
+    @abstractmethod
+    def set_served_composition(self, composition: ServedComposition) -> None: ...
