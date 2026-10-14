@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import RLock
 
@@ -175,3 +176,33 @@ class CommitExperimentObserver(RecordObserver):
                 checkpoint_path=None if prepared is None else prepared.checkpoint_path,
             )
         )
+
+
+class LoadedExperimentReports:
+    """Keep newly loaded observers' events until the outer registry lock exits.
+
+    The scope belongs to the synchronous caller, not the scenario being loaded:
+    its observer does not exist when the caller first acquires the registry lock.
+    Existing observers keep their own reporting and serialization boundaries.
+    """
+
+    def __init__(self) -> None:
+        self.active_scope: ContextVar[ExitStack | None] = ContextVar("loaded_experiment_reports", default=None)
+
+    @contextmanager
+    def scope(self) -> Iterator[None]:
+        if self.active_scope.get() is not None:
+            yield
+            return
+        with ExitStack() as reports:
+            token = self.active_scope.set(reports)
+            try:
+                yield
+            finally:
+                self.active_scope.reset(token)
+
+    def defer(self, observer: CommitExperimentObserver) -> None:
+        """Retain a new observer through registration, including failed loads."""
+        reports = self.active_scope.get()
+        if reports is not None:
+            reports.enter_context(observer.reporting())

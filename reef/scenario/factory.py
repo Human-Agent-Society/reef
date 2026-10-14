@@ -37,7 +37,7 @@ from reef.core.components import (
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.observability.commits import CommitExperimentObserver
+from reef.observability.commits import CommitExperimentObserver, LoadedExperimentReports
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario.binding import ScenarioBinding
@@ -122,12 +122,14 @@ class ScenarioFactory:
         local_artifact_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
+        loaded_experiment_reports: LoadedExperimentReports | None = None,
     ) -> None:
         self._recipe = recipe
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
         self._storage = scenario_storage
+        self.loaded_experiment_reports = loaded_experiment_reports
 
     def has_registration(self, scenario: str) -> bool:
         """True when the scenario is durably registered with the backend."""
@@ -428,6 +430,8 @@ class ScenarioFactory:
                     scenario.reingest(up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=bound.component)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
+            if experiment_observer is not None and self.loaded_experiment_reports is not None:
+                self.loaded_experiment_reports.defer(experiment_observer)
             scenario.publish_shipped_content()
             return scenario
         except BaseException:

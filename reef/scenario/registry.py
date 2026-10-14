@@ -10,7 +10,8 @@ resolution and uses the registry for lookups.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
@@ -23,6 +24,7 @@ from reef.artifact.repository import (
 from reef.core.errors import ReefError, UnknownScenario
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
+from reef.observability.commits import LoadedExperimentReports
 from reef.recipe.base import Recipe
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
@@ -68,11 +70,13 @@ class ScenarioRegistry:
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
+        self.loaded_experiment_reports = LoadedExperimentReports()
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
+            loaded_experiment_reports=self.loaded_experiment_reports,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
         )
         self._backend_factory = backend_factory
@@ -218,13 +222,16 @@ class ScenarioRegistry:
             rows.append(row)
         return tuple(rows)
 
-    def lock_for(self, scenario: str) -> RLock:
+    @contextmanager
+    def lock_for(self, scenario: str) -> Iterator[None]:
+        """Serialize scenario access; report newly loaded commits after the outermost lock exits."""
         with self._lock:
             lock = self._scenario_locks.get(scenario)
             if lock is None:
                 lock = RLock()
                 self._scenario_locks[scenario] = lock
-            return lock
+        with self.loaded_experiment_reports.scope(), lock:
+            yield
 
     def set_training_mode(self, scenario: str, training_mode: str) -> Scenario:
         """Select an existing scenario's mode and keep it for the reloads this process runs."""
