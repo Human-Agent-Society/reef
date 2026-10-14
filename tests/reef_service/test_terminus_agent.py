@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.terminus.quirks import _ALLOWED_KNOBS, _BINDING_KNOBS
+from reef.harness.adapters.matchers import Each, IsIn, Key
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
@@ -141,9 +141,13 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
 
     from harbor.agents.terminus_2.terminus_2 import Terminus2
 
+    # The descriptor's first check admits the config keys: Each(Key(IsIn([...]))).
+    admitted = get_adapter("terminus").config_targets["primary"].checks[0].matcher
+    assert isinstance(admitted, Each) and isinstance(admitted.matcher, Key)
+    assert isinstance(admitted.matcher.matcher, IsIn)
     parameters = set(inspect.signature(Terminus2.__init__).parameters)
-    unknown = sorted((_ALLOWED_KNOBS | _BINDING_KNOBS) - parameters)
-    assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
+    unknown = sorted(set(admitted.matcher.matcher.choices) - parameters)
+    assert unknown == [], f"the descriptor admits arguments Terminus 2 does not take: {unknown}"
 
 
 #: Provider fields a tree may pass through llm_call_kwargs, for example OpenRouter's routing and sampling fields; its

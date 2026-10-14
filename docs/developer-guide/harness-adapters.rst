@@ -79,11 +79,9 @@ whatever the adapter declares; for example:
 - An entry whose kind the descriptor gives no path, such as ``code_extension``
   under ``native``.
 - A ``config`` entry naming a target the descriptor does not declare.
-- A ``config`` entry that moves a key of the target's ``locked`` list off the
-  value its ``defaults`` set, or that sets a locked key the defaults never
-  name. A locked path is dotted key names with ``*`` for any key of an object
-  or any item of a list, and the check runs before the adapter's own steps, so
-  no adapter can skip it.
+- A merged config that fails one of its target's ``checks`` (see
+  `Config checks`_). The checks run before the adapter's own steps, so no
+  adapter can skip them.
 - A ``native_graph`` or ``native_agent`` naming a tool, skill, agent, or graph
   that no entry defines, or agents that delegate in a cycle.
 - A second ``native_loop``: a tree holds at most one.
@@ -93,14 +91,98 @@ What the adapter owns
 
 An adapter is configured mostly via declaration. ``descriptor.yaml`` supplies
 the path template for each tree node kind, the named config targets, the
-defaults merged under every tree, and the keys a tree must keep (``locked``).
-An adapter whose agent differs only in where
+defaults merged under every tree, and the checks the merged config must pass
+(``checks``). An adapter whose agent differs only in where
 files go needs no code at all, although they must comply with the following
 rules:
 
 - ``files.config`` must declare a ``primary`` target.
 - ``files.rules`` and ``files.skill`` are required.
 - every named template must contain ``{name}``.
+
+Config checks
+^^^^^^^^^^^^^
+
+A config target's ``checks`` state what its merged config must keep or must
+not set. Each check has a ``key``, a ``match`` expression that every value at
+the key must match, and an optional ``reason`` that a refusal gives:
+
+.. code-block:: yaml
+
+   files:
+     config:
+       primary:
+         path: "claude/settings.json"
+         defaults:
+           includeCoAuthoredBy: false
+         checks:
+           - key: includeCoAuthoredBy
+             match: IsDefault()
+           - key: [model, fallbackModel]
+             match: IsAbsent()
+             reason: Reef's model binding chooses the model
+           - key: env.DISABLE_TELEMETRY
+             match: Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
+             reason: benchmark episodes keep telemetry off
+
+The render runs the checks on the merged config, with the model binding
+applied when there is one, before any adapter step. Reef owns the matchers;
+a descriptor cannot add one. The render refuses a tree whose config fails a
+check, for example::
+
+   claude composition fails the check on env key 'AWS_REGION' in
+   claude/settings.json: Reef's model binding chooses the endpoint, ...
+
+A refusal names the key, and for ``Each`` the failing key or item, but never
+the value, which can be a credential the binding wrote. A check without a
+``reason`` gives its match expression instead.
+
+**Keys.** ``key`` is required: dot-separated key names, or a list of them
+(one check per key). ``.`` names the whole file, for a check on its top-level
+key names; a check without a key fails to load. A ``*`` segment is every key of an
+object and every item of a list. A ``**`` segment is any number of segments,
+zero included. A key the config does not set is absent. A ``*`` or ``**``
+segment visits only the values the config has.
+
+**Matchers.** Write a match expression as nested calls with JSON literals
+(``true``, ``false`` and ``null`` included). Use ``|-`` in YAML to wrap a long
+one over several lines.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Matcher
+     - Matches
+   * - ``IsDefault()``
+     - The value the target's ``defaults`` give the key, or an absent key when
+       they give none. Only for a key without ``*`` or ``**``.
+   * - ``IsAbsent()``
+     - A key the config does not set. An empty value is a set one.
+   * - ``Eq(v)``, ``IsIn([v, ...])``
+     - A value equal to ``v``, or to one of the list, with its type: ``false``
+       matches neither ``0`` nor ``"false"``.
+   * - ``IsObject()``, ``IsInt()``, ``Ge(n)``
+     - An object; an integer that is not a boolean; a number at least ``n``.
+   * - ``StartsWith(s)``, ``EndsWith(s)``, ``HasSubstr(s)``, ``MatchesRegex(s)``
+     - Text with that prefix, suffix or substring, or text that the regular
+       expression matches as a whole.
+   * - ``Lowercase(m)``, ``Uppercase(m)``, ``Strip(m)``
+     - Text that matches ``m`` after the change.
+   * - ``ParseJson(m)``
+     - A string holding JSON whose value matches ``m``.
+   * - ``Each(m)``, ``Contains(m)``
+     - Every entry of an object or item of a list matches ``m``, or at least
+       one does. ``Each`` also matches an absent key.
+   * - ``Key(m)``, ``Value(m)``
+     - An object entry whose key, or whose value, matches ``m``. Use them
+       inside ``Each`` and ``Contains``.
+   * - ``AllOf(m, ...)``, ``AnyOf(m, ...)``, ``Not(m)``
+     - Every matcher matches, at least one does, or ``m`` does not.
+
+Text matchers read a string as it is, and a number, a boolean or null as its
+JSON text, so ``Lowercase(Eq("0"))`` matches ``0``. They match no object, list
+or absent key. Only ``IsAbsent``, ``Not`` and ``Each`` match an absent key, so
+"if it is set, it must be X" is ``AnyOf(IsAbsent(), X)``.
 
 An adapter may also declare a ``quirks`` module to further customize the
 rendering process. The module defines one subclass of ``AdapterRenderer``
@@ -116,7 +198,7 @@ files:
      - Use it to
    * - ``process_config``
      - One merged config file, as a JSON object
-     - Refuse or adjust config, such as a shape the declaration cannot state
+     - Adjust config, or refuse a config a check cannot describe
    * - ``process_skill``
      - The text of one ``skill`` file
      - Add or check skill frontmatter
@@ -125,8 +207,8 @@ files:
      - Add or check command frontmatter
    * - ``check_model_route``
      - The processed config files, skill files and command files
-     - Refuse the model routes the harness reads beyond the binding's keys,
-       such as a fallback model or a second provider
+     - Refuse a model route that no check can describe, such as a model in
+       the frontmatter of a skill or a command
    * - ``finalize_render``
      - Every rendered file as text, each config file already written in its
        format
@@ -146,6 +228,9 @@ gets the same values from ``skill_frontmatter(path, text)``.
 
 .. important::
 
+   Write a rule on config values as a config check, not as a step: a check is
+   declared beside the defaults it protects and needs no code.
+
    Prefer the narrow steps over ``finalize_render``. A ``process_*`` step sees
    one file of one kind, and ``check_model_route`` only reads, so a reader can
    tell what each one may change and a reviewer can check it in isolation.
@@ -162,8 +247,9 @@ credential (the value holding ``{api_key}``) is set beside it. The binding is
 merged after the tree and wins every key it writes, so only a tree rendered
 without the binding, as admission renders a proposal, can set one; admission
 refuses an inline credential, so the credential tells the two apart. No
-adapter can turn this check off. Each adapter's ``check_model_route`` refuses
-the other routes its harness reads.
+adapter can turn this check off. Each adapter refuses the other routes its
+harness reads, such as a fallback model or a second provider, in its config
+checks, and in ``check_model_route`` what the checks cannot describe.
 
 Every step is a static method, and defining one as an ordinary method fails
 when the class is created. The render uses the class without making an
