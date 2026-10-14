@@ -16,6 +16,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event, Lock, RLock
+from weakref import WeakValueDictionary
 
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
@@ -228,7 +229,9 @@ class LoadedExperimentReports:
         self.active_scope: ContextVar[tuple[ExitStack, list[tuple[CommitExperimentObserver, int]]] | None] = (
             ContextVar("loaded_experiment_reports", default=None)
         )
-        self.deliveries: dict[str, ExperimentReportDelivery] = {}
+        # Observers and active delivery calls own queues. Keep the same queue
+        # through reloads while either exists, then release unused scenario names.
+        self.deliveries: WeakValueDictionary[str, ExperimentReportDelivery] = WeakValueDictionary()
         self.lock = Lock()
 
     def delivery_for(self, scenario: str, tracker: ExperimentTracker) -> ExperimentReportDelivery:

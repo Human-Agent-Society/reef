@@ -7,14 +7,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-from tests.scenario.test_component_trainers import (
-    HARNESS,
-    WEIGHTS,
-    _component_files,
-    _ComponentBackend,
-    _records,
-    _TwoTrainerRecipe,
-)
+from tests.scenario.test_component_trainers import _component_files
+from tests.support.component_trainers import HARNESS, WEIGHTS, _ComponentBackend, _records, _TwoTrainerRecipe
 from tests.support.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import InMemoryRepositoryBackend

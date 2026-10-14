@@ -5,8 +5,8 @@ from contextlib import contextmanager, nullcontext
 from threading import Event
 
 import pytest
-from tests.reef_service.test_artifact_versions import RecordingExperimentTracker, dispatcher, train
-from tests.scenario.test_component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
+from tests.support.artifact_versions import RecordingExperimentTracker, dispatcher, train
+from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
 
 from reef.artifact import Artifact
 from reef.train import TrainStepResult

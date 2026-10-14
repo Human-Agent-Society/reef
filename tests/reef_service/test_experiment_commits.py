@@ -267,3 +267,93 @@ def test_nested_loads_deliver_in_commit_order_after_all_scopes_exit(tmp_path, re
         if second is not None:
             second.store.close()
         storage.close()
+
+
+@pytest.mark.unit
+def test_delivery_index_releases_observers_after_their_lifetime(tmp_path):
+    import gc
+    import weakref
+
+    storage = SQLiteScenarioStorage(tmp_path)
+    tracker = RecordingTracker()
+    reports = LoadedExperimentReports()
+    first = CommitExperimentObserver(
+        tracker,
+        scenario="math",
+        recipe="recipe",
+        source_artifact_ref=ArtifactRef("seed", "seed", None),
+        scenario_step=0,
+        store=storage.open("math"),
+        delivery=reports.delivery_for("math", tracker),
+    )
+    second = CommitExperimentObserver(
+        tracker,
+        scenario="math",
+        recipe="recipe",
+        source_artifact_ref=ArtifactRef("seed", "seed", None),
+        scenario_step=0,
+        store=storage.open("math"),
+        delivery=reports.delivery_for("math", tracker),
+    )
+    delivery_ref = weakref.ref(first.delivery)
+    assert second.delivery is first.delivery
+    first.store.close()
+    del first
+    gc.collect()
+    assert delivery_ref() is second.delivery
+    second.store.close()
+    del second
+    gc.collect()
+    assert delivery_ref() is None
+    assert "math" not in reports.deliveries
+    storage.close()
+
+
+@pytest.mark.unit
+def test_delivery_index_keeps_in_flight_events_until_reporting_finishes(monkeypatch):
+    import gc
+    import weakref
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    tracker = RecordingTracker()
+    reports = LoadedExperimentReports()
+    delivery = reports.delivery_for("math", tracker)
+    delivery_ref = weakref.ref(delivery)
+    entered, release, ready = Event(), Event(), Event()
+    ready.set()
+
+    def record(event):
+        if event.context.step == 1:
+            entered.set()
+            assert release.wait(10)
+        tracker.events.append(event)
+
+    def event(step):
+        ref = training_record(step).artifact_ref
+        return TrainingExperimentEvent(
+            context=TrainingExperimentContext(scenario="math", recipe="recipe", step=step, source_artifact_ref=ref),
+            produced_artifact_ref=ref,
+            metrics={},
+            outcome="committed",
+        )
+
+    monkeypatch.setattr(tracker, "record", record)
+    delivery.enqueue(event(1), ready)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(delivery.flush)
+        try:
+            assert entered.wait(5)
+            del delivery
+            gc.collect()
+            replacement = reports.delivery_for("math", tracker)
+            assert replacement is delivery_ref()
+            replacement.enqueue(event(2), ready)
+            del replacement
+        finally:
+            release.set()
+        pending.result(timeout=5)
+    assert [event.context.step for event in tracker.events] == [1, 2]
+    gc.collect()
+    assert delivery_ref() is None
+    assert "math" not in reports.deliveries
