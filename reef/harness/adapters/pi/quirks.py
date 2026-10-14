@@ -11,13 +11,6 @@ pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 and never offered. ``process_skill`` gives a skill node whose
 text carries none both, the description being the text's first line.
 
-The descriptor's checks keep every model call on Reef's model binding: the
-binding writes the provider ``reef`` in ``models.json`` and selects it in
-``settings.json``, and the checks refuse another provider, a ``reef``
-provider with keys the binding does not write, and ``enabledModels`` and
-``httpProxy``, which send every call through another set of models or
-another host.
-
 pi 0.84.2 rewrites a few old settings keys when it loads ``settings.json`` and
 writes the new form back on its next save: ``queueMode`` becomes
 ``steeringMode``, a boolean ``websockets`` becomes ``transport``, and a

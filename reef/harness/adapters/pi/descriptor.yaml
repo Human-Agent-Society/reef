@@ -61,8 +61,6 @@ files:
     primary:
       path: "pi-agent/settings.json"
       defaults: {}
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs.
       checks:
         # They choose the models a run may use or send every call through
         # another host.

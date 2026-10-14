@@ -68,9 +68,8 @@ files:
           disabled: true
         session-telemetry-otel:
           disabled: true
-      # The shared render refuses a composition that fails one of these
-      # checks, in either profile (the web target repeats them by the
-      # anchor), before any quirks step runs.
+      # The web target repeats these checks through the anchor, so both
+      # profiles are held to them.
       checks: &patch_checks
         # The session log stays uncompressed (the reader cannot parse zstd),
         # and the LLM title call (one extra model request per episode) and

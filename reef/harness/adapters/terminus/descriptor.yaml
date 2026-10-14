@@ -50,8 +50,6 @@ files:
     primary:
       path: "terminus/config.json"
       defaults: {}
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs.
       checks:
         # Terminus 2 constructor arguments a tree may set, verified against
         # harbor 0.20.0, which reef-eval 0.1.1 resolves; a bump should check

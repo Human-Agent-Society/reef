@@ -1,9 +1,6 @@
-"""Codex adapter quirks: TOML, skill metadata, and safety invariants.
+"""Codex adapter quirks: the model catalog, skill metadata, and code extensions.
 
-Reef config nodes are JSON objects for every adapter, while Codex reads user
-configuration as TOML. The descriptor's checks hold the benchmark invariants
-and the model provider, and the render writes ``config.toml`` as TOML by its
-suffix. ``process_config`` turns the model metadata in ``models.json`` into
+``process_config`` turns the model metadata in ``models.json`` into
 Codex's model catalog. Codex skills require ``name`` and ``description``
 frontmatter. ``process_skill`` adds it when an evolved skill omits it. An
 agent_command renders as a skill in the same root, so it gets the same

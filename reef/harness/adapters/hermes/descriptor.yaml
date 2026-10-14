@@ -61,8 +61,6 @@ files:
           write_json_snapshots: true
         skills:
           creation_nudge_interval: 0
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs.
       checks:
         # Keep an episode hermetic and single request, with its snapshot readable.
         - key: [

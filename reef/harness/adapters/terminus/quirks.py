@@ -1,28 +1,10 @@
 """Terminus adapter quirks: constructor knobs, skill frontmatter, one context module.
 
-Terminus 2 takes its behavior from constructor arguments rather than a config
-file it discovers, so ``terminus/config.json`` is a flat object whose keys must
-each name a real Terminus 2 argument. The descriptor's checks refuse an
-unknown key, a defect in the tree: failing at render is what keeps a gated
-change meaning what it says instead of silently dropping a knob.
-
 Skills carry the ``name`` and ``description`` frontmatter the instruction
 builder reads. ``process_skill`` and ``process_command`` add it
 when an evolved node ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
 renders under the second root, and Harbor lists those skills beside the
 others, with nothing that marks them as commands.
-
-The descriptor's checks also keep every model call on Reef's model binding.
-The binding writes ``model_name``, ``api_base`` and ``llm_kwargs`` with the
-key; the checks refuse other ``llm_kwargs`` keys, a ``llm_call_kwargs``
-argument that litellm reads as the endpoint, the provider, a credential, the
-model, a fallback model or a logging callback, and a model named in
-``extra_body``.
-
-These checks cover the config the tree renders. Reef's proxy forwards the
-``model`` and ``models`` a request sends as they are, so a request that other
-code builds with the rendered key, such as a tool the model runs, can still
-name another model.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around

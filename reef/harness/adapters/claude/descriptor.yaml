@@ -85,8 +85,6 @@ files:
         # Covers a run where the person passes their own --settings, which
         # replaces the one in client_args.
         disableDeepLinkRegistration: "disable"
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs.
       checks:
         - key: [includeCoAuthoredBy, disableDeepLinkRegistration]
           match: IsDefault()

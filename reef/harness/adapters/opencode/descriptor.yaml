@@ -45,8 +45,6 @@ files:
         enabled_providers: ["reef"]
         permission:
           "*": "allow"
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs.
       checks:
         # Keep a benchmark episode hermetic and on the binding's provider only.
         - key: [autoupdate, share, enabled_providers]

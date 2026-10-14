@@ -28,15 +28,7 @@ counts as a mapping with no keys; frontmatter that does not parse, nests
 too deeply to read, holds any other tag, or is any other value than a
 mapping is refused at render. Every header is written so that YAML 1.2
 reads each value back with its type: a string that YAML 1.1 or 1.2 would
-read as a number, a boolean or a null is quoted.
-
-The descriptor's checks hold both profiles' patch layers before any step
-here runs: the keys an episode relies on, a patch entry that is an object,
-and every model call on Reef's model binding. The binding writes the
-``llm-pi-ai`` route ``reef``, selects it in ``agent-default-model`` and puts
-the route's key in ``.env``; another route, DeepSeek's own adapter, a
-provider or a model set for another call, a patch entry that names another
-package, and a js expression in those plugins are refused there."""
+read as a number, a boolean or a null is quoted."""
 
 from __future__ import annotations
 

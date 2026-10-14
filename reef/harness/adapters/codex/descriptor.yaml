@@ -64,10 +64,9 @@ files:
           trace_exporter: none
         sandbox_workspace_write:
           network_access: false
-      # The shared render refuses a composition that fails one of these
-      # checks, before any quirks step runs. web_search may take any value
-      # Codex reads, because the episode argv pins it disabled and only a
-      # person's reef-codex session reads the tree's value.
+      # web_search may take any value Codex reads, because the episode argv
+      # pins it disabled and only a person's reef-codex session reads the
+      # tree's value.
       checks:
         # The episode argv pins never, and a reef-codex session keeps Codex's
         # on-request default, so the person approves each command that leaves

@@ -523,12 +523,6 @@ def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
         defaults = target.get("defaults", {})
         if not isinstance(defaults, Mapping):
             raise DescriptorError(f"{where} config target {target_name!r} defaults must be an object")
-        if "locked" in target:
-            # A lock the loader skipped would leave the key unchecked, so the old field fails loudly.
-            raise DescriptorError(
-                f"{where} config target {target_name!r} 'locked' is replaced by 'checks': write a locked key as a "
-                "check whose match is IsDefault() when the defaults set it, and IsAbsent() when they do not"
-            )
         targets[str(target_name)] = ConfigTarget(
             path=_require_str(target, "path", f"{where} config target {target_name!r}"),
             defaults=dict(defaults),

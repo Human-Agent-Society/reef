@@ -6,23 +6,10 @@ feature-gate cache, per-session ``todos/`` lists, and ``shell-snapshots/``.
 The descriptor whitelists those so the episode inverse tolerates them and
 reports anything else as residue.
 
-The descriptor's checks keep the settings.json keys a tree must keep, refuse
-the settings keys that choose the model, a credential helper or a login
-method, and hold ``settings.env``: it must not turn the updater switches,
-telemetry or non-essential traffic back on, and must not set an env name
-Claude Code reads to choose the endpoint, the credential or the model,
-beside the three names Reef's model binding writes. The shared render runs
-them before this module's steps.
-
 Every model call stays on Reef's model binding, and a ``model`` in the
 frontmatter of a command or a skill is the tree choosing where calls go.
 ``check_model_route`` refuses it, reading the frontmatter as Claude Code
 reads it, which no config check can.
-
-These checks cover the config the tree renders. Reef's proxy forwards the
-``model`` and ``models`` a request sends as they are, so a request that other
-code builds with the rendered key, such as a tool the model runs, can still
-name another model.
 """
 
 from __future__ import annotations

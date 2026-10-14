@@ -1,23 +1,10 @@
-"""Matchers for the config checks a descriptor declares, after GoogleTest's matchers.
+"""Matchers for the tree node checks a descriptor declares, borrowed from GoogleTest's matchers.
 
-A config target in ``descriptor.yaml`` lists ``checks``. Each check names a
-``key`` of the merged config file and a ``match`` expression that every value
-at that key must match, such as ``Not(Lowercase(IsIn(["0", "false"])))``. The
-render refuses a tree whose config fails a check, before any adapter step
-runs. Reef owns the matcher vocabulary; a descriptor cannot add a matcher.
-
-A key is dot separated key names, or ``.`` for the whole file. A ``*`` segment is every key of an object
-and every item of a list, and a ``**`` segment is any number of segments,
-zero included. A key the config does not set has the value ``ABSENT``, which
-only ``IsAbsent()``, ``Not(...)`` and ``Each(...)`` match. A ``*`` or ``**``
-segment visits only values the config has, so a check below one passes when
-there is nothing to visit.
-
-Text matchers (``StartsWith``, ``EndsWith``, ``HasSubstr``, ``MatchesRegex``
-and the ``Lowercase``, ``Uppercase`` and ``Strip`` transforms) read a scalar
-as text: a string as it is, and a number, a boolean or null as its JSON text.
-They match no object, list or ``ABSENT``. ``Eq`` and ``IsIn`` compare values
-with their types, so ``false`` matches neither ``0`` nor ``"false"``.
+Each check names a ``key`` of the checked value and a ``match`` expression that
+every value at that key must match, such as
+``Not(Lowercase(IsIn(["0", "false"])))``. The key syntax and what each matcher
+matches are the descriptor contract described in "Node checks" in
+``docs/developer-guide/harness-adapters.rst``.
 
 A match expression is parsed with Python's expression grammar, restricted to
 matcher calls and JSON literals (``true``, ``false`` and ``null`` included), so
@@ -331,7 +318,7 @@ JSON_NAMES = {"true": True, "false": False, "null": None}
 
 @dataclass(frozen=True)
 class KeyDefault:
-    """The value the target's defaults give a check's key, ``ABSENT`` when they do not set it."""
+    """The value a check's key has in the defaults, ``ABSENT`` when they do not set it."""
 
     value: object
 

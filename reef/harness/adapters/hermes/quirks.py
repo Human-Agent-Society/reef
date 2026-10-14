@@ -15,25 +15,8 @@ default identity instead of replacing it. ``process_skill`` and
 ``process_command`` give a SKILL.md the node text left bare the ``name`` and
 ``description`` frontmatter hermes requires, under both skill roots.
 
-The descriptor's checks hold the config before any step here runs: the
-scanner download, the session title call, the background review and the
-curator that write skills into the tree, and the snapshot the reader
-parses stay as the defaults set them, and every model call stays on Reef's
-model binding. The binding writes the ``model`` section (a ``custom``
-provider, the endpoint, the model and a literal key), and the checks refuse
-the other names hermes reads for a provider, an endpoint, a credential, a
-transport, a model or a fallback chain, in ``model``, at the top level, in
-the mixture of agents presets, and for an auxiliary task, delegation, cron
-or the curator; an auxiliary task may keep ``auto`` or ``main``, which run
-it on the main model. A request body a tree passes to the bound endpoint
-(``extra_body``, ``delegation.request_overrides``) may not name a model
-either. ``process_config`` refuses a ``skills.external_dirs`` that is not a
-list of strings, where it adds the commands root.
-
-These checks cover the config the tree renders. Reef's proxy forwards the
-``model`` and ``models`` a request sends as they are, so a request that other
-code builds with the rendered key, such as a tool the model runs, can still
-name another model.
+``process_config`` refuses a ``skills.external_dirs`` that is not a list of
+strings, where it adds the commands root.
 """
 
 from __future__ import annotations

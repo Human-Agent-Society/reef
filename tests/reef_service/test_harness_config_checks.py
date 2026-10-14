@@ -215,15 +215,6 @@ def test_checks_are_validated_at_load(tmp_path: Path, checks: object, message: s
         checked(tmp_path, checks)
 
 
-def test_a_descriptor_that_still_declares_locked_keys_is_refused(tmp_path: Path) -> None:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "opencode" / "descriptor.yaml").read_text())
-    data["files"]["config"]["primary"]["locked"] = ["autoupdate"]
-    path = tmp_path / "descriptor.yaml"
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match=r"'locked' is replaced by 'checks'.*IsDefault\(\).*IsAbsent\(\)"):
-        load_descriptor(path)
-
-
 def test_a_check_with_a_list_of_keys_is_one_check_per_key(tmp_path: Path) -> None:
     descriptor = checked(tmp_path, [{"key": ["a", "b.c"], "match": "IsAbsent()", "reason": "r"}], {})
     assert [(check.key, check.reason) for check in descriptor.config_targets["primary"].checks] == [
