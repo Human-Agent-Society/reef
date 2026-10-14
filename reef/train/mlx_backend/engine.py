@@ -326,12 +326,14 @@ def _checkpointed_layers(layers: Sequence[nn.Module]) -> Iterator[None]:
 
             return mx.checkpoint(inner)(module.trainable_parameters(), *args, **kwargs)
 
-        cls.__call__ = checkpointed
+        # MLX layer classes have heterogeneous ``__call__`` signatures. This
+        # temporary class patch is required for checkpoint recomputation.
+        cls.__call__ = checkpointed  # type: ignore[method-assign]
     try:
         yield
     finally:
         for cls, call in originals.items():
-            cls.__call__ = call
+            cls.__call__ = call  # type: ignore[method-assign]
 
 
 def _lora_reaches_keys_or_values(lora_keys: Sequence[str]) -> bool:
