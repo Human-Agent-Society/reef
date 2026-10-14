@@ -1165,7 +1165,12 @@ the rounds:
 
 ``GeneratedTaskTasks`` runs the rounds and turns the training plays into
 tasks. It plays each task ``plays_per_task`` times, as its record stage
-groups them:
+groups them. With ``eval_fraction`` above 0, it decides each task's split
+before any task is played: tasks that share a source record share a split, a
+task placed in an earlier round keeps its split, and an eval task plays every
+arm while its training plays report nothing, so no batch trains on it. Each
+round's split goes into ``manifest-<round>.json`` beside the round summary,
+under ``state_dir``:
 
 .. config::
 
@@ -1176,6 +1181,8 @@ groups them:
    pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
    pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
    pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+   pipeline.record2task.config.eval_fraction | 0.0 | the fraction of each round's new tasks held out of training; 0 trains on every task
+   pipeline.record2task.config.split_seed | 0 | the seed that fixes which of a round's new tasks the eval split holds
 
 ``GeneratedTaskBatches`` batches complete task groups:
 

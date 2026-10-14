@@ -789,6 +789,8 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
         ({"rounds": 1, "description": "x", "state_dir": "s"}, "pipeline.record2task.config.generator"),
         ({"source_records_per_round": 1}, "needs a source_tag"),
         ({"source_tag": "session"}, "name=value"),
+        ({"eval_fraction": 1.5}, "eval_fraction must be"),
+        ({"eval_fraction": -0.5}, "eval_fraction must be"),
     ],
 )
 def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str, int], message: str) -> None:
@@ -809,6 +811,117 @@ def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> No
         built(description="x", state_dir="s")
     with pytest.raises(ValueError, match="generator_url"):
         built(description="x", state_dir="s", generator_url="${endpoints.generator}")
+
+
+# -------------------------------------------------------------------------------------------------- the split
+
+
+def eval_manifest(tmp_path: Path, round_number: int) -> dict[str, Any]:
+    """The split manifest the recipe wrote for one round, beside its summary."""
+    return json.loads((tmp_path / "state" / "tasks" / f"manifest-{round_number:05d}.json").read_text())
+
+
+def summary_splits(tmp_path: Path, round_number: int) -> dict[str, str]:
+    return {task["name"]: task["split"] for task in summary(tmp_path, round_number)["tasks"]}
+
+
+def test_an_eval_task_is_played_but_its_training_plays_never_reach_a_batch(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    p, player = rounds(tmp_path, task_generator, eval_fraction=0.5, split_seed=7, tasks_per_step=1)
+    assert not looked(p)
+    manifest = eval_manifest(tmp_path, 0)
+    held = set(manifest["eval"])
+    assert len(held) == 1, "one task of two is held out"
+    names = ("harbor-00000-000", "harbor-00000-001")
+    arms = [(call["task"], call["arm"], call["is_reporting"]) for call in player.plays]
+    for name in names:
+        assert [(arm, reporting) for task, arm, reporting in arms if task == name] == [
+            ("plain", name not in held),
+            ("hint", True),
+        ], "the eval task still plays every arm, but its training arm reports nothing"
+    (results,) = task_generator.results
+    by_name = {result.task.name: result for result in results}
+    for name in names:
+        assert by_name[name].training_rewards == (0.25, 0.25), "the generator gets the eval task's rewards too"
+    document = summary(tmp_path, 0)
+    splits = summary_splits(tmp_path, 0)
+    assert splits == {name: ("eval" if name in held else "train") for name in names}
+    assert document["tasks"][0]["source_agent_record_ids"] == ["designer-0"]
+    assert [task["reported_plays"] for task in document["tasks"]] == [0 if name in held else 2 for name in names]
+    assert (
+        manifest["train"] == sorted(set(names) - held) and manifest["eval_fraction"] == 0.5 and manifest["seed"] == 7
+    )
+    # Only the train task's episodes can complete a group, so the batch trains on it alone.
+    train = next(name for name in names if name not in held)
+    for index in range(2):
+        played(p, train, index, float(index % 2))
+    assert p.ready()
+    assert [[sample.group_id for sample in group] for group in trajectory_groups(p.build_batch())] == [[train, train]]
+
+
+def test_tasks_that_share_a_source_record_keep_one_split_across_rounds(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator(
+        [
+            generated(0, 0, 1),
+            (
+                GeneratedTask(task_for("harbor-00001-000", "designer-0", 9010)),
+                GeneratedTask(task_for("harbor-00001-001", "designer-1", 9011)),
+            ),
+        ]
+    )
+    worker = DeferredWorker()
+    p, player = rounds(tmp_path, task_generator, worker=worker, eval_fraction=0.5, split_seed=3, tasks_per_step=1)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    played(p, "t-0", 0, 1.0)
+    played(p, "t-0", 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    worker.finish()
+    assert not p.ready(), "round 0 lands on this look and round 1 starts on it"
+    assert [job.round_number for job in worker.submitted] == [0, 1]
+    worker.finish()
+    assert not p.ready(), "round 1 is absorbed; no further batch can come"
+    split0, split1 = summary_splits(tmp_path, 0), summary_splits(tmp_path, 1)
+    assert split0["harbor-00000-000"] == split1["harbor-00001-000"], "the same source record, the same split"
+    assert split0["harbor-00000-001"] == split1["harbor-00001-001"]
+    manifest0, manifest1 = eval_manifest(tmp_path, 0), eval_manifest(tmp_path, 1)
+    assert set(manifest1["eval"]) == {name.replace("00000", "00001") for name in set(manifest0["eval"])}
+    held1 = set(manifest1["eval"])
+    assert [
+        (call["task"], call["is_reporting"])
+        for call in player.plays
+        if call["task"].startswith("harbor-00001") and call["arm"] == "plain"
+    ] == [(name, name not in held1) for name in ("harbor-00001-000", "harbor-00001-001")]
+
+
+def test_a_restarted_processor_keeps_the_split_its_summaries_recorded(tmp_path: Path) -> None:
+    first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), eval_fraction=0.5, split_seed=5, rounds=1)
+    assert not looked(first)
+    assert summary_splits(tmp_path, 0) == {"harbor-00000-000": "eval"}, "a lone fresh task is held out"
+    first.close()
+    task_generator = ScriptedGenerator(
+        [(*generated(1, 0), GeneratedTask(task_for("harbor-00001-001", "designer-9", 9011)))]
+    )
+    second, player = rounds(tmp_path, task_generator, eval_fraction=0.5, split_seed=999, rounds=2)
+    assert not looked(second)
+    assert summary_splits(tmp_path, 1) == {
+        "harbor-00001-000": "eval",
+        "harbor-00001-001": "eval",
+    }, "the task of a placed source record keeps its split, and the fresh one is drawn"
+    assert [call["is_reporting"] for call in player.plays if call["arm"] == "plain"] == [False, False]
+
+
+def test_without_an_eval_fraction_every_task_trains_as_the_recipe_always_did(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    p, player = rounds(tmp_path, task_generator)
+    assert not looked(p)
+    assert all(call["is_reporting"] for call in player.plays)
+    (results,) = task_generator.results
+    assert all(result.is_played for result in results)
+    document = summary(tmp_path, 0)
+    assert all("split" not in task and "source_agent_record_ids" not in task for task in document["tasks"]), (
+        "the summary is what the recipe always wrote"
+    )
+    assert not list((tmp_path / "state" / "tasks").glob("manifest-*.json")), "no split manifest is written"
 
 
 # ------------------------------------------------------------------------------------------------- the recipe
