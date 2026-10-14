@@ -13,8 +13,8 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_proposals import _dispatcher, _recipe
-from reef_service.test_harness_recipe import (
+from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
+from tests.reef_service.test_harness_recipe import (
     SEED_MODELS,
     SEED_SETTINGS,
     backend,
@@ -22,8 +22,10 @@ from reef_service.test_harness_recipe import (
     run_backend_step,
     runtime,
 )
-from reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
-from reef_service.test_reef_trainer_contracts import ExampleBackend
+from tests.reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.train.test_harness_evolve_processor import harness_stages
+from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from reef.core import AgentRecord, RequestType
 from reef.core.requirements import REQUIRE_KINDS
@@ -39,9 +41,6 @@ from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import merged_requires
 from reef.train.trainer import Trainer
 from reef.train.types import TrainingBatch
-
-from ._strategies import resolve_episode_scorer, resolve_proposer
-from .test_harness_evolve_processor import harness_stages
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])
@@ -614,7 +613,7 @@ def test_the_manifest_and_the_install_script_carry_the_chains_requires(tmp_path:
     the union and its install script refuses until every item is checked off, naming the newest release that
     requires nothing (the seed's successor, not the parent, which requires an item of its own); each releases
     row keeps its own step's list."""
-    from reef_service.test_harness_channel import _pinned_env, _run_install
+    from tests.reef_service.test_harness_channel import _pinned_env, _run_install
 
     dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, _rules_proposer()))
     scenario = dispatcher.get_or_create_scenario("agents")

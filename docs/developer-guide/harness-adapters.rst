@@ -202,13 +202,6 @@ Examples:
   ``code_extension`` there too; refusals like this far outnumber the engine's
   own.
 
-*Backward compatibility*: A quirks module written before ``AdapterRenderer``
-may still define a module-level ``finalize_render(files)`` instead. This is
-deprecated and loading such a module warns: it runs in place of the
-``finalize_render`` step. Its config files arrive in the format their suffix
-names, so a ``.toml``, ``.yaml`` or ``.env`` file is no longer JSON. Define an
-``AdapterRenderer`` subclass instead.
-
 Note that ``native`` declares no ``quirks`` and runs on the engine's rules
 alone.
 

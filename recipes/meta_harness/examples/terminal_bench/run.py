@@ -84,7 +84,6 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
         ),
-        agent_record_dir=directory / "reef-data",
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
     )
 

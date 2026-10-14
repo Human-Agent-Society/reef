@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, _report_once, evaluate, make_binary, runtime
+from tests.reef_service.test_harness_recipe import (
+    SEED_MODELS,
+    SEED_SETTINGS,
+    _report_once,
+    evaluate,
+    make_binary,
+    runtime,
+)
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -21,7 +29,6 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 CREATE_RULES = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
 
@@ -67,7 +74,6 @@ def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     return Dispatcher(
         recipe,
         factory,
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 

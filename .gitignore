@@ -182,7 +182,7 @@ cython_debug/
 # VSCode
 settings.json
 # pi renders its harness config as settings.json; the golden trees are fixtures
-!tests/reef_service/data/harness_goldens/**/settings.json
+!tests/harness/data/harness_goldens/**/settings.json
 
 # Ruff stuff:
 .ruff_cache/
@@ -205,8 +205,9 @@ local/
 glm/
 _examples_synced/
 .env
-# The dsh adapter's golden tree renders an (empty) .env: render output, not a secret.
-!tests/reef_service/data/harness_goldens/dsh/dsh/.env
+# These golden trees render empty .env files.
+!tests/harness/data/harness_goldens/dsh/dsh/.env
+!tests/harness/data/harness_goldens/hermes/hermes/.env
 .DS_Store
 .worktrees/
 .reef/

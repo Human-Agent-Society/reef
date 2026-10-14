@@ -25,6 +25,8 @@ import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.train.test_harness_evolve_processor import harness_stages
 
 import reef.harness.adapters
 import reef.service.routes.system as system_routes
@@ -55,9 +57,6 @@ from reef.service.install_script import (
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-
-from ._strategies import resolve_episode_scorer, resolve_proposer
-from .test_harness_evolve_processor import harness_stages
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -166,6 +165,7 @@ def _dispatcher(
     api: str = "openai",
     adapter: str = "pi",
     model_metadata: dict[str, ModelMetadata] | None = None,
+    allow_implicit_creation: bool = True,
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -194,8 +194,8 @@ def _dispatcher(
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        allow_implicit_creation=allow_implicit_creation,
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -352,7 +352,7 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
             assert scenario["scenario_step"] == committed["step"] == 1
             assert committed["metrics"]["published"] is False
             assert committed["metrics"]["selected"] is False
-            assert committed["metrics"]["selection"]["outcome"] == "reject"
+            assert committed["metrics"]["selection"]["selected"] is False
             response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
             assert response.status == 404
         finally:
@@ -999,7 +999,7 @@ if mode == "static":
     # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.
     record.pop("setup", None)
     print(hashlib.sha256((json.dumps(record, indent=2) + "\n").encode("utf-8")).hexdigest())
-elif mode in ("check", "gate"):
+elif mode == "check":
     checked = {item["name"]: item for item in setup}
     def met(item):
         # A check off records the check it stood for; one without it (an older release file) counts by name.
@@ -2574,6 +2574,24 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
 
 
 @pytest.mark.unit
+def test_install_route_creates_no_scenario_when_implicit_creation_is_off(tmp_path) -> None:
+    dispatcher = _dispatcher(tmp_path, (), allow_implicit_creation=False)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
+            assert response.status == 404
+            assert "POST /reef/scenarios" in await response.text()
+            assert dispatcher.list_scenarios() == ()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exists(tmp_path) -> None:
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
@@ -2581,7 +2599,6 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=None,
         scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("weights-only")

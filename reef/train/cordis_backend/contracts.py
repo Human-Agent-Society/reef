@@ -59,7 +59,3 @@ class StepProgressReader(ABC):
     @property
     @abstractmethod
     def step_progress(self) -> StepProgress | None: ...
-
-
-# Compatibility for adapters that implement the earlier interface name.
-ProposalGate = ProposalValidator

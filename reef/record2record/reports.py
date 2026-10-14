@@ -220,7 +220,6 @@ class ReportRecord2Record(Record2Record):
         self.available_limit = context.held_set_limit
         self.grouping = grouping
         self.exclusive_sources = exclusive_sources
-        self.formed: list[ReportCandidate] = []
         self.candidate_count = 0
         #: The inference records, by ID, until their release.
         self.inferences: dict[str, AgentRecord] = {}
@@ -301,11 +300,6 @@ class ReportRecord2Record(Record2Record):
         """End a valid report that this method does not train on. A subclass can keep it for another use."""
         self.end_report(report)
 
-    def take_formed(self) -> tuple[RecordSet, ...]:
-        formed: tuple[RecordSet, ...] = tuple(self.formed)
-        self.formed = []
-        return formed
-
     def report_context(self, report: AgentRecord, parsed_report: ReportBase | None) -> ReportContext:
         missing = [ref for ref in report.references if ref not in self.inferences]
         if missing:
@@ -323,7 +317,6 @@ class ReportRecord2Record(Record2Record):
         group = None if key is None else self.groups.setdefault(key, ReportGroup())
         if group is not None and (group.discarded or slot in group.entries):
             self.end_report(report)
-            self.ended_set_ids.add(report.agent_record_id)
             return
         self.reports[report.agent_record_id].status = ReportStatus.HELD
         entry = ReportEntry(order=self.pool.next_arrival_index(), context=context, group_key=key, slot=slot)
@@ -337,17 +330,16 @@ class ReportRecord2Record(Record2Record):
         self.apply_limit()
 
     def reject(self, record_set: RecordSet) -> None:
-        report = candidate_context(record_set).report
-        self.end_report(report)
-        self.ended_set_ids.add(report.agent_record_id)
+        self.end_report(candidate_context(record_set).report)
 
     def end_report(self, report: AgentRecord) -> None:
         """End a report without training. Its record is releasable, with the sources that it owns outright.
 
         A report owns its sources when it claims more than one inference, or
-        any number under ``exclusive_sources``.
+        any number under ``exclusive_sources``. The pipeline forgets the tasks of the report's formed set.
         """
         self.reports[report.agent_record_id] = ReportState(report, ReportStatus.ENDED)
+        self.ended_set_ids.add(report.agent_record_id)
         if self.exclusive_sources or len(report.references) > 1:
             self.owned_sources.update(report.references)
 
@@ -377,7 +369,6 @@ class ReportRecord2Record(Record2Record):
         group.discarded = True
         for entry in group.entries.values():
             self.end_report(entry.context.report)
-            self.ended_set_ids.add(entry.report_id)
         group.entries = {}
 
     # ------------------------------------------------------- available limit
@@ -412,7 +403,6 @@ class ReportRecord2Record(Record2Record):
         for entry in report_set.entries:
             self.end_report(entry.context.report)
             self.owned_sources.update(entry.context.references)
-            self.ended_set_ids.add(entry.report_id)
 
     # ------------------------------------------------------------ consumption
 
@@ -491,6 +481,21 @@ class ReportRecord2Record(Record2Record):
                 max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
             ),
         }
+
+
+class ExclusiveReportRecord2Record(ReportRecord2Record):
+    """Every valid report trains by itself, and a report that ends owns its inference records outright. No config.
+
+    Use it when each report has its own inferences, as one scored rollout or one distillation sample does.
+    """
+
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context, ReportGrouping(), exclusive_sources=True)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context)
 
 
 def candidate_context(record_set: RecordSet) -> ReportContext:

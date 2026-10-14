@@ -679,7 +679,7 @@ def _release_info_tool_lines(wrapper_name: str) -> list[str]:
         "    # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.",
         '    record.pop("setup", None)',
         '    print(hashlib.sha256((json.dumps(record, indent=2) + "\\n").encode("utf-8")).hexdigest())',
-        'elif mode in ("check", "gate"):',
+        'elif mode == "check":',
         '    checked = {item["name"]: item for item in setup}',
         "    def met(item):",
         "        # A check off records the check it stood for; one without it (an older release file) counts by name.",

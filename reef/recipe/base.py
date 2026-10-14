@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.components import RECORDS_COMPONENT
+from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase
 from reef.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
@@ -24,10 +25,16 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
-from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
+from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2task import Record2Task
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
+from reef.runtime.interfaces import (
+    InferenceHandler,
+    InferenceRuntime,
+    MultimodalRelay,
+    TrainingMethod,
+    TrainingRuntime,
+)
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
@@ -35,6 +42,7 @@ from reef.task2batch import NoBatches
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -376,6 +384,10 @@ class WeightTrainingSpec:
     optimizer steps (rollout unit, step size, epochs, shuffle, remainder). It
     is the recipe's choice, not the objective's; the objective only rejects a
     schedule its loss cannot train, at build time and again in the backend.
+
+    ``objective`` is the recipe's startup objective: the training backend
+    starts with its loss family, and every job trains with it unless the
+    recipe overrides :meth:`WeightTrainingRecipe.training_method_selector`.
     """
 
     objective: str
@@ -439,6 +451,17 @@ class WeightTrainingRecipe(Recipe):
         """
         return WeightTrainingSpec(objective="")
 
+    def training_method_selector(self) -> TrainingMethodSelector:
+        """How this recipe picks the objective and learning-rate schedule of each training job.
+
+        The default trains every job with ``training_spec().objective`` and the
+        backend's configured learning rate. A recipe that switches methods
+        within one run (a supervised phase before policy training, a
+        distillation phase after it) returns its own selector, built from its
+        config fields; the backend still starts with the spec's objective.
+        """
+        return FixedTrainingMethodSelector(TrainingMethod(type(self).training_spec().objective))
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
@@ -493,21 +516,21 @@ class WeightTrainingRecipe(Recipe):
         field resolution performs type conversion before construction. A key this recipe does not declare
         is a loud error: the operator set a value nothing would consume.
         """
-        config_fields = recipe_config_fields(cls)
+        field_names = {argument.name for argument in config_arguments(cls)}
         data: dict[str, Any] = {}
         unknown: list[str] = []
         checkpoint_every: Any = None
         for key, value in settings.items():
             if key == "checkpoint_every_n_versions":
                 checkpoint_every = value
-            elif key in config_fields:
+            elif key in field_names:
                 # A YAML key left empty (None) is unset, not a value to parse.
                 if value is not None:
                     data[key] = value
             else:
                 unknown.append(key)
         if unknown:
-            known = ", ".join(f"reef.{name}" for name in [*sorted(config_fields), "checkpoint_every_n_versions"])
+            known = ", ".join(f"reef.{name}" for name in [*sorted(field_names), "checkpoint_every_n_versions"])
             raise RecipeConfigError(
                 f"{cls.__name__} does not consume {', '.join(f'reef.{key}' for key in sorted(unknown))}; "
                 f"the recipe would silently run with its defaults instead. "
@@ -517,9 +540,7 @@ class WeightTrainingRecipe(Recipe):
             )
         config: dict[str, Any] = {"data": data, "model": {"path": model_path}}
         if checkpoint_every is not None:
-            config["artifact"] = {
-                "checkpoint_every_n_versions": parse_int(checkpoint_every, "reef.checkpoint_every_n_versions")
-            }
+            config["artifact"] = {"checkpoint_every_n_versions": checkpoint_every}
         return config
 
     @classmethod
@@ -574,8 +595,6 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        from reef.train.runtime_backend import RuntimeCandidateBackend
-
         spec = type(self).training_spec()
         if type(self).pipeline_spec().task2batch is NoBatches:
             raise TypeError(
@@ -606,7 +625,7 @@ class WeightTrainingRecipe(Recipe):
             pipeline_factory=self.build_pipeline,
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
-                spec.objective,
+                self.training_method_selector(),
                 spec.scheduling,
                 inference_runtime=self.runtime,
                 loss_family=spec.loss_family,

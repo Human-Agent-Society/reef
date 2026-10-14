@@ -72,12 +72,21 @@ The Slime options belong in ``training.options``:
    opd-top-k | 1 | selects the sampled-token reverse-KL estimator; the sampled token's probability is normalized over the full vocabulary.
    opd-teacher-update-rate | 0 | the teacher stays frozen.
    opd-importance-sampling-cap | 0 | no truncated importance-sampling correction: one on-policy update per batch.
+   opd-advantage-clip | 0 | symmetric bound on the teacher/student log-prob difference used in the sampled reverse-KL gradient. 0 disables clipping.
 
 Also set ``loss-type: custom_loss``, ``use-rollout-logprobs: true`` and
 ``disable-compute-advantages-and-returns: true``. The family rejects multiple
 optimizer updates per batch. The shared backend's other divergences and
 representations are reachable through the inherited ``opd-*`` flags; changing
 them changes the method.
+
+Set ``opd-advantage-clip: 1.0`` to bound each token's advantage to
+``[-1, 1]`` before importance-sampling weights and sample weights are applied.
+Score centering uses the same bounded advantage. This option changes the
+gradient; the reported divergence remains the unclipped estimate. It requires
+``opd-divergence: reverse``, positive ``opd-top-k``, and
+``opd-top-k-distribution: renormalized``. The bound is fixed, rather than
+derived from running statistics.
 
 The separate checkpoint is swapped into the actor's architecture for the
 teacher pass, so teacher and student must share the architecture, parallel

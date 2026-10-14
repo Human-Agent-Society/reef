@@ -54,8 +54,6 @@ class Task2Batch(ABC, Plugin):
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
 
     def __init__(self, context: PipelineContext, batch_size: int) -> None:
-        if batch_size <= 0:
-            raise ValueError("batch_size must be positive")
         self.context = context
         self.scenario = context.scenario
         #: The number of record sets in one batch.
@@ -91,18 +89,6 @@ class Task2Batch(ABC, Plugin):
         that the recipe leaves out of the batch. In ``manual`` mode an
         instruction's batch has no tasks.
         """
-
-    def status(self) -> Mapping[str, Any]:
-        """Return JSON-safe state that the pipeline adds to its status."""
-        return {}
-
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        """Return numeric state that the pipeline adds to its metrics."""
-        return {}
-
-    def close(self) -> None:
-        """Release resources that the stage owns. Calling it more than one time is safe."""
-        return
 
 
 class NoBatches(Task2Batch):

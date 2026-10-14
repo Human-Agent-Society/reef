@@ -18,9 +18,9 @@ from collections.abc import Mapping
 
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
-from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 
 
 class TerminusAdapterRenderer(AdapterRenderer):

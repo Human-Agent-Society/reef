@@ -139,7 +139,7 @@ def worker_runtime(recipe):
     Ray reads RAY_ADDRESS when set; without it, start a local Ray runtime.
     Do not tear down an externally owned runtime when embedding this driver.
     """
-    selection, _ = evaluation_selection(recipe.score_episode, None, recipe.worker_executor)
+    selection, _ = evaluation_selection(recipe.score_episode, recipe.worker_executor)
     if selection.settings.backend != "ray":
         yield
         return
@@ -200,7 +200,6 @@ class RunService:
             recipe,
             InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
-            agent_record_dir=run_dir / "reef-data",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
         self._app = create_app(

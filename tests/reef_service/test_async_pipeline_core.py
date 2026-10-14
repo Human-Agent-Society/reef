@@ -7,7 +7,8 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
@@ -26,8 +27,6 @@ from reef.runtime.interfaces import (
 )
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
-
-from ._policy_recipe import TestPolicyRecipe
 
 _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
@@ -119,8 +118,8 @@ class DurableRuntime(StubTrainingRuntime):
         self.serving_version = runtime_load_id
         return ActivatedModel(candidate.candidate_id, runtime_load_id)
 
-    def reject_candidate(self, candidate, decision):
-        del candidate, decision
+    def reject_candidate(self, candidate):
+        del candidate
 
 
 class BlockingLostAckBackend(InMemoryRepositoryBackend):
@@ -213,7 +212,6 @@ def start_dispatcher(tmp_path: Path):
             TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
             factory,
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=tmp_path / "agent-record",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         )
@@ -337,8 +335,8 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
         lambda ref: pytest.fail(f"unexpected inference materialization: {ref.release_id}"),
     )
 
-    response = asyncio.run(
-        RequestService(dispatcher).infer(
+    response, _ = asyncio.run(
+        RequestService(dispatcher).infer_with_data(
             {"x-reef-scenario": "math"},
             {"messages": [{"role": "user", "content": "hi"}]},
             "/v1/chat/completions",
@@ -378,17 +376,17 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
-    committed = scenario.metrics_for_version(scenario.current_artifact_ref().release_id)
+    _, committed = scenario.artifact_with_metrics()
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
-    assert committed["selection"]["outcome"] == "select"
+    assert committed["selection"]["selected"] is True
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 1
     assert isinstance(status["recorded_at"], float)
     assert status["metrics"] == committed
-    status["metrics"]["selection"]["outcome"] = "mutated by caller"
+    status["metrics"]["selection"]["selected"] = False
     refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert refreshed["metrics"]["selection"]["outcome"] == "select"
+    assert refreshed["metrics"]["selection"]["selected"] is True
 
 
 @pytest.mark.unit
@@ -403,7 +401,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     produced = scenario.current_artifact_ref()
-    committed = scenario.metrics_for_version(produced.release_id)
+    _, committed = scenario.artifact_with_metrics(produced.release_id)
 
     assert committed is not None
     assert committed["experiment/provider"] == "test"
@@ -465,7 +463,8 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     assert len(receipts) == 1
     assert receipts[0]["metadata"] == {
         "outcome": "stale",
-        "metrics": stale_metrics,
+        # The receipt keeps the method the dropped batch was prepared with.
+        "metrics": {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}},
     }
     assert receipts[0]["consumed_ids"] == ("inference-1", "report-1")
 
@@ -624,7 +623,9 @@ def test_serving_only_scenarios_upload_requests_during_generation(
     async def run() -> None:
         handler = BlockingHandler()
         service = RequestService(dispatcher)
-        request = asyncio.create_task(service.infer({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler))
+        request = asyncio.create_task(
+            service.infer_with_data({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
+        )
         try:
             await asyncio.wait_for(handler.started.wait(), 2)
             sample = await asyncio.to_thread(wait_for_operational_sample, tracker, {"serve/request/active": 1})
@@ -638,7 +639,7 @@ def test_serving_only_scenarios_upload_requests_during_generation(
             assert sample["serve/request/active"] == 0
             assert sample["ingest/accepted_total"] == 0
             handler.release.set()
-            await service.infer({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
+            await service.infer_with_data({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
             sample = await asyncio.to_thread(
                 wait_for_operational_sample, tracker, {"serve/request/completed_total": 1}
             )

@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Event
 
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_proposals import _dispatcher, _recipe
+from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app

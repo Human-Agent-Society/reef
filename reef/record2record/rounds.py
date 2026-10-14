@@ -44,6 +44,8 @@ class RoundRecord2Record(ReportRecord2Record):
 
     The record-to-task stage starts each due round and tells the stage when
     it finished. After ``stop_rounds``, the stage holds no more source sessions.
+    The subclass's settings check that ``batches_per_round`` is positive and
+    ``sources_per_round`` is not negative.
     """
 
     def __init__(
@@ -56,10 +58,6 @@ class RoundRecord2Record(ReportRecord2Record):
         exclusive_sources: bool = False,
     ) -> None:
         super().__init__(context, grouping, exclusive_sources=exclusive_sources)
-        if batches_per_round < 1:
-            raise ValueError("batches_per_round must be positive")
-        if sources_per_round < 0:
-            raise ValueError("sources_per_round must be non-negative")
         self.round_grouping = grouping
         self.batches_per_round = batches_per_round
         self.sources_per_round = sources_per_round

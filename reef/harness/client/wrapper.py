@@ -1181,12 +1181,6 @@ def _met(item: Mapping[str, Any], record: Mapping[str, Any] | None) -> bool:
     return record is not None and ("check" not in record or record.get("check") == item.get("check"))
 
 
-def _unmet(requires: Any, setup: Any) -> list[dict[str, Any]]:
-    """The required items no check off meets."""
-    checked = {item["name"]: item for item in _named_items(setup)}
-    return [item for item in _named_items(requires) if not _met(item, checked.get(item["name"]))]
-
-
 def _item_line(item: Mapping[str, Any]) -> str:
     """One required item as every listing prints it: the name, the kind and the check as written."""
     check = item.get("check")

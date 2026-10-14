@@ -351,7 +351,7 @@ callers remain compatible with existing adapters.
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
-bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
+bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
 ``SQLiteScenarioStorage`` inherit those bases, respectively.
 
 .. code:: python
@@ -365,21 +365,22 @@ bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
    dispatcher = Dispatcher(
        recipe,
        repository_backend_factory,
-       agent_record_dir=Path(".reef/agent-record"),
        scenario_storage=storage,
    )
 
 ``Dispatcher`` requires ``scenario_storage`` and passes it to scenario
 creation. It never selects or imports a record storage implementation. The
 ``build_default_dispatcher`` convenience helper also requires this argument.
-Deployment assembly chooses SQLite or PostgreSQL from ``reef.record_backend``;
-embedded callers supply their chosen storage service explicitly. For ephemeral records
-and commits, pass ``SQLiteScenarioStorage()`` without a directory. Passing
-a directory preserves SQLite schemas, JSONL format, and scenario filenames.
+Deployment assembly builds the storage that ``storage.record_backend`` names:
+SQLite, PostgreSQL, or a ``ScenarioStorage`` plugin; embedded callers supply
+their chosen storage service explicitly. For ephemeral records, commits and
+settings, pass ``SQLiteScenarioStorage()`` without a directory. Passing a
+directory preserves SQLite schemas, JSONL format, and scenario filenames.
 
-With an explicit storage service, ``agent_record_dir`` independently selects the
-local directory for scenario model settings. Configure it to retain those
-settings across restarts even when records and commits use a remote adapter.
+The storage service keeps all per-scenario state. This includes the
+``ScenarioSettings`` of each scenario: the model configuration and the
+selected training mode. The scenario registry uses ``read_settings`` and
+``write_settings``. ``archive`` retires the settings with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
 ``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
@@ -393,10 +394,8 @@ The scenario registry caches one configuration object per scenario and passes
 it to the factory during creation and recovery. Recipes retain that object so
 new work observes updates while already resolved runtime snapshots remain
 unchanged. Use ``Dispatcher.configure_scenario_model`` to persist updates;
-it validates the value and recipe compatibility and writes the private JSON
-file before replacing the active runtime. ``reef.storage.model_config`` owns
-file reads, atomic writes, and archival. Existing file paths, JSON values,
-and owner-only permissions remain unchanged.
+it validates the value and recipe compatibility and writes the scenario
+settings through the storage service before replacing the active runtime.
 
 Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``records=...`` and ``commit_log=...`` arguments with one store opened by a
@@ -404,17 +403,44 @@ Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``Scenario`` does not choose a storage backend. Read committed history through
 ``scenario.store.history()`` and persistence capability through
 ``scenario.store.durable``; the former ``scenario.commit_log`` property has been
-removed. The concrete commit log store's ``commit_log`` is for backend diagnostics.
+removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostics.
 
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
-``reef.storage.scenario``, alongside ``ScenarioStoreConflict``. Concrete storage classes
-live under ``reef.storage``: ``commit_log.CommitLogScenarioStore`` accepts a
-``RecordStore`` and a JSONL ``CommitLog``; ``sqlite.SQLiteScenarioStorage`` and
-``postgres.PostgresScenarioStorage`` assemble their respective record backends.
-The scenario package depends only
-on storage contracts. Direct commit log callers now import ``CommitLog`` from
-``reef.storage.commit_log``; ``reef.scenario.commit_log`` is removed. The session
-contract is:
+``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
+Concrete storage classes live under ``reef.storage``:
+``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore`` and a
+``CommitHistory``, either the JSONL ``commit_log.CommitLog`` or the
+``postgres.PostgresCommitTable``; ``sqlite.SQLiteScenarioStorage`` and
+``postgres.PostgresScenarioStorage`` assemble their respective backends. The
+scenario package depends only on storage contracts. The storage contract is:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory)``
+     - Class method that builds the storage a deployment names in
+       ``storage.record_backend``. ``config`` is the plugin's own mapping;
+       ``directory`` is ``storage.agent_record_dir``.
+   * - ``durable``
+     - Whether new sessions and settings survive a process restart.
+   * - ``open(scenario)``
+     - Open an independently owned session (the ``ScenarioStore`` below).
+   * - ``read_settings(scenario)``
+     - The scenario's ``ScenarioSettings``; defaults for a scenario with none.
+   * - ``write_settings(scenario, settings)``
+     - Replace the settings durably. The caller serializes writers of one scenario.
+   * - ``archive(scenario)``
+     - Retire the scenario's records, commits and settings, so a recreated
+       scenario starts empty; return the archive locations.
+   * - ``prune(max_bytes=...)``
+     - Evict the oldest record bodies over the byte budget.
+   * - ``close()``
+     - Release shared resources; repeated calls are safe.
+
+The session contract is:
 
 .. list-table::
    :header-rows: 1
@@ -454,9 +480,12 @@ returns the original record, even after later steps have committed; only
 expected step, or a retry with conflicting content, raises
 ``ScenarioStoreConflict`` without advancing the store.
 
-The commit log adapter serializes its writers with a local POSIX file lock;
-direct writes through ``CommitLog`` bypass this store contract.
-The default adapter fsyncs the JSONL record as the durable commit point.
+``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
+``CommitLog`` uses a local POSIX file lock. Its fsynced JSONL line is the
+durable commit point. ``PostgresCommitTable`` holds an advisory lock in one
+transaction and inserts the commit row in that transaction. The commit is
+durable when the transaction ends. Direct writes through a ``CommitHistory``
+bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
 committed ``consumed_ids`` and separate skipped-batch receipts to rebuild
@@ -469,7 +498,7 @@ pending releases, rollback, and checkpoint reconciliation. See `Commit ordering
 provide distributed leases or authorize multiple active training writers.
 
 The storage service exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
-``prune(days=..., max_bytes=...)``, and ``close()``. Archive retires that scenario's
+``prune(max_bytes=...)``, and ``close()``. Archive retires that scenario's
 stored state so its name can be reused; prune applies retained-body limits to
 active and archived state. Custom backends implement those operations instead
 of exposing local file paths. Each opened session belongs to its scenario and
@@ -501,6 +530,9 @@ SQLite leaves it empty because each store owns a database. Custom SQL adapters
 must also supply ``RecordTables.eviction`` with scope/scenario keys and the
 ``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
 These totals are updated atomically with capacity deletion and retry hashes.
+``RecordTables.settings`` holds the store's settings as ``name`` and
+``value_json`` rows under the scope keys; ``SQLRecordStore.read_settings()`` and
+``write_settings(settings)`` read and replace them.
 
 .. code-block:: python
 
@@ -518,12 +550,15 @@ These totals are updated atomically with capacity deletion and retry hashes.
 The URL constructor owns its pool. To share a pool across sessions, construct
 ``PostgresRecordDatabase(url, schema=...)`` and pass that object instead of a URL;
 close sessions before closing the database. Both close operations are idempotent.
-``PostgresScenarioStorage(url, directory, schema=...)`` combines PostgreSQL
-records with ``CommitLogScenarioStore`` and local JSONL logs. Pass it through
+``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
+(the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
+the schema. It uses ``directory`` only to import the commit logs and model
+configuration files of earlier versions on start. Pass it through
 ``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
-selects this storage service with ``reef.record_backend: postgres``; see
-`operation settings <../user-guide/operate.rst>`__ for connection and storage setup.
+selects this storage service with ``storage.record_backend: postgres``; see
+`Choose the storage backend <../user-guide/operate.rst#choose-the-storage-backend>`__
+for connection and storage setup.
 
 Writes lock their store generation before allocating append sequences and hold
 the lock through commit. Reads use a consistent transaction snapshot. PostgreSQL
@@ -546,8 +581,7 @@ be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
        retained = records.audit_page("math")
 
 ``RecordRetention`` in ``reef.storage.records`` holds and validates the
-``max_bytes`` capacity budget. ``days`` remains a validated compatibility
-argument but does not expire data. Store factories apply capacity limits through
+``max_bytes`` capacity budget. Store factories apply capacity limits through
 ``prune`` independently of record consumption.
 
 Training commits persist consumption progress without changing record
@@ -608,7 +642,7 @@ including ``archived/``. The budget measures UTF-8 JSON payloads, references,
 and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
 
 For embedded Python deployments, use
-``dispatcher.prune_record_archives(RecordRetention(days=7, max_bytes=20 * 1024**3))``
+``dispatcher.prune_record_archives(RecordRetention(max_bytes=20 * 1024**3))``
 with ``RecordRetention`` imported from ``reef.storage.records``. This runs one sweep
 through the configured storage service and serializes it with scenario archival.
 Standalone ``SQLiteRecordStore`` and ``Dispatcher`` construction do not start a
@@ -630,10 +664,10 @@ standalone SQLite maintenance, pass the directory to the storage service:
    from reef.storage.records import RecordRetention
    from reef.storage.sqlite import SQLiteScenarioStorage
 
-   retention = RecordRetention(days=7, max_bytes=20 * 1024**3)
+   retention = RecordRetention(max_bytes=20 * 1024**3)
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
    try:
-       purged = storage.prune(days=retention.days, max_bytes=retention.max_bytes)
+       purged = storage.prune(max_bytes=retention.max_bytes)
    finally:
        storage.close()
 
@@ -732,7 +766,9 @@ A reported-feedback recipe implements these hooks:
 The recipe owns the report policy. Its record stage is a subclass of
 ``ReportRecord2Record(context, grouping, *, exclusive_sources=False,
 ordered_groups=False)``; ``ReportRecord2Record(context, ReportGrouping())``
-trains every report by itself. A ``ReportGrouping`` runs in the
+trains every report by itself. ``ExclusiveReportRecord2Record(context)`` also
+trains every report by itself, and a report that ends owns its inference
+records. A ``ReportGrouping`` runs in the
 record-to-record stage and reads only records:
 
 .. list-table::
@@ -1024,6 +1060,15 @@ valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
 ``epochs > 1`` otherwise, at recipe build and again in each backend before
 preparation.
 
+``WeightTrainingRecipe.training_method_selector()`` returns a
+``TrainingMethodSelector`` (``reef.train.runtime_backend``). Its
+``select(batch, algorithm_state)`` returns the ``TrainingMethod``
+(``reef.runtime.interfaces``) of each job: an objective reference and an
+optional ``LearningRateSchedule``. The default ``FixedTrainingMethodSelector``
+returns ``training_spec().objective``. The method is part of the job's
+identity. See `Write a recipe
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__.
+
 ``StepSignal`` carries:
 
 - ``action``: ``train`` runs backend training; ``skip`` commits a state-only
@@ -1056,6 +1101,14 @@ including the coordinator RPC. Update custom runtimes and upgrade coordinators
 and workers together. Experiment backend metadata now uses ``objective`` and
 ``scheduling`` instead of ``step_preparer``; committed algorithm state,
 training payloads, checkpoints and artifact formats are unchanged.
+
+Migration to per-job training methods: the second argument of every
+``prepare_training_step``, including the coordinator RPC, is now the job's
+``TrainingMethod``. ``RuntimeCandidateBackend`` takes a
+``TrainingMethodSelector`` instead of the objective string. Update custom
+runtimes, and upgrade coordinators and workers together. Training payloads gain
+a ``method`` entry, so the same rows produce a different job id. Finish or
+reject the jobs in flight before you upgrade.
 
 Harness method
 --------------
@@ -1170,8 +1223,8 @@ exact result it was given.
 |                                   | name, version, and a metrics mapping          |
 +-----------------------------------+-----------------------------------------------+
 | ``decide(candidate, evaluation)`` | returns a ``SelectionDecision`` whose         |
-|                                   | ``outcome`` is ``select`` or ``reject``, and  |
-|                                   | which must carry the evaluation it was given  |
+|                                   | ``selected`` is a boolean, and which must     |
+|                                   | carry the evaluation it was given             |
 +-----------------------------------+-----------------------------------------------+
 
 A rejection leaves the previous artifact serving. An exception is fail-closed:
@@ -1335,7 +1388,9 @@ holds their Slime reference. ``loss_fn`` names the Tinker built-in loss the
 family trains with; ``inputs(rows, base_logprobs, kl_coef=...)`` returns that
 function's token-aligned ``loss_fn_inputs``, one dictionary per row; and
 ``needs_base_logprobs`` requests frozen-base scores for a nonzero KL
-coefficient. For ``importance_sampling``, ``TokenRow.inputs`` builds the
+coefficient. ``check_kl_coef(kl_coef)`` raises ``ValueError`` for a
+coefficient the family cannot train; Reef calls it when it prepares a job,
+before any remote work. The default accepts every coefficient. For ``importance_sampling``, ``TokenRow.inputs`` builds the
 dictionary from response-token advantages, shifting prediction targets by one
 token and padding prompt positions with zeros. A ``TinkerCustomLoss`` adds
 ``loss(data, logprobs)``, which the SDK boundary passes to

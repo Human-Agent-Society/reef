@@ -250,6 +250,8 @@ class ReefTaskPlays(TaskPlays):
             labels={**tags, "arm": arm},
             extra_instruction_paths=extra_instruction_paths,
             is_reporting=is_reporting,
+            # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
+            verifier_timeout_reward=0.0,
         )
         return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
 

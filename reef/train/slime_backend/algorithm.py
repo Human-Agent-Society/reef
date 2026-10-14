@@ -67,7 +67,7 @@ Register the spec by reference from the package ``__init__`` —
 ``register_loss_family_ref("<name>", "my_method.slime:MyMethodAlgorithm")``
 (:mod:`reef.train.algos.registry`) — so the service never imports
 the Slime side and the driver imports it on first resolve. Naming conventions, enforced by
-``tests/reef_service/test_slime_algorithm_contract.py``: the spec class is
+``tests/slime_backend/test_slime_algorithm_contract.py``: the spec class is
 ``<Pkg>Algorithm`` and its driver options ``<Pkg>Settings``, both importable
 from the family package root; ``@objective`` entry points are ``<pkg>_loss``,
 ``<pkg>_advantages``, ``<pkg>_actor_init`` / ``<pkg>_actor_pre_train``; family
@@ -128,8 +128,16 @@ class PolicyGradientWeight:
 
 @dataclass(frozen=True)
 class TrainResult:
+    """One job's training: the actor workers' results and the method's durable metrics.
+
+    ``actor_trained`` is false when the job trained only the critic (a warmup
+    step): the actor took no optimizer step, so its learning-rate schedule
+    does not advance.
+    """
+
     worker_results: list[Any]
     durable_metrics: dict[str, Any] = field(default_factory=dict)
+    actor_trained: bool = True
 
 
 # --- objective registration (worker-side) ---
@@ -211,6 +219,17 @@ def resolve_objective_paths(args: Namespace) -> None:
         raise RuntimeError(f"loss family {loss_family!r} did not register required objective hooks: {hooks}")
     for arg_name, fn_name in registered.items():
         setattr(args, arg_name, f"{module_path}.{fn_name}")
+
+
+def reset_objective_paths(args: Namespace) -> None:
+    """Clear every objective hook path a family registered in this worker, before another family resolves its own.
+
+    A job of another loss family re-points the worker (see
+    ``worker_hooks.switch_loss_family``); a hook the previous family
+    registered and the next one does not must not stay on ``args``.
+    """
+    for arg_name in {name for hooks in _objective_registry.values() for name in hooks}:
+        setattr(args, arg_name, None)
 
 
 class SlimeAlgorithm(ABC):

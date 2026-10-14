@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 import yaml
-from reef_service.runtime_stubs import runtime_bindings, runtime_fixture
+from tests.support.runtime_stubs import runtime_bindings, runtime_fixture
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.inference.http import InferenceProxyRuntime
@@ -268,7 +268,7 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
 
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
-    from reef_service.runtime_stubs import StubTrainingRuntime
+    from tests.support.runtime_stubs import StubTrainingRuntime
 
     from reef.service import assembly
     from reef.service.deploy.service_config import ServiceConfig

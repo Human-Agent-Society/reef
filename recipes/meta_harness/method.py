@@ -361,9 +361,8 @@ class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
             selected=selected,
         )
         return SelectionDecision(
-            outcome="select" if selected else "reject",
+            selected=selected,
             policy="meta_harness",
-            policy_version="1",
             reason=(
                 f"candidate scored {candidate_mean:.4f} against committed incumbent {incumbent_mean:.4f} "
                 f"over {len(candidate_scores)} episode results"

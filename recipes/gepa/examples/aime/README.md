@@ -160,11 +160,11 @@ is sampling. The frozen column is the yardstick, being the same seed prompt in
 all four runs, and it scores between 36 and 47 of 150. The records are in
 [`results/`](results/).
 
-The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
+The deterministic half of the contract is `tests/recipes/gepa/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,
 the dataset drift refusal, and the driver's record lookup and report against a
 real embedded service with a stubbed inference backend. Where the upstream
-package is installed, `tests/reef_service/test_gepa_fidelity.py` drives
+package is installed, `tests/recipes/gepa/test_gepa_fidelity.py` drives
 `gepa.optimize` and this method side by side on a synthetic task from the
 same seed and requires the same candidates, parents, minibatches, and
 validation means at every iteration.

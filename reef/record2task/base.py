@@ -25,7 +25,7 @@ class TaskResult:
     """The tasks made from one record set, and what the record stage does with the set.
 
     ``runtime_load_id`` is the version of the tasks' training data, when the
-    stage knows it. The record stage's eligibility checks read it.
+    stage knows it. The record stage's staleness check reads it.
     """
 
     status: TaskStatus

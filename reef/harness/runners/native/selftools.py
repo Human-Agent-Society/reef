@@ -158,7 +158,7 @@ class SelfTools(ToolRunner):
                 if e.get("name") == "native_graph" and isinstance(e.get("config"), Mapping)
             }
             return {"main": graphs.get("main", SEED_GRAPH), "graphs": graphs}
-        if what in ("results", "verdicts"):
+        if what == "results":
             return self.results()
         if what == "status":
             return self._state.status()
@@ -173,18 +173,15 @@ class SelfTools(ToolRunner):
                 "operation": row.get("operation"),
                 "pending": row.get("pending", False),
                 "recorded_at": row.get("recorded_at"),
-                "evaluation": row.get("metrics", row.get("evaluation", row.get("gate"))),
+                "evaluation": row.get("metrics"),
             }
             for row in rows
         ]
-        # Older self-tool consumers read evaluation metrics from this key.
-        for release in releases:
-            release["gate"] = release["evaluation"]
         head = self._state.release_id or (str(rows[0]["release_id"]) if rows and rows[0].get("release_id") else None)
         rejected = None
         if head is not None:
             manifest = self._state.client.fetch(head)
-            evaluation_metrics = manifest.get("evaluation", manifest.get("gate"))
+            evaluation_metrics = manifest.get("evaluation")
             rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
         return {"head": head, "releases": releases, "rejected": rejected}
 
@@ -230,7 +227,7 @@ def self_tools(state: ServeState) -> list[HostTool]:
                 "properties": {
                     "what": {
                         "type": "string",
-                        "enum": ["tree", "graph", "results", "verdicts", "status"],
+                        "enum": ["tree", "graph", "results", "status"],
                         "description": "Which view: tree, graph, results or status.",
                     }
                 },
@@ -263,7 +260,4 @@ def self_tools(state: ServeState) -> list[HostTool]:
     ]
 
 
-# Compatibility aliases for existing imports.
-VERDICT_ROWS = RESULT_ROWS
-
-__all__ = ["RESERVED_NAMES", "RESULT_ROWS", "VERDICT_ROWS", "HostTool", "SelfTools", "ServeState", "self_tools"]
+__all__ = ["RESERVED_NAMES", "RESULT_ROWS", "HostTool", "SelfTools", "ServeState", "self_tools"]

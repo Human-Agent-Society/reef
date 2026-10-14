@@ -25,10 +25,12 @@ dependencies = [
     "aiohttp>=3.14",  # web.RequestKey
     "alembic>=1.13,<2",
     "huggingface_hub",
+    # Harbor's environment contract backs reef.sandbox; the terminus runner, the task player and the generator
+    # service play Harbor tasks with reef-eval.
+    "harbor>=0.20,<0.21",
     "pyyaml",
     "reef-client>=0.2.0",
-    # Harbor and reef-eval: the terminus runner, the task player and the generator service play Harbor tasks.
-    "reef-eval[harbor]>=0.1.1",
+    "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
     "tomli-w",
 ]
@@ -227,7 +229,7 @@ fail_under = 80
 [tool.pytest.ini_options]
 # durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
 # -vv will also display tests with duration = 0.00s
-addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
+addopts = "--verbose --pyargs --durations=0 --strict-markers --import-mode=importlib"
 testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
 # directories to ignore when discovering tests
 norecursedirs = [

@@ -295,9 +295,8 @@ only when at least one task improves and none regresses.
            scores = [(c if c is not None else -1e30, k if k is not None else -1e30) for c, k in pairs]
            selected = all(c >= k for c, k in scores) and any(c > k for c, k in scores)
            return SelectionDecision(
-               outcome="select" if selected else "reject",
+               selected=selected,
                policy="pareto",
-               policy_version="1",
                reason="no task regressed and at least one improved" if selected else "Pareto failed",
                evaluation=evaluation,
            )

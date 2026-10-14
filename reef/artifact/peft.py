@@ -51,13 +51,10 @@ def read_peft_config(local_path: Path) -> Mapping[str, Any]:
     return config
 
 
-def _digest(path: Path) -> str:
-    """SHA-256 of one artifact file, read in chunks so a large adapter streams."""
-    hasher = hashlib.sha256()
+def file_sha256(path: Path) -> str:
+    """SHA-256 hex digest of one artifact file, streamed so a large adapter is never read whole."""
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def read_adapter_metadata(local_path: Path) -> Mapping[str, Any] | None:
@@ -178,7 +175,7 @@ class PEFTValidator(ArtifactValidator):
                     f"{ADAPTER_METADATA} lists {name!r}, which the artifact does not contain; "
                     "the adapter is incomplete"
                 )
-            if (actual := _digest(target)) != expected:
+            if (actual := file_sha256(target)) != expected:
                 raise AdapterArtifactError(
                     f"{name!r} hashes to {actual} but {ADAPTER_METADATA} recorded {expected}; "
                     "the adapter was corrupted or modified after export"
@@ -199,6 +196,7 @@ __all__ = [
     "METADATA_SCHEMA",
     "AdapterArtifactError",
     "PEFTValidator",
+    "file_sha256",
     "read_adapter_metadata",
     "read_peft_config",
 ]

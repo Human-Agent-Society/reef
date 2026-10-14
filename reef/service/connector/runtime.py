@@ -146,8 +146,6 @@ class ReefRuntime:
 
     async def execute(self, command: dict[str, Any]) -> dict[str, Any]:
         action = command.get("action")
-        if action == "refresh":
-            return await self.snapshot()
         name = scenario_name(command.get("scenario"))
         path = "/reef/scenarios/" + quote(name, safe="")
         if action == "releases":
@@ -252,7 +250,7 @@ def release_summary(row: Any) -> dict[str, Any]:
     Never artifact files, request text, entry bodies or prompts: a request
     keeps its id and the names and kinds of what it requires, an agent's
     proposal its id, a recheck its reason code, a mutation its op, id and
-    kind, and a selection its outcome, policy, evaluator and counts.
+    kind, and a selection its selected flag, policy, evaluator and counts.
     ``result`` is the release page's result for a step (``selected``,
     ``rejected``, ``skipped``, ``failed`` or ``pending``).
     """
@@ -308,9 +306,13 @@ def release_summary(row: Any) -> dict[str, Any]:
                 summary["mutations"].append(entry)
         selection = metrics.get("selection")
         if isinstance(selection, dict):
-            decision: dict[str, Any] = {
-                key: selection[key][:80] for key in ("outcome", "policy") if isinstance(selection.get(key), str)
-            }
+            decision: dict[str, Any] = {}
+            policy = selection.get("policy")
+            if isinstance(policy, str):
+                decision["policy"] = policy[:80]
+            selected = selection.get("selected")
+            if isinstance(selected, bool):
+                decision["selected"] = selected
             if isinstance(selection.get("metrics"), dict):
                 decision["metrics"] = finite_numbers(selection["metrics"], ("passed", "failed", "floor_score"))
             evaluation = selection.get("evaluation")

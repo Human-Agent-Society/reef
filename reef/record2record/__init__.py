@@ -22,7 +22,8 @@ Stages:
   record and decides nothing.
 * ``ReportRecord2Record`` (``reports.py``): reports and the inference records that
   they reference, alone or in groups. A recipe's ``ReportGrouping`` decides
-  which reports train and how they form groups.
+  which reports train and how they form groups. ``ExclusiveReportRecord2Record``
+  trains every valid report by itself, and each report owns its inference records.
 * ``JudgingRecord2Record`` (``judging.py``): records that a model judges on a
   background worker after later traffic completes them. A recipe's
   ``RecordJudging`` holds the correlation and the judge.
@@ -34,14 +35,14 @@ Stages:
 Components of the pool:
 
 * ``RecordSet`` (``sets.py``): the base of every set, with the fields that the
-  pool, the selection policies, and the eligibility checks read.
+  pool, the selection policies, and the staleness check read.
 * ``RecordSetPool`` (``pool.py``): the held sets, and the reserved batch.
 * ``SelectionPolicy`` (``selection.py``): the order in which sets go into a
   batch. ``ArrivalOrder`` takes the oldest first. ``GroupKeyOrder`` takes
   ungrouped sets, then groups by key.
-* ``EligibilityCheck`` (``eligibility.py``): finds held sets that can no
-  longer train. ``StalenessCheck`` drops sets that are more than
-  ``max_staleness`` versions behind the newest held set.
+* ``stale_sets`` (``staleness.py``): finds held sets that are more than
+  ``max_staleness`` versions behind the newest held set. ``JudgingRecord2Record``
+  drops them.
 
 The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
 ``reef.observability``, ``reef.background_jobs``, and ``reef.pipeline_context``. Thus record-to-task and
@@ -49,20 +50,15 @@ the trainer can both use it.
 """
 
 from reef.record2record.base import InferenceRecord2Record, PassThroughRecord2Record, Record2Record, TaskStatus
-from reef.record2record.eligibility import EligibilityCheck, IneligibleSet, StalenessCheck
-from reef.record2record.judging import JudgedSet, JudgingRecord2Record, RecordJudging, judged_sets
+from reef.record2record.judging import JudgedSet, JudgingRecord2Record, RecordJudging
 from reef.record2record.pool import RecordSetPool
 from reef.record2record.reports import (
+    ExclusiveReportRecord2Record,
     GroupDecision,
     ReportCandidate,
     ReportContext,
-    ReportEntry,
     ReportGrouping,
     ReportRecord2Record,
-    ReportSet,
-    accepted_by,
-    report_score,
-    report_sets,
 )
 from reef.record2record.rounds import RoundGrouping, RoundRecord2Record
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder, SelectionPolicy
@@ -70,10 +66,9 @@ from reef.record2record.sets import RecordSet, SingleRecordSet
 
 __all__ = [
     "ArrivalOrder",
-    "EligibilityCheck",
+    "ExclusiveReportRecord2Record",
     "GroupDecision",
     "GroupKeyOrder",
-    "IneligibleSet",
     "InferenceRecord2Record",
     "JudgedSet",
     "JudgingRecord2Record",
@@ -84,18 +79,11 @@ __all__ = [
     "RecordSetPool",
     "ReportCandidate",
     "ReportContext",
-    "ReportEntry",
     "ReportGrouping",
     "ReportRecord2Record",
-    "ReportSet",
     "RoundGrouping",
     "RoundRecord2Record",
     "SelectionPolicy",
     "SingleRecordSet",
-    "StalenessCheck",
     "TaskStatus",
-    "accepted_by",
-    "judged_sets",
-    "report_score",
-    "report_sets",
 ]

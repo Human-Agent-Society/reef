@@ -18,15 +18,15 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.records_types import AgentRecord
 from reef.pipeline_context import PipelineContext
 from reef.record2record.base import Record2Record
-from reef.record2record.eligibility import StalenessCheck
 from reef.record2record.selection import ArrivalOrder
 from reef.record2record.sets import RecordSet
+from reef.record2record.staleness import stale_sets
 
 
 class RecordJudging(BackgroundJobRunner, ABC):
@@ -86,8 +86,8 @@ class JudgingRecord2Record(Record2Record):
 
     Every record is in exactly one state: tracked, in flight, held in the
     pool, or terminal. Terminal records are released from memory and never
-    batch. Judged sets wait in the order that their judgments arrived. A
-    ``StalenessCheck`` drops sets that are more than ``max_staleness``
+    batch. Judged sets wait in the order that their judgments arrived. The
+    staleness check (``stale_sets``) drops sets that are more than ``max_staleness``
     versions behind the newest one (the context's ``max_staleness``), by record arrival, while no batch is out:
     continual serving advances the version every step, and stale sets would
     otherwise block the queue.
@@ -96,18 +96,16 @@ class JudgingRecord2Record(Record2Record):
     """
 
     def __init__(self, context: PipelineContext, judging: RecordJudging, worker: BackgroundJobWorker | None) -> None:
-        super().__init__(ArrivalOrder(), (StalenessCheck(context.max_staleness),))
+        super().__init__(ArrivalOrder())
+        self.max_staleness = context.max_staleness
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
         self.in_flight: dict[str, AgentRecord] = {}
-        #: Terminal receipts: retired or trained, both releasable.
-        self.terminal: set[str] = set()
         # Record-arrival order per live receipt: the staleness check needs
         # generation recency, which judgment completion order is not.
         self.arrival_order: dict[str, int] = {}
         self.arrival_count = 0
-        self.formed: list[JudgedSet] = []
 
     # ------------------------------------------------------------- formation
 
@@ -141,16 +139,12 @@ class JudgingRecord2Record(Record2Record):
                 )
             )
 
-    def take_formed(self) -> tuple[JudgedSet, ...]:
-        formed, self.formed = tuple(self.formed), []
-        return formed
-
     def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
-        self.pool.put(replace(record_set, runtime_load_id=runtime_load_id))
-        # The eligibility checks never run under a reserved batch: its samples reference held sets.
+        super().accept(record_set, runtime_load_id)
+        # The staleness check never runs under a reserved batch: its samples reference held sets.
         if self.pool.reserved is None:
-            dropped_sets = judged_sets(tuple(dropped.record_set for dropped in self.pool.drop_ineligible()))
-            for judged_set in dropped_sets:
+            for judged_set in judged_sets(stale_sets(self.pool.sets(), self.max_staleness)):
+                self.pool.remove(judged_set.set_id)
                 self.retire(judged_set.receipt)
                 self.ended_set_ids.add(judged_set.set_id)
 
@@ -192,11 +186,9 @@ class JudgingRecord2Record(Record2Record):
     # ------------------------------------------------------------ consumption
 
     def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
-        consumed = frozenset(judged_set.receipt for judged_set in judged_sets(record_sets))
+        consumed = super().consume(judged_sets(record_sets), trained=trained)
         for receipt in consumed:
             self.arrival_order.pop(receipt, None)
-            self.terminal.add(receipt)
-        self.ended_set_ids.update(consumed)
         return consumed
 
     # --------------------------------------------------------- background work
@@ -214,10 +206,10 @@ class JudgingRecord2Record(Record2Record):
     def releasable_record_ids(self) -> frozenset[str]:
         held = frozenset(judged_set.receipt for judged_set in judged_sets(self.pool.sets()))
         protected = frozenset(self.tracked) | frozenset(self.in_flight) | held
-        return frozenset(self.terminal) - protected
+        return super().releasable_record_ids() - protected
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
-        self.terminal -= agent_record_ids
+        super().release_records(agent_record_ids)
         for agent_record_id in agent_record_ids:
             self.tracked.pop(agent_record_id, None)
             self.in_flight.pop(agent_record_id, None)

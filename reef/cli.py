@@ -6,11 +6,10 @@ Usage:
   reef connect                               # link an existing runtime to the console
 
 `reef serve` starts local inference or a provider deployment without YAML, or reads
-a config's `services` list and starts its processes in dependency order.
-Run `reef serve --help` for config options.
+a config's components and assembles their processes. Run `reef serve --help` for
+config options; the configuration reference documents the layout.
 
-Deployment stacks use the `services` layout documented in the configuration
-reference. Named recipe YAML is deployment data, not library data: point
+Named recipe YAML is deployment data, not library data: point
 ``REEF_RECIPE_CONFIG_DIR`` at your own directory.
 """
 

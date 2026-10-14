@@ -56,19 +56,17 @@ from __future__ import annotations
 
 import importlib
 import re
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from types import ModuleType
 from typing import Any
 
 import yaml
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
-from reef.harness.episodes.executor import EpisodeExecutor
+from reef.sandbox.process import EpisodeExecutor
 
 
 class ExecutionValidator(ABC):
@@ -166,21 +164,6 @@ class AdapterRenderer:
         names; a change to a config file reads that text again. The returned mapping is the rendered tree.
         """
         return files
-
-
-def legacy_adapter_renderer(module: ModuleType) -> type[AdapterRenderer]:
-    """The renderer of a quirks module that defines only the older module level ``finalize_render(files)``.
-
-    Deprecated: such a module should define an ``AdapterRenderer`` subclass instead. This will be removed.
-    """
-
-    class ModuleRenderer(AdapterRenderer):
-        @staticmethod
-        def finalize_render(files: dict[str, str]) -> dict[str, str]:
-            rendered: dict[str, str] = module.finalize_render(files)
-            return rendered
-
-    return ModuleRenderer
 
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
@@ -706,26 +689,7 @@ def _load_quirks(
     if len(renderers) > 1:
         names = ", ".join(sorted(renderer.__name__ for renderer in renderers))
         raise DescriptorError(f"{where} quirks module defines more than one AdapterRenderer subclass: {names}")
-    finalize = getattr(module, "finalize_render", None)
-
-    # Backward compatibility to support bare finalize_render.
-    if renderers and finalize is not None:
-        raise DescriptorError(f"{where} quirks must define an AdapterRenderer subclass or finalize_render, not both")
-    if finalize is not None and not callable(finalize):
-        raise DescriptorError(f"{where} quirks finalize_render must be callable")
-    if renderers:
-        renderer = renderers[0]
-    elif finalize is not None:
-        # An external quirks module written before AdapterRenderer: its function still gets the last word.
-        warnings.warn(
-            f"{where} quirks module {module_name!r} defines finalize_render, which is deprecated; "
-            "define an AdapterRenderer subclass instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        renderer = legacy_adapter_renderer(module)
-    else:
-        renderer = AdapterRenderer
+    renderer = renderers[0] if renderers else AdapterRenderer
     whitelist = tuple(getattr(module, "cleanup_whitelist", ()))
     if not all(isinstance(item, str) and item for item in whitelist):
         raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")

@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.openclawrl.prm import flatten_content
+from reef.record2task.samples import flatten_content
 
 #: Ceiling on live sessions. The fallback opens one session per unmatched
 #: request, so without a ceiling a client it never matches grows the table

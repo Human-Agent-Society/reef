@@ -43,22 +43,20 @@ def _required_environment(name: str) -> str:
     return value
 
 
-def _driver_options(
-    arguments: Sequence[str], *, default_ready_file: str = DEFAULT_READY_FILE
-) -> tuple[Path, list[str]]:
+def _driver_options(arguments: Sequence[str]) -> tuple[Path, list[str]]:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--ready-file", default=os.environ.get("REEF_BRIDGE_READY_FILE", default_ready_file))
+    parser.add_argument("--ready-file", default=os.environ.get("REEF_BRIDGE_READY_FILE", DEFAULT_READY_FILE))
     options, remaining = parser.parse_known_args(arguments)
     if not options.ready_file:
         raise RuntimeError("--ready-file must be non-empty")
     return Path(options.ready_file), remaining
 
 
-def _write_ready_file(path: Path, marker: str = READY_MARKER) -> None:
+def _write_ready_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        temporary.write_text(f"{marker}\n", encoding="utf-8")
+        temporary.write_text(f"{READY_MARKER}\n", encoding="utf-8")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -96,8 +94,6 @@ def supervise_deployment(
     source: ModelPlanSource,
     ready_file: Path,
     stopping: threading.Event,
-    *,
-    marker: str = READY_MARKER,
 ) -> ModelDeployment:
     """Cold-rebuild failed components, with at most three restarts per five minutes.
 
@@ -128,7 +124,7 @@ def supervise_deployment(
                 deployment = ModelDeployment(source.create())
                 deployment.start()
                 if not stopping.is_set():
-                    _write_ready_file(ready_file, marker)
+                    _write_ready_file(ready_file)
                     _logger.info("Model deployment recovered and ready")
         return deployment
     except BaseException:
@@ -143,7 +139,6 @@ def run_deployment(
     plan: ModelDeploymentPlan,
     ready_file: Path,
     *,
-    marker: str = READY_MARKER,
     source: ModelPlanSource | None = None,
 ) -> int:
     ready_file.unlink(missing_ok=True)
@@ -157,10 +152,10 @@ def run_deployment(
     try:
         deployment.start()
         if not stopping.is_set():
-            _write_ready_file(ready_file, marker)
-            print(marker, flush=True)
+            _write_ready_file(ready_file)
+            print(READY_MARKER, flush=True)
             if source is not None and plan.health is not None:
-                deployment = supervise_deployment(deployment, source, ready_file, stopping, marker=marker)
+                deployment = supervise_deployment(deployment, source, ready_file, stopping)
             else:
                 stopping.wait()
         return 0

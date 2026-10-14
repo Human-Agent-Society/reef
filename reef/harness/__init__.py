@@ -14,9 +14,10 @@ The map, one subpackage per job:
     reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
     the two programs Reef ships, native and terminus.
 ``episodes/``
-    one headless run and its reading: launch on a rendered root, locally or
-    in a jail (``run``, ``executor``), the model binding, the version pin and
-    the trajectory readers.
+    one headless run and its reading: launch on a rendered root through any
+    ``reef.sandbox`` executor (``run``), the adapter as the program that
+    executor runs and its install (``vendor_install``), the model binding,
+    the version pin and the trajectory readers.
 ``runners/``
     the programs an adapter's ``binary`` points at when Reef ships them:
     ``native`` (the loop, its graph, its seed and the resident ``serve`` form)
@@ -28,7 +29,7 @@ The map, one subpackage per job:
     what a settled step means for the person who asked, and the next action
     it offers: the words the wrapper prints and the harness pages render.
 
-This package depends on core values and runtime contracts, never on training,
+This package depends on core values, runtime contracts and sandbox execution, never on training,
 recipes, scenario coordination, or the HTTP service.
 
 The evolution loop itself, propose, gate and publish, is

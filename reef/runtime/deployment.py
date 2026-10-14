@@ -504,14 +504,6 @@ def register_runtime_kind(cls: type[RuntimeFactory]) -> type[RuntimeFactory]:
     return cls
 
 
-def register_runtime_factory(factory: RuntimeFactory) -> RuntimeFactory:
-    """Register an external runtime factory (module-level convenience)."""
-    if not isinstance(factory, RuntimeFactory):
-        raise TypeError(f"a runtime factory registers a RuntimeFactory, got {type(factory).__name__}")
-    _register(factory)
-    return factory
-
-
 def runtime_kinds() -> tuple[str, ...]:
     return tuple(dict.fromkeys((*_BUILTIN_FACTORIES, *_runtime_kinds)))
 

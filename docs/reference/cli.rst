@@ -23,7 +23,7 @@ to forced cleanup of the managed service processes.
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
-   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``; ``harness-evolve``, its former name, starts the same profile.
+   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
@@ -57,8 +57,6 @@ wheel, so it runs from an installed package; it listens on
 ``127.0.0.1:8901`` without authentication unless ``REEF_TOKEN`` is set, and keeps its state under
 ``.reef/reefine/``. To change anything else, copy
 ``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
-``--recipe harness-evolve``, the former name of the profile folded into it,
-starts the same profile and says so on stderr.
 
 Overriding config values
 ------------------------

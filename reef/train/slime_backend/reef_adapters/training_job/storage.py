@@ -33,6 +33,8 @@ class CheckpointStorageError(RuntimeError):
 
 #: Rank-local adapter snapshots live beside the Megatron checkpoint.
 ADAPTER_SLOTS_DIRNAME = "reef_adapter_slots"
+#: The learning-rate schedule progress of every scenario lives beside the job marker.
+LEARNING_RATE_SCHEDULES_FILENAME = "reef_learning_rate_schedules.json"
 
 
 @dataclass(frozen=True)
@@ -336,11 +338,12 @@ class CheckpointStorage:
 
     def _unknown_assets(self, known: set[Path]) -> list[str]:
         unknown: list[str] = []
-        # Control files Reef itself keeps in the managed roots: the job marker
-        # and the LoRA scenario history beside the HF exports, and the
-        # adapter-slot snapshots beside the Megatron checkpoints.
+        # Control files Reef itself keeps in the managed roots: the job marker,
+        # the LoRA scenario history and the learning-rate schedule progress
+        # beside the HF exports, and the adapter-slot snapshots beside the
+        # Megatron checkpoints.
         roots = [
-            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME}),
+            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME, LEARNING_RATE_SCHEDULES_FILENAME}),
             (self.megatron_root, "latest_checkpointed_iteration.txt", {ADAPTER_SLOTS_DIRNAME}),
         ]
         if self.critic_root is not None:

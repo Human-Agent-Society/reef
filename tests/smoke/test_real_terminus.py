@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.trajectory import read_terminus_atif
+from reef.harness.episodes.trajectory import TerminusAtifReader
 from reef.harness.tree.render import render_composition
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
@@ -56,7 +56,7 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
 
     slug = trial_slug(TASK)
     assert sorted(sessions.glob("*.json")) == [sessions / f"{slug}.json"]
-    events = read_terminus_atif(sessions)
+    events = TerminusAtifReader()(sessions)
     assert events and events[0]["type"] == "verifier"
     # The verifier has to have run. Accepting an empty reward here would let
     # this pass on an episode whose container never built.

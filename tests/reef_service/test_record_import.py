@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
@@ -22,8 +23,6 @@ from reef.task2batch import Task2Batch
 from reef.train import PreparedStep, Trainer, TrainingBatch
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskItem
-
-from .test_reef_trainer_contracts import ExampleBackend
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 

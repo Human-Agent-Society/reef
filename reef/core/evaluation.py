@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -51,32 +51,24 @@ class EvaluationResult:
 class SelectionDecision:
     """The durable, explainable decision for one evaluated candidate."""
 
-    outcome: Literal["select", "reject"]
+    selected: bool
     policy: str
-    policy_version: str
     reason: str
     evaluation: EvaluationResult
     metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"select", "reject"}:
-            raise ValueError("selection outcome must be 'select' or 'reject'")
+        if not isinstance(self.selected, bool):
+            raise ValueError("selected must be a boolean")
         if not isinstance(self.policy, str) or not self.policy:
             raise ValueError("policy must be a non-empty string")
-        if not isinstance(self.policy_version, str) or not self.policy_version:
-            raise ValueError("policy_version must be a non-empty string")
         if not isinstance(self.reason, str) or not self.reason:
             raise ValueError("reason must be a non-empty string")
 
-    @property
-    def selected(self) -> bool:
-        return self.outcome == "select"
-
     def to_dict(self) -> dict[str, Any]:
         return {
-            "outcome": self.outcome,
+            "selected": self.selected,
             "policy": self.policy,
-            "policy_version": self.policy_version,
             "reason": self.reason,
             "evaluation": self.evaluation.to_dict(),
             "metrics": dict(self.metrics),

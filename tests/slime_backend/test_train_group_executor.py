@@ -5,7 +5,7 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
-from executor_helpers import AttachedTestGroup
+from tests.support.executor_helpers import AttachedTestGroup
 
 from reef.runtime.executor import Executor, ExecutorFuture, resolve
 from reef.runtime.executor.failure import ExecutorFailureListener

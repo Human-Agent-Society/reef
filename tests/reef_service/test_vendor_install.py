@@ -15,9 +15,18 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tests.reef_service.test_harness_recipe import (
+    MODEL,
+    PI_FAKE,
+    RULES,
+    batch,
+    evaluate,
+    make_binary,
+    run_backend_step,
+)
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.executor import LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.episodes.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
@@ -27,11 +36,9 @@ from reef.harness.episodes.vendor_install import (
     resolve_binary,
 )
 from reef.runtime.executor.config import ExecutorSettings
+from reef.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.service.install_script import render_install_script
 from reef.train.cordis_backend import CordisBackend, Mutation
-from ._strategies import resolve_episode_scorer, resolve_proposer
-
-from .test_harness_recipe import MODEL, PI_FAKE, RULES, batch, evaluate, make_binary, run_backend_step
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -194,7 +201,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
 
 
 def _counting_resolver(monkeypatch, result):
-    """Stand in for ``resolve_binary`` where the backend calls it, counting calls.
+    """Stand in for ``resolve_binary`` where the adapter program calls it, counting calls.
 
     ``result`` is the path a resolution yields, or an exception it raises.
     """
@@ -207,7 +214,7 @@ def _counting_resolver(monkeypatch, result):
             raise result
         return result
 
-    monkeypatch.setattr("reef.train.cordis_backend.backend.resolve_binary", resolve)
+    monkeypatch.setattr("reef.harness.episodes.vendor_install.resolve_binary", resolve)
     return calls
 
 
@@ -260,7 +267,7 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
 
 
 def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
-    from reef.harness.episodes.e2b import E2BExecutor
+    from reef.sandbox.e2b import E2BExecutor
 
     calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
@@ -344,7 +351,7 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
     seen = []
 
     def launch(executor, argv, **kwargs):
-        seen.append(executor._bwrap_argv(argv, **{k: v for k, v in kwargs.items() if k != "timeout"}))
+        seen.append(executor.bwrap_argv(argv, **{k: v for k, v in kwargs.items() if k != "timeout"}))
         return LocalExecutor().launch(argv, **kwargs)
 
     monkeypatch.setattr(SandboxExecutor, "launch", launch)
@@ -368,6 +375,7 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
 @pytest.mark.unit
 def test_an_explicit_binary_does_not_add_a_vendor_mount(monkeypatch, tmp_path) -> None:
     calls = _counting_resolver(monkeypatch, "/should/not/be/used")
+    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     sandbox = SandboxExecutor()
     backend = _backend(str(make_binary(tmp_path)), _propose, executor=sandbox)
     assert calls == []

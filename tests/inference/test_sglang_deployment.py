@@ -13,7 +13,7 @@ from reef.inference.sglang.executor import SGLangExecutor
 
 @pytest.mark.parametrize("executor", [None, "auto", "ray"])
 def test_native_inference_factory_accepts_plain_input_without_starting_workers(monkeypatch, executor):
-    from reef.inference.sglang.service import RayExecutor
+    from reef.runtime.executor.ray import RayExecutor
 
     def fail_allocation(*args, **kwargs):
         raise AssertionError("factory must not allocate workers")

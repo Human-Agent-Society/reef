@@ -18,12 +18,14 @@ from recipes.gepa.archive import Archive
 from recipes.gepa.method import GEPAProposer, ScoreFeedback
 from reef.evaluation.harness import EpisodeEvaluationWorker, EpisodeScorer
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.e2b import E2BExecutor
-from reef.harness.episodes.executor import EpisodeTimeout, build_executor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent import launch_pi
+from reef.sandbox.config import build_executor
+from reef.sandbox.e2b import E2BExecutor
+from reef.sandbox.process import EpisodeTimeout
 from reef.train.cordis_backend.backend import _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost
 
@@ -85,8 +87,9 @@ def model_endpoint():
 
 @pytest.mark.parametrize("adapter,api", [("pi", "openai"), ("codex", "responses")])
 def test_real_agent_episode_through_generic_executor(adapter, api, model_endpoint, tmp_path):
-    executor = build_executor({"executor": "e2b", "adapter": adapter, "sandbox": {"forward_ports": [model_endpoint]}})
     descriptor = get_adapter(adapter)
+    configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
+    executor, _ = configured.for_program(AdapterProgram(descriptor))
     binding = ModelBinding(
         base_url=f"http://127.0.0.1:{model_endpoint}",
         model=os.environ.get("REEF_E2B_TEST_MODEL", "openai/gpt-4.1-mini"),
@@ -111,7 +114,7 @@ def test_real_agent_episode_through_generic_executor(adapter, api, model_endpoin
 
 
 def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
-    executor = build_executor({"executor": "e2b", "adapter": "pi"})
+    executor, _ = build_executor({"executor": "e2b"}).for_program(AdapterProgram(get_adapter("pi")))
     assert isinstance(executor, E2BExecutor)
     session = replace(executor, binary="python3", timeout_s=90).open()
     root = tmp_path / "episode"
@@ -161,8 +164,9 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
 
 
 def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
-    executor = build_executor({"executor": "e2b", "adapter": "pi", "sandbox": {"forward_ports": [model_endpoint]}})
     descriptor = get_adapter("pi")
+    configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
+    executor, _ = configured.for_program(AdapterProgram(descriptor))
     binding = ModelBinding(
         base_url=f"http://127.0.0.1:{model_endpoint}",
         model=os.environ.get("REEF_E2B_TEST_MODEL", "openai/gpt-4.1-mini"),
@@ -196,7 +200,7 @@ def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
 
 
 def test_reefine_scripted_trial_uses_node_in_the_shared_session(tmp_path):
-    executor = build_executor({"executor": "e2b", "adapter": "pi"})
+    executor, _ = build_executor({"executor": "e2b"}).for_program(AdapterProgram(get_adapter("pi")))
     assert isinstance(executor, E2BExecutor)
     host = AgentHost(get_adapter("pi"), "/host-only/pi", executor, None, _StepCalls(0, []), 90, 60)
     session = executor.open()

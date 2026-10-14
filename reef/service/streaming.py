@@ -85,6 +85,11 @@ def _sse_data(frame: bytes) -> str:
 #: Responses events that end a stream the model finished; ``incomplete`` is a normal stop at a token limit.
 RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})
 
+#: The output item type OpenRouter streams for its web search server tool, and the item type Codex reads
+#: for a web search (actions ``search``, ``open_page``, ``find_in_page``).
+OPENROUTER_WEB_SEARCH_ITEM = "openrouter:web_search"
+WEB_SEARCH_CALL_ITEM = "web_search_call"
+
 
 def is_terminal_sse_event(path: str, frame: bytes) -> bool:
     """Whether ``frame`` is the provider protocol's successful terminator."""
@@ -103,6 +108,69 @@ def is_terminal_sse_event(path: str, frame: bytes) -> bool:
             return payload.get("type") == "message_stop"
         return payload.get("type") in RESPONSES_TERMINAL_EVENTS
     return False
+
+
+def frame_for_codex(frame: bytes) -> bytes:
+    """Rewrite one Responses SSE frame so a Codex client reads OpenRouter's web search.
+
+    OpenRouter streams its web search server tool as an output item of type
+    ``openrouter:web_search``; Codex only parses ``web_search_call`` and drops
+    an item of an unknown type, so the search never shows in the TUI, never
+    lands in the session rollout, and never replays on the next turn. The two
+    item shapes share the OpenAI action object, so the rewrite renames the
+    item's type on ``response.output_item.added`` and ``response.output_item.done``,
+    and inside the ``response.completed`` output. A frame without the item,
+    including a frame of any other protocol, comes back unchanged.
+
+    Scope note (follow-up, #621): this rewrite covers the client-facing frames
+    only, and only within one turn. Whether OpenRouter accepts the replayed
+    ``web_search_call`` item on the *next* turn's input is unverified offline —
+    it needs a live OpenRouter key and Codex — so the replay leg stays an open
+    follow-up, not something this function settles.
+    """
+
+    if OPENROUTER_WEB_SEARCH_ITEM.encode("ascii") not in frame:
+        return frame
+    try:
+        payload = json.loads(_sse_data(frame))
+    except json.JSONDecodeError:
+        return frame
+    if not isinstance(payload, dict):
+        return frame
+    kind = payload.get("type")
+    if kind in ("response.output_item.added", "response.output_item.done") and isinstance(payload.get("item"), dict):
+        item = payload["item"]
+        if item.get("type") != OPENROUTER_WEB_SEARCH_ITEM:
+            return frame
+        payload["item"] = {**item, "type": WEB_SEARCH_CALL_ITEM}
+    elif kind == "response.completed" and isinstance(payload.get("response"), dict):
+        output = payload["response"].get("output")
+        if not isinstance(output, list) or not any(
+            isinstance(item, dict) and item.get("type") == OPENROUTER_WEB_SEARCH_ITEM for item in output
+        ):
+            return frame
+        payload["response"]["output"] = [
+            (
+                {**item, "type": WEB_SEARCH_CALL_ITEM}
+                if isinstance(item, dict) and item.get("type") == OPENROUTER_WEB_SEARCH_ITEM
+                else item
+            )
+            for item in output
+        ]
+    else:
+        return frame
+    return _rewritten_sse_frame(frame, payload)
+
+
+def _rewritten_sse_frame(frame: bytes, payload: dict[str, Any]) -> bytes:
+    """The frame with its data lines replaced by one line carrying ``payload``; every other line kept."""
+
+    lines = frame.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    head = [line for line in lines if not line.startswith("data:")]
+    while head and not head[-1]:
+        head.pop()
+    data = f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+    return ("\n".join([*head, data]) + "\n\n").encode()
 
 
 def chat_completion_chunk_identity(frame: bytes) -> dict[str, Any]:
@@ -275,6 +343,7 @@ __all__ = [
     "SSEFrameDecoder",
     "aggregate_sse_text",
     "chat_completion_chunk_identity",
+    "frame_for_codex",
     "is_terminal_sse_event",
     "receipt_sse_events",
     "sse_events",

@@ -37,9 +37,6 @@ from reef.evaluation.evaluators import (
     SelectionPlugin,
 )
 
-# Compatibility aliases for existing imports.
-RegressionGateMixin = RegressionCheckMixin
-
 __all__ = [
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
@@ -52,7 +49,6 @@ __all__ = [
     "ConfiguredEvaluationPlugin",
     "EvaluationResult",
     "RegressionCheckMixin",
-    "RegressionGateMixin",
     "SelectionDecision",
     "SelectionPlugin",
     "UpdateCandidate",

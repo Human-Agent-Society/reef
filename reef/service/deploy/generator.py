@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.core.config import Settings, config_metadata, config_option
 from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 
@@ -29,7 +29,7 @@ DEFAULT_READY_TIMEOUT = 60
 
 
 @dataclass(frozen=True)
-class GeneratorSettings:
+class GeneratorSettings(Settings):
     """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section."""
 
     tasks_root: str = config_option(help="The directory generated tasks, manifests and Harbor job files live under.")
@@ -62,9 +62,19 @@ class GeneratorSettings:
     designer_timeout_s: float = config_option(
         DEFAULT_DESIGNER_TIMEOUT_S, help="Seconds one designer call may take; inference.timeout-s must allow it too."
     )
+    designer_api: str | None = config_option(
+        None,
+        help=(
+            "The API the designer asks through: openai (Chat Completions) or responses. By default responses when "
+            "designer calls go to this deployment and its inference.upstream-api is responses, openai otherwise."
+        ),
+    )
     designer_options: Mapping[str, Any] | None = dataclasses.field(
         default=None,
-        metadata=config_metadata('Extra fields of the designer\'s chat request, e.g. {"reasoning_effort": "none"}.'),
+        metadata=config_metadata(
+            'Extra fields of the designer\'s request, e.g. {"reasoning_effort": "none"}; with designer-api '
+            'responses, Responses fields such as {"reasoning": {"effort": "low"}}.'
+        ),
     )
     ready_timeout: int = config_option(
         DEFAULT_READY_TIMEOUT, help="Seconds reef serve waits for the generator to answer."
@@ -79,21 +89,12 @@ class GeneratorSettings:
             raise ValueError("generator.concurrency must be at least 1")
         if self.designer_timeout_s <= 0:
             raise ValueError("generator.designer-timeout-s must be positive")
+        if self.designer_api not in (None, "openai", "responses"):
+            raise ValueError("generator.designer-api must be openai or responses")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):
             raise ValueError("generator.agent must carry a Harbor agent name or an import_path")
-
-
-def generator_settings(section: Mapping[str, Any]) -> GeneratorSettings:
-    """Parse the ``generator`` section, in its public hyphen spelling or the field spelling; unknown fields are refused."""
-    if not isinstance(section, Mapping):
-        raise ValueError("generator must be an object")
-    folded = {str(key).replace("-", "_"): value for key, value in section.items()}
-    if len(folded) != len(section):
-        raise ValueError("generator names a field twice, in both spellings")
-    values = parse_config_values(config_arguments(GeneratorSettings, prefix=("generator",)), folded)
-    return GeneratorSettings(**values)
 
 
 def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -102,9 +103,9 @@ def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
     if section is None:
         return None
     try:
-        generator = generator_settings(section)
+        generator = GeneratorSettings.from_config(section, setting=GENERATOR_SERVICE)
     except ValueError as exc:
-        raise DeployConfigError(f"generator: {exc}") from exc
+        raise DeployConfigError(str(exc)) from exc
     # The same interpreter as every child reef serve starts.
     python = os.environ.get("REEF_PYTHON", sys.executable)
     probe_host = "127.0.0.1" if generator.host in ("0.0.0.0", "") else generator.host

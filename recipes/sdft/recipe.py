@@ -10,7 +10,7 @@ from recipes.sdft.processor import SDFTBatches, SDFTTasks
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.record2task.distill import DistillRecord2Record
+from reef.record2record import ExclusiveReportRecord2Record
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
 
@@ -26,7 +26,7 @@ class SDFTRecipe(WeightTrainingRecipe):
     ``batch_size=1`` a report trains as soon as it arrives.
 
     The recipe binds the objective, the step schedule, and the report
-    contract. Its stages are ``DistillRecord2Record``, ``SDFTTasks``, and
+    contract. Its stages are ``ExclusiveReportRecord2Record``, ``SDFTTasks``, and
     ``SDFTBatches``; the deployment's ``pipeline`` section gives their config.
     ``pipeline.record2task.config`` takes ``tokenizer_path`` (required: the
     served model's tokenizer renders the teacher prompt),
@@ -54,7 +54,7 @@ class SDFTRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=DistillRecord2Record, record2task=SDFTTasks, task2batch=SDFTBatches)
+        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=SDFTTasks, task2batch=SDFTBatches)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

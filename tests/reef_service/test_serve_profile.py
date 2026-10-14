@@ -20,21 +20,15 @@ from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_nam
 from reef.storage.sqlite import SQLiteRecordStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: What the launcher prints when the folded profile is selected by its former name.
-ALIAS_NOTICE = "reef: --recipe harness-evolve is now reefine; starting the reefine profile"
 
 
 @pytest.mark.unit
 def test_builtin_recipe_profiles() -> None:
     assert profile_names() == ("reefine",)
     assert profile_path("reefine") == PROFILES_DIR / "reefine.yaml"
-    # The folded harness-evolve profile keeps its name as an alias, not as a profile of its own.
-    assert profile_path("harness-evolve") == PROFILES_DIR / "reefine.yaml"
     with pytest.raises(UnknownProfileError) as error:
         profile_path("weights")
-    assert str(error.value) == (
-        "no profile for recipe 'weights'; recipes with a profile: reefine (--recipe harness-evolve starts reefine)"
-    )
+    assert str(error.value) == "no profile for recipe 'weights'; recipes with a profile: reefine"
     with pytest.raises(UnknownProfileError):
         profile_path("../reefine")
 
@@ -63,9 +57,6 @@ def test_only_an_explicit_config_or_profile_selects_a_file(tmp_path, monkeypatch
     assert _resolve_config("mine.yaml", None) == "mine.yaml"
     assert _resolve_config(None, "reefine") == profile
     assert capsys.readouterr().err == ""
-    # The former name selects the same file and says so once, on stderr.
-    assert _resolve_config(None, "harness-evolve") == profile
-    assert capsys.readouterr().err == ALIAS_NOTICE + "\n"
     assert _resolve_config(None, None) is None
     with pytest.raises(DeployConfigError, match="not both"):
         _resolve_config("mine.yaml", "reefine")
@@ -158,9 +149,9 @@ def test_serve_without_a_config_names_the_recipes_with_a_profile(tmp_path) -> No
     )
     assert result.returncode == 2
     assert "recipes with a profile: reefine" in result.stderr
-    # The former name is announced before the profile's own checks run.
+    # The profile's own checks name the missing model.
     result = subprocess.run(
-        [sys.executable, "-m", "reef.cli", "serve", "--recipe", "harness-evolve"],
+        [sys.executable, "-m", "reef.cli", "serve", "--recipe", "reefine"],
         cwd=tmp_path,
         env={k: v for k, v in env.items() if k != "REEF_UPSTREAM_MODEL"},
         capture_output=True,
@@ -168,7 +159,6 @@ def test_serve_without_a_config_names_the_recipes_with_a_profile(tmp_path) -> No
         timeout=60,
     )
     assert result.returncode == 2
-    assert ALIAS_NOTICE in result.stderr
     assert "pass --inference.upstream-model MODEL" in result.stderr
 
 

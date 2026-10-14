@@ -6,10 +6,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.inference.engine_control import EngineConfig
 from reef.runtime.executor import Executor
-
-#: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
-CONTROL_TIMEOUT_S = 14_400
 
 #: Engine arguments Reef derives from its own settings; ``options`` may not repeat them.
 RESERVED_OPTIONS = frozenset({"model", "host", "port", "tensor_parallel_size", "enable_sleep_mode"})
@@ -45,7 +43,7 @@ def kv_transfer_config(configured: Any) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class VLLMConfig:
+class VLLMConfig(EngineConfig):
     """One model served by identical single-node vLLM engines on the reserved inference GPUs."""
 
     model_path: str

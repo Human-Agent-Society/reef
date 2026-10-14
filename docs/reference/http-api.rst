@@ -441,6 +441,13 @@ scenario returns HTTP 409. This means the surface, runtime, inference backend,
 and optional report schema chosen when the recipe is constructed are fixed with
 it.
 
+A deployment can limit its scenarios. See `Limit the scenarios a service holds
+<../user-guide/operate.rst#limit-the-scenarios-a-service-holds>`__. A request
+that would create a scenario past ``reef.max_scenarios`` returns HTTP 409.
+A request can also need to load a scenario when the service already holds
+``reef.max_loaded_scenarios`` loaded scenarios. If none of them is idle, the
+request returns HTTP 503 with a ``Retry-After`` header.
+
 If the deployment sets ``reef.allow_implicit_scenario_creation: false``, an
 unknown scenario returns HTTP 404 and you create it first:
 
@@ -741,7 +748,9 @@ script, naming ``GET /reef/harness`` for the tree and ``POST /reef/train`` for
 a request. If install omits ``x-reef-scenario``, Reef creates a scenario with a
 generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
-automatically.
+automatically. With ``reef.allow_implicit_scenario_creation: false``, install
+creates no scenario and returns HTTP 404. Create the scenario first with
+``POST /reef/scenarios``, then name it in ``x-reef-scenario``.
 
 Creating that scenario takes a few seconds, and ``curl ... | bash`` shows
 nothing until the first bytes arrive. So when the script is not ready within
@@ -1045,10 +1054,8 @@ naming it.
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
 ``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
 phase ``evaluating``. Reviews and settled proposals store their outcome under
-``result``. New records use these names. Readers also accept the earlier ``verdict``,
-``gate_sides``, ``gated_against`` and ``rollback_gated_against`` fields, and the
-``gating`` phase. Harness manifests expose ``gate`` as an alias of ``evaluation``
-for existing clients.
+``result``. A harness manifest carries the evaluation metrics under
+``evaluation`` only.
 
 Both pages are links a person opens in a browser, which sends no header, so
 they also take the scenario and a credential as query parameters,

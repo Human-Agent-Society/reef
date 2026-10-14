@@ -14,7 +14,7 @@ class RecordSet(ABC):
     """Records that are used together, such as one record, a report with its inferences, or a ready group.
 
     A stage forms record sets, and its pool holds, orders, and checks them.
-    The pool, the selection policies, and the eligibility checks read only
+    The pool, the selection policies, and the staleness check read only
     these fields:
 
     * ``set_id`` identifies the set in the pool.

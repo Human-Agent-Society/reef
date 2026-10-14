@@ -5,11 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.inference.engine_control import EngineConfig
 from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
 from reef.runtime.executor import Executor
-
-#: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
-CONTROL_TIMEOUT_S = 14_400
 
 
 @dataclass(frozen=True)
@@ -38,7 +36,7 @@ class SGLangModelConfig:
 
 
 @dataclass(frozen=True)
-class SGLangConfig:
+class SGLangConfig(EngineConfig):
     model_path: str
     num_gpus: int
     gpus_per_engine: int

@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
 from reef.recipe.cordis import CordisRecipe
@@ -171,11 +172,14 @@ class GEPARecipe(CordisRecipe):
             archive.persist()
         propose = self.propose
         if isinstance(propose, _UnboundProposer):
+            descriptor = get_adapter(self.adapter)
+            # The minibatch episodes run the harness the evaluation runs, bound as the backend binds it.
+            executor, binary = self.executor.for_program(AdapterProgram(descriptor), binary=self.binary)
             propose = GEPAProposer(
                 archive=archive,
-                descriptor=get_adapter(self.adapter),
-                binary=self.binary,
-                executor=self.executor,
+                descriptor=descriptor,
+                binary=binary,
+                executor=executor,
                 episode_timeout_s=self.episode_timeout_s,
                 forbid_residue=self.forbid_residue,
                 score_episode=self.score_episode,

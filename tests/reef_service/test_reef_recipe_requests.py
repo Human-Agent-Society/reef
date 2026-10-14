@@ -52,7 +52,7 @@ def test_new_scenario_is_created_for_every_request_type(path: str) -> None:
             )
 
             assert response.status == 200
-            assert dispatcher.has_loaded("new-scenario")
+            assert dispatcher._registry.get_optional("new-scenario") is not None
         finally:
             await client.close()
 
@@ -87,7 +87,7 @@ def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
             )
 
             assert response.status == 200
-            assert dispatcher.has_loaded("new-scenario")
+            assert dispatcher._registry.get_optional("new-scenario") is not None
         finally:
             await client.close()
 
@@ -124,7 +124,7 @@ def test_registered_scenario_keeps_its_binding_for_every_request_type(path: str)
             )
 
             assert response.status == 200
-            assert dispatcher.has_loaded("registered")
+            assert dispatcher._registry.get_optional("registered") is not None
         finally:
             await client.close()
 
@@ -163,7 +163,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
         request_type=RequestType.REPORT,
     )
 
-    assert restarted_dispatcher.has_loaded("durable")
+    assert restarted_dispatcher._registry.get_optional("durable") is not None
 
 
 @pytest.mark.unit

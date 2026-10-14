@@ -435,18 +435,6 @@ class Loader(EntryTree):
             return
         self.ctx.logger.info("%s plugin %s", kind, entry.options.get("name"))
 
-    def locate(self, fiber: Fiber | None = None) -> str | None:
-        """The id of the entry owning ``fiber`` (default: the calling scope)."""
-        node = fiber if fiber is not None else self.ctx.fiber
-        while True:
-            entry = node.entry
-            if entry is not None:
-                return str(entry.id)
-            parent = node.parent.fiber
-            if parent is node:
-                return None
-            node = parent
-
     def _save_config(self, fiber: Fiber, config: Any, no_save: bool, next_: Callable[[], Any]) -> Any:
         """Global 'internal/update' middleware: a tracked fiber's reconfigure
         writes through to its entry's options (index.ts:74-80)."""

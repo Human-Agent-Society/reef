@@ -61,6 +61,11 @@ class OperationMetrics:
             self.active_operations.add(measurement)
         return measurement
 
+    def active_count(self) -> int:
+        """The number of calls that run now."""
+        with self.lock:
+            return len(self.active_operations)
+
     def increment(self, counter: str) -> None:
         """Count an event using a fixed metric name chosen by its caller."""
         with self.lock:

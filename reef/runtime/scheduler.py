@@ -30,7 +30,6 @@ from typing import Any, Literal
 
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch
-from reef.core.evaluation import SelectionDecision
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -50,6 +49,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingJobState,
     TrainingJobStore,
+    TrainingMethod,
     TrainingRuntime,
     TrainingRuntimeError,
 )
@@ -482,16 +482,12 @@ class TrainingExecution:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
         disposition = marker_disposition(marker, job_id)
-        if disposition == "conflict":
-            if marker is None:
-                raise RuntimeError("conflicting training disposition has no marker")
+        if marker is not None and disposition == "conflict":
             raise RuntimeError(
                 f"training marker is {marker['status']} for job {marker['job_id']}, not this batch's job "
                 f"{job_id}; operator recovery required (see Training-step coordination in the executors guide)"
             )
-        if disposition != "fresh":
-            if marker is None:
-                raise RuntimeError("replayed training disposition has no marker")
+        if marker is not None and disposition != "fresh":
             return marker_result(marker) if marker["status"] == "COMPLETE" else marker_checkpoint_result(marker)
         admission_metrics: Mapping[str, Any] = {}
         if self._context is not None:
@@ -600,14 +596,14 @@ class RuntimeScheduler:
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
     ) -> PreparedTrainingStep:
         return self.training_runtime.prepare_training_step(
             batch,
-            objective,
+            method,
             algorithm_state,
             scheduling,
             scenario_step,
@@ -616,37 +612,6 @@ class RuntimeScheduler:
                 if self.training_runtime.max_staleness > 0
                 else self.inference_runtime.current_runtime_load_id()
             ),
-        )
-
-    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
-        """Execute a native checkpoint job and stage its uncommitted weights."""
-        with self._colocated_pause():
-            checkpoint = self._validated_result(self.training_runtime.execute_training_job(payload))
-        if checkpoint.outcome == "stale":
-            self.operations.increment("stale_batches_total")
-        if checkpoint.outcome in {"stale", "storage_blocked"}:
-            self._resume_if_colocated()
-            return checkpoint
-        if checkpoint.outcome == "complete":
-            if (self.training_runtime.training_job_status() or {}).get("commit_acknowledged") is True:
-                self.inference_runtime.resume_admission()
-            else:
-                self.inference_runtime.pause_admission()
-            return checkpoint
-        if checkpoint.outcome != "checkpoint" or checkpoint.training_job_id is None:
-            raise TrainingRuntimeError("deferred weight updates require a checkpoint with a training_job_id")
-        if not self._colocated:
-            # Training and checkpointing may overlap inference on disjoint
-            # GPUs. Close admission only for the short serving-weight update.
-            self.inference_runtime.pause_admission()
-        with self.operations.measure("weight_sync"):
-            updated = self.inference_runtime.resume_weight_update(checkpoint.training_job_id)
-        return TrainingJobResult(
-            "complete",
-            updated.runtime_load_id,
-            checkpoint.checkpoint_path,
-            metrics=checkpoint.metrics,
-            training_job_id=checkpoint.training_job_id,
         )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
@@ -673,9 +638,9 @@ class RuntimeScheduler:
         with self.operations.measure("weight_sync"):
             return self.inference_runtime.activate_candidate(candidate)
 
-    def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
+    def reject_candidate(self, candidate: ModelCandidate) -> None:
         """Discard a candidate before reopening the unchanged serving version."""
-        self.training_runtime.reject_candidate(candidate, decision)
+        self.training_runtime.reject_candidate(candidate)
         self.inference_runtime.resume_admission()
 
     @contextmanager
@@ -805,12 +770,6 @@ class RuntimeScheduler:
         self.inference_runtime.pause_admission()
         return False
 
-    @staticmethod
-    def _validated_result(result: Any) -> TrainingJobResult:
-        if not isinstance(result, TrainingJobResult):
-            raise TrainingRuntimeError(f"train group handle returned invalid training result: {type(result).__name__}")
-        return result
-
 
 def pending_job_identity(training_job: Mapping[str, Any]) -> tuple[int, str]:
     job_scenario_step = training_job.get("scenario_step")
@@ -859,11 +818,11 @@ class TrainingCoordinator:
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return self._training.prepare_training_step(batch, objective, algorithm_state, scheduling)
+        return self._training.prepare_training_step(batch, method, algorithm_state, scheduling)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""
@@ -942,16 +901,6 @@ class TrainingCoordinator:
         reconcile the serving engine with its recovered head.
         """
         return self._context.runtime_load_id
-
-    def republish_serving(self) -> str:
-        """Recover serving actors and republish unchanged weights in place.
-
-        This path is for an inference-engine replacement, not a training step.
-        Keep the current token because the checkpoint/model tensors have not
-        changed; the next optimizer-backed publication advances it normally.
-        """
-        with self._operation_lock:
-            return self._publication.republish(self._context.runtime_load_id)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         """Delegate job replay, train ordering and checkpoint recording to Reef."""

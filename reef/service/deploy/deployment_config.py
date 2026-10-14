@@ -25,6 +25,11 @@ from reef.service.deploy.service_config import service_config_arguments, service
 _MISSING = object()
 #: Appended to unknown-section and unknown-field errors.
 LAYOUT_HINT = "see the configuration layout in docs/reference/configuration.rst"
+#: Public recipe sections and the resolved paths they move to.
+RECIPE_SECTION_PATHS: Mapping[tuple[str, ...], tuple[str, ...]] = {
+    ("recipe", "config"): ("reef", "data"),
+    ("recipe", "runtime"): ("reef", "runtime"),
+}
 
 
 @dataclass(frozen=True)
@@ -85,13 +90,6 @@ def _unknown(values: Mapping[str, Any], prefix: str = "") -> list[str]:
 
 def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
     """Translate a configuration file's public sections to the resolved deployment layout."""
-    if "service" in config or "services" in config:
-        raise DeployConfigError(
-            "service/services are not accepted: move HTTP settings to reef; "
-            "processes are assembled by Reef and the selected recipe"
-        )
-    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
-        raise DeployConfigError("execution.services is not accepted; configure component resources instead")
     pending = copy.deepcopy(dict(config))
     known_sections = {
         "reef",
@@ -117,8 +115,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         if value is not _MISSING:
             _put(resolved, argument.path, value)
     for path, target in (
-        (("recipe", "config"), ("reef", "data")),
-        (("recipe", "runtime"), ("reef", "runtime")),
+        *RECIPE_SECTION_PATHS.items(),
         (("execution",), ("execution",)),
         (("executors",), ("executors",)),
     ):
@@ -199,7 +196,7 @@ def translate_references(config: dict[str, Any], arguments: tuple[ConfigArgument
         ".".join(argument.public_path or argument.path): ".".join(argument.path)
         for argument in (*service_config_arguments(), *arguments)
     }
-    paths.update({"recipe.runtime": "reef.runtime", "recipe.config": "reef.data"})
+    paths.update({".".join(public): ".".join(internal) for public, internal in RECIPE_SECTION_PATHS.items()})
 
     def convert(value: Any) -> Any:
         if isinstance(value, str):
@@ -221,7 +218,7 @@ def translate_references(config: dict[str, Any], arguments: tuple[ConfigArgument
     return convert(config)
 
 
-_EXECUTION_ROLES = ("services", "training", "rollout", "evolution", "generator")
+_EXECUTION_ROLES = ("training", "rollout", "evolution", "generator")
 
 
 def selected_weight_training(
@@ -367,7 +364,7 @@ def normalize_component_config(config: Mapping[str, Any], arguments: tuple[Confi
         factory.parse_config(runtime, os.environ)
     execution = normalized.get("execution", {})
     if not isinstance(execution, Mapping) or set(execution) - set(_EXECUTION_ROLES):
-        raise ValueError("execution must be an object with services, training, rollout, evolution or generator roles")
+        raise ValueError("execution must be an object with training, rollout, evolution or generator roles")
     for selection in execution.values():
         executor_settings(normalized, selection)
     return normalized

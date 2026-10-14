@@ -4069,21 +4069,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/59/17/9c2a94877c3852b7fd677a9624f4b3dec5def9b34b058f7fc202da250d74/reef_eval-0.1.1-py3-none-any.whl", hash = "sha256:1249272463fc3ff42addd5e68ba9c7fd13ff233a5ec3e3d46073185c68b57db4", size = 48145, upload-time = "2026-08-31T16:11:10.084Z" },
 ]
 
-[package.optional-dependencies]
-harbor = [
-    { name = "harbor" },
-]
-
 [[package]]
 name = "reef-infra"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "alembic" },
+    { name = "harbor" },
     { name = "huggingface-hub" },
     { name = "pyyaml" },
     { name = "reef-client" },
-    { name = "reef-eval", extra = ["harbor"] },
+    { name = "reef-eval" },
     { name = "sqlalchemy" },
     { name = "tomli-w" },
 ]
@@ -4159,6 +4155,7 @@ requires-dist = [
     { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.13" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
+    { name = "harbor", specifier = ">=0.20,<0.21" },
     { name = "httpx", marker = "extra == 'sglang'" },
     { name = "httpx", marker = "extra == 'vllm'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
@@ -4185,7 +4182,7 @@ requires-dist = [
     { name = "ray", extras = ["default"], marker = "extra == 'slime'" },
     { name = "ray", extras = ["default"], marker = "extra == 'vllm'" },
     { name = "reef-client", specifier = ">=0.2.0" },
-    { name = "reef-eval", extras = ["harbor"], specifier = ">=0.1.1" },
+    { name = "reef-eval", specifier = ">=0.1.1" },
     { name = "requests", marker = "extra == 'sglang'" },
     { name = "requests", marker = "extra == 'slime'" },
     { name = "requests", marker = "extra == 'vllm'" },

@@ -1,8 +1,10 @@
 """The generated-task stages: rounds of generated tasks played here, their training episodes trained here.
 
-The record stage (``RoundRecord2Record``, built in ``recipe.py``) groups the task player's reports: every
+The record stage (``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) groups the task player's reports: every
 episode of the training arm names its task under ``metadata.task``, the episodes of one task form a
-group, and a group is complete at ``plays_per_task`` episodes. ``GeneratedTaskBatches`` batches
+group, and a group is complete at ``plays_per_task`` episodes. A training play that reports nothing, such
+as a failed trial, never joins its group. So when a task's plays end, its group is complete at the number
+of plays that reported, and a group of one is discarded. ``GeneratedTaskBatches`` batches
 ``tasks_per_step`` complete groups, in arrival order. ``GeneratedTaskTasks`` runs the rounds with the
 deployment's :class:`~reef.core.tasks.TaskGenerator`.
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,6 +57,8 @@ DEFAULT_TASKS_PER_STEP = 4
 DEFAULT_PLAYS_PER_TASK = 4
 # Qwen3 with thinking off ends the generation prompt with an empty think block of four tokens.
 DEFAULT_SCAFFOLD_TOLERANCE = 8
+# A realigned drift spans the whole previous response, so the budget must exceed max_tokens plus the scaffold.
+REALIGN_THRESHOLD = 32768
 DEFAULT_BATCHES_PER_ROUND = 1
 ERROR_EXCERPT_CHARS = 300
 ROUND_PREFIX = "round-"
@@ -97,6 +102,20 @@ def recorded_rounds(state_dir: Path) -> tuple[int, ...]:
     return tuple(numbers)
 
 
+def recorded_reported_plays(state_dir: Path) -> dict[str, int]:
+    """Each played task's count of training episodes that reached Reef, from the round summaries.
+
+    A summary written before the counts were kept names none.
+    """
+    counts: dict[str, int] = {}
+    for round_number in recorded_rounds(state_dir):
+        document = json.loads((state_dir / f"{ROUND_PREFIX}{round_number:05d}.json").read_text(encoding="utf-8"))
+        for task in document["tasks"]:
+            if task.get("reported_plays") is not None:
+                counts[task["name"]] = task["reported_plays"]
+    return counts
+
+
 @dataclass(frozen=True)
 class RoundJob(SupportsReceipt):
     """One round to run, with its source sessions' records; the receipt names it."""
@@ -129,7 +148,11 @@ class RoundOutcome(SupportsReceipt):
 def episode_assembly(scaffold_tolerance: int = DEFAULT_SCAFFOLD_TOLERANCE) -> SampleAssembly:
     """The sample assembly for an agent's episode: many model calls that extend one conversation."""
     return SampleAssembly(
-        SampleAssemblySettings(accept_multi_turn_policy_samples=True, scaffold_tolerance=scaffold_tolerance)
+        SampleAssemblySettings(
+            accept_multi_turn_policy_samples=True,
+            realign_threshold=REALIGN_THRESHOLD,
+            scaffold_tolerance=scaffold_tolerance,
+        )
     )
 
 
@@ -157,13 +180,16 @@ def inference_tags(record: AgentRecord) -> Mapping[str, object]:
 class TaskGroupGrouping(RoundGrouping):
     """The training arm's episodes of one task form one group, ready at ``plays_per_task`` episodes.
 
-    Measurement arms and the generator's own reports share the scenario; only the training arm trains.
-    A source session is a report whose inference records all carry ``source_tag``.
+    A group is ready at fewer episodes when fewer of the task's plays reported (``reported_plays``), and a
+    group of one is discarded. Measurement arms and the generator's own reports share the scenario; only
+    the training arm trains. A source session is a report whose inference records all carry ``source_tag``.
     """
 
     def __init__(self, plays_per_task: int, source_tag: tuple[str, str] | None = None) -> None:
         self.plays_per_task = plays_per_task
         self.source_tag = source_tag
+        #: How many training episodes of each played task reached Reef, by task name, once its plays ended.
+        self.reported_plays: dict[Hashable, int] = {}
 
     def is_training_report(self, report: AgentRecord) -> bool:
         return reported_arm(report) == TRAINING_ARM
@@ -172,7 +198,10 @@ class TaskGroupGrouping(RoundGrouping):
         return reported_task_name(context.report), None
 
     def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
-        return GroupDecision.READY if len(members) >= self.plays_per_task else GroupDecision.INCOMPLETE
+        if len(members) < self.reported_plays.get(key, self.plays_per_task):
+            return GroupDecision.INCOMPLETE
+        # A group of one has no relative reward.
+        return GroupDecision.READY if len(members) >= 2 else GroupDecision.DISCARD
 
     def is_source_report(self, context: ReportContext) -> bool:
         if self.source_tag is None or not context.inferences:
@@ -186,7 +215,8 @@ class TaskGroupSettings(PluginSettings):
     """The config of ``GeneratedTaskRecord2Record``."""
 
     plays_per_task: int = config_option(
-        DEFAULT_PLAYS_PER_TASK, help="The training plays of each task; a group is complete at this count."
+        DEFAULT_PLAYS_PER_TASK,
+        help="The training plays of each task; a group is complete at this count, or at the plays that reported.",
     )
     batches_per_round: int = config_option(
         DEFAULT_BATCHES_PER_ROUND, help="The trained batches after which the next round starts."
@@ -247,8 +277,8 @@ class TaskBatchSettings(PluginSettings):
 class GeneratedTaskRecord2Record(RoundRecord2Record):
     """The generated-task record stage: one group per task, and a round request every ``batches_per_round`` batches.
 
-    Config: ``plays_per_task`` (the training plays of each task; a group is
-    complete at this count, at least 2), ``batches_per_round``,
+    Config: ``plays_per_task`` (the training plays of each task, at least 2; a
+    group is complete at this count, or at the plays that reported), ``batches_per_round``,
     ``source_records_per_round`` (the source sessions that each request takes,
     at most), and ``source_tag`` (``name=value``; required when
     ``source_records_per_round`` is above 0). A terminal report owns its sources.
@@ -267,6 +297,13 @@ class GeneratedTaskRecord2Record(RoundRecord2Record):
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         return cls(context, TaskGroupSettings.parse(config, plugin_class=cls))
+
+    def plays_reported(self, task_name: str, count: int) -> None:
+        """A task's training plays ended with ``count`` episodes reported, so its group is complete at that count."""
+        self.task_grouping.reported_plays[task_name] = count
+        # The count can arrive before the task's first report.
+        if task_name in self.groups:
+            self.refresh_group(task_name)
 
 
 class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
@@ -322,6 +359,12 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         if self.task_generator is not None:
             logger.info("scenario %r generates tasks with %s", self.scenario, type(self.task_generator).__name__)
         recorded = recorded_rounds(self.state_dir) if self.state_dir is not None else ()
+        # The round summaries keep how many plays of each task reported, so replayed reports close the groups.
+        if self.state_dir is not None:
+            for task_name, count in recorded_reported_plays(self.state_dir).items():
+                round_stage.plays_reported(task_name, count)
+        # The worker puts each task's count here as its plays end; the trainer's thread takes them in poll.
+        self.reported_play_counts: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
         self.next_round = recorded[-1] + 1 if recorded else 0
         self.completed_rounds = len(recorded)
         self.round_in_flight: int | None = None
@@ -365,9 +408,10 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         return replace(sample, group_id=task_name)
 
     def poll(self) -> None:
-        """Absorb the finished rounds, then start the next round when the record stage says one is due."""
-        if self.worker is not None:
-            self.absorb_finished_rounds()
+        """Absorb the finished plays and rounds, then start the next round when the record stage says one is due."""
+        while not self.reported_play_counts.empty():
+            self.round_stage.plays_reported(*self.reported_play_counts.get_nowait())
+        self.absorb_finished_rounds()
         if self.round_stage.round_due():
             self.start_round()
 
@@ -392,7 +436,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     def absorb_finished_rounds(self) -> None:
         """Take the rounds that the worker finished, and tell the record stage whether each one played no task."""
         if self.worker is None:
-            raise RuntimeError("no round worker to poll")
+            return
         for outcome in self.worker.poll():
             self.round_in_flight = None
             if isinstance(outcome, Failed):
@@ -451,6 +495,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         if self.task_generator is None or self.state_dir is None:
             raise RuntimeError("a round needs a task generator and a state_dir")
         results: list[TaskPlayResult] = []
+        reported_plays: dict[str, int] = {}
         error = ""
         # The generator is a deployment's plugin: whatever it raises stops the round, and what ran is kept.
         try:
@@ -462,7 +507,12 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                     continue
                 validation = await self.task_generator.validate(item.task)
                 if validation.is_valid:
-                    results.append(await self.played(item, job.round_number))
+                    result, reported = await self.played(item, job.round_number)
+                    results.append(result)
+                    if result.is_played:
+                        reported_plays[item.task.name] = reported
+                        # The task's group can close now, before the round ends.
+                        self.reported_play_counts.put((item.task.name, reported))
                 else:
                     results.append(TaskPlayResult(item.task, error="; ".join(validation.errors)))
         except Exception as exc:
@@ -473,14 +523,15 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         except Exception as exc:
             error = error or str(exc) or type(exc).__name__
             logger.exception("the task generator did not take the results of round %d", job.round_number)
-        self.write_round_summary(job.round_number, tuple(results), error, job.source_records)
+        self.write_round_summary(job.round_number, tuple(results), error, reported_plays, job.source_records)
         return RoundOutcome(receipt=job.receipt, round_number=job.round_number, results=tuple(results), error=error)
 
-    async def played(self, item: GeneratedTask, round_number: int) -> TaskPlayResult:
+    async def played(self, item: GeneratedTask, round_number: int) -> tuple[TaskPlayResult, int]:
         """Write one valid task and play it: the training arm, then each measurement arm.
 
-        A task the agent could not play at all (every training episode ended before the agent ran) is
-        removed and comes back with the first episode's error, and its measurement arms are not played.
+        Returns the task's result and how many of its training episodes reached Reef, 0 for a task that was
+        not played. A task the agent could not play at all (every training episode ended before the agent
+        ran) is removed and comes back with the first episode's error, and its measurement arms are not played.
         """
         if self.task_player is None:
             raise RuntimeError("playing a task needs the generator service")
@@ -488,7 +539,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         try:
             written = await self.task_player.write_task(task)
         except (DuplicateTask, TaskNameConflict) as exc:
-            return TaskPlayResult(task, error=f"refused: {exc}")
+            return TaskPlayResult(task, error=f"refused: {exc}"), 0
         tags = {"round": str(round_number)}
         training = await self.task_player.play(
             written.path,
@@ -502,9 +553,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         )
         if training and all(play.reward is None and play.error for play in training):
             await self.task_player.delete_task(task.name)
-            return TaskPlayResult(
-                task, error=f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
-            )
+            error = f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
+            return TaskPlayResult(task, error=error), 0
         measurement_rewards: dict[str, tuple[float, ...]] = {}
         for arm in item.measurement_arms:
             plays = await self.task_player.play(
@@ -518,16 +568,21 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 model=self.served_model,
             )
             measurement_rewards[arm.name] = rewards_of(plays)
-        return TaskPlayResult(task, rewards_of(training), measurement_rewards)
+        reported = sum(play.is_reported for play in training)
+        return TaskPlayResult(task, rewards_of(training), measurement_rewards), reported
 
     def write_round_summary(
         self,
         round_number: int,
         results: tuple[TaskPlayResult, ...],
         error: str,
+        reported_plays: Mapping[str, int],
         source_records: tuple[AgentRecord, ...] = (),
     ) -> Path:
-        """Keep each task's result, the round's error, and its source records' IDs; a restart counts these files."""
+        """Keep each task's result and reported plays, the round's error, and its source records' IDs.
+
+        A restart counts these files and reads the reported plays back.
+        """
         if self.state_dir is None:
             raise RuntimeError("a round summary needs a state_dir")
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -541,6 +596,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                     "error": result.error,
                     "training_rewards": list(result.training_rewards),
                     "measurement_rewards": {arm: list(rewards) for arm, rewards in result.measurement_rewards.items()},
+                    "reported_plays": reported_plays.get(result.task.name),
                 }
                 for result in results
             ],

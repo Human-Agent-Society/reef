@@ -10,7 +10,10 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.runtime_stubs import runtime_bindings
+from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
+from tests.train.test_reef_trainer_contracts import ExampleBackend, ExampleBatch
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -29,11 +32,6 @@ from reef.train.cordis_backend.processor import InferenceTasks
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import TrainDataItem, TrainingBatch
-
-from .runtime_stubs import StubTrainingRuntime
-from .test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
-from .test_harness_proposals import _dispatcher, _recipe
-from .test_reef_trainer_contracts import ExampleBackend, ExampleBatch
 
 
 class CaptureBackend(ExampleBackend):
@@ -656,7 +654,7 @@ def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
         dispatcher.close()
 
 
-def test_mode_selection_survives_a_reload_and_resets_on_restart(tmp_path):
+def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
     def propose(nodes, samples, models, *, requests=()):
         return None
 
@@ -675,13 +673,21 @@ def test_mode_selection_survives_a_reload_and_resets_on_restart(tmp_path):
         assert dispatcher.get_or_create_scenario("s").scenario_step == 1
     finally:
         dispatcher.close()
-    # A new process loads the committed state and starts from the recipe's configured mode.
+    # A new process loads the committed state and the stored mode.
     restarted = _dispatcher(tmp_path, _recipe(tmp_path, propose))
     try:
         loaded = restarted.get_or_create_scenario("s")
-        assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "auto"
+        assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "manual"
     finally:
         restarted.close()
+    # A recipe that no longer takes instructions keeps its default, so a person can still select a mode.
+    without_requests = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
+    try:
+        with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
+            assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
+        assert "keeps its default training mode" in caplog.text
+    finally:
+        without_requests.close()
 
 
 def _committed_row(dispatcher, text):
@@ -726,11 +732,11 @@ def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
 def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_failed(tmp_path):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
     evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
+    from tests.support._strategies import resolve_episode_scorer
+
     from reef.harness.tree.mutations import Mutation
     from reef.service.release_page import failed_words
     from reef.train.cordis_backend.strategies import StepProposal
-
-    from ._strategies import resolve_episode_scorer
 
     marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 

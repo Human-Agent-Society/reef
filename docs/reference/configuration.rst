@@ -358,8 +358,7 @@ Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
 options reach ``reef.service.training_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
-argument handling and Slime's native parser. Automatic training launches use
-only this effective config and ignore an ambient ``SLIME_ARGS_FILE``.
+argument handling and Slime's native parser.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
@@ -668,22 +667,22 @@ persistent.
    storage.artifact-repository | .reef/artifacts.git | the Git-backed release chain
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
-   storage.agent-record-dir | .reef/agent-record | the record store
-   storage.agent-record-retention-days | 7.0 | deprecated compatibility setting; automatic cleanup no longer expires data by age
+   storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commit logs and settings
+   storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
    storage.agent-record-retention-max-bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
 .. warning::
 
-   On ephemeral storage, a restart loses the record store, the commit logs, and
-   every version.
+   On ephemeral storage, a restart loses the scenario storage (with SQLite) and
+   every version. See `Back up a deployment
+   <../user-guide/operate.rst#back-up-a-deployment>`__.
 
 Training completion updates consumption progress without retiring stored bodies.
 Storage manages cleanup independently: the HTTP service runs a sweep at startup
 and every 60 seconds. When the total record-body size exceeds the configured
 budget, storage evicts the oldest records by stored creation time, breaking ties
 by append sequence. Both consumed and unconsumed data are eligible; processors
-cannot protect disk records from capacity eviction. The deprecated
-``storage.agent-record-retention-days`` option is accepted but has no cleanup effect.
+cannot protect disk records from capacity eviction. Records do not expire by age.
 
 The budget measures UTF-8 JSON payloads, references and artifact references
 across active and archived scenarios. SQLite shares it across the record
@@ -987,7 +986,6 @@ Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
    execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
-   evolution.episode_workers / worker_executor / worker_resources | | deprecated compatibility aliases; conflicting resource values are rejected; legacy worker_executor cannot accompany role-level workers/resources
    evolution.sandbox | | for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). E2B rejects nonempty ``egress_hosts``/``limits``; template resources and outbound internet apply. Both accept ``env_from``
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent evaluation task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
@@ -1158,7 +1156,7 @@ the rounds:
 
 .. config::
 
-   pipeline.record2record.config.plays_per_task | 4 | training plays of each task; a group is complete at this count. At least 2.
+   pipeline.record2record.config.plays_per_task | 4 | training plays of each task; a group is complete at this count, or at the plays that reported when fewer did. At least 2.
    pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
@@ -1212,7 +1210,7 @@ place it on the host that has Docker.
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
    generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials
-   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders
+   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
    generator.concurrency | 2 | episodes in flight per play request
@@ -1220,7 +1218,8 @@ place it on the host that has Docker.
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default
    generator.designer-timeout-s | 1800 | seconds one designer call may take; ``inference.timeout-s`` must allow it too
-   generator.designer-options | extra fields of the designer's chat request, e.g. ``{"reasoning_effort": "none"}``
+   generator.designer-api | the API the designer asks through: ``openai`` (Chat Completions) or ``responses`` (the Responses API). The default is ``responses`` when designer calls go to this deployment and its ``inference.upstream-api`` is ``responses``, and ``openai`` otherwise
+   generator.designer-options | extra fields of the designer's request, e.g. ``{"reasoning_effort": "none"}``; with ``designer-api: responses``, Responses fields such as ``{"reasoning": {"effort": "low"}}``
    generator.ready-timeout | 60 | seconds ``reef serve`` waits for the generator to answer
 
 .. code:: yaml

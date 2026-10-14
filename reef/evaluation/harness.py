@@ -44,7 +44,6 @@ from reef.core.plugins import ConfiguredPlugin, PluginConfigError
 from reef.core.tasks import primary_reward
 from reef.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
 from reef.harness.episodes.trajectory import (
@@ -69,7 +68,7 @@ from reef.runtime.executor.config import (
 )
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
-
+from reef.sandbox.process import EPISODE_OWNER_LEASE, EpisodeExecutor
 
 #: The record file beside one evaluation episode's kept trajectory.
 RECORD_EPISODE_FILE = "episode.json"
@@ -379,31 +378,12 @@ class EvaluationWorkerPool:
                 self._executor.shutdown()
 
 
-def legacy_worker_settings(
-    settings: ExecutorSettings, workers: int | None = None, gpus: float | None = None
-) -> ExecutorSettings:
-    """Compatibility boundary for the old recipe/Python resource arguments."""
-    if workers is not None:
-        if settings.workers is not None and settings.workers != workers:
-            raise ValueError("episode_workers conflicts with execution.evolution.workers")
-        settings = replace(settings, workers=workers)
-    if gpus is not None:
-        if settings.resources.gpus_per_worker is not None and settings.resources.gpus_per_worker != gpus:
-            raise ValueError("worker_resources.num_gpus conflicts with execution.evolution.resources.gpus_per_worker")
-        settings = replace(settings, resources=replace(settings.resources, gpus_per_worker=gpus))
-    return settings
-
-
 def evaluation_selection(
-    scorer: EpisodeScorer,
-    workers: int | None,
-    settings: ExecutorSettings,
-    gpus_per_worker: float | None = None,
+    scorer: EpisodeScorer, settings: ExecutorSettings
 ) -> tuple[ExecutorSelection, ExecutionRequirements]:
     declared = scorer.execution_requirements()
     if not isinstance(declared, ExecutionRequirements):
         raise TypeError("EpisodeScorer.execution_requirements must return ExecutionRequirements")
-    settings = legacy_worker_settings(settings, workers, gpus_per_worker)
     requirements = worker_requirements(settings, declared)
     gpus = requirements.gpus_per_worker
     configured_gpus = settings.options.get("num_gpus", gpus)
@@ -477,17 +457,12 @@ class HarnessCandidate(UpdateCandidate):
     mutations: tuple[Mutation, ...]
     #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
     evaluation_tasks: tuple[str, ...] = ()
-    #: Legacy constructor keyword; new candidates use evaluation_tasks.
-    gate_tasks: tuple[str, ...] = ()
     #: The candidate is the rollback target, so selecting it rolls back.
     recheck: bool = False
     #: The inbox proposal these mutations came from, settled with the result; None for the method's own.
     proposal_id: str | None = None
     #: The step record directory claimed for it at prepare time; ``None`` with the record off.
     record_dir: Path | None = None
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
 
 
 def clip_redacted(text: str, limit: int) -> str:
@@ -565,7 +540,7 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
 
     def evaluation_tasks(self, candidate: HarnessCandidate) -> tuple[str, ...]:
         """The tasks the candidate carries; an older candidate carries none and falls back to the seed set."""
-        return candidate.evaluation_tasks or candidate.gate_tasks or self._tasks
+        return candidate.evaluation_tasks or self._tasks
 
     def episode_count(self, candidate: HarnessCandidate, side_count: int) -> int:
         """How many episodes :meth:`evaluate` runs for ``candidate`` on ``side_count`` sides."""
@@ -685,9 +660,8 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
         if self._min_win_margin:
             metrics["min_win_margin"] = self._min_win_margin
         return SelectionDecision(
-            outcome="select" if selected else "reject",
+            selected=selected,
             policy="score_comparison",
-            policy_version="1",
             reason=(
                 f"candidate won {wins} task pairings and lost {losses}"
                 if selected
@@ -742,9 +716,8 @@ class FloorMixin(CandidateEvaluationPlugin):
         else:
             reason = f"candidate met the floor on all {len(scores)} tasks"
         return SelectionDecision(
-            outcome="select" if scores and not failed else "reject",
+            selected=bool(scores) and not failed,
             policy="floor",
-            policy_version="1",
             reason=reason,
             evaluation=evaluation,
             metrics={"passed": passed, "failed": failed, "floor_score": self._floor_score},

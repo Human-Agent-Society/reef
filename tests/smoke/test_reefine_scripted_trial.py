@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.tree.render import render_composition
 from reef.recipe.reefine.agent import AGENT_TOOLS, launch_pi
 from reef.recipe.reefine.trial import trial_script
+from reef.sandbox.process import LocalExecutor
 from reef.train.cordis_backend.backend import _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost
 

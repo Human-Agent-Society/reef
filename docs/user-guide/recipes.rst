@@ -177,3 +177,18 @@ service ``reef serve`` starts beside the HTTP service). The package holds the
 method: the Designer's adversarial experience section, the hint arm each task
 asks for, and the hint based regret reported against the Designer's receipt.
 The Designer's own training follows.
+
+`AutoEnvScaling <../../recipes/beta/autoenvscaling/README.md>`__ (preprint
+forthcoming) is **beta** under ``recipes/beta/autoenvscaling/``. It is a task
+generator: a coding agent rebuilds recorded coding-agent sessions as Harbor
+tasks. The agent, pi in an E2B sandbox, writes one task in its workspace from
+one session and the repository the session changed. It runs the task's oracle
+and nop check itself through the generator service, and revises until the check
+passes. A model call reviews each task's tests and refuses a task whose tests
+check what its instruction does not state. A pass-rate band marks the tasks the
+Reasoning Agent can reach. The deployment selects it as the generator of the
+generated-task stages in its ``pipeline`` section, and the built-in
+generated-task recipe plays the tasks and trains on them (see `generated tasks
+<../reference/configuration.rst#generated-tasks>`__). With ``author: prompt``,
+the generator service's one-reply prompt Designer rebuilds the same sessions as
+the baseline.

@@ -79,9 +79,18 @@ the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
 
+Each job trains the Tinker loss of the objective that its recipe selected
+(`Switch methods within a run
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__).
+Tinker preparation needs one advantage per trajectory, so a supervised or
+distillation objective fails before training.
+``kl-coef`` applies to every job. When it is not zero, a job whose loss has no
+KL penalty, such as ``importance_sampling``, also fails before training.
+
 ``lora-rank``, ``seed``, and ``learning-rate`` configure adapter initialization
 and Adam updates. Other Adam settings currently use the pinned SDK's defaults
 (beta1 0.9, beta2 0.95, epsilon 1e-12, zero weight decay and gradient clipping).
+``learning-rate`` applies until a recipe selects a learning-rate schedule.
 ``training.timeout-s`` bounds SDK futures and configures
 transport timeouts; ``inference.timeout-s`` bounds sampling. These timeouts do
 not cancel a remote update that the service has already accepted.
@@ -102,7 +111,9 @@ it cannot accidentally apply the uncertain gradient a second time to that model.
 This favors recovery correctness over session reuse and training throughput.
 
 Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
-schema version, base model, LoRA rank, training-state URI, and sampler URI. It
+schema version, base model, LoRA rank, training-state URI, and sampler URI.
+After a recipe selects a learning-rate schedule, it also records the schedule's
+progress. It
 contains references, not portable weight tensors. Restore and rollback require
 continued access to both remote checkpoints in the originating account/project.
 Local disk retention does not remove remote files. Use Tinker's checkpoint
@@ -168,7 +179,7 @@ The SDK session opens inside Reef's coordinator process, where the trainer
 runs, and the coordinator learns the recipe's Tinker loss reference from the
 driver, so the same recipe package is imported on both sides.
 
-``tests/reef_service/test_tinker_local_engine_ray.py`` runs this topology on a
+``tests/tinker_backend/test_tinker_local_engine_ray.py`` runs this topology on a
 CPU: a local Ray cluster with pretend GPUs, the real model driver, a stub
 engine that accepts Reef's adapter-file transfer in place of SGLang, and the
 Tinker SDK faked on the driver's path. With ``REEF_TEST_TINKER_REAL=1`` and

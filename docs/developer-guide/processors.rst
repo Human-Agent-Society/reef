@@ -87,7 +87,7 @@ The trainer calls it on its own thread, under its lock; no call may block:
   them again. ``trained=False`` says the backend dropped the batch as stale,
   for a record stage that paces work on what trained.
 
-The pipeline also merges the three stages' ``status()``, metrics, background
+The pipeline also merges the record and task stages' ``status()``, metrics, background
 work (``background_jobs_running()``), and ``close()``. ``releasable_record_ids()``
 returns the completed records that no held set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
@@ -131,6 +131,8 @@ names it, so the record never trains after a restart.
      - nothing; the default of a pipeline that trains no weights
    * - ``ReportRecord2Record``
      - report validation, groups and slots, the manual-mode limit, source release
+   * - ``ExclusiveReportRecord2Record``
+     - a ``ReportRecord2Record`` that trains every report by itself; a report that ends owns its inference records
    * - ``JudgingRecord2Record``
      - correlation, the judging worker, and the ``max_staleness`` check
    * - ``InferenceRecord2Record``
@@ -301,6 +303,10 @@ without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
 
+The generator service scores an episode whose verifier ran past its timeout
+as 0, and reports it, so a training play of that kind trains. The task's
+oracle passed the same verifier, so the timeout is the agent's.
+
 The recipe splits the rounds across its stages. The record stage
 (``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due
 and holds the source sessions. The record-to-task stage (``GeneratedTaskTasks``) runs one round
@@ -319,7 +325,10 @@ train. A generated task whose measurement arm is
 named ``plain`` comes back unplayed with an error. The record stage groups
 the training reports by ``metadata.task.name``. A group is complete at
 ``plays_per_task`` episodes, and a batch holds ``tasks_per_step`` complete
-groups. The ``task_group`` objective centers and scales each reward within its
+groups. A training play that reports nothing, such as a failed trial, never
+joins its group. When the task's plays end, its group is complete at the
+number of plays that reported; a group of one is discarded. The
+``task_group`` objective centers and scales each reward within its
 task group, on Tinker's ``importance_sampling`` loss. The record stage
 releases the reports of measurement arms and reports without an arm, such as a
 generator's own reports, without assembling them.

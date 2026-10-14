@@ -20,7 +20,7 @@ from reef.record2task.generator.service import (
     readiness_probes,
 )
 from reef.service.deploy.config_utils import DeployConfigError, load_config
-from reef.service.deploy.generator import GeneratorSettings, generator_settings
+from reef.service.deploy.generator import GeneratorSettings
 from reef.service.deploy.inference import local_service_url
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 
@@ -31,11 +31,19 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
     token = settings.tokens[0] if settings.tokens else None
     tasks_root = Path(generator.tasks_root).expanduser()
     work_dir = Path(generator.work_dir).expanduser() if generator.work_dir else tasks_root / ".play"
+    if generator.designer_api is not None:
+        designer_api = generator.designer_api
+    elif settings.upstream_api == "responses" and not generator.designer_url:
+        # This deployment's upstream speaks Responses; a designer-url service's dialect is its own to name.
+        designer_api = "responses"
+    else:
+        designer_api = "openai"
     designer = ReefDesigner(
         reef_url=generator.designer_url or reef_url,
         token=generator.designer_token if generator.designer_url else token,
         request_options=generator.designer_options,
         timeout_s=generator.designer_timeout_s,
+        api=designer_api,
     )
     plays = ReefTaskPlays(
         reef_url=reef_url,
@@ -84,7 +92,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = service_config_from_mapping(config)
         if settings.generator_settings is None:
             raise DeployConfigError("the deployment has no generator section")
-        generator = generator_settings(settings.generator_settings)
+        generator = GeneratorSettings.from_config(settings.generator_settings, setting="generator")
     except (DeployConfigError, ValueError) as exc:
         parser.error(str(exc))
     service = generator_service(settings, generator)

@@ -99,16 +99,6 @@ def send_lora_to_distributed_engines(
     return refs
 
 
-def unload_lora_from_engines(engines: Sequence[Any], lora_name: str) -> None:
-    """Remove one adapter revision from every engine; raise if any keeps it.
-
-    The residency manager that asked for the eviction turns a failure into a
-    visibly ``leaked`` slot, so this does not swallow it.
-    """
-    refs = [engine.unload_lora_adapter.remote(lora_name=lora_name) for engine in engines if engine is not None]
-    validate_lora_update_results(ray.get(refs))
-
-
 def tensor_checksums(named_tensors: list[tuple[str, torch.Tensor]]) -> dict[str, str]:
     checksums = {
         name: hashlib.sha256(
@@ -145,7 +135,6 @@ __all__ = [
     "send_lora_to_colocated_engine",
     "send_lora_to_distributed_engines",
     "tensor_checksums",
-    "unload_lora_from_engines",
     "validate_lora_update_results",
     "verify_replica_adapter_checksums",
 ]

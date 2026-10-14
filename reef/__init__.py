@@ -42,9 +42,6 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import Task2Batch, Trainer, TrainingPipeline
 from reef.runtime.interfaces import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
 
-# Compatibility aliases for existing imports.
-RegressionGateMixin = RegressionCheckMixin
-
 __all__ = [
     "SCENARIO_METADATA_KEY",
     "ActivatedModel",
@@ -70,7 +67,6 @@ __all__ = [
     "RecordStore",
     "ReefError",
     "RegressionCheckMixin",
-    "RegressionGateMixin",
     "ReportBase",
     "ReportPayload",
     "ReportValidationError",

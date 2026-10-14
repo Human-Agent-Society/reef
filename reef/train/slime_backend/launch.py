@@ -223,8 +223,7 @@ class SlimeDeployment(TrainingDeployment):
             ray_actor_name=settings["ray_actor_name"] or DEFAULT_ACTOR_NAME,
             inference_handler_factory=settings["inference_handler_factory"],
         )
-        # Managed launches take native options from the resolved config.
-        driver = driver_service("slime-driver", settings, {**driver_environment(os.environ), "SLIME_ARGS_FILE": ""})
+        driver = driver_service("slime-driver", settings, driver_environment(os.environ))
         teacher = teacher_service(settings)
         if teacher is not None:
             driver["depends_on"] = [TEACHER_SERVICE]

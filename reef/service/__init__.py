@@ -2,7 +2,6 @@
 
 ``training_driver`` owns startup and shutdown of model deployment components.
 The selected backend supplies a plan; the driver imports no concrete framework.
-``slime_driver`` preserves the legacy explicit-process CLI.
 
 Everything HTTP lives here, and only the HTTP parts live in the HTTP layer.
 ``RequestService`` is the transport-free core — it parses ``x-reef-*``

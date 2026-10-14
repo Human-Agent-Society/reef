@@ -488,8 +488,8 @@ contract in the instruction consistent with the judge, and start a new scenario
 when that contract changes.
 
 Add tests for the program contract, invalid outputs, reward calculation, and
-task registration. ``tests/test_tttd_harness.py`` and
-``tests/test_tttd_packing_tasks.py`` show how the shared harness hands programs
+task registration. ``tests/recipes/tttd/test_tttd_harness.py`` and
+``tests/recipes/tttd/test_tttd_packing_tasks.py`` show how the shared harness hands programs
 to a task-specific judge.
 
 Related guides

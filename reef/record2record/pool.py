@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable
 
-from reef.record2record.eligibility import EligibilityCheck, IneligibleSet
 from reef.record2record.selection import ArrivalOrder, SelectionPolicy
 from reef.record2record.sets import RecordSet
 
@@ -13,25 +12,20 @@ class RecordSetPool:
     """Hold the record sets that a batch can use, and the reserved batch.
 
     The stage adds and removes sets. It also decides what a consumed set
-    releases. The pool orders sets only through its ``SelectionPolicy``, and
-    removes unusable sets only through its eligibility checks.
+    releases. The pool orders sets only through its ``SelectionPolicy``.
     A reservation does not change until the pipeline consumes it or reserves
     again. Thus the pipeline can return the same batch until the trainer
     acknowledges it.
     """
 
-    def __init__(self, selection: SelectionPolicy | None = None, checks: Sequence[EligibilityCheck] = ()) -> None:
+    def __init__(self, selection: SelectionPolicy | None = None) -> None:
         self.selection = ArrivalOrder() if selection is None else selection
-        self.checks = tuple(checks)
         self.sets_by_id: dict[Hashable, RecordSet] = {}
         self.reserved: tuple[RecordSet, ...] | None = None
         self.arrival_count = 0
 
     def __len__(self) -> int:
         return len(self.sets_by_id)
-
-    def __contains__(self, set_id: Hashable) -> bool:
-        return set_id in self.sets_by_id
 
     def next_arrival_index(self) -> int:
         """Return a new index. It is larger than each index that this pool returned before."""
@@ -49,21 +43,6 @@ class RecordSetPool:
     def sets(self) -> tuple[RecordSet, ...]:
         """Return all sets, in the order that the pool received them."""
         return tuple(self.sets_by_id.values())
-
-    def drop_ineligible(self) -> tuple[IneligibleSet, ...]:
-        """Run the eligibility checks in order, remove the sets that fail, and return them.
-
-        Each check sees the sets that the earlier checks kept. The stage
-        calls this method when no batch is out, and releases the returned sets.
-        """
-        dropped: list[IneligibleSet] = []
-        for check in self.checks:
-            for result in check.ineligible_sets(self.sets()):
-                if self.sets_by_id.get(result.record_set.set_id) is not result.record_set:
-                    raise ValueError(f"{type(check).__name__} returned a set that the pool does not hold")
-                self.sets_by_id.pop(result.record_set.set_id)
-                dropped.append(result)
-        return tuple(dropped)
 
     def ordered_sets(self) -> tuple[RecordSet, ...]:
         """Return all sets, in the order of the selection policy."""

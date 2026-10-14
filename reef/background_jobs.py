@@ -1,7 +1,7 @@
 """Asynchronous jobs off the trainer thread: a job runner and the worker that runs it.
 
-Processors use the worker for slow work that must not block the trainer, such
-as judge calls or task-generation rounds. The module uses only the standard
+Pipeline stages use the worker for slow work that must not block the trainer,
+such as judge calls or task-generation rounds. The module uses only the standard
 library, so every package can depend on it.
 """
 
