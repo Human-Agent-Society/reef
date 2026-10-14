@@ -41,6 +41,15 @@ class WeightRuntime(ServingRuntime):
     @abstractmethod
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
 
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str | None:
+        """Optionally reload startup weights, returning their new runtime load ID.
+
+        The artifact may be unmaterialized. Runtimes that lose their weights
+        across Reef restarts materialize it here before loading. The default
+        preserves resident weights without downloading checkpoint bytes.
+        """
+        return None
+
     def activate_checkpoint(self, artifact: Artifact) -> str:
         """Bind a recovered or republished artifact before the scenario serves it.
 
@@ -53,19 +62,6 @@ class WeightRuntime(ServingRuntime):
         now serves under.
         """
         return artifact.ref.release_id
-
-
-class CheckpointRecoveryRuntime(WeightRuntime):
-    """Opt-in runtime capability to reload a recovered checkpoint at startup.
-
-    Ordinary weight inspection and rollback do not imply this capability:
-    remote runtimes can keep their weights resident across Reef restarts.
-    """
-
-    @abstractmethod
-    def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
-        """Load startup weights and return their new runtime load ID."""
-        ...
 
 
 class AdapterWeightRuntime(WeightRuntime):
@@ -117,7 +113,9 @@ class RecoveryRestorer(ArtifactLoader):
     """
 
     @abstractmethod
-    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None: ...
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
+        """Restore if needed, materializing the artifact only when loading it."""
+        ...
 
 
 class InferenceHooks(ABC):
@@ -184,7 +182,6 @@ __all__ = [
     "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
-    "CheckpointRecoveryRuntime",
     "FileTree",
     "HarnessInfo",
     "InferenceHooks",

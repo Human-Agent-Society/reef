@@ -286,6 +286,26 @@ def test_rollback_loads_a_published_adapter(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_startup_recovery_materializes_the_checkpoint_only_when_loading(tmp_path: Path) -> None:
+    from reef.artifact import Artifact, InMemoryRepositoryBackend
+    from reef.surface.weights import WeightLoader
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    (adapter / "adapters.safetensors").write_bytes(b"weights")
+    backend = InMemoryRepositoryBackend.factory(adapter, root=tmp_path / "repository")("math")
+    ref = backend.fork(metadata={"runtime_load_id": "old-incarnation:4"})
+    artifact = Artifact(ref, backend, metadata=backend.metadata())
+    serving = MLXServingRuntime(FakeEngine())
+
+    assert artifact.local_path is None
+    assert WeightLoader().restore_recovered(artifact, serving) == "fake-2"
+    assert len(serving.engine.loaded) == 1
+    assert (serving.engine.loaded[0] / "adapters.safetensors").read_bytes() == b"weights"
+    assert serving.inference_admission_status["open"] is True
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("startup", [False, True])
 def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(tmp_path: Path, startup: bool) -> None:
     from reef.artifact.artifact import Artifact

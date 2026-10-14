@@ -13,7 +13,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import adapter_name, create_weight_surface
-from reef.surface.base import CheckpointRecoveryRuntime
+from reef.surface.base import WeightRuntime
 from reef.surface.weights import WeightInferenceHooks, WeightLoader, artifact_runtime_load_id
 
 
@@ -96,9 +96,9 @@ def test_a_restarted_engine_gets_the_recovered_head_loaded_back(tmp_path: Path) 
     """
     restored: list[str] = []
 
-    class Runtime(StubTrainingRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubTrainingRuntime, WeightRuntime):
         def restore_recovered_checkpoint(self, artifact):
-            return self.restore_checkpoint(artifact)
+            return self.restore_checkpoint(artifact.materialize())
 
         def serving_runtime_load_id(self):
             return "mlx-222-1"  # a fresh process: counter back at one
@@ -129,9 +129,9 @@ def test_a_restarted_engine_gets_the_recovered_head_loaded_back(tmp_path: Path) 
 def test_an_artifact_with_no_recorded_version_is_left_alone(tmp_path: Path) -> None:
     # An unknown published version is not a sign of a stale engine, and a
     # runtime that reports none of its own cannot be compared against.
-    class Runtime(StubTrainingRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubTrainingRuntime, WeightRuntime):
         def restore_recovered_checkpoint(self, artifact):
-            return self.restore_checkpoint(artifact)
+            return self.restore_checkpoint(artifact.materialize())
 
         def serving_runtime_load_id(self):
             return "mlx-111-40"
@@ -145,9 +145,9 @@ def test_an_artifact_with_no_recorded_version_is_left_alone(tmp_path: Path) -> N
 def test_a_matching_engine_keeps_serving_the_live_head(tmp_path: Path) -> None:
     # Same process, same weights: recovery leaves the live head in place and
     # activation stays out of the way.
-    class Runtime(StubTrainingRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubTrainingRuntime, WeightRuntime):
         def restore_recovered_checkpoint(self, artifact):
-            return self.restore_checkpoint(artifact)
+            return self.restore_checkpoint(artifact.materialize())
 
         def serving_runtime_load_id(self):
             return "mlx-111-40"
@@ -174,9 +174,9 @@ def test_a_head_that_is_its_own_checkpoint_still_gets_restored(tmp_path: Path) -
     """
     restored: list[str] = []
 
-    class Runtime(StubTrainingRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubTrainingRuntime, WeightRuntime):
         def restore_recovered_checkpoint(self, artifact):
-            return self.restore_checkpoint(artifact)
+            return self.restore_checkpoint(artifact.materialize())
 
         def serving_runtime_load_id(self):
             return "mlx-222-1"
@@ -199,7 +199,12 @@ def test_a_head_that_is_its_own_checkpoint_still_gets_restored(tmp_path: Path) -
     assert restored == [str(ckpt.local_path)]
 
 
-def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(tmp_path: Path) -> None:
+@pytest.mark.parametrize("stale_head", [False, True], ids=["current-head", "repair-head-mirror"])
+def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(
+    tmp_path: Path, stale_head: bool
+) -> None:
+    from reef.storage.commits import CommitRecord
+
     class MaterializingBackend(InMemoryRepositoryBackend):
         def materialize(self, ref):
             artifact = super().materialize(ref)
@@ -211,9 +216,9 @@ def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(tm
 
     restored: list[tuple[Path, str]] = []
 
-    class FreshRuntime(StubInferenceRuntime, CheckpointRecoveryRuntime):
+    class FreshRuntime(StubInferenceRuntime, WeightRuntime):
         def restore_recovered_checkpoint(self, artifact):
-            return self.restore_checkpoint(artifact)
+            return self.restore_checkpoint(artifact.materialize())
 
         def serving_runtime_load_id(self):
             return "mlx-fresh-1"
@@ -225,7 +230,9 @@ def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(tm
     initial = tmp_path / "initial"
     initial.mkdir()
     backend_factory = MaterializingBackend.factory(initial, root=tmp_path / "repository")
-    first = Dispatcher(WeightSurfaceRecipe(), backend_factory, scenario_storage=SQLiteScenarioStorage())
+    first = Dispatcher(
+        WeightSurfaceRecipe(), backend_factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "records")
+    )
     first.get_or_create_scenario("math")
     first.close()
 
@@ -235,15 +242,40 @@ def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(tm
         staged.local_path,
         metadata={**backend.metadata(), "runtime_load_id": "mlx-previous-40"},
     )
-    published = backend.publish(checkpoint_artifact, expected_parent=backend.current())
+    previous = backend.current()
+    published = backend.publish(checkpoint_artifact, expected_parent=previous, advance_head=not stale_head)
+    if stale_head:
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        store = storage.open("math")
+        try:
+            store.commit_step(
+                expected_step=0,
+                commit=CommitRecord(
+                    scenario="math",
+                    step=1,
+                    artifact_ref=published,
+                    checkpoint=True,
+                    algorithm_state=None,
+                    high_water_sequence=0,
+                    high_water_offset=0,
+                ),
+            )
+        finally:
+            store.close()
+            storage.close()
+        assert backend.current() == previous
+        assert "runtime_load_id" not in backend.metadata()
 
     runtime = FreshRuntime(StubTrainingRuntime(), base_url="http://fresh-runtime")
     second = Dispatcher(
-        WeightSurfaceRecipe(runtime=runtime), backend_factory, scenario_storage=SQLiteScenarioStorage()
+        WeightSurfaceRecipe(runtime=runtime),
+        backend_factory,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         scenario = second.get_or_create_scenario("math")
         assert scenario.repository.require_current_artifact() == published
+        assert backend.current() == published
         assert restored == [(backend.materialize(published).local_path, "mlx-previous-40")]
     finally:
         second.close()
@@ -276,7 +308,7 @@ def test_a_materialized_artifact_carries_the_version_it_was_published_under(tmp_
 
 
 @pytest.mark.parametrize("served", ["engine:0", None])
-def test_recovery_does_not_reload_a_runtime_without_startup_capability(tmp_path: Path, served: str | None) -> None:
+def test_recovery_does_not_reload_a_runtime_using_default_startup_hook(tmp_path: Path, served: str | None) -> None:
     class Runtime(StubInferenceRuntime):
         def serving_runtime_load_id(self):
             return served
@@ -326,7 +358,7 @@ def test_executor_scenario_startup_preserves_existing_recovery_flow(tmp_path: Pa
 
 
 def test_recovery_does_not_reload_an_opted_in_runtime_with_unknown_version(tmp_path: Path) -> None:
-    class Runtime(StubInferenceRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubInferenceRuntime, WeightRuntime):
         def serving_runtime_load_id(self):
             return None
 
@@ -340,9 +372,9 @@ def test_recovery_does_not_reload_an_opted_in_runtime_with_unknown_version(tmp_p
     assert WeightLoader().restore_recovered(checkpoint(tmp_path, "old-incarnation:4"), runtime) is None
 
 
-@pytest.mark.parametrize("restored_version", [None, "", 3])
+@pytest.mark.parametrize("restored_version", ["", 3])
 def test_recovery_refuses_an_invalid_runtime_load_id(tmp_path: Path, restored_version) -> None:
-    class Runtime(StubInferenceRuntime, CheckpointRecoveryRuntime):
+    class Runtime(StubInferenceRuntime, WeightRuntime):
         def serving_runtime_load_id(self):
             return "new-incarnation:0"
 
@@ -350,8 +382,71 @@ def test_recovery_refuses_an_invalid_runtime_load_id(tmp_path: Path, restored_ve
             return restored_version
 
         def restore_checkpoint(self, artifact):
-            raise AssertionError("startup recovery must use its explicit capability")
+            raise AssertionError("startup recovery must use its startup hook")
 
     runtime = Runtime(StubTrainingRuntime(), base_url="http://runtime")
     with pytest.raises(TypeError, match="non-empty runtime load ID"):
         WeightLoader().restore_recovered(checkpoint(tmp_path, "old-incarnation:4"), runtime)
+
+
+@pytest.mark.parametrize(
+    ("opted_in", "recorded", "served"),
+    [
+        (False, "previous:4", "fresh:0"),
+        (True, "previous:4", "previous:4"),
+        (True, "previous:4", None),
+        (True, None, "fresh:0"),
+    ],
+    ids=["opted-out", "matching-version", "unknown-runtime-version", "unknown-recorded-version"],
+)
+def test_startup_skips_unavailable_checkpoint_when_recovery_is_unnecessary(
+    tmp_path: Path, opted_in: bool, recorded: str | None, served: str | None
+) -> None:
+    from reef.artifact.artifact import ArtifactMaterializationError
+
+    class UnavailableBackend(InMemoryRepositoryBackend):
+        checkpoint_unavailable = False
+
+        def materialize(self, ref):
+            if self.checkpoint_unavailable:
+                raise ArtifactMaterializationError("checkpoint download is unavailable")
+            artifact = super().materialize(ref)
+            return Artifact(ref, None, local_path=artifact.local_path, metadata=self._storage.metadata[ref.release_id])
+
+    class WeightSurfaceRecipe(Recipe):
+        def build_surface(self, scenario):
+            return create_weight_surface()
+
+    class Runtime(StubInferenceRuntime):
+        def serving_runtime_load_id(self):
+            return served
+
+        def restore_checkpoint(self, artifact):
+            raise AssertionError("unnecessary startup recovery must not load weights")
+
+    class RecoveringRuntime(Runtime, WeightRuntime):
+        def restore_recovered_checkpoint(self, artifact):
+            return self.restore_checkpoint(artifact.materialize())
+
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = UnavailableBackend.factory(initial, root=tmp_path / "repository")
+    first = Dispatcher(WeightSurfaceRecipe(), factory, scenario_storage=SQLiteScenarioStorage())
+    first.get_or_create_scenario("math")
+    first.close()
+    backend = factory("math")
+    staged = checkpoint(tmp_path, recorded)
+    published = backend.publish(
+        Artifact.local(staged.local_path, metadata={**backend.metadata(), **staged.metadata}),
+        expected_parent=backend.current(),
+    )
+    backend.checkpoint_unavailable = True
+    runtime_type = RecoveringRuntime if opted_in else Runtime
+    runtime = runtime_type(StubTrainingRuntime(), base_url="http://runtime")
+    second = Dispatcher(WeightSurfaceRecipe(runtime=runtime), factory, scenario_storage=SQLiteScenarioStorage())
+    try:
+        scenario = second.get_or_create_scenario("math")
+        assert scenario.repository.require_current_artifact() == published
+        assert runtime.serving_runtime_load_id() == served
+    finally:
+        second.close()

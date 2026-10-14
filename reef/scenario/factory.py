@@ -207,17 +207,15 @@ class ScenarioFactory:
             )
             repository.synchronize_checkpoint()
             if isinstance(surface.loader, RecoveryRestorer):
-                # Deciding which release should serve is not the same as the
-                # runtime holding it. A runtime whose weights live in this
-                # process lost them when the previous one exited, and nothing
-                # here used to put them back: the scenario resumed reporting its
-                # full step count while answering from the bare base model.
-                #
-                # `resolve` rather than `Artifact(ref, repository)`: the bare
-                # constructor carries neither the local path nor the metadata,
-                # so a restorer would see an artifact with nothing to load and
-                # no record of the version it was published under.
-                surface.loader.restore_recovered(repository.resolve(current_artifact), runtime)
+                # Synchronization makes backend metadata describe the selected
+                # checkpoint, including after repairing a stale head mirror.
+                # Keep bytes lazy so runtimes can skip unnecessary downloads.
+                recovered = Artifact(
+                    current_artifact,
+                    repository,
+                    metadata=None if isinstance(current_artifact, LiveWeightArtifactRef) else backend.metadata(),
+                )
+                surface.loader.restore_recovered(recovered, runtime)
             if isinstance(surface.loader, ArtifactActivator) and not isinstance(
                 current_artifact, LiveWeightArtifactRef
             ):
