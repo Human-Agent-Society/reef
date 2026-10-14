@@ -10,12 +10,24 @@ import pytest
 import yaml
 
 import reef.harness.adapters
-from reef.harness.adapters import get_adapter
+from reef.harness.adapters import BUILTIN_ADAPTERS, builtin_descriptor_path, get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
 from reef.harness.adapters.matchers import ABSENT, parse_matcher
 from reef.harness.tree.render import RenderError, render_composition
 
 OPENCODE = "opencode/opencode.json"
+
+
+@pytest.mark.parametrize("adapter", BUILTIN_ADAPTERS)
+def test_every_bundled_descriptor_loads(adapter: str) -> None:
+    """Loading a descriptor parses each of its match expressions, so a malformed check fails here, not at render."""
+    descriptor = load_descriptor(builtin_descriptor_path(adapter))
+    assert descriptor.name == adapter
+
+
+def test_every_descriptor_file_is_a_bundled_adapter() -> None:
+    adapters_dir = Path(reef.harness.adapters.__file__).parent
+    assert {path.parent.name for path in adapters_dir.glob("*/descriptor.yaml")} == set(BUILTIN_ADAPTERS)
 
 
 @pytest.mark.parametrize(
