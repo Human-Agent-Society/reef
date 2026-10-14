@@ -79,8 +79,8 @@ whatever the adapter declares; for example:
 - An entry whose kind the descriptor gives no path, such as ``code_extension``
   under ``native``.
 - A ``config`` entry naming a target the descriptor does not declare.
-- A merged config that fails one of its target's ``checks`` (see
-  `Config checks`_). The checks run before the adapter's own steps, so no
+- A tree whose nodes fail one of the ``checks`` the descriptor declares (see
+  `Node checks`_). The checks run before the adapter's own steps, so no
   adapter can skip them.
 - A ``native_graph`` or ``native_agent`` naming a tool, skill, agent, or graph
   that no entry defines, or agents that delegate in a cycle.
@@ -91,7 +91,7 @@ What the adapter owns
 
 An adapter is configured mostly via declaration. ``descriptor.yaml`` supplies
 the path template for each tree node kind, the named config targets, the
-defaults merged under every tree, and the checks the merged config must pass
+defaults merged under every tree, and the checks the tree's nodes must pass
 (``checks``). An adapter whose agent differs only in where
 files go needs no code at all, although they must comply with the following
 rules:
@@ -100,12 +100,19 @@ rules:
 - ``files.rules`` and ``files.skill`` are required.
 - every named template must contain ``{name}``.
 
-Config checks
-^^^^^^^^^^^^^
+Node checks
+^^^^^^^^^^^
 
-A config target's ``checks`` state what its merged config must keep or must
+A descriptor's ``checks`` state what the nodes of a tree must keep or must
 not set. Each check has a ``key``, a ``match`` expression that every value at
-the key must match, and an optional ``reason`` that a refusal gives:
+the key must match, and an optional ``reason`` that a refusal gives.
+
+``config`` is the node kind that takes checks. Its nodes are fragments: each
+one merges into a config target over the target's ``defaults``, and the model
+binding merges last when one is applied. So the checks are declared on the
+target, ``files.config.<target>.checks``, and match the merged target rather
+than each node. This is what lets ``IsDefault()`` compare a key with the
+target's default:
 
 .. code-block:: yaml
 
@@ -125,10 +132,9 @@ the key must match, and an optional ``reason`` that a refusal gives:
              match: Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
              reason: benchmark episodes keep telemetry off
 
-The render runs the checks on the merged config, with the model binding
-applied when there is one, before any adapter step. Reef owns the matchers;
-a descriptor cannot add one. The render refuses a tree whose config fails a
-check, for example::
+The render runs each target's checks on the merged target, before any
+adapter step. Reef owns the matchers; a descriptor cannot add one. The render
+refuses a tree whose nodes fail a check, for example::
 
    claude composition fails the check on env key 'AWS_REGION' in
    claude/settings.json: Reef's model binding chooses the endpoint, ...
@@ -138,11 +144,12 @@ the value, which can be a credential the binding wrote. A check without a
 ``reason`` gives its match expression instead.
 
 **Keys.** ``key`` is required: dot-separated key names, or a list of them
-(one check per key). ``.`` names the whole file, for a check on its top-level
-key names; a check without a key fails to load. A ``*`` segment is every key of an
-object and every item of a list. A ``**`` segment is any number of segments,
-zero included. A key the config does not set is absent. A ``*`` or ``**``
-segment visits only the values the config has.
+(one check per key). ``.`` names the whole checked value, for a check on its
+top-level key names; a check without a key fails to load. A ``*`` segment is
+every key of an object and every item of a list. A ``**`` segment is any
+number of segments, zero included. A key the checked value does not have is
+absent. A ``*`` or ``**`` segment visits only the values the checked value
+has.
 
 **Matchers.** Write a match expression as nested calls with JSON literals
 (``true``, ``false`` and ``null`` included). Use ``|-`` in YAML to wrap a long
@@ -154,10 +161,10 @@ one over several lines.
    * - Matcher
      - Matches
    * - ``IsDefault()``
-     - The value the target's ``defaults`` give the key, or an absent key when
-       they give none. Only for a key without ``*`` or ``**``.
+     - For a config target: the value its ``defaults`` give the key, or an
+       absent key when they give none. Only for a key without ``*`` or ``**``.
    * - ``IsAbsent()``
-     - A key the config does not set. An empty value is a set one.
+     - A key the checked value does not have. An empty value is a set one.
    * - ``Eq(v)``, ``IsIn([v, ...])``
      - A value equal to ``v``, or to one of the list, with its type: ``false``
        matches neither ``0`` nor ``"false"``.
@@ -714,9 +721,9 @@ Hermes Agent
 ~~~~~~~~~~~~
 
 The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
-``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``; the
-quirks write the merged configuration as YAML. They enforce these defaults
-so an episode stays self-contained and makes one request:
+``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``, which
+the render writes as YAML. The descriptor's checks keep these defaults so an
+episode stays self-contained and makes one request:
 
 - ``security.tirith_enabled`` disables the terminal scanner download. The
   scanner would also block a command it cannot resolve, such as
@@ -801,11 +808,10 @@ Codex CLI
 
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
-``config.toml``; the quirks write the merged configuration as TOML. They
-enforce these defaults so an episode stays self-contained: the update
-check, analytics, feedback, and telemetry are off, and the
-``workspace-write`` sandbox has no network. Rendering rejects a tree that
-changes them.
+``config.toml``, which the render writes as TOML. The descriptor's checks
+keep these defaults so an episode stays self-contained: the update check,
+analytics, feedback, and telemetry are off, and the ``workspace-write``
+sandbox has no network. Rendering rejects a tree that changes them.
 
 Node paths and transformations are:
 
@@ -1330,6 +1336,8 @@ Descriptor fields
   ``{prompt}`` in ``argv``.
 - ``files`` maps node kinds to output paths, such as
   ``skills/{name}/SKILL.md``. ``rules`` and ``skill`` paths are required.
+  Each ``files.config.<target>`` gives a config file's ``path``, its
+  ``defaults`` and its ``checks`` (see `Node checks`_).
   Other kinds are optional; Reef rejects a mutation of a kind with no
   render path. ``files.tree`` is an optional entries-list path for agents
   that reconcile the live tree.
@@ -1351,8 +1359,8 @@ Descriptor fields
   ``install`` commands, which would otherwise install the latest release
   over the person's own ``claude``). The ``claude`` episode ``env`` sets both
   too. A variable the shell sets wins. Claude Code applies the ``env`` block
-  of ``settings.json`` over the environment, so the ``claude`` quirks reject
-  a tree that sets either one there.
+  of ``settings.json`` over the environment, so the ``claude`` descriptor's
+  checks reject a tree that sets either one there.
 - ``client_args`` lists arguments the wrapper puts ahead of the person's own,
   for a setting the rendered tree must not undo. ``claude`` passes
   ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
