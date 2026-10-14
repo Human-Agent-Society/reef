@@ -980,9 +980,9 @@ def test_without_an_eval_fraction_every_task_trains_as_the_recipe_always_did(tmp
     (results,) = task_generator.results
     assert all(result.is_played for result in results)
     document = summary(tmp_path, 0)
-    assert all("split" not in task and "source_agent_record_ids" not in task for task in document["tasks"]), (
-        "the summary is what the recipe always wrote"
-    )
+    assert all(
+        "split" not in task and "source_agent_record_ids" not in task for task in document["tasks"]
+    ), "the summary is what the recipe always wrote"
     assert not list((tmp_path / "state" / "tasks").glob("manifest-*.json")), "no split manifest is written"
 
 
