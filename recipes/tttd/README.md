@@ -10,8 +10,8 @@ Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.1
 
 ```text
 tttd/
-  recipe.py        TTTDRecipe: training spec, loss family "tttd", grid configuration
-  processor.py     reported feedback, grouped: the step is the full grid of sibling attempts
+  recipe.py        TTTDRecipe: training spec, loss family "tttd", default pipeline stages
+  processor.py     the stages: TTTDRecord2Record owns the grid; TTTDTasks and TTTDBatches read it
   objective.py     shared grouped adaptive-entropic advantages and backend loss selection
   report.py        TTTDGroupedRolloutReport, the declared report schema
   tinker.py        remote importance-sampling loss and centered frozen-base KL

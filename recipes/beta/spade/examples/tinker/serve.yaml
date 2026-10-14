@@ -2,7 +2,6 @@
 # The built-in generated-task recipe plays and trains; SPADE is the task generator.
 # Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
 # The generator service runs under the same interpreter as Reef.
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -29,29 +28,38 @@ generator:
           chat_template_kwargs:
             enable_thinking: false
 recipe:
-  implementation: reef.record2dataset.generated_tasks:GeneratedTaskRecipe
+  implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
   config:
-    # A batch is tasks-per-step complete groups of plays-per-task episodes of one task.
-    tasks-per-step: 2
-    plays-per-task: 4
-    # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
-    scaffold-tolerance: 8
-    # The rounds: one generation of tasks each, the next one after batches-per-round batches trained.
-    generator-url: ${endpoints.generator}
-    rounds: 20
-    batches-per-round: 2
-    description: shell tasks with hidden state under /var and /etc
-    state-dir: ${REEF_SPADE_STATE_DIR}/rounds
     checkpoint-every-n-versions: 1
-# The task generator: SPADE's Designer, count tasks for each round, a hint arm for each task with a hint.
-task-generation:
-  module: recipes.beta.spade:SpadeTaskGenerator
-  config:
-    generator_url: ${endpoints.generator}
-    count: 8
-    hint_plays: 2
-    skills: [inspection, repair]
-    state_dir: ${REEF_SPADE_STATE_DIR}/generations
+# The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
+pipeline:
+  # The training plays of each task form one group; the next round is due after batches_per_round batches trained.
+  record2record:
+    config:
+      plays_per_task: 4
+      batches_per_round: 2
+  # The rounds: one generation of tasks each, played through the generator service.
+  record2task:
+    config:
+      generator_url: ${endpoints.generator}
+      rounds: 20
+      description: shell tasks with hidden state under /var and /etc
+      state_dir: ${REEF_SPADE_STATE_DIR}/rounds
+      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+      scaffold_tolerance: 8
+      # The task generator: SPADE's Designer, count tasks for each round, a hint arm for each task with a hint.
+      generator:
+        module: recipes.beta.spade:SpadeTaskGenerator
+        config:
+          generator_url: ${endpoints.generator}
+          count: 8
+          hint_plays: 2
+          skills: [inspection, repair]
+          state_dir: ${REEF_SPADE_STATE_DIR}/generations
+  # A batch is tasks_per_step complete task groups.
+  task2batch:
+    config:
+      tasks_per_step: 2
 training:
   backend: tinker
   ready-timeout: 1800

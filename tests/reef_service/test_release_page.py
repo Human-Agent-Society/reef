@@ -20,8 +20,9 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
-from reef_service.test_harness_requests import _post, _request
+from tests.reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
+from tests.reef_service.test_harness_requests import _post, _request
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -34,7 +35,6 @@ from reef.service.page_chrome import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 CHROME = Path(__file__).parents[2] / "reef" / "service" / "page_chrome.py"
@@ -888,7 +888,10 @@ def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
 
 
 @pytest.mark.parametrize("sides_key", ["evaluation_sides", "gate_sides"])
-def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran(sides_key) -> None:
+@pytest.mark.parametrize("legacy_policy_version", [False, True])
+def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran(
+    sides_key: str, legacy_policy_version: bool
+) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     row = {
         "release_id": "rel-1",
@@ -905,11 +908,12 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
             "selection": {
                 "policy": "floor",
-                "policy_version": "1",
                 "reason": "candidate met the floor on all 1 tasks",
             },
         },
     }
+    if legacy_policy_version:
+        row["metrics"]["selection"]["policy_version"] = "1"
     selection_result = _section(build_release_page(1, [creation, row]), "Result")
     assert '<span class="selected">Published</span>' in selection_result
     assert "<dt>Passed</dt><dd>1</dd>" in selection_result and "<dt>Failed</dt><dd>0</dd>" in selection_result

@@ -48,14 +48,19 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/core/` | Shared value types, wire contracts, and errors |
 | `reef/dispatcher.py`, `reef/scenario/` | Coordination, scenario state, commit ordering, and recovery |
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
-| `reef/recipe/`, `reef/train/` | Recipe contracts, processors, training, evaluation, and backend integrations |
+| `reef/recipe/`, `reef/train/` | Recipe contracts, built-in recipes, the training pipeline, training, and backend integrations |
+| `reef/evaluation/` | Candidate evaluation: running and scoring evaluation episodes, deciding whether a candidate is published, and plugin configuration |
 | `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
 | `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
 | `reef/surface/` | Delivery of published artifacts |
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
-| `reef/record2dataset/` | The generator service: a designer prompt for Harbor tasks, the authoring gate and oracle check, task player jobs; the built-in generated-task recipe |
+| `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
+| `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
+| `reef/record2task/` | The record-to-task stage: one record set into tasks (`Record2Task`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
+| `reef/task2batch/` | The task-to-batch stage: the tasks of the selected record sets into one batch (`Task2Batch`) |
+| `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |
 
@@ -300,6 +305,11 @@ endorsements of every sentence or historical API detail:
 
 ## Tests and checks
 
+Read [tests/AGENTS.md](tests/AGENTS.md) before adding or moving tests. Place new
+tests under their owning component, not directly under `tests/`. Keep
+`tests/reef_service/` for service contracts and service workflows. Update CI
+selection and fixture paths with every move; preserve existing test coverage.
+
 Start with the smallest existing suite that exercises the changed behavior.
 Extend nearby tests and fixtures; check observable results and failure cases.
 Public interface changes need contract tests. For training or performance
@@ -307,7 +317,7 @@ changes, include relevant evaluation or baseline comparisons.
 
 ```bash
 # Focused test example; substitute the suite relevant to the change.
-.venv/bin/python -m pytest tests/reef_service/test_reef_artifacts.py -q
+.venv/bin/python -m pytest tests/artifact/test_reef_artifacts.py -q
 
 # Python checks (activate .venv first for pre-commit's local hooks).
 pre-commit run --files path/to/changed_file.py
@@ -341,7 +351,7 @@ keep unrelated working-tree changes intact.
   method's README. Keep examples self-contained.
 - For harness adapters, read
   [harness-adapters.rst](docs/developer-guide/harness-adapters.rst).
-  Golden harness trees under `tests/reef_service/data/harness_goldens/` are
+  Golden harness trees under `tests/harness/data/harness_goldens/` are
   test fixtures, including their instruction files; preserve exact output.
 - For documentation site changes, read [docs/site/AGENTS.md](docs/site/AGENTS.md).
   With Node.js 22, run `npm ci`, `npm run check:docs`, `npm run lint`, and

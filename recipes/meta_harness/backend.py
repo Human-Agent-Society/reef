@@ -8,8 +8,9 @@ from dataclasses import replace
 from typing import Any
 
 from reef.core.evaluation import SelectionDecision
+from reef.evaluation.harness import HarnessCandidate
 from reef.train.backend import PreparedStep
-from reef.train.cordis_backend import CordisBackend, HarnessCandidate
+from reef.train.cordis_backend import CordisBackend
 from reef.train.types import TrainingBatch, TrainStepResult
 
 from .population import Population, PopulationStore, content_id

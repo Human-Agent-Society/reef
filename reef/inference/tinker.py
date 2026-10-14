@@ -121,11 +121,18 @@ class TinkerSDKSampler(TinkerSampler):
             sampler = self._service.create_sampling_client(model_path=sampler_path)
             if sampler.get_base_model() != self._model:
                 raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
-        result = sampler.sample(
-            prompt=self._sdk.ModelInput.from_ints(prompt),
-            num_samples=1,
-            sampling_params=self._sdk.SamplingParams(**params),
-        ).result(timeout=self._timeout_s)
+        try:
+            result = sampler.sample(
+                prompt=self._sdk.ModelInput.from_ints(prompt),
+                num_samples=1,
+                sampling_params=self._sdk.SamplingParams(**params),
+            ).result(timeout=self._timeout_s)
+        except self._sdk.BadRequestError as exc:
+            # An overflow carries OpenAI's code and wording, which agents match to compact their history.
+            message = str(exc)
+            if "context window" in message:
+                message = f"context_length_exceeded: the prompt exceeds this model's maximum context length. {message}"
+            raise UpstreamStatusError(message, status=400) from exc
         if len(result.sequences) != 1:
             raise ValueError("Tinker returned an unexpected number of sequences")
         sequence = result.sequences[0]

@@ -3,10 +3,10 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
-from reef_service.runtime_stubs import ExecutorRuntimeFixture
+from tests.support.runtime_stubs import ExecutorRuntimeFixture
 
 import reef
-from reef.train import processors
+from reef import task2batch
 
 
 @pytest.mark.unit
@@ -119,7 +119,8 @@ def test_readme_names_are_exported() -> None:
     assert reef.AgentRecord is not None
     assert reef.RecordStore is not None
     assert reef.Scenario is not None
-    assert reef.DataProcessor is not None
+    assert reef.TrainingPipeline is not None
+    assert reef.Task2Batch is not None
     assert reef.Trainer is not None
     assert reef.Recipe is not None
 
@@ -221,7 +222,7 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
     """Neither the online_grpo training objective nor its recipe class may come back.
 
     Grouped objectives are cookbook-owned now; the grouped machinery (group
-    keys, slots, the decide_group barrier in the reported-feedback processor) stays. The
+    keys, slots, the ``ReportGrouping.decide`` barrier in the report stage) stays. The
     ``online_rft`` kind that replaced this arm is gone too — a filtered-SFT
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
@@ -238,21 +239,28 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
 def test_noop_naming_is_removed_in_favor_of_recipe() -> None:
     assert not hasattr(reef, "NoopRecipe")
     assert not hasattr(reef.Dispatcher, "noop")
-    assert not hasattr(processors, "NoopProcessor")
+    assert not hasattr(task2batch, "NoopProcessor")
     assert importlib.util.find_spec("reef.noop") is None
 
 
 @pytest.mark.unit
 def test_pairing_interlock_surface_is_replaced_by_the_engine_spec() -> None:
-    """The abstract subclassing base gave way to one spec-configured processor.
+    """The subclassed processor bases gave way to one pipeline over three recipe stages.
 
-    Recipe processors keep their public class names as thin adapters over
-    ``ReportedFeedbackProcessor``; the interlock vocabulary (``PairedCandidate``, the
+    Recipes write a ``Task2Batch`` for ``TrainingPipeline``; the processor bases
+    (``DataProcessor``, ``ReportedFeedbackProcessor``, ``ComputedFeedbackProcessor``)
+    and the interlock vocabulary (``PairedCandidate``, the
     ``_collect_candidates``/``_terminal_report_ids`` dual bookkeeping) must
     stay gone.
     """
-    from reef.train.processors import ReportedFeedbackProcessor, reported
+    from reef.record2task import assembly
+    from reef.train.pipeline import TrainingPipeline
 
-    assert not hasattr(reported, "PairedCandidate")
+    for name in ("DataProcessor", "ReportedFeedbackProcessor", "ComputedFeedbackProcessor"):
+        assert not hasattr(task2batch, name)
+        assert not hasattr(reef, name)
+    assert importlib.util.find_spec("reef.train.processors") is None
+    assert not hasattr(assembly, "PairedCandidate")
+    assert not hasattr(assembly, "ReportedFeedbackProcessor")
     for hook in ("_collect_candidates", "_terminal_report_ids", "_terminal_source_ids", "_create_batch"):
-        assert not hasattr(ReportedFeedbackProcessor, hook)
+        assert not hasattr(TrainingPipeline, hook)

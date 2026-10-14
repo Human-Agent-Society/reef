@@ -33,7 +33,7 @@ out (:class:`_ExplicitGradientDivergence`). Every kernel takes the
 tensor-parallel group explicitly and reduces across the vocab shards with
 :mod:`reef.train.slime_backend.vocab_parallel`, so the CPU parity tests run
 it at world size one against the pure-Python oracle in
-``tests/reef_service/reference_algorithms/distill.py``.
+``tests/support/reference_algorithms/distill.py``.
 Megatron and Slime are imported where a hook runs.
 """
 
@@ -49,6 +49,7 @@ import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillSettings, settings_from_args
+from reef.train.slime_backend.distill.teacher_engine import ENGINE_TEACHER_BATCH_KEYS
 from reef.train.slime_backend.score_centering import settings_from_args as centering_settings_from_args
 from reef.train.slime_backend.score_centering.term import score_centering_term
 from reef.train.slime_backend.vocab_parallel import (
@@ -491,6 +492,12 @@ def distill_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
     """``--reef-actor-pre-train-hook-path`` entry point: score every teacher sequence before the step."""
     if not rollout_data.get("teacher_tokens"):
         raise ValueError("every distill sample must carry teacher_tokens")
+    if actor.args.distill_teacher_url:
+        if any(
+            len(rollout_data.get(key, ())) != len(rollout_data["teacher_tokens"]) for key in ENGINE_TEACHER_BATCH_KEYS
+        ):
+            raise ValueError("the teacher engine's columns must be filled by the bridge before training")
+        return
     from slime.utils.timer import timer
 
     from reef.train.slime_backend.distill.teacher import compute_teacher_rows

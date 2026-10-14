@@ -153,10 +153,10 @@ file, including a file selected through ``GUIDANCE_CONFIG``.
    * - Configuration
      - Default
      - Meaning
-   * - ``recipe.config.groups-per-step``
+   * - ``pipeline.record2record.config.groups_per_step``
      - 2
      - Parents selected per update
-   * - ``recipe.config.rollouts-per-group``
+   * - ``pipeline.record2record.config.rollouts_per_group``
      - 4
      - Guidance samples per parent
    * - ``training.options.global-batch-size``

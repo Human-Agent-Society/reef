@@ -22,6 +22,8 @@ import math
 import os
 import re
 import sys
+import urllib.parse
+import urllib.request
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
@@ -31,7 +33,7 @@ from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
-from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, read_harbor_task
+from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.harness.client.wrapper import CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -106,6 +108,19 @@ class ReefEvalLab(TaskLab):
         return EpisodeRow(rewards=rewards, error=str(row_tags.get("error") or ""), trial_uri=row.uri)
 
 
+def verifier_timed_out(trial_uri: str | None) -> bool:
+    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
+    if not trial_uri or not trial_uri.startswith("file://"):
+        return False
+    # The URI is percent-encoded (Path.as_uri), so a work dir with a space or a non-ASCII name needs decoding.
+    result_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "result.json"
+    # A trial whose harbor process was killed has no result file; its episode stays unscored.
+    if not result_path.is_file():
+        return False
+    exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
+    return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+
+
 def bound_agent(agent: Mapping[str, object], *, model: str, base_url: str, api_key: str) -> dict[str, object]:
     """The agent configuration with ``{model}``, ``{base_url}`` and ``{api_key}`` filled in wherever they sit."""
     values = {"{model}": model, "{base_url}": base_url, "{api_key}": api_key}
@@ -143,10 +158,8 @@ def checked_labels(labels: Mapping[str, str]) -> dict[str, str]:
 
 
 def episode_reward(rewards: Mapping[str, float]) -> float | None:
-    """The verifier's reward: the ``reward`` entry, else the first one; None when the verifier wrote nothing finite."""
-    if not rewards:
-        return None
-    value = rewards["reward"] if "reward" in rewards else next(iter(rewards.values()))
+    """The verifier's primary reward (``primary_reward``); None when it names none or wrote nothing finite."""
+    value = primary_reward(rewards)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return float(value)
@@ -227,6 +240,7 @@ class TaskPlayer:
         per_receipt: bool = False,
         is_reporting: bool = True,
         lab: TaskLab | None = None,
+        verifier_timeout_reward: float | None = None,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -256,6 +270,8 @@ class TaskPlayer:
         self.per_receipt = per_receipt
         # A measurement run (an arm played for its reward alone) keeps its episodes out of the training data.
         self.is_reporting = is_reporting
+        # The reward for an episode whose verifier ran past its timeout; None leaves such an episode unscored.
+        self.verifier_timeout_reward = verifier_timeout_reward
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -312,6 +328,10 @@ class TaskPlayer:
         failed_calls = len(turns) - len(receipts)
         error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
+        if row.rewards and primary_reward(row.rewards) is None and not error:
+            error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
+        if reward is None and self.verifier_timeout_reward is not None and verifier_timed_out(row.trial_uri):
+            reward = self.verifier_timeout_reward
         report_ids: tuple[str, ...] = ()
         if self.is_reporting and reward is not None and receipts:
             try:

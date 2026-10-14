@@ -10,7 +10,6 @@
 # The cookbook method's recipe class: harness_evolve plus the
 # catalog-injecting delivery surface. The entry point follows the same
 # recipes.<method>.recipe convention as the other cookbook methods.
-schema-version: 2
 recipe:
   implementation: recipes.skillclaw.recipe:SkillClawRecipe
 
@@ -59,7 +58,11 @@ recipe:
       # hands the recipe its model binding, which reef renders into each probe
       # episode and passes to propose. The served pool never names an endpoint.
       seed: []
-    batch-size: 60
+# The night trigger: the batch closes at the frozen day's task count, passing reports included.
+pipeline:
+  task2batch:
+    config:
+      batch_size: 60
 inference:
   upstream-model: ${REEF_MODEL}
 

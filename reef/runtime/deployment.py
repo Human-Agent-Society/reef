@@ -664,3 +664,14 @@ class RayRuntimeConfig(RuntimeConnectionConfig):
     actor_name: str = config_option(DEFAULT_ACTOR_NAME, help="Training coordinator actor name.")
     namespace: str = config_option(DEFAULT_NAMESPACE, help="Ray namespace containing the coordinator.")
     ray_address: str | None = config_option(None, help="Ray cluster address.")
+
+
+def http_readiness_command(python: str, endpoint: str) -> list[str]:
+    """Check HTTP readiness without a shell or an optional HTTP client."""
+    return [
+        python,
+        "-c",
+        "import sys, urllib.request; "
+        "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=5).close()",
+        endpoint,
+    ]

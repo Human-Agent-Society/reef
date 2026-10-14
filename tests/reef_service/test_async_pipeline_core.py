@@ -7,7 +7,8 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
@@ -26,8 +27,6 @@ from reef.runtime.interfaces import (
 )
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
-
-from ._policy_recipe import TestPolicyRecipe
 
 _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
@@ -381,14 +380,14 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     committed = scenario.metrics_for_version(scenario.current_artifact_ref().release_id)
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
-    assert committed["selection"]["outcome"] == "select"
+    assert committed["selection"]["selected"] is True
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 1
     assert isinstance(status["recorded_at"], float)
     assert status["metrics"] == committed
-    status["metrics"]["selection"]["outcome"] = "mutated by caller"
+    status["metrics"]["selection"]["selected"] = False
     refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert refreshed["metrics"]["selection"]["outcome"] == "select"
+    assert refreshed["metrics"]["selection"]["selected"] is True
 
 
 @pytest.mark.unit
@@ -430,8 +429,8 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.training_job_id == "job-0"
     assert event.source_runtime_load_id == "v0"
     assert event.produced_runtime_load_id == "job:job-0"
-    assert scenario.trainer.processor.experiment_logger is tracker.loggers["math"]
-    scenario.trainer.processor.experiment_logger.log({"accepted": 1}, namespace="processor")
+    assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]
+    scenario.trainer.pipeline.experiment_logger.log({"accepted": 1}, namespace="processor")
     assert tracker.loggers["math"].logged == [
         ("recipe", {"batch_size": 1}),
         ("processor", {"accepted": 1}),
@@ -465,7 +464,8 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     assert len(receipts) == 1
     assert receipts[0]["metadata"] == {
         "outcome": "stale",
-        "metrics": stale_metrics,
+        # The receipt keeps the method the dropped batch was prepared with.
+        "metrics": {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}},
     }
     assert receipts[0]["consumed_ids"] == ("inference-1", "report-1")
 

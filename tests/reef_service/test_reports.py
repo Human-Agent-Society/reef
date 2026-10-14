@@ -10,14 +10,16 @@ from typing import Any
 
 import pytest
 
-from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
+from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
+from reef.record2task.assembly import SampleAssemblySettings
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import ProcessorContext
+from reef.train import PipelineContext
+from reef.train.pipeline import TrainingPipeline
 
 
 @dataclass(frozen=True)
@@ -228,7 +230,7 @@ def test_declared_schema_is_enforced_at_ingress() -> None:
     assert stored.agent_record_id == "good"
     scenario = dispatcher.get_or_create_scenario("workload")
     assert scenario is not None
-    assert scenario.trainer.processor.context.report_type is ScoredRolloutReport
+    assert scenario.trainer.pipeline.context.report_type is ScoredRolloutReport
 
 
 def test_undeclared_recipe_keeps_open_ingress_via_anyreport() -> None:
@@ -246,12 +248,13 @@ def test_undeclared_recipe_keeps_open_ingress_via_anyreport() -> None:
 
 
 def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
-    processor = TTTDProcessor(
-        ProcessorContext(
-            "discovery",
-            {"groups_per_step": 2, "rollouts_per_group": 3},
-            report_type=TTTDGroupedRolloutReport,
-        )
+    context = PipelineContext("discovery", report_type=TTTDGroupedRolloutReport)
+    record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=2, rollouts_per_group=3))
+    processor = TrainingPipeline(
+        context,
+        record2record=record2record,
+        record2task=TTTDTasks(SampleAssemblySettings(), record2record),
+        task2batch=TTTDBatches(context, record2record),
     )
     processor.ingest(
         AgentRecord.create(
@@ -354,6 +357,7 @@ def test_missing_reference_rejection_does_not_queue_or_reserve_the_report_id() -
 
 def test_report_retry_after_capacity_eviction_remains_idempotent_and_conflicts_fail(tmp_path) -> None:
     from dataclasses import replace
+
     from reef.storage.records import RecordConflict, RecordRetention
 
     dispatcher = _dispatcher(Recipe(), "recipe", record_dir=tmp_path)

@@ -76,6 +76,22 @@ class ServiceConfig:
         default_factory=dict,
         metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
     )
+    teacher_model_path: str | None = config_option(
+        None, public_path=("teacher", "model_path"), help="Teacher engine HF model or directory; frozen SGLang."
+    )
+    teacher_num_gpus: int = config_option(
+        1, public_path=("teacher", "num_gpus"), help="Teacher engine GPUs, also its tensor parallel size."
+    )
+    teacher_port: int = config_option(
+        30001, public_path=("teacher", "port"), help="Teacher engine's internal HTTP port."
+    )
+    teacher_timeout: float = config_option(
+        300.0, public_path=("teacher", "timeout"), help="Deadline of one teacher engine scoring request in seconds."
+    )
+    teacher_options: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Native SGLang teacher options.", public_path=("teacher", "options")),
+    )
     training_backend: str | None = config_option(
         None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
     )
@@ -198,11 +214,13 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
     )
-    #: The task generator the generated-task recipe asks for tasks: a plugin class and its config.
-    task_generation_settings: Mapping[str, Any] | None = field(
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2batch``.
+    pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Task generator settings as a JSON/YAML object with module and config.", path=("task-generation",)
+            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2batch, each with module and "
+            "config.",
+            path=("pipeline",),
         ),
     )
     #: The generator service ``reef serve`` starts beside the HTTP service; ``reef.service.deploy.generator`` parses it.
@@ -264,7 +282,7 @@ def service_owned_keys() -> frozenset[str]:
     non_reef_fields = {
         "evaluation_settings",
         "generator_settings",
-        "task_generation_settings",
+        "pipeline_settings",
         "tracing_config",
         "training_settings",
         "wandb_config",
@@ -326,10 +344,6 @@ def parse_service_arguments(
     expanded the effective config. ``cli_paths`` remains accepted for callers
     of the earlier adapter; precedence is already present in the mapping.
     """
-    if "schema-version" in config:
-        from reef.service.deploy.deployment_config import translate_layout
-
-        config = translate_layout(config)
     arguments = service_config_arguments()
     supplied = {}
     for argument in arguments:
@@ -352,10 +366,6 @@ def normalize_service_config(
     which of their fields the operator supplied, and custom stacks may have
     no Reef HTTP child at all.
     """
-    if "schema-version" in config:
-        from reef.service.deploy.deployment_config import translate_layout
-
-        config = translate_layout(config)
     values = parse_service_arguments(config, cli_paths=cli_paths)
     normalized = copy.deepcopy(dict(config))
     for argument in service_config_arguments():
@@ -393,16 +403,7 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
-    """Translate the config's ``reef`` section into HTTP service settings."""
-    if "schema-version" in config:
-        from reef.service.deploy.deployment_config import (
-            component_config_arguments,
-            normalize_component_layout,
-            translate_layout,
-        )
-
-        config = translate_layout(config)
-        config = normalize_component_layout(config, component_config_arguments(config))
+    """Read HTTP service settings from a resolved deployment's ``reef`` section."""
     values = parse_service_arguments(config)
     if not isinstance(values["recipe"], str) or not values["recipe"]:
         raise ValueError("config must declare a non-empty reef.recipe")
@@ -411,6 +412,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     # The legacy retry deadline follows the request timeout unless supplied.
     if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
-    # Preserve shared execution settings for presets and directly selected recipes.
-    preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
+    # Preserve shared execution settings for directly selected recipes.
+    preset = dict(config) if ":" in values["recipe"] else None
     return ServiceConfig(**values, recipe_settings=_reef_section(config), preset_config=preset)

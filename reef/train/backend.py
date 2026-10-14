@@ -110,8 +110,8 @@ class CandidateBackend(CandidateEvaluator, ABC):
 
     The backend owns method-specific candidate construction and settlement,
     and supplies the default evaluator. A recipe may inject a cohesive
-    :class:`reef.train.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
-    wraps this evaluator in :class:`reef.train.evaluation.BackendAlwaysSelectPlugin`.
+    :class:`reef.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
+    wraps this evaluator in :class:`reef.evaluation.BackendAlwaysSelectPlugin`.
     Every backend therefore follows the same evaluate-then-decide lifecycle
     between preparation and settlement.
     """

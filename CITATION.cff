@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use Reef in your research, please cite it using this metadata."
+type: software
+title: "Reef: Infrastructure for Continually Self-Improving Agents"
+authors:
+  - name: Reef Contributors
+url: "https://github.com/Human-Agent-Society/reef"
+license: Apache-2.0

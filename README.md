@@ -71,9 +71,9 @@ modules implement each step.
 | Step | What happens | Where it lives |
 |---|---|---|
 | **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
-| **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`storage/records.py`](reef/storage/records.py) — stored interactions and feedback<br>[`train/processors/`](reef/train/processors) — feedback matching and eligibility |
-| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — batches and update jobs |
-| **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
+| **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`storage/records.py`](reef/storage/records.py) — stored interactions and feedback<br>[`record2record/`](reef/record2record) — feedback matching and eligibility |
+| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — the training pipeline, batches, and update jobs |
+| **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`evaluation/`](reef/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
 ## 📦 Installation
@@ -321,6 +321,22 @@ Working on continual self-improving agent?
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
 
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
+
+
+## 📚 Citation
+
+If you use Reef in your research, please cite:
+
+```bibtex
+@misc{reef2026,
+  title  = {Reef: Infrastructure for Continually Self-Improving Agents},
+  author = {{Reef Contributors}},
+  year   = {2026},
+  url    = {https://github.com/Human-Agent-Society/reef}
+}
+```
+
+Citation metadata is also available in [CITATION.cff](CITATION.cff).
 
 
 ## 👥 The Team

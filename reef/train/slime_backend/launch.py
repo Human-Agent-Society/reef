@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
+from reef.runtime.deployment import http_readiness_command
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.deployment import (
+    INFERENCE_RESERVED_OPTIONS,
     TrainingDeployment,
     TrainingDeploymentPlan,
     driver_service,
@@ -48,7 +51,7 @@ def expand_option_references(
     return {name: _expand(value) for name, value in options.items()}
 
 
-def driver_arguments(config: Mapping[str, Any]) -> list[str]:
+def driver_arguments(config: Mapping[str, Any], *, loss_family: str = "") -> list[str]:
     """Adapt resolved component config to the pinned Slime parser at launch.
 
     Keep generated inference flags out of training.options. Legacy explicit
@@ -59,6 +62,17 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     # managed options so the model resolves once for the HTTP service and the
     # driver alike; they are expanded here, against the same resolved config.
     training_options = expand_option_references(config, reef.get("training_backend_options", {}))
+    if reef.get("teacher_model_path"):
+        if not loss_family:
+            raise DeployConfigError("a teacher engine requires a distillation loss family")
+        managed = {
+            f"{loss_family}-teacher-url": interpolate_config(config, "${endpoints.distill-teacher}"),
+            f"{loss_family}-teacher-model-path": reef["teacher_model_path"],
+            f"{loss_family}-teacher-timeout": reef.get("teacher_timeout", 300.0),
+        }
+        if any(name in training_options for name in (*managed, f"{loss_family}-teacher-checkpoint")):
+            raise DeployConfigError("teacher section replaces native teacher URL, model path, timeout and checkpoint")
+        training_options.update(managed)
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
@@ -113,8 +127,65 @@ def require_vllm_weight_transport(options: Mapping[str, Any]) -> None:
         raise DeployConfigError("inference.backend: vllm has no weights checker; drop check-weight-update-equal")
 
 
+#: The teacher engine's service name; its endpoint reaches the driver as ``${endpoints.distill-teacher}``.
+TEACHER_SERVICE = "distill-teacher"
+#: SGLang options the teacher section sets itself or that would change which model it serves.
+TEACHER_RESERVED_OPTIONS = frozenset(INFERENCE_RESERVED_OPTIONS) | {
+    "tokenizer-path",
+    "tokenizer-mode",
+    "revision",
+    "tokenizer-revision",
+    "enable-lora",
+    "lora-paths",
+    "load-format",
+    "enable-mis",
+    "skip-tokenizer-init",
+}
+
+
+def teacher_service(settings: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The teacher engine as a Ray service with its own GPUs, stopped with its deployment."""
+    if not settings.get("teacher_model_path"):
+        if settings.get("teacher_options"):
+            raise DeployConfigError("teacher.options requires teacher.model-path")
+        return None
+    size = settings["teacher_num_gpus"]
+    port = settings["teacher_port"]
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+        raise DeployConfigError("teacher.num-gpus must be a positive integer")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 or port == settings["port"]:
+        raise DeployConfigError("teacher.port must be valid and distinct from reef.port")
+    options = normalize_native_options(settings["teacher_options"])
+    arguments = native_arguments(options, reserved=set(TEACHER_RESERVED_OPTIONS))
+    python = os.environ.get("REEF_PYTHON", sys.executable)
+    return {
+        "name": TEACHER_SERVICE,
+        "executor": "ray",
+        "resources": {"num_gpus": size, "num_cpus": 1},
+        "endpoint": f"http://{{host}}:{port}",
+        "command": [
+            python,
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "${reef.teacher_model_path}",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--tp",
+            str(size),
+            *arguments,
+        ],
+        "ready": http_readiness_command(python, f"${{endpoints.{TEACHER_SERVICE}}}/health"),
+        "ready_timeout": settings["training_ready_timeout"],
+    }
+
+
 class SlimeDeployment(TrainingDeployment):
     """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
+
+    supports_teacher_engine = True
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -153,7 +224,12 @@ class SlimeDeployment(TrainingDeployment):
             inference_handler_factory=settings["inference_handler_factory"],
         )
         # Managed launches take native options from the resolved config.
-        return (driver_service("slime-driver", settings, {**driver_environment(os.environ), "SLIME_ARGS_FILE": ""}),)
+        driver = driver_service("slime-driver", settings, {**driver_environment(os.environ), "SLIME_ARGS_FILE": ""})
+        teacher = teacher_service(settings)
+        if teacher is not None:
+            driver["depends_on"] = [TEACHER_SERVICE]
+            return (teacher, driver)
+        return (driver,)
 
     def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
         from reef.train.slime_backend.driver import create_training_plan

@@ -96,15 +96,16 @@ def startup_report(
 ) -> list[str]:
     """Lines describing each explicitly supplied, automatically chosen or key default setting.
 
-    ``base`` is the loaded file or the command-line seed config and ``resolved``
-    the normalized deployment config after component assembly. With
-    ``include_defaults`` every declared setting is listed, defaults included.
+    ``base`` is the public layout from the loaded file or the command-line
+    environment, and ``resolved`` the normalized deployment config after
+    component assembly. With ``include_defaults`` every declared setting is
+    listed, defaults included.
     """
     arguments = (*service_config_arguments(), *component_config_arguments(resolved))
-    supplied = translate_layout(base) if from_file else base
+    supplied = translate_layout(base)
     supplied_source = "file" if from_file else "environment"
-    # Version 2 and command-line startup seed the record-only recipe and a loopback bind.
-    seeds = translate_layout({"schema-version": 2}) if not from_file or "schema-version" in base else {}
+    # Layout translation seeds the record-only recipe and a loopback bind.
+    seeds = translate_layout({})
     overridden = _leaf_paths(_apply_overrides({}, dict(overrides), arguments=arguments))
     lines = ["resolved settings:"]
     for argument in arguments:

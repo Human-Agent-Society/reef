@@ -7,12 +7,17 @@ from pathlib import Path
 
 if not __package__:
     # Direct execution (`python test_plugin_runtime_hook_contracts.py ...`)
-    # imports this file as a top-level module; put tests/ on sys.path so the
+    # imports this file as a top-level module; put the repository on sys.path so the
     # canonical package import below works in that mode too. Under pytest the
-    # file is always imported as part of the plugin_contracts package.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    # file is always imported as part of the tests.plugin_contracts package.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from plugin_contracts._shared import get_contract_path, install_paths, run_contract_test_for_file, stubbed_modules
+from tests.plugin_contracts._shared import (
+    get_contract_path,
+    install_paths,
+    run_contract_test_for_file,
+    stubbed_modules,
+)
 
 install_paths()
 
@@ -43,7 +48,7 @@ def test_rollout_data_postprocess_callsite_is_stable() -> None:
 def test_rollout_data_postprocess_path_aligns_with_expected_format() -> None:
     path = get_contract_path(
         "ROLLOUT_DATA_POSTPROCESS_PATH",
-        "plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
+        "tests.plugin_contracts.test_plugin_runtime_hook_contracts.reference_rollout_data_postprocess",
     )
     # A user-supplied hook module may itself import torch; keep the stub
     # scoped to loading and exercising the hook.

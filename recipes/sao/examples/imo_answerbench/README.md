@@ -84,7 +84,8 @@ self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]},
    generation receipt.
 2. After the local grader computes the reward, report it against that exact
    receipt. The dispatcher collects `batch_size` reports into one training
-   step; this smoke config sets `batch_size: 1`, so each report is one step.
+   step; this smoke config sets `pipeline.task2batch.config.batch_size: 1`,
+   so each report is one step.
 
 A third piece runs after the trial. Harbor writes `result.json` when the
 verifier finishes, and a watcher thread posts the verifier's reward as one
@@ -103,7 +104,7 @@ reef-eval starts one Harbor trial for the next problem
   -> Reef stores the sampled tokens, the loss mask, and the rollout log-probabilities
   -> the agent extracts \boxed{} and scores it against the gold answer
   -> the agent reports the score against that rollout's receipt
-  -> SAOProcessor accepts the report and emits one ATIF TrajectoryItem
+  -> SAOTasks accepts the report and emits one ATIF TrajectoryItem
   -> the sao training objective hands Slime a batch of one
   -> the colocated critic computes values; skip-observation GAE builds the advantages
   -> Slime runs policy_loss with SAO's per-token DIS primitive, after two critic steps
@@ -218,7 +219,7 @@ step), actor and critic `grad_norm`, and the asynchrony telemetry `sao/policy_la
 Change `inference.model-path`, the GPU counts and parallelism flags, and
 `--seq-length` and `--rollout-max-response-len` in `serve.yaml`. The
 objective flags are the paper's reasoning-domain values and do not change
-with model size. `recipe.config.batch-size` and `training.config.global_batch_size` must stay
+with model size. `pipeline.task2batch.config.batch_size` and `training.config.global_batch_size` must stay
 equal, because each rollout sample is its own data-parallel unit.
 
 ## Paper fidelity
@@ -227,7 +228,7 @@ The integration reproduces:
 
 - single-rollout sampling, one rollout per prompt with no comparison group and
   no slowest-sample barrier, with `batch_size` such rollouts per optimizer
-  step (the recipe default is the paper's 128; this smoke config sets
+  step (the default is the paper's 128; this smoke config sets
   `batch_size: 1`, `--global-batch-size=1`, see below);
 - a value model colocated with the actor and two critic steps per actor step
   (`--critic-steps-per-actor=2`), trained at the paper's value learning rate
@@ -263,8 +264,9 @@ uses the paper's shape at a budget one node can afford.
 `stream.py` keeps `SAO_IN_FLIGHT` requests open at all times, each on a
 problem drawn from a training pool, grades each completion with the
 verifier's rule and reports it against its receipt; `serve-30b.yaml` takes
-the optimizer step size from `SAO_BATCH` (the recipe's `batch-size` and the
-driver's `--global-batch-size`, which must agree). Held-out problem indices
+the optimizer step size from `SAO_BATCH` (the batch stage's
+`pipeline.task2batch.config.batch_size` and the driver's
+`--global-batch-size`, which must agree). Held-out problem indices
 are never served, and `evaluate.py` scores the base and the trained weights
 on them afterwards with fresh samples.
 

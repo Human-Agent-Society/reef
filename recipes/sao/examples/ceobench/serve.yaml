@@ -36,7 +36,6 @@
 # so training keeps pace with the game (about a week of play per step). Paths are the
 # container's; run.sh mounts the model directory and the run directory.
 
-schema-version: 2
 reef:
   ready-timeout: 3600
   host: 0.0.0.0                        # the task container reaches Reef by LAN address
@@ -70,9 +69,12 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 8                      # MUST equal training.config.global_batch_size
     max-staleness: 64
     checkpoint-every-n-versions: 20
+pipeline:
+  task2batch:
+    config:
+      batch_size: 8                    # MUST equal training.config.global_batch_size
 training:
   backend: slime
   ready-timeout: 900

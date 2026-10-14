@@ -19,7 +19,7 @@ than supervised fine-tuning on the same demonstrations.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/sdft/``                                          |
 +-------------+------------------------------------------------------------+
-| Processor   | reported feedback, singleton                               |
+| Pipeline    | reported feedback, singleton                               |
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
@@ -33,7 +33,7 @@ What it does
 The harness sends a request through Reef. It gets a demonstration of the
 response from somewhere else such as a reference solution or a stronger
 model. It reports the demonstration against the request's receipt. With the
-default ``batch_size`` of 1 each report is one training step.
+default batch size of 1 each report is one training step.
 
 .. flow::
    :loop: the next request is served by the updated weights
@@ -47,18 +47,23 @@ default ``batch_size`` of 1 each report is one training step.
 How Reef implements it
 ----------------------
 
-The processor is the shared ``DistillProcessor``
-(`Processors <../../developer-guide/processors.rst>`__). It turns every
+SDFT has three pipeline stages
+(`Training pipeline <../../developer-guide/processors.rst>`__).
+``DistillRecord2Record`` makes each report its own record set. ``SDFTTasks``
+turns each report into a task. ``SDFTBatches`` batches ``batch_size`` tasks.
+
+``SDFTTasks`` extends the shared ``DistillTasks``. ``DistillTasks`` turns every
 ``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the
 student's recorded tokens and ``teacher_tokens``. ``teacher_tokens`` is the
 teacher's request rendered with the served model's chat template and
 followed by the student's response ids.
 
-SDFT's processor adds the demonstration block to the request's final user
+``SDFTTasks`` adds the demonstration block to the request's final user
 message. It adds the block as a new user message when the request ends in a
 tool result. ``context_template`` sets the block's text and its default is
 the reference implementation's wording. A harness that needs another layout
-subclasses the processor and overrides ``teacher_request``.
+subclasses ``SDFTTasks`` and overrides ``teacher_request``. The deployment
+names the subclass in ``pipeline.record2task.module``.
 
 The ``sdft`` loss family is a thin family on the Slime backend's
 distillation base in ``reef/train/slime_backend/distill/``
@@ -105,13 +110,41 @@ recipe never trains on it.
 Configuration
 -------------
 
+The deployment's top-level ``pipeline`` section configures the stages. Each
+stage reads only its own ``config``. ``DistillRecord2Record`` takes no
+config.
+
+.. code:: yaml
+
+   recipe:
+     implementation: recipes.sdft.recipe:SDFTRecipe
+     config:
+       max-staleness: 0
+   pipeline:
+     record2task:
+       config:
+         tokenizer_path: /models/Qwen2.5-7B-Instruct
+         max_teacher_tokens: 8192
+     task2batch:
+       config:
+         batch_size: 32
+
+Reef checks each stage's config when it loads the recipe. A bad
+``context_template`` or a missing ``tokenizer_path`` fails the deployment. A
+stage key under ``recipe.config`` also fails it, and the error names the
+key's place in ``pipeline``.
+
 .. config::
 
-   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
-   tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
-   context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
-   max_staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
+   pipeline.record2task.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
+   pipeline.record2task.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
+   pipeline.task2batch.config.batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+
+``SDFTTasks`` also takes the sample assembly's keys
+(``accept_multi_turn_policy_samples``, ``realign_threshold`` and
+``scaffold_tolerance``).
 
 The Slime driver takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.

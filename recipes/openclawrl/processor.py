@@ -1,242 +1,58 @@
-"""The OpenClaw-RL processor: judge every main turn by its next state.
+"""The OpenClaw-RL record-to-task and task-to-batch stages: one judged turn, one sample.
 
-A computed-feedback recipe on the shared engine
-(:class:`~reef.train.processors.computed.ComputedFeedbackProcessor` owns the record
-lifecycle, the judging worker, and the batch cycle). This file is the
-method: ``ingest`` correlates main turns into sessions and hands each
-completed turn over for judgment, ``judge`` is upstream's combine
-dispatch, ``make_sample`` validates the tensors, ``make_batch`` shapes
-the batch. One turn, one judgment, one sample — rewards pass through raw
+A computed-feedback recipe. The correlation and the judge are
+:class:`~recipes.openclawrl.judging.OpenClawRLJudging`, which runs in the
+record-to-record stage :class:`~recipes.openclawrl.judging.OpenClawRLRecord2Record`.
+This file validates the tensors (``make_sample``), shapes the batch
+(``make_batch``), and writes the PRM record file. Rewards pass through raw
 (upstream ``--n-samples-per-prompt 1``; no grouping, no normalization).
-
-No proxy and no judgment on the wire: the method derives every verdict
-from the traffic the agent already produces. Correlation prefers a
-harness-stamped ``x-reef-tag-session`` and falls back to trace matching,
-which holds only for agents that resend their transcript each turn. The
-machinery — session matching, the PRM clients — lives in
-:mod:`recipes.openclawrl`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import collections
 import json
 import logging
 import pathlib
-import time
-from dataclasses import asdict, replace
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
+from typing import Any, Self
 
-from recipes.openclawrl.prm import (
-    append_hint_to_messages,
-    build_clients,
-    collect_hint_candidates,
-    render_response_fallback,
-)
-from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
-from recipes.openclawrl.turns import (
-    TurnJob,
-    TurnJudgment,
-    main_turn_message,
-    turn_job,
-    turn_request_messages,
-    validate_teacher_cands,
-)
-from reef.core.records_types import AgentRecord, RequestType
+from recipes.openclawrl.judging import OpenClawRLRecord2Record
+from recipes.openclawrl.turns import TurnJudgment, validate_teacher_cands
+from reef.core.config import config_option
+from reef.core.plugins import NoSettings, PluginConfigError
+from reef.core.records_types import AgentRecord
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.train.processors.common import make_policy_trajectory
-from reef.train.processors.computed import ComputedFeedbackProcessor, JudgingWorker
-from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem, policy_row_violation
+from reef.pipeline_context import PipelineContext
+from reef.record2record import Record2Record
+from reef.record2task import JudgedTasks, Record2Task
+from reef.record2task.samples import make_policy_trajectory
+from reef.task2batch import Task2Batch
+from reef.task2batch.base import BatchSettings
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
-# How often a run may repeat the "nothing is binding" warning, and how many
-# dead-on-arrival sessions it takes to raise it at all. A conversation whose
-# last turn never got a next state is ordinary; a run where those outnumber
-# the turns that did bind is a correlation failure.
-_UNBOUND_WARN_INTERVAL_S = 300.0
-_UNBOUND_WARN_FLOOR = 8
 
+class OpenClawRLTasks(JudgedTasks):
+    """One judged turn as one sample; a turn whose tensors the top-K select loss cannot train on retires.
 
-def _session_tag(payload: Any) -> str | None:
-    """The harness-declared conversation id (``x-reef-tag-session``), if any."""
-    metadata = payload.get("metadata") if isinstance(payload, dict) else None
-    tags = metadata.get("tags") if isinstance(metadata, dict) else None
-    value = tags.get("session") if isinstance(tags, dict) else None
-    return str(value).strip() or None if value is not None else None
-
-
-class OpenClawRLProcessor(ComputedFeedbackProcessor):
-    """Turns judged by their next state; terminal exclusions mirror upstream.
-
-    Side calls, retried turns, session-final turns,
-    judge-declined turns, and samples whose tensors the top-K select loss
-    cannot train on (the capture must cover every response token) all
-    retire terminal instead of ever entering a batch.
+    The capture must cover every response token, and every trained sample
+    carries at least one teacher candidate. The stage takes no config.
     """
 
-    output_schema = TrainingBatch
-    required_request_types = frozenset({RequestType.INFERENCE, RequestType.REPORT})
-
-    def __init__(
-        self,
-        context: ProcessorContext,
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
         *,
-        worker: JudgingWorker | None = None,
-        clients: tuple[Any, Any, Any] | None = None,
-    ) -> None:
-        config = context.config
-        # The judge's clients (PRM judge, directive teacher, renderer) and
-        # its config fields; ``clients`` overrides for tests.
-        self._prm, self._teacher, self._renderer = clients if clients is not None else build_clients(config)
-        self._max_hint_candidates = max(1, int(config.get("prm_max_hint_candidates", 3)))
-        self._index = SessionIndex(
-            float(config.get("session_ttl_s", 900.0)),
-            max_sessions=int(config.get("max_open_sessions", DEFAULT_MAX_SESSIONS)),
-        )
-        # Correlation reports itself through the log, not the record file
-        # below: the failure worth catching is "nothing ever bound", and a
-        # run in that state never produces the batch that would write a line.
-        self._warned_untagged = False
-        self._warned_evicted = False
-        self._last_unbound_warning = -_UNBOUND_WARN_INTERVAL_S
-        # What the judge actually saw. Upstream persists this per turn to a
-        # PRM record file; without it a batch mean is the only visible number
-        # and every question about the judged population — the eval mix, how
-        # often a hint was accepted, which next states are being judged —
-        # needs a bespoke replay to answer. A file, not a log line: reef
-        # configures no logging, so anything below WARNING is discarded.
-        self._judged: collections.Counter[str] = collections.Counter()
-        record_file = str(config.get("prm_record_file", "") or "").strip()
-        self._record_path = pathlib.Path(record_file) if record_file else None
-        if worker is None and self._prm is not None:
-            worker = JudgingWorker(self.judge, concurrency=int(config.get("prm_concurrency", 8)))
-        super().__init__(context, worker=worker)
-
-    # ------------------------------------------------ the recipe's data path
-    #  ingest (correlate sessions) → judge (async, on the worker)
-    #  → make_sample → make_batch; lifecycle and the cycle are the engine's.
-
-    def ingest(self, item: AgentRecord) -> None:
-        # 1. Catch up on derived state. Expiry runs before observing, so an
-        #    expired session can never capture this request as its successor.
-        now = time.monotonic()
-        self.catch_up(now)
-        # 2. Reports never train here; owning them keeps the store
-        #    compactable (nothing else would ever release them).
-        if item.request_type is not RequestType.INFERENCE:
-            self.retire(item.agent_record_id)
-            return
-        # 3. Side calls (titles, compaction — no tools) never train.
-        payload = item.payload
-        if main_turn_message(payload) is None:
-            self.retire(item.agent_record_id)
-            return
-        # 4. Correlate into a session: a retry is terminal; the request that
-        #    follows a turn delivers its next state — send that turn to the
-        #    judging worker. A harness-stamped ``session`` tag names the
-        #    conversation outright; without one this falls back to trace
-        #    matching, which only holds for agents that resend their whole
-        #    transcript every turn. Every main turn is judged against
-        #    whatever arrived next — a tool result is a next state, and its
-        #    role is an input to the judge rather than a filter.
-        observation = self._index.observe(
-            item.agent_record_id,
-            turn_request_messages(payload),
-            now,
-            session_tag=_session_tag(payload),
-        )
-        if observation.duplicate:
-            self.retire(item.agent_record_id)
-            return
-        if observation.binding is not None:
-            record = self.tracked_record(observation.binding.receipt)
-            if record is not None:
-                self.dispatch(turn_job(record, observation.binding))
-        # 5. This turn now awaits its own next state.
-        self.track(item)
-
-    async def judge(self, job: TurnJob) -> TurnJudgment:
-        """Upstream combine dispatch: evaluative and directive judges per turn.
-
-        ┌────────────────┬──────────────┬──────────────────────────────────┐
-        │ hint accepted? │ eval = ±1?   │ judgment                         │
-        ├────────────────┼──────────────┼──────────────────────────────────┤
-        │ yes            │ yes          │ score=eval + teacher signal      │
-        │ yes            │ no           │ score=0.0 + teacher signal       │
-        │ no             │ yes          │ score=eval + un-enhanced anchor  │
-        │ no             │ no           │ terminal                         │
-        └────────────────┴──────────────┴──────────────────────────────────┘
-
-        Runs on the judging worker's thread, never the trainer's. The
-        un-enhanced anchor is upstream's RL-only convention
-        (``teacher_tokens_candidates = [un_enhanced]``): every RL sample
-        carries the frozen PRM's log-probs under the PLAIN prompt as a
-        single OPD candidate, so the distillation term keeps pulling the
-        policy toward the frozen base distribution on its top-K.
-        """
-        # 1. The judges and teacher see the same text upstream does: the
-        #    chat-template re-render of the FULL assistant turn (reasoning +
-        #    content + native tool calls); the visible render is the fallback.
-        response_text = None
-        if self._renderer is not None:
-            response_text = await asyncio.to_thread(
-                self._renderer.render,
-                list(job.request_messages),
-                dict(job.response_message),
-                tools=job.request_tools,
-            )
-        response_text = response_text or render_response_fallback(job.response_message)
-        # 2. Both PRM judges vote.
-        eval_score, hint_votes = await asyncio.gather(
-            self._prm.evaluate(response_text, job.next_state_text, job.next_state_role),
-            self._prm.evaluate_hint_votes(response_text, job.next_state_text, job.next_state_role),
-        )
-        # 3. The accepted hindsight hints, shortest first, capped.
-        candidates = collect_hint_candidates(hint_votes, max_cand=self._max_hint_candidates)
-        # 4. Every candidate ships as a TOKEN SEQUENCE — upstream's
-        #    ``teacher_tokens_candidates`` — for the train actor's Megatron
-        #    teacher pass; an RL-only turn ships the un-enhanced native ids
-        #    (the anchor, whose construction cannot fail). Without the
-        #    generation-time capture the turn cannot train regardless, so no
-        #    candidate is built for it.
-        messages = list(job.request_messages)
-        native_ok = bool(
-            job.native_tokens
-            and job.response_token_count
-            and 0 < job.response_token_count < len(job.native_tokens)
-            and job.topk_indices
-            and len(job.topk_indices) == job.response_token_count
-        )
-        teacher_cands: list[dict[str, Any]] = []
-        if candidates and messages and native_ok:
-            if job.native_tokens is None or job.response_token_count is None:
-                raise RuntimeError("native OpenClaw job lost its token capture")
-            for candidate in candidates:
-                enhanced = append_hint_to_messages(messages, candidate)
-                ids = await self._teacher.candidate_tokens(
-                    enhanced,
-                    tools=job.request_tools,
-                    native_tokens=job.native_tokens,
-                    response_token_count=job.response_token_count,
-                )
-                if ids is not None:
-                    teacher_cands.append({"hint": candidate, "teacher_tokens": ids})
-        if not teacher_cands and eval_score in (1.0, -1.0) and native_ok:
-            if job.native_tokens is None:
-                raise RuntimeError("native OpenClaw job lost its token capture")
-            teacher_cands.append({"hint": "", "teacher_tokens": [int(v) for v in job.native_tokens]})
-        # 5. The dispatch table decides.
-        has_rl = eval_score in (1.0, -1.0)
-        self._judged[f"next_state:{job.next_state_role}"] += 1
-        self._judged[f"eval:{eval_score:+.0f}" if has_rl else "eval:0"] += 1
-        self._judged["hint_accepted" if candidates else "hint_declined"] += 1
-        self._judged["anchor_only" if (not candidates and teacher_cands) else "teacher_cands"] += 1
-        if not has_rl and not teacher_cands:
-            self._judged["declined"] += 1
-            return TurnJudgment(job.receipt)
-        return TurnJudgment(job.receipt, score=eval_score if has_rl else 0.0, teacher_cands=tuple(teacher_cands))
+        context: PipelineContext,
+        record2record: Record2Record,
+        environ: Mapping[str, str],
+    ) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls()
 
     def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectoryItem | None:
         # 1. A declined judgment never trains. (Narrow on the score itself:
@@ -271,14 +87,68 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             return None
         return sample.with_training(extras={**sample.training.get("extras", {}), "teacher_cands": list(validated)})
 
-    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
-        self._record_batch(samples, batch_number)
+
+@dataclass(frozen=True)
+class OpenClawRLBatchSettings(BatchSettings):
+    """The config of ``OpenClawRLBatches``."""
+
+    batch_size: int = config_option(
+        16, help="The judged turns in one batch. Must equal the Slime driver's --global-batch-size."
+    )
+    # Upstream's OPENCLAW_PRM_RECORD_FILE.
+    prm_record_file: str = config_option(
+        "", help="The file that gets one JSON line for each batch: the judged population. Empty disables it."
+    )
+
+
+class OpenClawRLBatches(Task2Batch):
+    """Judged turns into batches, and the PRM record file.
+
+    Config: :class:`OpenClawRLBatchSettings`. The PRM record file reports
+    what the judging of ``record2record`` saw, so the stage needs the
+    scenario's ``OpenClawRLRecord2Record``.
+    """
+
+    def __init__(
+        self, context: PipelineContext, settings: OpenClawRLBatchSettings, record2record: OpenClawRLRecord2Record
+    ) -> None:
+        super().__init__(context, settings.batch_size)
+        # What the judge actually saw goes to the PRM record file, one line
+        # per batch. Upstream persists this per turn; without it a batch mean
+        # is the only visible number. A file, not a log line: reef configures
+        # no logging, so anything below WARNING is discarded.
+        record_file = settings.prm_record_file.strip()
+        self.record_path = pathlib.Path(record_file) if record_file else None
+        self.openclawrl_judging = record2record.openclawrl_judging
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        record2task: Record2Task,
+        environ: Mapping[str, str],
+    ) -> Self:
+        settings = OpenClawRLBatchSettings.parse(config, plugin_class=cls)
+        if not isinstance(record2record, OpenClawRLRecord2Record):
+            raise PluginConfigError(
+                f"{cls.__name__} needs OpenClawRLRecord2Record as record2record, not {type(record2record).__name__}"
+            )
+        return cls(context, settings, record2record)
+
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        samples = tuple(task for task in tasks if isinstance(task, TrajectoryItem))
+        if len(samples) != len(tasks):
+            raise TypeError("OpenClaw-RL tasks must be trajectories")
+        self.write_record_line(samples, batch_number)
         return TrainingBatch(
             f"{self.scenario}:openclawrl:{batch_number}",
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def _record_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> None:
+    def write_record_line(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> None:
         """Append this batch's judged population to the PRM record file.
 
         One line per batch: what the judges returned since the previous one,
@@ -292,74 +162,18 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             "scenario": self.scenario,
             "samples": len(samples),
             "rewards": dict(sorted(collections.Counter(f"{trajectory_reward(s):+.0f}" for s in samples).items())),
-            "judged": dict(sorted(self._judged.items())),
+            "judged": dict(sorted(self.openclawrl_judging.judged.items())),
             # Cumulative, unlike the per-batch counters above: these answer
             # "is correlation working" for the run as a whole.
-            "correlation": asdict(self._index.stats),
+            "correlation": asdict(self.openclawrl_judging.index.stats),
         }
-        self._judged.clear()
-        if self._record_path is None:
+        self.openclawrl_judging.judged.clear()
+        if self.record_path is None:
             return
         try:
-            self._record_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._record_path.open("a", encoding="utf-8") as handle:
+            self.record_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.record_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
         except OSError:
             # Diagnostics must never take a training step down with them.
-            logger.warning("openclawrl: could not append to %s", self._record_path, exc_info=True)
-
-    def expire(self, now: float) -> tuple[str, ...]:
-        """Sessions idle past the TTL are over: drop them from the index and
-        retire the turn each was still holding.
-
-        Only a session's newest turn is ever unbound — every earlier one was
-        dispatched the moment its successor arrived — so what comes back is
-        one turn per dead session, a turn whose next state will never come.
-        Without this the index would grow for the life of the process and
-        those records would stay protected from compaction forever.
-        """
-        retired = self._index.expire(now)
-        self._warn_on_correlation(now)
-        return retired
-
-    def _warn_on_correlation(self, now: float) -> None:
-        """Say out loud when correlation is producing nothing.
-
-        A turn that never binds is never judged and never trains, and it does
-        so without an error: the only symptom is a training set that stays
-        empty, which is invisible without reading this file. WARNING because
-        reef configures no logging and anything below it is discarded; rate
-        limited because this is reached once per record.
-        """
-        stats = self._index.stats
-        if stats.untagged and not self._warned_untagged:
-            self._warned_untagged = True
-            logger.warning(
-                "openclawrl: correlating by trace matching — this traffic carries no "
-                "x-reef-tag-session tag. Trace matching binds only agents that resend their "
-                "whole transcript on every request; an agent that keeps or rewrites its "
-                "history locally yields no trainable turns. Stamp x-reef-tag-session, stable "
-                "and unique per conversation, to correlate reliably."
-            )
-        if stats.evicted and not self._warned_evicted:
-            self._warned_evicted = True
-            logger.warning(
-                "openclawrl: the session table hit max_open_sessions and is evicting the least "
-                "recently active sessions (%d so far); their pending turns retire untrained. "
-                "Unmatched requests each open a session, so this usually means correlation is "
-                "failing rather than that the traffic has that many live conversations.",
-                stats.evicted,
-            )
-        if (
-            stats.dropped_unbound >= _UNBOUND_WARN_FLOOR
-            and stats.dropped_unbound > stats.bound
-            and now - self._last_unbound_warning >= _UNBOUND_WARN_INTERVAL_S
-        ):
-            self._last_unbound_warning = now
-            logger.warning(
-                "openclawrl: %d session(s) expired without ever binding a turn, against %d bound "
-                "turn(s). Unbound turns are never judged and never train — check that every "
-                "inference in a conversation carries the same x-reef-tag-session value.",
-                stats.dropped_unbound,
-                stats.bound,
-            )
+            logger.warning("openclawrl: could not append to %s", self.record_path, exc_info=True)

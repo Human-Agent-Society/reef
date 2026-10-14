@@ -123,7 +123,7 @@ class SessionIndex:
     must never be judged against its own reply.
 
     Everything here runs on the trainer thread, which must not block
-    (``reef/train/processors/base.py``), once per record: the untagged path
+    (``reef/train/pipeline.py``), once per record: the untagged path
     walks the live sessions and the tagged path is a single lookup, and
     ``max_sessions`` is what bounds the first of those.
     """
@@ -133,8 +133,8 @@ class SessionIndex:
             raise ValueError("session_ttl_s must be positive")
         if max_sessions <= 0:
             raise ValueError("max_sessions must be positive")
-        self._ttl_s = ttl_s
-        self._max_sessions = max_sessions
+        self.ttl_s = ttl_s
+        self.max_sessions = max_sessions
         self._sessions: dict[str, _Session] = {}
         self._counts = {"tagged": 0, "untagged": 0, "bound": 0, "dropped_unbound": 0, "evicted": 0}
 
@@ -251,8 +251,8 @@ class SessionIndex:
         the tail of a busy table, and buys a bounded scan on the trainer
         thread instead of one that grows with the request rate.
         """
-        dead = [slot for slot, session in self._sessions.items() if now - session.last_activity > self._ttl_s]
-        overflow = len(self._sessions) - len(dead) - self._max_sessions
+        dead = [slot for slot, session in self._sessions.items() if now - session.last_activity > self.ttl_s]
+        overflow = len(self._sessions) - len(dead) - self.max_sessions
         if overflow > 0:
             expiring = set(dead)
             dead += heapq.nsmallest(

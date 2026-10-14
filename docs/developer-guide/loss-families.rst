@@ -14,11 +14,13 @@ the backend's forward passes.
 - Methods can also supply a Tinker loss implementation. TTTD shares one
   preparation method between its Slime and Tinker implementations.
 
-A recipe binds ``WeightTrainingSpec(objective=..., processor=..., scheduling=...)``.
+A recipe binds ``WeightTrainingSpec(objective=..., scheduling=...)``.
 ``WeightTrainingSpec.loss_family`` derives the family from that objective;
 ``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
 ``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
-The bridge still rejects a payload whose ``loss`` differs from its boot family.
+The workers start with that objective's family. A job that selects another
+objective trains that objective's family on the same workers (see
+`Per-job families`_).
 
 Layout
 ------
@@ -121,7 +123,7 @@ loss.
 - ``reef_actor_pre_train_hook_path``: ``<name>_actor_pre_train(actor, rollout_data)``,
   before every training step
 
-``tests/reef_service/test_slime_algorithm_contract.py`` enforces the entry point
+``tests/slime_backend/test_slime_algorithm_contract.py`` enforces the entry point
 names and the layering: family packages never import ``reef_adapters``, the
 adapter layer never names a family, ``utils/`` stays torch-free, family flags
 carry the ``--<name>-`` prefix.
@@ -151,6 +153,36 @@ row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 (thin families on the distillation base below).
 
+Per-job families
+----------------
+
+A job can select an objective of another family (`Switch methods within a run
+<write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep their
+startup flags. The family brings its ``--loss-type``, objective hooks,
+advantage routing, wire keys, and default driver options. Before the family's
+first job starts, the bridge validates the family against the startup flags.
+Only the actor workers switch; the critic keeps the startup family. A ``self``
+distillation teacher copies the actor's weights at the family's first job, and
+Reef does not checkpoint that copy.
+
+The bridge refuses a family that:
+
+- needs driver options;
+- configures the critic, as SAO does;
+- is a second distillation family;
+- declares a wire key with a dtype that another family of the run declares
+  differently;
+- fails its own validation against the startup flags.
+
+A learning-rate schedule sets the rate of each actor optimizer step through
+Slime's before-train-step hook. Reef runs any
+``--custom-megatron-before-train-step-hook-path`` first. Megatron's scheduler
+keeps its configured curve, so a checkpoint still loads under the startup
+flags. The bridge records each scenario's schedule progress in
+``reef_learning_rate_schedules.json`` beside the job marker, with each
+checkpoint. It refuses to start when that file records progress after the
+loaded checkpoint. It refuses a schedule when the run uses ``--decoupled-lr``.
+
 The distillation base
 ---------------------
 
@@ -163,7 +195,7 @@ and each such recipe's family is a thin subclass of it:
 - ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
   by the student's response ids verbatim, and ``sample_weight``, the factor
-  on that sample's mean divergence, 1 unless the recipe's processor sets
+  on that sample's mean divergence, 1 unless the recipe's stages set
   ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
   ``top-k-source``, ``top-k-distribution``, ``teacher-update-rate``,
@@ -192,7 +224,7 @@ and each such recipe's family is a thin subclass of it:
   parallel with ``reef/train/slime_backend/vocab_parallel.py`` and write the
   gradients out where autograd over one shard would drop the coupling
   through the global log-sum-exp;
-  ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
+  ``tests/slime_backend/test_distill_parity.py`` pins them to a pure-Python
   reference and to the dense gradients across four ranks.
 
 The base registers no family and imports nothing from ``reef_adapters``;
@@ -200,6 +232,45 @@ The base registers no family and imports nothing from ``reef_adapters``;
 operations over vocab shards (log-sum-exp, the log-probs at ids on any
 shard, the top-K ids) live in ``reef/train/slime_backend/vocab_parallel.py``,
 shared by the distillation base, score centering and OpenClaw-RL's teacher.
+
+Teacher engine
+--------------
+
+A Slime distillation family can score its ``separate`` teacher on a frozen
+SGLang engine instead of swapping a checkpoint into the actor, so the teacher
+may differ from the student in size and parallel layout as long as it uses the
+student's token ids. A deployment's ``teacher`` section declares it:
+``model-path`` names the HF weights, ``num-gpus`` reserves its own Ray GPUs and
+sets its tensor parallel size, ``port`` its internal endpoint, ``timeout`` the
+deadline of one scoring request, and ``options`` native SGLang options. The
+checkpoint teacher stays the default; the wire row, the loss and the report
+schema do not change.
+
+The bridge sends each sample's recorded teacher-prefix and response ids to the
+engine's ``/generate`` with ``max_new_tokens=0``, sixteen requests at a time, and the log-probs requested
+from the last prompt token, checks the returned ids and row counts against the
+recorded response, and fills ``distill_teacher_sampled_log_probs``,
+``distill_teacher_topk_ids`` and ``distill_teacher_topk_log_probs`` before the
+batch is partitioned and tensorized. Scoring completes before the training job
+is marked running, so a failure leaves no partially scored batch.
+``perf/distill_teacher_time`` is the scoring wall time in seconds, endpoint
+validation included.
+
+A managed deployment passes ``--<family>-teacher-url``,
+``--<family>-teacher-model-path`` and ``--<family>-teacher-timeout`` to the
+driver; an explicit process stack may set them itself. The endpoint must serve
+the model at ``teacher-model-path``, whose tokenizer is checked against the
+student's vocabulary and decoder at startup. Chat templates may differ because
+nothing is rendered or retokenized. Keep ``teacher=separate`` and drop
+``teacher-checkpoint``.
+
+The engine path supports the sampled reverse KL and the teacher-selected top-K
+forward, reverse and JSD objectives at rollout temperature 1, since SGLang's
+input log-probs are not tempered. The exact full-vocabulary and
+student-selected top-K representations stay on the checkpoint teacher, whose
+scoring runs on the actor. An unsupported combination fails validation. Engine
+log-probs come from the engine's bf16 kernels rather than the trainer's; for a
+frozen teacher that is a small constant bias.
 
 Score centering
 ---------------
@@ -351,8 +422,8 @@ The step reports aggregate metrics only, as sums of per-sample means:
 ``score_centering_sampler_head_mass``, ``score_centering_trainer_head_mass``,
 ``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
 fraction of positions where a tail fell below the floor); ``loss`` includes
-the term. ``tests/reef_service/test_score_centering_parity.py`` checks the
+the term. ``tests/slime_backend/test_score_centering_parity.py`` checks the
 term, added to each weight's loss and to SAO's own loss, against a
-full-vocabulary reference. ``tests/reef_service/test_distill_score_centering.py``
+full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
 checks the sampled OPD loss against that gradient, including skipped tokens,
 masked positions and sample weights.

@@ -8,11 +8,9 @@ Backend loss references stay lazy so service-side validation needs no GPU stack.
 from __future__ import annotations
 
 import importlib
-from typing import TypeVar
+from typing import overload
 
 from reef.train.algos.objective import TrainingObjective
-
-ObjectiveRegistration = TypeVar("ObjectiveRegistration", bound=TrainingObjective | type[TrainingObjective])
 
 
 class ObjectiveRegistry:
@@ -69,7 +67,17 @@ class ObjectiveRegistry:
 OBJECTIVES = ObjectiveRegistry()
 
 
-def register_objective(value: ObjectiveRegistration) -> ObjectiveRegistration:
+@overload
+def register_objective(value: type[TrainingObjective]) -> type[TrainingObjective]: ...
+
+
+@overload
+def register_objective(value: TrainingObjective) -> TrainingObjective: ...
+
+
+def register_objective(
+    value: TrainingObjective | type[TrainingObjective],
+) -> TrainingObjective | type[TrainingObjective]:
     """Register an instance, or decorate a zero-argument objective class."""
     if isinstance(value, type):
         if not issubclass(value, TrainingObjective):

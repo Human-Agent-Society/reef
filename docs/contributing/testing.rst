@@ -4,9 +4,19 @@ Testing
 Reef's tests are one repository suite. Most of it runs without a GPU; the parts
 that import the training runtime need the supported container.
 
+Find and place tests by the responsibility they cover. The
+`test directory map <https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`_
+defines the component, recipe, service, and smoke suites. Read it before adding
+or moving a test. Check placement with::
+
+    python .github/scripts/check_test_layout.py
+
+Pytest uses importlib mode. Import shared helpers through ``tests.support`` or
+another scoped ``tests.<owner>`` module, so test packages do not shadow libraries.
+
 PostgreSQL record tests require ``uv pip install -e '.[postgres]'`` and a dedicated
 test database. Set ``REEF_TEST_POSTGRES_URL`` to its PostgreSQL URL, then run
-``pytest tests/reef_service/test_record_store_contract.py tests/reef_service/test_postgres_records.py``.
+``pytest tests/storage/test_record_store_contract.py tests/storage/test_postgres_records.py``.
 Each test creates and drops a randomly named ``reef_test_*`` schema, so the test
 role needs schema-creation permission. Without the variable these integration
 cases skip; with it configured, connection or driver errors fail the tests.
@@ -19,9 +29,9 @@ Managed deployment recovery also has opt-in CPU tests using real Ray processes:
 
 .. code:: bash
 
-   REEF_TEST_RAY=1 PYTHONPATH="$PWD:$PWD/tests" NO_PROXY='*' \
-     .venv/bin/python -m pytest tests/reef_service/test_training_restart.py \
-       tests/reef_service/test_model_supervision_ray.py -q
+   REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
+     .venv/bin/python -m pytest tests/runtime/test_training_restart.py \
+       tests/runtime/test_model_supervision_ray.py -q
 
 Install the Python dependencies from ``.[slime]`` first. These tests use private
 local Ray clusters and fake CPU weights. They inject process death and check
@@ -51,7 +61,7 @@ require a supported GPU run.
 
 Run it in the supported container environment. Many torch-dependent tests use
 ``pytest.importorskip`` and skip when torch is unavailable. Others, including
-``tests/reef_service/test_slime_bridge.py``, import Slime and torch during
+``tests/slime_backend/test_slime_bridge.py``, import Slime and torch during
 collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
@@ -101,6 +111,19 @@ The ``test (3.12)`` check gates completion of both matrices. A failed,
 cancelled, or skipped matrix cannot pass it. The same gate combines and
 validates coverage.
 
+Installed-wheel selection
+------------------------
+
+``tests/packaging/wheel-tests.txt`` lists the contract modules that also run
+against installed packages. Selection is independent of their owner directory.
+Update the list when moving a listed module or adding a wheel-compatible
+contract. The layout check rejects missing and duplicate entries.
+
+Run these tests outside the checkout, with Reef and its dependencies installed
+from wheels. Expose only the checkout's ``tests/`` and ``recipes/`` directories
+there, as the CI job does. Do not add the checkout root to ``PYTHONPATH``: its
+``reef/`` directory would hide the installed package being tested.
+
 Run one area
 ------------
 
@@ -120,11 +143,13 @@ only a synthetic prompt and an episode token enter the sandbox. Default CI skips
 these paid tests; ``test_e2b_executor.py`` and ``test_e2b_tunnel.py`` cover the
 contracts and failure paths without provider access.
 
-Most tests under ``tests/reef_service`` need no GPU:
+Choose a component suite or one test module. For example, artifact contracts
+need no GPU:
 
 .. code:: bash
 
-   pytest tests/reef_service/test_reef_artifacts.py -q
+   pytest tests/artifact/ -q
+   pytest tests/artifact/test_reef_artifacts.py -q
 
 Markers
 -------

@@ -1,9 +1,8 @@
 # Colocated Qwen3-8B LoRA stack (tttd recipe) for summary-only Guidance-TTT.
 # The cardinalities and sequence limits below are deployment inputs, not
-# algorithm constants; harness/harbor_agent.py holds the same values so a
+# algorithm constants; harness/config.py reads the same values so a
 # qualification and a full run cannot silently disagree.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -26,9 +25,14 @@ inference:
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
   config:
-    groups-per-step: 2
-    rollouts-per-group: 4
     checkpoint-every-n-versions: 1
+# TTTD's stages. The record stage owns the step grid; the later stages read it from there.
+# harness/config.py reads this grid, so the harness and the stack cannot disagree about the step.
+pipeline:
+  record2record:
+    config:
+      groups_per_step: 2
+      rollouts_per_group: 4
 training:
   backend: slime
   colocate: true
@@ -38,8 +42,8 @@ training:
   timeout-s: 7200
   config:
     num_gpus: 2
-    # The grid and model limits. harness/harbor_agent.py reads these same keys,
-    # so the harness and the stack cannot disagree about the step it is running.
+    # The step count and model limits. harness/config.py reads these same keys,
+    # so the harness and the stack cannot disagree about the run.
     steps: 1
     max_tokens: 8192
     seq_length: 12288
@@ -56,8 +60,8 @@ training:
     save-interval: "${recipe.config.checkpoint-every-n-versions}"
     megatron-to-hf-mode: "bridge"
     num-rollout: "${training.config.steps}"
-    rollout-batch-size: "${recipe.config.groups-per-step}"
-    n-samples-per-prompt: "${recipe.config.rollouts-per-group}"
+    rollout-batch-size: "${pipeline.record2record.config.groups_per_step}"
+    n-samples-per-prompt: "${pipeline.record2record.config.rollouts_per_group}"
     global-batch-size: "8"
     disable-rollout-global-dataset: true
     actor-num-nodes: "1"

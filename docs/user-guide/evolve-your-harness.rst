@@ -226,24 +226,37 @@ Trigger of step
 ``auto`` mode
 ^^^^^^^^^^^^^
 
-In ``auto`` mode, two settings determine when Reef should start a step:
+In ``auto`` mode, the deployment's top-level ``pipeline`` section decides
+when Reef starts a step:
 
-- ``data.batch_size``: when this number of units is collected, trigger a step.
-- ``data.batch_policy``: decides what counts as one unit toward ``batch_size``.
+- ``pipeline.task2batch.config.batch_size`` (default 1): when this number of
+  units is collected, Reef starts a step.
+- The ``pipeline.record2record`` and ``pipeline.record2task`` stages decide
+  what counts as one unit toward ``batch_size``.
 
-``data.batch_policy`` supports two settings:
+The recipe's default stages count reports. Every valid scored report with
+at least one unique inference reference counts as one unit, including
+successful outcomes. A report over one receipt batches as that exchange. A
+report over several receipts batches as one trajectory sample that carries
+every referenced exchange in order. ``reef-pi report`` sends this kind of
+report for a whole run (``--per-receipt`` fans the score across the receipts
+as separate reports instead). Reports that reference inferences trained in
+earlier batches are dropped.
 
-- ``reports`` (default): every valid scored report with at least one unique
-  inference reference counts as one unit, including successful outcomes.  This
-  can be either a report over one receipt batches as that exchange, or a
-  report over several batches as one trajectory sample carrying every
-  referenced exchange in order, which is what ``reef-pi report`` sends for a
-  whole run (``--per-receipt`` fans the score across the receipts as
-  separate reports instead). Reports referencing inferences trained in
-  earlier batches are dropped.
-- ``records``: every inference counts as one unit. The report requirement is
-  dropped entirely: recorded traffic alone batches, unscored, for methods
-  that judge for themselves.
+To count recorded inference traffic instead, name the inference stages.
+Every inference then counts as one unit. No report is necessary: recorded
+traffic alone batches, unscored, for methods that judge for themselves.
+
+.. code-block:: yaml
+
+   pipeline:
+     record2record:
+       module: reef.record2record:InferenceRecord2Record
+     record2task:
+       module: reef.train.cordis_backend.processor:InferenceTasks
+     task2batch:
+       config:
+         batch_size: 4
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -257,25 +270,23 @@ queued request first, one per step. See `manual training API
 e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
-``data.batch_size`` and ``data.batch_policy`` trigger no evolution in this
-mode, but units are still collected while training requests run. However,
-these units are never used in evolution until ``data.training_mode`` is
-switched to ``auto`` or ``hybrid``. The held reports are capped at four
-times ``data.batch_size``, and the oldest are released once the batch
-passes that.
+The ``pipeline`` stages trigger no evolution in this mode, but units are
+still collected while training requests run. However, these units are never
+used in evolution until ``data.training_mode`` is switched to ``auto`` or
+``hybrid``. The held reports are capped at four times ``batch_size``, and
+the oldest are released once the batch passes that.
 
 ``hybrid`` mode
 ^^^^^^^^^^^^^^^
 
-In ``hybrid`` mode, either condition starts a step: enough units collected
-under ``data.batch_size`` and ``data.batch_policy``, or a training request
-received.
+In ``hybrid`` mode, either condition starts a step: ``batch_size`` units
+collected by the ``pipeline`` stages, or a training request received.
 
 When both conditions are met, the training request takes precedence for the
 next step. Reef builds one step that uses both, whether or not
-``data.batch_size`` is met. The proposer then
+``batch_size`` is met. The proposer then
 receives the training request and the units that an automatic batch would
-take next. It gets up to ``data.batch_size`` units, or none, and uses both
+take next. It gets up to ``batch_size`` units, or none, and uses both
 to make a mutation.
 
 Propose: mutation to the harness tree

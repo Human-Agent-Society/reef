@@ -17,7 +17,7 @@ import sys
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, NoReturn, Union, get_args, get_origin, get_type_hints
+from typing import Any, NoReturn, Self, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -280,6 +280,35 @@ def parse_config_values(
         for argument in arguments
         if include_defaults or argument.name in supplied
     }
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Base of a settings dataclass: ``config_option`` fields that one config mapping parses into."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, setting: str, strict: bool = True) -> Self:
+        """Read one config into this settings dataclass, in the hyphen or the field spelling.
+
+        ``setting`` names the config in errors, for example
+        ``pipeline.record2record.config``. With ``strict`` an unknown field is
+        refused; without it, fields that the dataclass does not declare are
+        ignored, for a config that several stages share in a test or a recipe.
+        """
+        if not isinstance(config, Mapping):
+            raise ValueError(f"{setting} must be an object")
+        folded = {str(key).replace("-", "_"): value for key, value in config.items()}
+        if len(folded) != len(config):
+            raise ValueError(f"{setting} names a field twice, in both spellings")
+        arguments = config_arguments(cls, prefix=tuple(setting.split(".")))
+        if not strict:
+            known = {argument.name for argument in arguments}
+            folded = {key: value for key, value in folded.items() if key in known}
+        try:
+            values = parse_config_values(arguments, folded)
+        except ValueError as exc:
+            raise ValueError(f"{setting}: {exc}") from exc
+        return cls(**values)
 
 
 def config_value(

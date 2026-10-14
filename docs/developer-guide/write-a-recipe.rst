@@ -73,10 +73,10 @@ A weight recipe is four pieces plus the class that binds them.
 
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(batch, state)`` to return advantages, metrics, and proposed state in a ``StepSignal``. No torch, Ray, or Slime import.
    step schedule | a ``StepScheduling`` the recipe binds beside its objective: rollout unit, optimizer step size, epochs, shuffle, and remainder handling. The objective declares only whether its loss tolerates more than one pass.
-   processor | assembles valid reports and referenced records into samples and typed batches
+   pipeline stages | the record stage, the record-to-task stage, and the task-to-batch stage that turn valid reports and referenced records into samples and typed batches; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
-   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the objective (by registered name or dotted class/instance path), and the step schedule
+   recipe class | a frozen dataclass whose ``pipeline_spec()`` names the stage classes and whose ``training_spec()`` names the objective (by registered name or dotted class/instance path) and the step schedule; ``training_method_selector()`` optionally picks another objective or a learning-rate schedule for each job
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
@@ -98,11 +98,12 @@ Copy a weight-training config as described in `Evolve your model
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: "my_pkg.my_method:MyMethodRecipe"
-     config:
-       batch-size: 4
+   pipeline:
+     task2batch:
+       config:
+         batch_size: 4
 
 This fragment shows only the new keys; keep the inference, storage and training
 settings from the config you copied. Reef assembles the driver and HTTP process. Set
@@ -144,6 +145,50 @@ resolves those fields before connecting the runtime and passes them to
 ``from_resolved_config``. ``from_environment`` uses that same resolution path
 for standalone recipe construction. Custom construction hooks should consume
 the resolved values; ``_recipe_kwargs`` continues to own non-field sections.
+
+Switch methods within a run
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default every job trains ``training_spec().objective`` at the backend's
+configured learning rate. To train several phases in one run, override
+``training_method_selector``. Reef calls the selector's
+``select(batch, algorithm_state)`` once for each job and trains the job with the
+``TrainingMethod`` that it returns:
+
+.. code:: python
+
+   from reef.recipe import WeightTrainingRecipe
+   from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
+   from reef.train.runtime_backend import TrainingMethodSelector
+
+   POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
+
+
+   class SupervisedThenPolicy(TrainingMethodSelector):
+       def select(self, batch, algorithm_state):
+           if algorithm_state.get("steps", 0) < 200:
+               return TrainingMethod("my_pkg.objectives:SupervisedObjective")
+           return TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
+
+
+   class MyMethodRecipe(WeightTrainingRecipe):
+       def training_method_selector(self):
+           return SupervisedThenPolicy()
+
+- ``select`` must depend only on its arguments. A retry calls it again, and
+  the method is part of the job's identity.
+- The backend resolves the objective in its own process. Use a dotted
+  reference for an objective from another package.
+- The backend refuses a method that it cannot train before the job starts.
+  `Per-job families <loss-families.rst#per-job-families>`__ and `Train with
+  Tinker <../user-guide/tinker.rst>`__ list what each backend supports.
+
+A ``LearningRateSchedule`` counts optimizer steps. A job that selects the
+active schedule continues it, also on a retry or after a restart. A job that
+selects another schedule starts that schedule at step 0. A job that selects no
+schedule keeps the active one. Starting a schedule does not reset the optimizer
+state. Job metrics include ``training_method``. While a schedule is active,
+they also include ``learning_rate`` and ``learning_rate_schedule``.
 
 Gate a candidate
 ~~~~~~~~~~~~~~~~
@@ -206,7 +251,7 @@ none.
 External method services
 ------------------------
 
-Version 2 configuration describes components and their parameters. It does not
+A configuration file describes components and their parameters. It does not
 accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
 in ``reef``. Reef assembles its HTTP process and supported inference/training
 backends. Additional method services run independently of Reef's orchestrator.

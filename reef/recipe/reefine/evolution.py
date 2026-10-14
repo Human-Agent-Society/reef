@@ -23,8 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
+from reef.evaluation.harness import EpisodeScorer, verifier_reward
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -34,9 +36,9 @@ from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
-from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
+from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer, verifier_reward
+from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectoryItem
 
 Proposal = tuple[str, str, dict[str, Any]]
@@ -222,6 +224,9 @@ REQUEST_PROMPT = (
     "Then one object per entry, each of the form:\n"
     '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
+    "When the request asks to stop a behavior an entry carries, retire that entry instead of writing a rule "
+    "against it: its id and kind, no config, and remove set to true "
+    '- {{"id": "<entry id>", "name": "<kind>", "remove": true}}. '
     "The id of a named kind must equal its config name. Give every entry you write an id of its own, "
     "a lowercase name, a rules entry too.\n"
     "When the change needs something only the user can provide or set up on their machine, end the array "
@@ -758,10 +763,12 @@ def _answer_once(
         if design is not None and adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None:
             return declined_answer(models, request, design, own, adapter)
         return _nothing_to_apply(reply, "the reply holds no usable entry")
-    mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
+    mutations, refused_entries = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
         return UnusableAnswer(
-            "every entry in the reply was dropped: a reserved id, or an id another kind holds", design
+            "every entry in the reply was dropped: a reserved id, or an id another kind holds",
+            design,
+            dropped=tuple(refused_entries),
         )
     written = entries_in_short(mutations)
     if entries:
@@ -782,8 +789,9 @@ def _answer_once(
     if design is not None:
         notes["design"] = kept_design(design)
     misnamed = misnamed_entries(reply, kinds)
-    if misnamed:
-        notes["dropped"] = misnamed
+    dropped = [*misnamed, *refused_entries]
+    if dropped:
+        notes["dropped"] = dropped
     # The review reads the whole design; the step records it cut to the record's size.
     review, review_failure = _review(
         models, str(request.get("text", "")), design, mutations, [*own, *added], adapter=adapter
@@ -833,7 +841,7 @@ def entries_in_short(mutations: Sequence[Mutation]) -> str:
         return value
 
     return "\n".join(
-        f"- {json.dumps(shortened({'id': mutation.id, **(mutation.options or {})}), ensure_ascii=False)}"
+        f"- {json.dumps(shortened({'op': mutation.op, 'id': mutation.id, **(mutation.options or {})}), ensure_ascii=False)}"
         for mutation in mutations
     )
 
@@ -1021,13 +1029,24 @@ def _request_prompt(
 
 def _request_mutations(
     proposals: Sequence[Proposal], nodes: Sequence[tuple[str, Any]], entries: Sequence[Mapping[str, Any]]
-) -> list[Mutation]:
-    """The proposals as mutations against the tree: an id the tree holds under the same kind is an update and a
-    new id a create; an id another kind holds would be refused at admission, so a rules entry takes one from
-    its text instead and a named kind is dropped."""
+) -> tuple[list[Mutation], list[str]]:
+    """The proposals as mutations against the tree, with one refusal line per proposal dropped: an id the tree
+    holds under the same kind is an update and a new id a create; a proposal with ``remove`` retires an entry the
+    tree holds and is refused otherwise, so a request that stops a behavior takes the old rule out instead of
+    piling a contradicting one beside it. An id another kind holds would be refused at admission, so a rules
+    entry takes one from its text instead and a named kind is dropped."""
     held, taken = _tree_ids(nodes, entries)
-    mutations = []
+    mutations: list[Mutation] = []
+    refused: list[str] = []
     for entry_id, kind, config in proposals:
+        if config.get("remove") is True:
+            if (kind, entry_id) not in held:
+                line = f"{kind} {entry_id!r} was dropped: the tree holds no such entry to remove"
+                logging.getLogger(__name__).warning("propose: %s", line)
+                refused.append(line)
+                continue
+            mutations.append(Mutation("remove", entry_id))
+            continue
         op = "update" if (kind, entry_id) in held else "create"
         if op == "create" and entry_id in taken:
             if "name" in REQUEST_KINDS[kind]:
@@ -1039,7 +1058,7 @@ def _request_mutations(
             entry_id = _rules_id(text) if kind == "rules" else _rules_id(text).replace("rules-", "config-")
             op = "update" if (kind, entry_id) in held else "create"
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
-    return mutations
+    return mutations, refused
 
 
 def _tree_ids(
@@ -1538,7 +1557,8 @@ def parse_config_entry(entry_id: Any, config: dict[str, Any], config_keys: Seque
 
 
 def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = ()) -> Proposal | None:
-    """One proposal object as (entry id, kind, config), or ``None`` when its shape is not one of ``kinds``."""
+    """One proposal object as (entry id, kind, config), or ``None`` when its shape is not one of ``kinds``; a
+    retire (``remove`` true and no config) parses as (entry id, kind, ``{"remove": True}``) instead."""
     if not isinstance(item, dict):
         return None
     # The prompt calls the field "name" and the value a kind, so a model writes either key; with both
@@ -1547,6 +1567,11 @@ def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = (
     kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
     if kind not in kinds or kind not in REQUEST_KINDS:
         return None
+    if item.get("remove") is True:
+        # A retire: the entry's id and kind, no config; `_request_mutations` refuses one the tree does not hold.
+        if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id):
+            return None
+        return entry_id, kind, {"remove": True}
     fields = REQUEST_KINDS[kind]
     if config is None:
         # A model also writes the config fields beside the id instead of under "config".
@@ -1596,6 +1621,8 @@ def dropped_entry_reasons(reply: str, kinds: Sequence[str], config_keys: Sequenc
             and config.get("name") not in (None, item.get("id"))
         ):
             lines.append(f"{label} was dropped: its id must equal its config name {config.get('name')!r}")
+        elif item.get("remove") is True:
+            lines.append(f"{label} was dropped: a remove names a held entry, by a lowercase id, with no config")
         else:
             lines.append(f"{label} was dropped: its body is empty or its id is not a lowercase entry name")
     return lines
