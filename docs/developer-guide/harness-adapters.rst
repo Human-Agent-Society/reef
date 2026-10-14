@@ -104,7 +104,7 @@ Node checks
 ^^^^^^^^^^^
 
 A descriptor's ``checks`` state what the nodes of a tree must keep or must
-not set. Each check has a ``key``, a ``match`` expression that every value at
+not set during evolution. Each check has a ``key``, a ``match`` expression that every value at
 the key must match, and an optional ``reason`` that a refusal gives.
 
 ``config`` is the node kind that takes checks. Its nodes are fragments: each
@@ -721,9 +721,9 @@ Hermes Agent
 ~~~~~~~~~~~~
 
 The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
-``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``, which
-the render writes as YAML. The descriptor's checks keep these defaults so an
-episode stays self-contained and makes one request:
+``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``; the
+quirks write the merged configuration as YAML. They enforce these defaults
+so an episode stays self-contained and makes one request:
 
 - ``security.tirith_enabled`` disables the terminal scanner download. The
   scanner would also block a command it cannot resolve, such as
@@ -808,10 +808,11 @@ Codex CLI
 
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
-``config.toml``, which the render writes as TOML. The descriptor's checks
-keep these defaults so an episode stays self-contained: the update check,
-analytics, feedback, and telemetry are off, and the ``workspace-write``
-sandbox has no network. Rendering rejects a tree that changes them.
+``config.toml``; the quirks write the merged configuration as TOML. They
+enforce these defaults so an episode stays self-contained: the update
+check, analytics, feedback, and telemetry are off, and the
+``workspace-write`` sandbox has no network. Rendering rejects a tree that
+changes them.
 
 Node paths and transformations are:
 
@@ -1359,8 +1360,8 @@ Descriptor fields
   ``install`` commands, which would otherwise install the latest release
   over the person's own ``claude``). The ``claude`` episode ``env`` sets both
   too. A variable the shell sets wins. Claude Code applies the ``env`` block
-  of ``settings.json`` over the environment, so the ``claude`` descriptor's
-  checks reject a tree that sets either one there.
+  of ``settings.json`` over the environment, so the ``claude`` quirks reject
+  a tree that sets either one there.
 - ``client_args`` lists arguments the wrapper puts ahead of the person's own,
   for a setting the rendered tree must not undo. ``claude`` passes
   ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
