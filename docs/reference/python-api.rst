@@ -1066,8 +1066,9 @@ publish or revert.
 
 .. code:: python
 
-   from reef.train.cordis_backend import EpisodeScorer, Proposer
-   from reef.train.evaluation import SelectionPlugin
+   from reef.evaluation import SelectionPlugin
+   from reef.evaluation.harness import EpisodeScorer
+   from reef.train.cordis_backend import Proposer
 
    class MyProposer(Proposer):
        def propose(self, nodes, samples, models, *, manifest=None, rejected=(), sources=(),
@@ -1187,11 +1188,12 @@ when it loads the configuration and calls ``from_config`` for each scenario.
 Reef rejects functions, abstract classes and objects that only expose
 matching methods.
 
-Harness recipes instead name a ``reef.train.evaluation.SelectionPlugin``
+Harness recipes instead name a ``reef.evaluation.SelectionPlugin``
 class in ``evolution.selection``. Its ``from_config(config, *,
 candidate_backend)`` binds the plugin to the scenario's candidate backend.
-``BackendAlwaysSelectPlugin``, ``ScoreComparisonPlugin`` and ``FloorPlugin``
-are the built-in policies ``always``, ``score_comparison`` and ``floor``.
+``BackendAlwaysSelectPlugin`` and ``reef.evaluation.harness``'s
+``ScoreComparisonPlugin`` and ``FloorPlugin`` are the built-in policies
+``always``, ``score_comparison`` and ``floor``.
 
 Surface
 -------

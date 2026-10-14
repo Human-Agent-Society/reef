@@ -94,7 +94,7 @@ The paper reports 91.89 for Polyomino, 0.1739 ms⁻¹ for Lasso,
 From the repository root:
 
 ```bash
-python -m pytest tests/test_guidance_ttt.py tests/test_guidance_ttt_tasks.py -q -o addopts=
+python -m pytest tests/recipes/tttd/test_guidance_ttt.py tests/recipes/tttd/test_guidance_ttt_tasks.py -q -o addopts=
 cd docs/site
 npm ci
 npm run check:docs

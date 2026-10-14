@@ -1,6 +1,5 @@
 # Installed-wheel smoke config: Reef proxies to a deliberately unreachable
 # provider, but startup and /healthz need only the core distribution.
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 18900

@@ -43,7 +43,8 @@ class Mutation:
             raise MutationError("remove mutation takes no options")
 
 
-def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
+def nodes_from_entries(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
+    """The enabled entries as (kind, config) pairs in tree order, the form ``render_composition`` takes."""
     return tuple((str(options["name"]), options.get("config")) for options in entries if not options.get("disabled"))
 
 
@@ -165,7 +166,7 @@ def admit_mutations(
             if error is not None:
                 raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
         admitted = _loader_entries(loader)
-        render_composition(_nodes_from(admitted), descriptor)
+        render_composition(nodes_from_entries(admitted), descriptor)
         refusal = _native_refusal(admitted, descriptor)
         if refusal is not None:
             raise MutationError(refusal)

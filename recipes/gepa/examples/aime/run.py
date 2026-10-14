@@ -47,18 +47,18 @@ from recipes.gepa.recipe import scenario_archive_path
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import evaluation_selection
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
-from reef.recipe.config import recipe_config_from_mapping
+from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.registry import build_recipe
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.cordis_backend.execution import evaluation_selection
 
 HERE = Path(__file__).resolve().parent
 # run.sh exports these; the defaults repeat here so the module imports (and
@@ -97,7 +97,7 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     deployment. The method never sees the endpoint or the key.
     """
     config = load_config(HERE / "gepa.yaml")
-    sections = recipe_config_from_mapping(config)
+    sections = recipe_config_from_file_layout(config)
     evolution = dict(sections["evolution"])
     evolution["tasks"] = tasks
     # Importable functions alone do not carry the driver's populated globals

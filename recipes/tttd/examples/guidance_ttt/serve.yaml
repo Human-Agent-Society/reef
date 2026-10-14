@@ -3,7 +3,6 @@
 # algorithm constants; harness/config.py reads the same values so a
 # qualification and a full run cannot silently disagree.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

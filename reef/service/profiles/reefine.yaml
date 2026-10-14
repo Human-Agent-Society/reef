@@ -1,5 +1,4 @@
 # Built-in Reefine: reef serve --recipe reefine --model ollama/gemma4:26b
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901

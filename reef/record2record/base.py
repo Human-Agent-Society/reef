@@ -7,12 +7,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping, Sequence
+from dataclasses import replace
 from enum import Enum
 from typing import Any, Self
 
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.reports import ReportBase
 from reef.pipeline_context import PipelineContext
 from reef.record2record.eligibility import EligibilityCheck
 from reef.record2record.pool import RecordSetPool
@@ -38,12 +38,16 @@ class Record2Record(ABC, Plugin):
     instructions, in append order. The stage forms record sets
     (``take_formed``). The pipeline makes tasks from each formed set and gives
     the result back (``settle``). The stage holds each set that has tasks in
-    its pool until the pipeline reserves it for a batch. The pool applies the
-    stage's selection policy and eligibility checks. The stage never calls the pipeline.
+    its ``pool`` until the pipeline reserves it for a batch; the pipeline
+    reserves and consumes through the pool, and the stage ends the consumed
+    sets (``consume``). The pool applies the stage's selection policy and
+    eligibility checks. The stage never calls the pipeline.
 
     A record that the stage ends, for example a record that can no longer
     train, appears in ``releasable_record_ids``. The trainer adds those IDs to
-    the next commit, so the record never trains after a restart.
+    the next commit, so the record never trains after a restart. The default
+    bookkeeping keeps the ended records in ``terminal`` until their release; a
+    stage with its own record lifecycle overrides the lifecycle methods.
 
     The stage keeps only memory that a replay of the retained records
     rebuilds, as pipeline memory does.
@@ -62,11 +66,12 @@ class Record2Record(ABC, Plugin):
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
     def __init__(self, selection: SelectionPolicy | None = None, checks: Sequence[EligibilityCheck] = ()) -> None:
+        #: The held sets. The pipeline reserves a batch from it and consumes the reservation.
         self.pool = RecordSetPool(selection, checks)
         #: Formed sets that ended after the task stage saw them. The pipeline forgets their tasks.
         self.ended_set_ids: set[Hashable] = set()
-        #: Whether the pipeline handed out a batch that the trainer has not acknowledged or released yet.
-        self.batch_out = False
+        #: Records that ended and that no live set references, until their release.
+        self.terminal: set[str] = set()
 
     @abstractmethod
     def ingest(self, record: AgentRecord) -> None:
@@ -78,6 +83,10 @@ class Record2Record(ABC, Plugin):
 
     def poll(self, now: float) -> None:
         """Absorb background work, such as finished judgments. ``now`` is a monotonic time."""
+        return
+
+    def context_changed(self, context: PipelineContext) -> None:
+        """The pipeline's context changed: its training mode, held-set limit, or admitted report type."""
         return
 
     def settle(self, record_set: RecordSet, status: TaskStatus, runtime_load_id: str | None = None) -> None:
@@ -93,71 +102,43 @@ class Record2Record(ABC, Plugin):
         elif status is not TaskStatus.INGESTED:
             raise TypeError("a task result must have a TaskStatus")
 
-    @abstractmethod
     def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
         """Hold a set that has tasks in the pool."""
+        self.pool.put(replace(record_set, runtime_load_id=runtime_load_id))
 
-    @abstractmethod
     def reject(self, record_set: RecordSet) -> None:
         """End a set that cannot train."""
+        self.terminal.update(record_set.record_ids())
+        self.ended_set_ids.add(record_set.set_id)
 
     def take_ended(self) -> frozenset[Hashable]:
         """Return the IDs of the formed sets that ended since the last call. The pipeline forgets their tasks."""
         ended, self.ended_set_ids = frozenset(self.ended_set_ids), set()
         return ended
 
-    # ---------------------------------------------------------- reservation
+    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
+        """End the sets that an acknowledged batch consumed, and return the IDs of their consumed records.
 
-    def available_count(self) -> int:
-        """Return the number of sets that a batch can use."""
-        return len(self.pool)
-
-    def mark_batch_out(self, batch_out: bool) -> None:
-        """Record whether a batch is out. A stage does not drop held sets under a batch that is out."""
-        self.batch_out = batch_out
-
-    def reserve(self, max_set_count: int) -> tuple[RecordSet, ...]:
-        """Select at most ``max_set_count`` sets as the next batch, in batch order, and keep them reserved."""
-        return self.pool.reserve(max_set_count)
-
-    def reserved_sets(self) -> tuple[RecordSet, ...]:
-        """Return the reserved sets. Return an empty tuple if no batch is reserved."""
-        return self.pool.reserved_sets()
-
-    def consume_reservation(self) -> frozenset[str]:
-        """End the reserved sets as trained, and return the IDs of the records that they consumed."""
-        if self.pool.reserved is None:
-            raise RuntimeError("cannot consume a batch before sets are reserved")
-        return self.mark_trained(self.pool.consume_reserved())
-
-    @abstractmethod
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
-        """End sets that a committed batch trained on, and return the IDs of their consumed records."""
-
-    def mark_batch_dropped(self) -> None:
-        """The backend dropped the batch that is out as stale. Its acknowledgement follows."""
-        return
-
-    def limit_available(self, max_set_count: int | None) -> None:
-        """Hold at most ``max_set_count`` unreserved sets. ``None`` removes the limit."""
-        return
+        ``trained`` is False when the backend dropped the batch as stale: its
+        sets are consumed all the same, but nothing trained on them.
+        """
+        consumed = frozenset(record_id for record_set in record_sets for record_id in record_set.record_ids())
+        self.terminal |= consumed
+        self.ended_set_ids.update(record_set.set_id for record_set in record_sets)
+        return consumed
 
     # ------------------------------------------------------------- lifecycle
 
-    def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
-        """Name the report contract that the scenario admits when it is wider than the pipeline's own."""
-        return
-
     def releasable_record_ids(self) -> frozenset[str]:
         """Return the IDs of records that the stage ended and that no live set references."""
-        return frozenset()
+        return frozenset(self.terminal)
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         """Forget released records. Stored records do not change."""
-        return
+        self.terminal -= agent_record_ids
 
-    def derivation_pending(self) -> bool:
-        """Return True while background work can form sets without a new record."""
+    def background_jobs_running(self) -> bool:
+        """Return True while background jobs run. A finished job can form sets without a new record."""
         return False
 
     def status(self) -> Mapping[str, Any]:
@@ -206,8 +187,8 @@ class PassThroughRecord2Record(Record2Record):
     def reject(self, record_set: RecordSet) -> None:
         raise TypeError(f"{type(self).__name__} ends no set: pair it with NoTasks, or hold sets in another stage")
 
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
-        raise TypeError(f"{type(self).__name__} holds no set, so no batch can train on one")
+    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
+        raise TypeError(f"{type(self).__name__} holds no set, so no batch can consume one")
 
 
 class InferenceRecord2Record(Record2Record):
@@ -221,10 +202,9 @@ class InferenceRecord2Record(Record2Record):
     def __init__(self) -> None:
         super().__init__()
         self.formed: list[RecordSet] = []
-        #: Records that ended: records that are not inferences, and trained inferences.
-        self.terminal: set[str] = set()
 
     def ingest(self, record: AgentRecord) -> None:
+        # A record that is not an inference ends at once.
         if record.request_type is not RequestType.INFERENCE:
             self.terminal.add(record.agent_record_id)
             return
@@ -235,22 +215,3 @@ class InferenceRecord2Record(Record2Record):
     def take_formed(self) -> tuple[RecordSet, ...]:
         formed, self.formed = tuple(self.formed), []
         return formed
-
-    def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
-        self.pool.put(record_set)
-
-    def reject(self, record_set: RecordSet) -> None:
-        self.terminal.update(record_set.record_ids())
-        self.ended_set_ids.add(record_set.set_id)
-
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
-        consumed = frozenset(record_id for record_set in trained_sets for record_id in record_set.record_ids())
-        self.terminal |= consumed
-        self.ended_set_ids.update(record_set.set_id for record_set in trained_sets)
-        return consumed
-
-    def releasable_record_ids(self) -> frozenset[str]:
-        return frozenset(self.terminal)
-
-    def release_records(self, agent_record_ids: frozenset[str]) -> None:
-        self.terminal -= agent_record_ids

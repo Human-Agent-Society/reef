@@ -3,7 +3,6 @@
 # The built-in Reefine recipe with its state under tutorials/reefine/work/,
 # training_mode manual and the evaluation's selection set to floor. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901

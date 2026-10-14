@@ -1,0 +1,1 @@
+"""Recipes coral test suite."""

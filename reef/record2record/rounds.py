@@ -69,7 +69,6 @@ class RoundRecord2Record(ReportRecord2Record):
         self.rounds_stopped = False
         # Batches that trained since the last round started; the next round is due at batches_per_round.
         self.trained_batches = 0
-        self.batch_dropped = False
         self.waiting_sources: list[ReportContext] = []
         self.round_sources: tuple[ReportContext, ...] = ()
 
@@ -119,15 +118,10 @@ class RoundRecord2Record(ReportRecord2Record):
         self.round_sources = ()
         self.waiting_sources = []
 
-    def mark_batch_dropped(self) -> None:
-        self.batch_dropped = True
-
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
-        if self.batch_dropped:
-            self.batch_dropped = False
-        else:
+    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
+        if trained:
             self.trained_batches += 1
-        return super().mark_trained(trained_sets)
+        return super().consume(record_sets, trained=trained)
 
     def releasable_record_ids(self) -> frozenset[str]:
         held = {

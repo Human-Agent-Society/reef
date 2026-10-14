@@ -3,7 +3,6 @@
 # (the absolute root all durable state hangs off) and REEF_INFERENCE_HOST
 # (this machine's IP, which Slime binds the training engines' router to).
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

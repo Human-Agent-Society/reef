@@ -3,9 +3,9 @@
 Reef config nodes are JSON objects for every adapter, while Codex reads user
 configuration as TOML. ``process_config`` validates the benchmark invariants,
 and the render writes ``config.toml`` as TOML by its suffix. Codex skills require ``name`` and
-``description`` frontmatter, synthesized when an evolved skill omits it; an
-agent_command renders as a skill in the same root, so it gets the same
-frontmatter. ``web_search`` may take any value Codex reads, because the
+``description`` frontmatter. ``process_skill`` adds it when an evolved
+skill omits it. An agent_command renders as a skill in the same root,
+so it gets the same frontmatter. ``web_search`` may take any value Codex reads, because the
 episode argv pins it disabled and only a person's reef-codex session reads
 the tree's value. ``approval_policy`` is refused: the episode argv pins it
 never, and a reef-codex session keeps Codex's on-request default, so the
@@ -26,9 +26,9 @@ from pathlib import Path
 from typing import Any
 
 import tomli_w
-import yaml
 
 from reef.core.model_metadata import ModelMetadata
+from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
@@ -78,15 +78,6 @@ OTEL_DEFAULTS = {
     "metrics_exporter": "none",
     "trace_exporter": "none",
 }
-
-
-def with_frontmatter(path: str, text: str) -> str:
-    if text.startswith("---\n"):
-        return text
-    name = path.split("/")[-2]
-    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-    header: dict[str, Any] = {"name": name, "description": first[:200] or name}
-    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -221,7 +212,7 @@ class CodexAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_skill(path: str, text: str) -> str:
         # An agent_command renders to the same path template, so it is processed here too.
-        return with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def check_model_route(

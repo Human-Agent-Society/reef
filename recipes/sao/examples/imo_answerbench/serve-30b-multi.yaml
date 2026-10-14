@@ -6,7 +6,6 @@
 # fed by stream.py with SAO_IN_FLIGHT rollouts open. Weights reach the
 # engines by NCCL broadcast after every step. Generation window 24k.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

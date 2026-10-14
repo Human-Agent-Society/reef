@@ -98,7 +98,6 @@ Copy a weight-training config as described in `Evolve your model
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: "my_pkg.my_method:MyMethodRecipe"
    pipeline:
@@ -208,7 +207,7 @@ none.
 External method services
 ------------------------
 
-Version 2 configuration describes components and their parameters. It does not
+A configuration file describes components and their parameters. It does not
 accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
 in ``reef``. Reef assembles its HTTP process and supported inference/training
 backends. Additional method services run independently of Reef's orchestrator.

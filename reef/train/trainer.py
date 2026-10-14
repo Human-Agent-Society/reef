@@ -25,12 +25,12 @@ from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, U
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
+from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
-from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.pipeline import InstructionFailure, TrainingPipeline
 from reef.train.types import PreparedCommit, TrainingBatch, TrainStepResult
 
@@ -654,8 +654,7 @@ class Trainer:
             batch_id = self._pending.batch_id
             consumed = self._pending.consumed_ids
             if consumed is None:
-                self._pipeline.dropped(batch_id)
-                consumed = self._pipeline.acknowledge(batch_id)
+                consumed = self._pipeline.acknowledge(batch_id, trained=False)
             released = self._pipeline.releasable_record_ids()
             metadata: dict[str, Any] = {"outcome": "stale", "metrics": dict(metrics or {})}
             if component is not None:

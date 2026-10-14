@@ -220,17 +220,16 @@ class TrainingPipeline:
             raise NotImplementedError(
                 f"{type(self.task2batch).__name__} does not implement training_mode={training_mode!r}"
             )
-        self.context = replace(self.context, training_mode=training_mode)
         # Manual mode batches on instructions, not sets, so the held sets are bounded instead.
-        self.record2record.limit_available(
-            self.batch_size * MANUAL_HELD_BATCHES if training_mode == "manual" else None
-        )
+        held_set_limit = self.batch_size * MANUAL_HELD_BATCHES if training_mode == "manual" else None
+        self.context = replace(self.context, training_mode=training_mode, held_set_limit=held_set_limit)
+        self.record2record.context_changed(self.context)
         self.forget_sets(self.record2record.take_ended())
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits when it is wider than this recipe's own."""
         self.context = replace(self.context, admitted_report_type=report_type)
-        self.record2record.admit_reports_of(report_type)
+        self.record2record.context_changed(self.context)
 
     # ------------------------------------------------------------ instructions
 
@@ -316,7 +315,7 @@ class TrainingPipeline:
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
             return True
-        return self.record2record.available_count() >= self.batch_size
+        return len(self.record2record.pool) >= self.batch_size
 
     def build_batch(self) -> TrainingBatch:
         if self.pending is None:
@@ -330,7 +329,7 @@ class TrainingPipeline:
                 else None
             )
             # In manual mode an instruction runs alone; in hybrid it takes the sets that an automatic batch would.
-            selected = self.record2record.reserve(
+            selected = self.record2record.pool.reserve(
                 0 if request is not None and self.training_mode == "manual" else self.batch_size
             )
             tasks = tuple(
@@ -343,13 +342,18 @@ class TrainingPipeline:
             if request is not None:
                 batch = replace(batch, batch_id=f"{self.scenario}:instruction:{request.id}", request=request)
             self.pending = batch
-            self.record2record.mark_batch_out(True)
         return self.pending
 
-    def acknowledge(self, batch_id: str) -> frozenset[str]:
+    def acknowledge(self, batch_id: str, *, trained: bool = True) -> frozenset[str]:
+        """The training step consumed the batch: end its sets, and return the IDs of the records they consumed.
+
+        ``trained`` is False when the backend dropped the batch as stale, for
+        a record stage that paces work on what trained.
+        """
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed = self.record2record.consume_reservation()
+        consumed_sets = self.record2record.pool.consume_reserved()
+        consumed = self.record2record.consume(consumed_sets, trained=trained)
         self.forget_sets(self.record2record.take_ended())
         if self.pending.request is not None:
             request_id = self.pending.request.id
@@ -358,19 +362,14 @@ class TrainingPipeline:
             self.consumed_requests.add(request_id)
             consumed = consumed | {request_id}
         self.pending = None
-        self.record2record.mark_batch_out(False)
         return consumed
-
-    def dropped(self, batch_id: str) -> None:
-        """The trainer says the batch is acknowledged without training: the backend dropped it as stale."""
-        self.record2record.mark_batch_dropped()
 
     def release_batch(self, batch_id: str) -> None:
         """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         self.pending = None
-        self.record2record.mark_batch_out(False)
+        self.record2record.pool.release_reservation()
 
     # ------------------------------------------------------------- lifecycle
 
@@ -383,15 +382,15 @@ class TrainingPipeline:
         self.consumed_requests -= agent_record_ids
         self.record2record.release_records(agent_record_ids)
 
-    def derivation_pending(self) -> bool:
-        """Whether background work could make the pipeline ready without a new record.
+    def background_jobs_running(self) -> bool:
+        """Return True while a stage has background jobs that run, such as judgments or a round.
 
-        The training worker sleeps until the next accepted record; while a
-        stage has background work (judgments, a running round), it polls on a
-        bounded interval instead. Read on the training thread between drains;
-        it must not block.
+        A finished job can make the pipeline ready without a new record.
+        While this is True, the training thread polls at a fixed interval.
+        Otherwise it sleeps until the next accepted record. The training
+        thread reads this between drains. It must not block.
         """
-        return self.record2record.derivation_pending() or self.record2task.derivation_pending()
+        return self.record2record.background_jobs_running() or self.record2task.background_jobs_running()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
@@ -412,7 +411,7 @@ class TrainingPipeline:
         The stages add terminal outcomes that can never train, so a bounded
         external wait can fail explicitly.
         """
-        state: dict[str, Any] = {"ready_units": self.record2record.available_count(), "batch_size": self.batch_size}
+        state: dict[str, Any] = {"ready_units": len(self.record2record.pool), "batch_size": self.batch_size}
         if self.supported_training_modes & {"manual", "hybrid"}:
             state["buffered_requests"] = self.buffered_requests()
         return {**state, **self.record2record.status(), **self.record2task.status(), **self.task2batch.status()}

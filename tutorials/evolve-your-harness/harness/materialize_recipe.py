@@ -18,7 +18,7 @@ import yaml
 def materialize(serve: Path, work: Path) -> None:
     """Write ``work/recipes/harness_evolve.yaml`` and ``work/tasks.json`` from ``serve``."""
     config = yaml.safe_load(serve.read_text())
-    recipe = {key: config[key] for key in ("schema-version", "recipe")}
+    recipe = {"recipe": config["recipe"]}
     recipe.update({key: config[key] for key in ("pipeline", "inference", "execution", "executors") if key in config})
     (work / "recipes").mkdir(parents=True, exist_ok=True)
     (work / "recipes" / "harness_evolve.yaml").write_text(yaml.safe_dump(recipe, sort_keys=False))

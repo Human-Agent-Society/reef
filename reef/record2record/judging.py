@@ -147,8 +147,8 @@ class JudgingRecord2Record(Record2Record):
 
     def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
         self.pool.put(replace(record_set, runtime_load_id=runtime_load_id))
-        # The eligibility checks never run under a batch that is out: its samples reference held sets.
-        if not self.batch_out:
+        # The eligibility checks never run under a reserved batch: its samples reference held sets.
+        if self.pool.reserved is None:
             dropped_sets = judged_sets(tuple(dropped.record_set for dropped in self.pool.drop_ineligible()))
             for judged_set in dropped_sets:
                 self.retire(judged_set.receipt)
@@ -191,8 +191,8 @@ class JudgingRecord2Record(Record2Record):
 
     # ------------------------------------------------------------ consumption
 
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
-        consumed = frozenset(judged_set.receipt for judged_set in judged_sets(trained_sets))
+    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
+        consumed = frozenset(judged_set.receipt for judged_set in judged_sets(record_sets))
         for receipt in consumed:
             self.arrival_order.pop(receipt, None)
             self.terminal.add(receipt)
@@ -201,9 +201,9 @@ class JudgingRecord2Record(Record2Record):
 
     # --------------------------------------------------------- background work
 
-    def derivation_pending(self) -> bool:
-        """In-flight judgments resolve and tracked records expire without a new record; poll while either exists."""
-        return bool(self.in_flight or self.tracked)
+    def background_jobs_running(self) -> bool:
+        """Return True while judgments run. An expiry only retires records, so it waits for the next ``ready``."""
+        return bool(self.in_flight)
 
     def close(self) -> None:
         if self.worker is not None:

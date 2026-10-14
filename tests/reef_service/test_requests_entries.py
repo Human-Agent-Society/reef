@@ -14,7 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from reef_service.test_harness_recipe import MODEL, batch, make_binary, runtime
+from tests.reef_service.test_harness_recipe import MODEL, batch, make_binary, runtime
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 import reef.harness.episodes.requests as requests
 from reef.artifact import InMemoryRepositoryBackend
@@ -34,7 +35,6 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 EXTENSION = "export default function (pi) {\n  if (process.env.PI_OFFLINE) return;\n}\n"
 SKILL = "---\nname: reef-pi-extension-api\ndescription: placeholder\n---\n# pi extension API\n"
@@ -101,7 +101,7 @@ def test_request_entries_pass_the_backends_seed_validation_and_a_recovered_state
         binary=str(make_binary(tmp_path)),
     )
     entries = [dict(entry) for entry in seed]
-    rendered = backend._render_for_episode(entries)
+    rendered = backend._episode_evaluator.render(entries)
     assert "pi-agent/tree.json" not in rendered and rendered["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     # A recovered state carrying reef's own entries meets the admission gate and steps on.
     result = backend.prepare_step(batch(), {"steps": 1, "entries": entries}, 0)

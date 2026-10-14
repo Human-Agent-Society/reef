@@ -33,7 +33,7 @@ composition and use paths; they are not an exhaustive Python import graph:
        subgraph Domains["Capability domains"]
            direction LR
            Serving("<b>Serving</b><br/><code>runtime</code> · <code>surface</code>")
-           Evolution("<b>Evolution</b><br/><code>train</code> · <code>harness</code>")
+           Evolution("<b>Evolution</b><br/><code>train</code> · <code>evaluation</code> · <code>harness</code>")
            State("<b>State</b><br/><code>artifact</code> · <code>records</code>")
        end
 
@@ -91,6 +91,10 @@ import a concrete integration.
 |                         | ``ReportTasks``, ``JudgedTasks``), and the generator     | training loops                             |
 |                         | service that writes, checks, and plays Harbor tasks      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
+| ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | proposing candidates, training loops,      |
+|                         | episodes, built-in selection policies, and the           | artifact publication                       |
+|                         | ``evaluation`` plugin configuration                      |                                            |
++-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/task2batch/``    | shaping the tasks of the selected record sets into one   | which records train, the training loop,    |
 |                         | batch (``Task2Batch``)                                   | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -122,7 +126,7 @@ Package import direction
 ------------------------
 
 Imports between the top-level Reef packages form a directed acyclic graph.
-``tests/reef_service/test_dependency_boundaries.py`` scans every Python file,
+``tests/contributing/test_dependency_boundaries.py`` scans every Python file,
 including relative imports and imports inside functions. Importing the root
 ``reef`` facade from an internal package also counts as a dependency; internal
 code imports the owning module directly.
@@ -150,10 +154,12 @@ package's own submodules and third-party libraries):
      - ``runtime``, ``artifact``, ``core``
    * - ``harness``
      - ``runtime``, ``core``
+   * - ``evaluation``
+     - ``harness``, ``runtime``, ``core``
    * - ``train``
-     - ``harness``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``harness``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``harness``, ``runtime``, ``surface``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``runtime``, ``surface``, ``storage``, ``observability``, ``core``
    * - ``scenario``
      - ``recipe``, ``train``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
@@ -301,7 +307,8 @@ Code for a concrete training integration lives together under
 ``reef/train/<integration>/``, but its surrounding files remain at repository
 level:
 
-- internal integration tests in ``tests/<integration>/``;
+- component and integration tests in ``tests/<owner>/``;
+- cookbook method tests in ``tests/recipes/<method>/``;
 - import and packaging contracts in ``tests/plugin_contracts/``;
 - service-facing contracts in ``tests/reef_service/``;
 - the learn-nothing deployment stacks, and the smallest example around them, in
@@ -310,6 +317,9 @@ level:
 - container and environment setup under ``docker/``; and
 - Python dependencies, package data, and plugin entry points in
   ``pyproject.toml``.
+
+The `test directory map <https://github.com/Human-Agent-Society/reef/blob/main/tests/AGENTS.md>`_
+defines the owner directories, shared support, and rules for moving tests.
 
 Do not copy third-party source into an integration subtree. Pin or declare the
 dependency in ``pyproject.toml`` and keep Reef-owned adapters local to the

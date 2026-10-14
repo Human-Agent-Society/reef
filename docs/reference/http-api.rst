@@ -1209,7 +1209,6 @@ trailing slash, credentials, or wildcard:
 
 .. code-block:: yaml
 
-   schema-version: 2
    reef:
      console-origins:
        - "https://api.reefinfra.ai"

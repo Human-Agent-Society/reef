@@ -1,7 +1,7 @@
 """Load selected component schemas, translate public paths, and validate their values.
 
-Field declarations own types and defaults. Layout translation maps versioned YAML
-and references onto those declarations without interpreting native backend options.
+Field declarations own types and defaults. Layout translation maps public YAML
+sections and references onto those declarations without interpreting native backend options.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from reef.service.deploy.config_utils import config_value, interpolate_config, i
 from reef.service.deploy.service_config import service_config_arguments, service_owned_keys
 
 _MISSING = object()
+#: Appended to unknown-section and unknown-field errors.
+LAYOUT_HINT = "see the configuration layout in docs/reference/configuration.rst"
 
 
 @dataclass(frozen=True)
@@ -82,22 +84,15 @@ def _unknown(values: Mapping[str, Any], prefix: str = "") -> list[str]:
 
 
 def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Translate schema-version 2 while keeping unversioned files unchanged."""
-    if "schema-version" not in config:
-        return copy.deepcopy(dict(config))
-    if type(config["schema-version"]) is not int or config["schema-version"] != 2:
-        raise DeployConfigError("unsupported schema-version; expected 2")
+    """Translate a configuration file's public sections to the resolved deployment layout."""
     if "service" in config or "services" in config:
         raise DeployConfigError(
-            "schema-version 2 does not accept service/services: move HTTP settings to reef; "
+            "service/services are not accepted: move HTTP settings to reef; "
             "processes are assembled by Reef and the selected recipe"
         )
     if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
-        raise DeployConfigError(
-            "execution.services belongs to legacy process stacks; configure component resources instead"
-        )
+        raise DeployConfigError("execution.services is not accepted; configure component resources instead")
     pending = copy.deepcopy(dict(config))
-    pending.pop("schema-version")
     known_sections = {
         "reef",
         "inference",
@@ -114,7 +109,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
     }
     extra = set(pending) - known_sections
     if extra:
-        raise DeployConfigError(f"unknown config sections: {', '.join(sorted(extra))}")
+        raise DeployConfigError(f"unknown config sections: {', '.join(sorted(extra))}; {LAYOUT_HINT}")
     resolved: dict[str, Any] = {"reef": {"recipe": "recipe", "host": "127.0.0.1"}, "run_dir": ".reef/run"}
     for argument in (*service_config_arguments(), *deployment_config_arguments()):
         path = argument.public_path or argument.path
@@ -136,7 +131,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
             raise DeployConfigError(f"{section} must be an object")
         if content:
             paths = _unknown({section: content}) or [f"{section}.{key}" for key in content]
-            raise DeployConfigError(f"unknown config fields: {', '.join(paths)}")
+            raise DeployConfigError(f"unknown config fields: {', '.join(paths)}; {LAYOUT_HINT}")
     return resolved
 
 
@@ -232,20 +227,12 @@ _EXECUTION_ROLES = ("services", "training", "rollout", "evolution", "generator")
 def selected_weight_training(
     recipe_type: type[Recipe], config: Mapping[str, Any]
 ) -> type[WeightTrainingRecipe] | None:
-    """The class a deployment of ``recipe_type`` trains weights with: itself, or a component it names.
-
-    A component lives under ``reef`` in the unversioned layout and under
-    ``reef.data`` once the versioned layout is translated; both are read.
-    """
+    """The class a deployment of ``recipe_type`` trains weights with: itself, or a component it names."""
     reef = config.get("reef", {})
-    sections = (reef, reef.get("data", {})) if isinstance(reef, Mapping) else ()
-    for section in sections:
-        if not isinstance(section, Mapping):
-            continue
-        selected = recipe_type.select_weight_training(section)
-        if selected is not None:
-            return selected[0]
-    return None
+    if not isinstance(reef, Mapping):
+        return None
+    selected = recipe_type.select_weight_training(reef)
+    return None if selected is None else selected[0]
 
 
 def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, tuple[str, ...]]:
@@ -258,9 +245,6 @@ def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, 
             else ("reef", "data")
         )
         return recipe_type, prefix
-    implementation = config.get("implementation")
-    if isinstance(implementation, str):
-        return recipe_class_for(implementation), ("data",)
     # A separately stored named preset is resolved by the recipe registry;
     # do not advertise fields for a class that the launcher has not selected.
     return None, ()
@@ -289,11 +273,10 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
                     public_path=("recipe", "config", "checkpoint_every_n_versions"),
                 )
             )
-        section_prefix = prefix[:-1] if prefix[-1:] == ("data",) else prefix
         arguments.extend(
             ConfigArgument(
                 section,
-                (*section_prefix, section),
+                ("reef", section),
                 "object",
                 False,
                 {},
@@ -302,11 +285,10 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             )
             for section in recipe_type.config_sections
         )
-    runtime_prefix = ("runtime",) if prefix == ("data",) else ("reef", "runtime")
     arguments.append(
         ConfigArgument(
             "runtime_type",
-            (*runtime_prefix, "type"),
+            ("reef", "runtime", "type"),
             "str",
             True,
             None,
@@ -314,7 +296,7 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             public_path=("recipe", "runtime", "type"),
         )
     )
-    runtime = config.get("runtime", {}) if prefix == ("data",) else config.get("reef", {}).get("runtime", {})
+    runtime = config.get("reef", {}).get("runtime", {})
     if isinstance(runtime, Mapping) and isinstance(runtime.get("type"), str):
         factory = runtime_factory_for(runtime["type"])
         if factory is None:
@@ -323,7 +305,7 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
         if settings_type is not None:
             arguments.extend(
                 replace(argument, public_path=("recipe", "runtime", argument.name))
-                for argument in config_arguments(settings_type, prefix=runtime_prefix)
+                for argument in config_arguments(settings_type, prefix=("reef", "runtime"))
             )
     for role in _EXECUTION_ROLES:
         prefix = ("execution", role)
@@ -366,14 +348,14 @@ def normalize_component_config(config: Mapping[str, Any], arguments: tuple[Confi
             continue
         value = interpolate_config_values(normalized, value)
         node[argument.path[-1]] = parse_config_values((argument,), {argument.name: value})[argument.name]
-    recipe_type, prefix = _recipe_definition(normalized)
-    if recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe) and prefix == ("reef",):
+    recipe_type, _ = _recipe_definition(normalized)
+    if recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe):
         owned = {key: value for key, value in normalized["reef"].items() if key not in service_owned_keys()}
         recipe_type.service_config(owned, model_path="")
     elif recipe_type is not None:
-        data = normalized.get("data", {}) if prefix == ("data",) else normalized.get("reef", {}).get("data", {})
+        data = normalized.get("reef", {}).get("data", {})
         parse_config_values(config_arguments(recipe_type), data, include_defaults=False)
-    runtime = normalized.get("runtime") if prefix == ("data",) else normalized.get("reef", {}).get("runtime")
+    runtime = normalized.get("reef", {}).get("runtime")
     if runtime is not None and runtime != {}:
         if not isinstance(runtime, Mapping) or not isinstance(runtime.get("type"), str):
             raise ValueError("reef.runtime must be an object with a runtime type")

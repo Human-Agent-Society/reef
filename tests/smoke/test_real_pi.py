@@ -91,7 +91,7 @@ def capturing_wrapper(tmp_path: Path, capture: Path) -> str:
     ``run_episode`` deletes the episode root before returning, so the raw
     bytes pi wrote are copied out by the wrapper first: they are the artifact
     the workflow uploads and the refresh source of the hermetic fixture
-    (tests/reef_service/data/pi_session_real/README.md).
+    (tests/harness/data/pi_session_real/README.md).
     """
     wrapper = tmp_path / "pi-capturing"
     wrapper.write_text(

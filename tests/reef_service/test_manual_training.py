@@ -10,7 +10,10 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.runtime_stubs import runtime_bindings
+from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
+from tests.train.test_reef_trainer_contracts import ExampleBackend, ExampleBatch
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -19,7 +22,7 @@ from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError
-from reef.record2record import InferenceRecord2Record, PassThroughRecord2Record
+from reef.record2record import InferenceRecord2Record, SingleRecordSet
 from reef.runtime.interfaces import TrainingRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -29,11 +32,6 @@ from reef.train.cordis_backend.processor import InferenceTasks
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import TrainDataItem, TrainingBatch
-
-from .runtime_stubs import StubTrainingRuntime
-from .test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
-from .test_harness_proposals import _dispatcher, _recipe
-from .test_reef_trainer_contracts import ExampleBackend, ExampleBatch
 
 
 class CaptureBackend(ExampleBackend):
@@ -349,7 +347,7 @@ def test_manual_instruction_batch_never_falls_back_to_auto():
     assert batch.request.id == "one"
     assert batch.items == ()
     assert pipeline.acknowledge(batch.batch_id) == frozenset({"one"})
-    assert pipeline.record2record.available_count() == 1
+    assert len(pipeline.record2record.pool) == 1
     pipeline.close()
 
 
@@ -362,26 +360,24 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     training that is merely slow.
     """
 
-    class CountingStage(PassThroughRecord2Record):
-        def __init__(self) -> None:
-            super().__init__()
-            self.held = 0
-
-        def available_count(self) -> int:
-            return self.held
-
     class CountedBatches(Task2Batch):
         def make_batch(self, tasks, batch_number):
             return TrainingBatch(f"{self.scenario}:{batch_number}", tasks)
 
-    stage = CountingStage()
+    stage = InferenceRecord2Record()
     context = PipelineContext("s", training_mode="auto")
     pipeline = TrainingPipeline(context, record2record=stage, task2batch=CountedBatches(context, 4))
+
+    def hold(count):
+        for index in range(len(stage.pool), count):
+            record = inference(f"inf-{index}")
+            stage.pool.put(SingleRecordSet(set_id=record.agent_record_id, arrival_index=index, record=record))
+
     assert pipeline.status() == {"ready_units": 0, "batch_size": 4}
-    stage.held = 3
+    hold(3)
     assert pipeline.status() == {"ready_units": 3, "batch_size": 4}
     assert not pipeline.ready()
-    stage.held = 4
+    hold(4)
     assert pipeline.status() == {"ready_units": 4, "batch_size": 4}
     assert pipeline.ready()
 
@@ -728,11 +724,11 @@ def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
 def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_failed(tmp_path):
     """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
     evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
+    from tests.support._strategies import resolve_episode_scorer
+
     from reef.harness.tree.mutations import Mutation
     from reef.service.release_page import failed_words
     from reef.train.cordis_backend.strategies import StepProposal
-
-    from ._strategies import resolve_episode_scorer
 
     marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 
@@ -1398,7 +1394,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
 
     with caplog.at_level(logging.WARNING, logger="reef.record2record.reports"):
         manual = fill("manual")
-    assert manual.record2record.available_count() == 4
+    assert len(manual.record2record.pool) == 4
     assert not manual.ready()
     retention = manual.releasable_record_ids()
     shed = {f"inf-{i}" for i in range(16)} | {f"rep-{i}" for i in range(16)}
@@ -1411,19 +1407,19 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     batch = manual.build_batch()
     assert batch.items == ()
     assert manual.acknowledge(batch.batch_id) == frozenset({"do-it"})
-    assert manual.record2record.available_count() == 4
+    assert len(manual.record2record.pool) == 4
     manual.close()
 
     for mode in ("auto", "hybrid"):
         uncapped = fill(mode)
-        assert uncapped.record2record.available_count() == 20
+        assert len(uncapped.record2record.pool) == 20
         # The switch to manual trims the pile at once; the batch already handed out keeps its unit.
         reserved = uncapped.build_batch()
         uncapped.set_training_mode("manual")
-        assert uncapped.record2record.available_count() == 4
+        assert len(uncapped.record2record.pool) == 4
         assert "inf-0" not in uncapped.releasable_record_ids()
         assert uncapped.acknowledge(reserved.batch_id) == frozenset({"inf-0", "rep-0"})
-        assert uncapped.record2record.available_count() == 3
+        assert len(uncapped.record2record.pool) == 3
         uncapped.close()
 
 

@@ -33,7 +33,7 @@ out (:class:`_ExplicitGradientDivergence`). Every kernel takes the
 tensor-parallel group explicitly and reduces across the vocab shards with
 :mod:`reef.train.slime_backend.vocab_parallel`, so the CPU parity tests run
 it at world size one against the pure-Python oracle in
-``tests/reef_service/reference_algorithms/distill.py``.
+``tests/support/reference_algorithms/distill.py``.
 Megatron and Slime are imported where a hook runs.
 """
 

@@ -1,14 +1,14 @@
-"""Strategy contracts for harness evolution: proposers, episode scorers and promoters.
+"""Strategy contracts for harness evolution: proposers and promoters.
 
 Each is a :class:`~reef.core.plugins.ConfiguredPlugin`. A deployment names
-the class (``evolution.propose``, ``evolution.evaluate``,
-``evolution.promote``), and the recipe builds it with ``from_config``; Python
-callers may pass a built instance.
+the class (``evolution.propose``, ``evolution.promote``), and the recipe
+builds it with ``from_config``; Python callers may pass a built instance. The
+episode scorer that ``evolution.evaluate`` names is
+:class:`reef.evaluation.harness.EpisodeScorer`.
 """
 
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -19,10 +19,7 @@ from reef.core.plugins import ConfiguredPlugin
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBindings
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.tree.mutations import Mutation
-from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TrajectoryItem
 
@@ -172,68 +169,6 @@ class Proposer(ConfiguredPlugin, ABC):
         agent_host: AgentHost | None = None,
     ) -> Mutation | Sequence[Mutation] | StepProposal | None:
         """Propose mutations for the current composition and trace batch."""
-
-
-class EpisodeScorer(ConfiguredPlugin, ABC):
-    """Base class for scoring one harness-evolution episode.
-
-    Implement:
-        ``score`` — given a task name and its episode result, return a
-        float score. Higher is better; non-finite values raise.
-    """
-
-    @abstractmethod
-    def score(self, task: str, result: EpisodeResult) -> float:
-        """Score one episode result for a task."""
-
-    def execution_requirements(self) -> ExecutionRequirements:
-        """Override when scoring loads a local GPU model or needs cluster placement.
-
-        API calls do not request local GPUs. GPU scorers must initialize their
-        model lazily in the allocated worker, not while the recipe is built.
-        """
-        return ExecutionRequirements()
-
-    def score_with_models(self, task: str, result: EpisodeResult, models: ModelBindings) -> float:
-        """Model-based judges override this method and use the supplied bindings."""
-        return self.score(task, result)
-
-
-def verifier_reward(task: str, result: EpisodeResult) -> float:
-    """The Harbor verifier's reward for a task directory episode; :class:`VerifierRewardScorer` scores with it.
-
-    The terminus runner writes one ``verifier`` row per episode with the task it played and the rewards
-    its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
-    episode or a verifier that wrote nothing scores 0 (the gate has already set aside an episode whose
-    trial never ran); an episode that exited without a row scores 0; a row for another task, several
-    rewards without a ``reward`` entry, or a reward that is not a finite number is an error.
-    """
-    rows = [event for event in result.trajectory if event.get("type") == "verifier"]
-    if not rows and result.exit_code:
-        return 0.0
-    if len(rows) != 1:
-        raise ValueError(f"expected one verifier record for {task!r}, found {len(rows)}")
-    row = rows[0]
-    if row.get("task") != task:
-        raise ValueError(f"the verifier record names {row.get('task')!r}, not {task!r}")
-    if row.get("failed"):
-        return 0.0
-    rewards = row.get("rewards")
-    reward = primary_reward(rewards) if isinstance(rewards, Mapping) else row.get("reward")
-    if reward is None:
-        if isinstance(rewards, Mapping) and rewards:
-            raise ValueError(f"the verifier for {task!r} wrote {sorted(rewards)} and no 'reward' entry")
-        return 0.0
-    if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
-        raise ValueError(f"the verifier reward for {task!r} must be a finite number, not {reward!r}")
-    return float(reward)
-
-
-class VerifierRewardScorer(EpisodeScorer):
-    """Score an episode by its Harbor verifier's reward (:func:`verifier_reward`); for a task manifest evaluation."""
-
-    def score(self, task: str, result: EpisodeResult) -> float:
-        return verifier_reward(task, result)
 
 
 class Promoter(ConfiguredPlugin, ABC):

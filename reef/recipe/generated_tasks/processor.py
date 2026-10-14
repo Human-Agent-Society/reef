@@ -416,7 +416,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             )
             self.round_stage.round_finished(played_none=played == 0)
 
-    def derivation_pending(self) -> bool:
+    def background_jobs_running(self) -> bool:
         return self.round_in_flight is not None
 
     def close(self) -> None:

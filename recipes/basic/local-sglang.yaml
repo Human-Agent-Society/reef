@@ -10,7 +10,6 @@
 # before accepting traffic; ${REEF_TOKEN} comes from the environment.
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 
-schema-version: 2
 reef:
   host: 0.0.0.0
   port: 8900

@@ -15,7 +15,7 @@ from reef.core.version import __version__
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.storage.records import RecordStore
-from reef.train.evaluation import (
+from reef.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,

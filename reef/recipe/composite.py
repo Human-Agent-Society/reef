@@ -7,22 +7,25 @@ the components' trainers, run as independent workers that meet at the
 scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
 
 Configured by a dotted ``implementation`` whose config carries a
-``components`` object, one recipe config per component name; each inherits
-the deployment's ``model`` unless it names its own, and each configures its
-own pipeline stages:
+``components`` object. Each component has the shape of a file's ``recipe``
+section, without ``runtime``: ``implementation`` names its recipe class and
+``config`` holds its fields, sections and pipeline stages. Each component
+uses the deployment's model:
 
 .. code:: yaml
 
-   implementation: reef.recipe.composite:CompositeRecipe
-   model:
-     path: qwen3-8b
-   components:
-     weights:
-       implementation: recipes.sao.recipe:SAORecipe
-       pipeline: {task2batch: {config: {batch_size: 8}}}
-     harness:
-       implementation: reef.recipe.cordis:CordisRecipe
-       evolution: {adapter: pi, ...}
+   recipe:
+     implementation: reef.recipe.composite:CompositeRecipe
+     config:
+       components:
+         weights:
+           implementation: recipes.sao.recipe:SAORecipe
+           config:
+             pipeline: {task2batch: {config: {batch_size: 8}}}
+         harness:
+           implementation: reef.recipe.cordis:CordisRecipe
+           config:
+             evolution: {adapter: pi, ...}
 """
 
 from __future__ import annotations
@@ -39,9 +42,9 @@ from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.recipe.config import recipe_config_from_mapping
+from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import recipe_class_for
+from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
@@ -51,6 +54,8 @@ from reef.train.trainer import ComponentTrainer
 CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
+#: The sections a component keeps under its own ``config``; a file keeps them at its top level.
+COMPONENT_FRAMEWORK_SECTIONS = ("pipeline", "evaluation")
 
 
 class AnyComponentReport(ReportBase):
@@ -86,13 +91,27 @@ def configured_training_mode(config: Mapping[str, Any]) -> str | None:
     return None
 
 
+def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
+    """The flat recipe config of ``components.<component>``, read the way a file's ``recipe`` section is read.
+
+    A component has no runtime of its own: every component shares the deployment's runtime.
+    """
+    path = f"components.{component}"
+    settings = recipe_config_from_section(section, path, COMPONENT_FRAMEWORK_SECTIONS)
+    if "runtime" in settings:
+        raise RecipeConfigError(
+            f"{path}.runtime is not accepted: every component shares the deployment's runtime, set by recipe.runtime"
+        )
+    return settings
+
+
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
     """Bind one recipe per release component; the scenario runs their trainers side by side."""
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
-    #: The versioned deployment layout keeps ``components`` under ``recipe.config``.
+    #: A deployment file keeps ``components`` under ``recipe.config``.
     config_sections: ClassVar[tuple[str, ...]] = ("components",)
 
     def __post_init__(self) -> None:
@@ -147,25 +166,20 @@ class CompositeRecipe(Recipe):
         runtime = cls._resolve_runtime(environ, runtime)
         configured_mode = configured_training_mode(config)
         components: dict[str, Recipe] = {}
-        for component, component_config in raw.items():
-            if not isinstance(component_config, Mapping):
-                raise RecipeConfigError(f"components.{component} must be an object")
-            cls.refuse_checkpoint_cadence(component_config, f"components.{component}")
-            merged = dict(component_config)
-            merged.setdefault("model", dict(config.get("model", {})))
-            data = merged.get("data", {})
-            if configured_mode is not None and isinstance(data, Mapping) and configured_training_mode(merged) is None:
-                # The composite's mode is every component's mode: a component sets its own only to disagree. A data
-                # section that is not an object is left as written, for the config parser to refuse.
-                merged["data"] = {**data, "training_mode": configured_mode}
-            settings = recipe_config_from_mapping(merged)
-            recipe_class = recipe_class_for(settings["implementation"])
-            if recipe_class is None:
-                raise RecipeConfigError(
-                    f"components.{component}.implementation must be 'recipe' or a dotted recipe class"
-                )
-            components[str(component)] = recipe_class.from_environment(
-                environ, config=settings, runtime=runtime, training_runtime=training_runtime
+        for component, section in raw.items():
+            settings = component_recipe_config(str(component), section)
+            cls.refuse_checkpoint_cadence(settings["data"], f"components.{component}.config")
+            settings["model"] = dict(config.get("model", {}))
+            if configured_mode is not None and configured_training_mode(settings) is None:
+                # The composite's mode is every component's mode: a component sets its own only to disagree.
+                settings["data"]["training_mode"] = configured_mode
+            settings = recipe_config_from_mapping(settings)
+            components[str(component)] = build_recipe(
+                settings["implementation"],
+                environ,
+                config=settings,
+                runtime=runtime,
+                training_runtime=training_runtime,
             )
         modes = {recipe.training_mode for recipe in components.values()}
         if len(modes) != 1:
@@ -185,20 +199,17 @@ class CompositeRecipe(Recipe):
         """The one component that trains weights, so the deployment connects its training runtime.
 
         A release loads one component into a runtime, so two weight training
-        components are refused here, before any runtime is connected.
+        components are refused here, before any runtime is connected. The
+        selected component's config is returned flat, as its recipe reads it.
         """
         components = config.get("components")
         if not isinstance(components, Mapping):
             return None
         selected: list[tuple[str, tuple[type[WeightTrainingRecipe], Mapping[str, Any]]]] = []
-        for name, component_config in components.items():
-            if not isinstance(component_config, Mapping):
-                continue
-            implementation = component_config.get("implementation")
-            recipe_type = recipe_class_for(implementation) if isinstance(implementation, str) else None
-            if recipe_type is None:
-                continue
-            weight_training = recipe_type.select_weight_training(component_config)
+        for name, section in components.items():
+            settings = component_recipe_config(str(name), section)
+            recipe_type = recipe_class_for(settings["implementation"])
+            weight_training = None if recipe_type is None else recipe_type.select_weight_training(settings)
             if weight_training is not None:
                 selected.append((str(name), weight_training))
         if len(selected) > 1:

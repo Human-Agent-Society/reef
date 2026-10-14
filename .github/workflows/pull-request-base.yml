@@ -1,0 +1,25 @@
+name: pull request base
+
+# A pull request that targets another branch merges only into that branch, and
+# never reaches main. A stacked pull request shows this check as failed until
+# its base merges and the pull request is retargeted to main. Changing the base
+# sends an edited event, so the check runs again then.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  base-is-main:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Require main as the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$BASE_REF" != "main" ]; then
+            echo "::error::This pull request targets '$BASE_REF', so merging it does not change main. After '$BASE_REF' merges, rebase this branch onto main and change the base to main."
+            exit 1
+          fi

@@ -1,5 +1,4 @@
 # run.py embeds this recipe in a durable Reef scenario and drives its reports.
-schema-version: 2
 recipe:
   implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
   config:

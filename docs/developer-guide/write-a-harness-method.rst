@@ -142,7 +142,8 @@ This method adds a rules node the first time a batch contains a failure:
 
 .. code:: python
 
-   from reef.train.cordis_backend import EpisodeScorer, Mutation, Proposer
+   from reef.evaluation.harness import EpisodeScorer
+   from reef.train.cordis_backend import Mutation, Proposer
 
    RULE = "State the final answer alone on the last line.\n"
    EXPECTED = {"[fib]": "2880067194370816120"}
@@ -202,7 +203,6 @@ tree. The ``pipeline`` section sets the batch size:
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: reef.recipe.cordis:CordisRecipe
      config:
@@ -241,7 +241,6 @@ processes. ``reef serve -c`` reads a deployment config. The one in
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: <name>  # resolves to recipes/<name>.yaml
    reef:
@@ -273,7 +272,7 @@ only when at least one task improves and none regresses.
 .. code:: python
 
    from reef import CandidateEvaluator, SelectionDecision
-   from reef.train.evaluation import SelectionPlugin
+   from reef.evaluation import SelectionPlugin
 
 
    class ParetoPlugin(SelectionPlugin):

@@ -20,8 +20,9 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
-from reef_service.test_harness_requests import _post, _request
+from tests.reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
+from tests.reef_service.test_harness_requests import _post, _request
+from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -34,7 +35,6 @@ from reef.service.page_chrome import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-from ._strategies import resolve_episode_scorer, resolve_proposer
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 CHROME = Path(__file__).parents[2] / "reef" / "service" / "page_chrome.py"

@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, TaskSplit, split_by_source
+from reef.core.tasks import HarborTask, TaskSplit, primary_reward, split_by_source
 from reef.record2task.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -343,7 +343,9 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     rewards = verifier.get("rewards") if isinstance(verifier, Mapping) else None
     if not isinstance(rewards, Mapping) or not rewards:
         return TrialOutcome(reward=None, exception=exception_text, agent_note=agent_note)
-    value = next(iter(rewards.values()))
+    value = primary_reward(rewards)
+    if value is None and exception_text is None:
+        exception_text = f"a verifier that wrote {', '.join(sorted(map(str, rewards)))} and no reward entry"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return TrialOutcome(reward=None, exception=exception_text, agent_note=agent_note)
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)

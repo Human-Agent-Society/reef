@@ -4,7 +4,6 @@
 # count are the reduced integration smoke the recipe page describes.
 # TTTD_STATE_DIR is the absolute root all durable state hangs off.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

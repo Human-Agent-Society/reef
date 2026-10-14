@@ -28,11 +28,15 @@ from __future__ import annotations
 import importlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from reef.core.errors import ReefError
+from reef.core.tasks import harbor
+
+# Preserve the original import path for callers of the shared reward reader.
+primary_reward = harbor.primary_reward
 
 
 class TrajectoryError(ReefError):
@@ -252,15 +256,6 @@ class HermesSessionReader(TrajectoryReader):
         return tuple(events)
 
 
-def primary_reward(rewards: Mapping[str, Any]) -> Any:
-    """Harbor's primary reward among a verifier's rewards: the ``reward`` entry, else the sole entry, else None."""
-    if "reward" in rewards:
-        return rewards["reward"]
-    if len(rewards) == 1:
-        return next(iter(rewards.values()))
-    return None
-
-
 @register_trajectory_reader
 class TerminusAtifReader(TrajectoryReader):
     """Read the terminus runner's ATIF trajectories: every ``*.json`` under ``path``.
@@ -388,3 +383,91 @@ def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
             if texts:
                 return "\n".join(texts)
     return None
+
+
+def failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
+    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    for event in trajectory:
+        if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
+            return str(event["error"])
+    return ""
+
+
+def root_header(trajectory: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The root's ``session`` line of a native-jsonl trajectory (the agents' files sort first); empty for other formats."""
+    for event in trajectory:
+        data = event.get("data") or {}
+        if event.get("type") == "session" and str(data.get("agent") or "root") == "root":
+            return data
+    return {}
+
+
+def stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
+    stages: list[str] = []
+    reason: str | None = None
+    errors: dict[str, Mapping[str, Any]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+        elif type_ == "turn/end" and agent is not None:
+            details = data.get("reason") or {}
+            kind = details.get("kind")
+            if kind == "error" and isinstance(details.get("error"), Mapping):
+                errors[agent] = details["error"]
+            if agent == "root":
+                reason = None if kind is None else str(kind)
+        elif agent != "root":
+            continue
+        elif type_ == "stage/exit":
+            stages.append(str(data.get("stage")))
+    path: dict[str, Any] = {"stages": stages, "reason": reason}
+    # The root's own error, else the error of an agent whose failure ended the run before the root wrote its end:
+    # a subagent's model error aborts the whole run with no root turn/end.
+    errored = "root" if "root" in errors else next((name for name in errors if reason is None), None)
+    if errored is not None:
+        path["error"] = dict(errors[errored])
+        if errored != "root":
+            path["errored_agent"] = errored
+    return path
+
+
+#: The counters a result carries per agent; the token pair is what the endpoint reported, zero when it reported none.
+AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
+
+
+def agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Turns, steps, tool calls, tool errors and reported tokens per agent of a
+    native-jsonl trajectory; empty for other formats."""
+    work: dict[str, dict[str, int]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+            work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
+        elif agent is None:
+            continue
+        elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
+            work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
+            work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
+        elif type_ == "step/start":
+            work[agent]["steps"] += 1
+        elif type_ == "tool/call":
+            work[agent]["tool_calls"] += 1
+        elif type_ == "tool/result" and data.get("is_error"):
+            work[agent]["tool_errors"] += 1
+    return work
+
+
+def sum_agents(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:
+    """The per-agent counters of several episodes, summed per agent and sorted by agent name."""
+    total: dict[str, dict[str, int]] = {}
+    for work in runs:
+        for agent, counts in work.items():
+            sums = total.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))
+            for key, value in counts.items():
+                sums[key] = sums.get(key, 0) + value
+    return {agent: total[agent] for agent in sorted(total)}

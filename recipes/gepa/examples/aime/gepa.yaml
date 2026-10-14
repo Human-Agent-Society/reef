@@ -9,7 +9,6 @@
 
 # The method package: GEPA's archive, Pareto parent sampling, reflective
 # proposal, and strict aggregate promotion, under the evolution contract.
-schema-version: 2
 recipe:
   implementation: recipes.gepa.recipe:GEPARecipe
 

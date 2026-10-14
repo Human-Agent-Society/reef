@@ -10,7 +10,6 @@
 # The cookbook method's recipe class: harness_evolve plus the
 # catalog-injecting delivery surface. The entry point follows the same
 # recipes.<method>.recipe convention as the other cookbook methods.
-schema-version: 2
 recipe:
   implementation: recipes.skillclaw.recipe:SkillClawRecipe
 

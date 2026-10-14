@@ -12,21 +12,20 @@ from reef.recipe.errors import RecipeConfigError
 
 
 def load_recipe_config(path: str | Path) -> dict[str, Any]:
+    """Load a recipe file in the public layout and return its flat recipe config."""
     config_path = Path(path)
     try:
         loaded = yaml.safe_load(config_path.read_text())
     except (OSError, yaml.YAMLError) as exc:
         raise RecipeConfigError(f"cannot load recipe config {config_path}: {exc}") from exc
-    return recipe_config_from_mapping(loaded)
+    return recipe_config_from_file_layout(loaded)
 
 
 def recipe_config_from_mapping(loaded: Any) -> dict[str, Any]:
-    """Validate the preset structure supplied by either YAML or deployment."""
+    """Validate a flat recipe config: the internal config a Recipe reads, never a user file's layout."""
     if not isinstance(loaded, Mapping):
         raise RecipeConfigError("recipe config must be a YAML object")
     config = dict(loaded)
-    if "schema-version" in config:
-        config = _public_recipe_config(config)
     if not isinstance(config.get("implementation"), str) or not config["implementation"]:
         raise RecipeConfigError("recipe config must contain a non-empty 'implementation'")
     for section in ("data", "artifact", "runtime", "model", "rollout", "optimization"):
@@ -44,42 +43,67 @@ def config_positive_int(config: Mapping[str, Any], name: str, default: int) -> i
     return value
 
 
-def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Read the shared public envelope without depending on the service launcher."""
+def recipe_config_from_section(section: Any, path: str, framework_sections: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Read a ``{implementation, config, runtime}`` section into a flat recipe config, before validation.
+
+    ``path`` names the section in error messages: ``recipe`` in a file, or
+    ``components.<name>`` in a composite recipe. A field under ``config`` goes
+    to ``data`` unless the recipe class declares it in ``config_sections`` or
+    the caller names it in ``framework_sections``.
+    """
     from reef.recipe.registry import recipe_class_for
 
-    if type(config["schema-version"]) is not int or config["schema-version"] != 2:
-        raise RecipeConfigError("unsupported recipe schema-version; expected 2")
-    if "service" in config or "services" in config:
+    implementation = section.get("implementation") if isinstance(section, Mapping) else None
+    recipe_type = recipe_class_for(implementation) if isinstance(implementation, str) else None
+    if not isinstance(section, Mapping) or recipe_type is None:
         raise RecipeConfigError(
-            "schema-version 2 does not accept service/services; use reef settings and automatic assembly"
+            f"{path}.implementation must name a recipe class; "
+            "see the configuration layout in docs/reference/configuration.rst"
         )
-    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
-        raise RecipeConfigError("execution.services belongs to legacy process stacks")
-    recipe = config.get("recipe")
-    if not isinstance(recipe, Mapping) or not isinstance(recipe.get("implementation"), str):
-        raise RecipeConfigError("recipe.implementation must name a recipe class")
-    recipe_type = recipe_class_for(recipe["implementation"])
-    if recipe_type is None:
-        raise RecipeConfigError("recipe.implementation must name a recipe class")
-    supplied = recipe.get("config", {})
+    for key in section:
+        if key not in ("implementation", "config", "runtime"):
+            raise RecipeConfigError(
+                f"{path}.{key} is not accepted: {path} takes implementation, config and runtime; "
+                f"recipe fields go under {path}.config"
+            )
+    supplied = section.get("config", {})
     if not isinstance(supplied, Mapping):
-        raise RecipeConfigError("recipe.config must be an object")
+        raise RecipeConfigError(f"{path}.config must be an object")
+    sections = (*recipe_type.config_sections, *framework_sections)
     data: dict[str, Any] = {}
-    resolved: dict[str, Any] = {"implementation": recipe["implementation"], "data": data}
+    resolved: dict[str, Any] = {"implementation": implementation, "data": data}
     for name, value in supplied.items():
         if not isinstance(name, str):
-            raise RecipeConfigError("recipe config field names must be strings")
+            raise RecipeConfigError(f"{path}.config field names must be strings")
         name = name.replace("-", "_")
-        target = resolved if name in recipe_type.config_sections else data
+        target = resolved if name in sections else data
         if name in target:
-            raise RecipeConfigError(f"duplicate recipe config field: {name}")
+            raise RecipeConfigError(f"duplicate {path}.config field: {name}")
         target[name] = value
-    for section in recipe_type.config_sections:
-        if section in resolved and not isinstance(resolved[section], Mapping):
-            raise RecipeConfigError(f"recipe.config.{section} must be an object")
-    if "runtime" in recipe:
-        resolved["runtime"] = recipe["runtime"]
+    for name in sections:
+        if name in resolved and not isinstance(resolved[name], Mapping):
+            raise RecipeConfigError(f"{path}.config.{name} must be an object")
+    if "runtime" in section:
+        resolved["runtime"] = section["runtime"]
+    return resolved
+
+
+def recipe_config_from_file_layout(loaded: Any) -> dict[str, Any]:
+    """Read a recipe file's public sections into a flat recipe config.
+
+    The file selects its class under ``recipe.implementation``, its fields under
+    ``recipe.config`` and its runtime under ``recipe.runtime``. A standalone
+    file names its model in the ``inference`` section; a deployment supplies
+    its already resolved runtime instead.
+    """
+    if not isinstance(loaded, Mapping):
+        raise RecipeConfigError("recipe config must be a YAML object")
+    config = dict(loaded)
+    if "service" in config or "services" in config:
+        raise RecipeConfigError("service/services are not accepted; use reef settings and automatic assembly")
+    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
+        raise RecipeConfigError("execution.services is not accepted; configure component resources instead")
+    resolved = recipe_config_from_section(config.get("recipe"), "recipe")
     for section in ("execution", "executors", "pipeline"):
         if section in config:
             resolved[section] = config[section]
@@ -89,9 +113,10 @@ def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(inference, Mapping):
         raise RecipeConfigError("inference must be an object")
     if "reef" not in config:
-        model = inference.get(
-            "upstream-model", inference.get("upstream_model", inference.get("model-path", inference.get("model_path")))
-        )
-        if model is not None:
-            resolved["model"] = {"path": model}
-    return resolved
+        # An explicit model, even null, is kept so that it is not replaced by the deployment's model.
+        supplied_names = [
+            name for name in ("upstream-model", "upstream_model", "model-path", "model_path") if name in inference
+        ]
+        if supplied_names:
+            resolved["model"] = {"path": inference[supplied_names[0]]}
+    return recipe_config_from_mapping(resolved)

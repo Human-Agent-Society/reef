@@ -128,7 +128,6 @@ engines, ``inference.tensor-parallel-size``:
 
 .. code:: yaml
 
-   schema-version: 2
    inference:
      model-path: /models/Qwen3-8B
      backend: sglang
@@ -169,7 +168,7 @@ The SDK session opens inside Reef's coordinator process, where the trainer
 runs, and the coordinator learns the recipe's Tinker loss reference from the
 driver, so the same recipe package is imported on both sides.
 
-``tests/reef_service/test_tinker_local_engine_ray.py`` runs this topology on a
+``tests/tinker_backend/test_tinker_local_engine_ray.py`` runs this topology on a
 CPU: a local Ray cluster with pretend GPUs, the real model driver, a stub
 engine that accepts Reef's adapter-file transfer in place of SGLang, and the
 Tinker SDK faked on the driver's path. With ``REEF_TEST_TINKER_REAL=1`` and

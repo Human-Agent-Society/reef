@@ -17,7 +17,6 @@
 # the actor with the teacher copy swapped in from the host. Paths are the
 # container's.
 
-schema-version: 2
 reef:
   ready-timeout: 3600
   host: 0.0.0.0

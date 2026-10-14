@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
-from reef_service.runtime_stubs import ExecutorRuntimeFixture
+from tests.support.runtime_stubs import ExecutorRuntimeFixture
 
 import reef
 from reef import task2batch

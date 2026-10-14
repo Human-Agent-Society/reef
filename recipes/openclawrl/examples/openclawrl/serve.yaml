@@ -29,7 +29,6 @@
 #   HF model directory at inference.model-path (bridge mode loads HF weights
 #   directly; no torch_dist conversion needed).
 
-schema-version: 2
 reef:
   ready-timeout: 3600
   host: 0.0.0.0

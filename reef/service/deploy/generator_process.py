@@ -66,18 +66,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "-c",
         "--config",
-        default=os.environ.get("REEF_CONFIG"),
-        help="the deployment reef serve resolved (REEF_CONFIG under reef serve) or a deployment file",
+        default=None,
+        help="a deployment file; without it, the deployment reef serve resolved (REEF_CONFIG)",
     )
     arguments = parser.parse_args(argv)
-    if not arguments.config:
-        parser.error("a deployment is required: REEF_CONFIG under reef serve, or -c <file>")
+    resolved_path = os.environ.get("REEF_CONFIG")
     try:
-        config = load_config(arguments.config)
-        if config.get("schema-version") == 2:
+        if arguments.config:
             from reef.service.deploy.orchestrator import resolve_deployment_config
 
-            config, _ = resolve_deployment_config(config, None, arguments.config)
+            file_config = load_config(arguments.config, interpolate_env=False)
+            config, _ = resolve_deployment_config(file_config, None, arguments.config)
+        elif resolved_path:
+            config = load_config(resolved_path)
+        else:
+            parser.error("a deployment is required: REEF_CONFIG under reef serve, or -c <file>")
         settings = service_config_from_mapping(config)
         if settings.generator_settings is None:
             raise DeployConfigError("the deployment has no generator section")

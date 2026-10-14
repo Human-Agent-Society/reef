@@ -23,6 +23,7 @@ from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
+from reef.evaluation.evaluators import BackendEvaluateMixin
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
@@ -30,7 +31,6 @@ from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TrajectoryItem
 
 from .population import Population, PopulationStore, normalize_entries

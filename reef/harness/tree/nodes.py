@@ -225,6 +225,21 @@ def redact_secret_shaped(text: str) -> str:
     return _SECRET_TEXT.sub("[redacted credential]", text)
 
 
+#: Characters kept per text in a record; a longer text ends in a clip marker.
+RECORD_TEXT_CAP = 20_000
+
+
+def clip_record_text(text: str) -> str:
+    """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
+
+    The record holds model traffic and proposals before the tree boundary
+    saw them, so the boundary's credential tripwire runs here too."""
+    text = redact_secret_shaped(text)
+    if len(text) <= RECORD_TEXT_CAP:
+        return text
+    return f"{text[:RECORD_TEXT_CAP]}... [clipped {len(text) - RECORD_TEXT_CAP} chars]"
+
+
 def directive_shaped(text: str) -> bool:
     """Whether a saved task contains instruction-override phrasing or a chat-template control token."""
     return _DIRECTIVE_TEXT.search(text) is not None

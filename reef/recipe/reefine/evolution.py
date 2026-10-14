@@ -26,6 +26,7 @@ from typing import Any
 from reef.core.prompts import untrusted_text
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
+from reef.evaluation.harness import EpisodeScorer, verifier_reward
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -37,7 +38,7 @@ from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer, verifier_reward
+from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectoryItem
 
 Proposal = tuple[str, str, dict[str, Any]]

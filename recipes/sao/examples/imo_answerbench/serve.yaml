@@ -22,7 +22,6 @@
 #
 # Started by run.sh; state under ./work.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

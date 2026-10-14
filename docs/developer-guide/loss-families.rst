@@ -121,7 +121,7 @@ loss.
 - ``reef_actor_pre_train_hook_path``: ``<name>_actor_pre_train(actor, rollout_data)``,
   before every training step
 
-``tests/reef_service/test_slime_algorithm_contract.py`` enforces the entry point
+``tests/slime_backend/test_slime_algorithm_contract.py`` enforces the entry point
 names and the layering: family packages never import ``reef_adapters``, the
 adapter layer never names a family, ``utils/`` stays torch-free, family flags
 carry the ``--<name>-`` prefix.
@@ -192,7 +192,7 @@ and each such recipe's family is a thin subclass of it:
   parallel with ``reef/train/slime_backend/vocab_parallel.py`` and write the
   gradients out where autograd over one shard would drop the coupling
   through the global log-sum-exp;
-  ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
+  ``tests/slime_backend/test_distill_parity.py`` pins them to a pure-Python
   reference and to the dense gradients across four ranks.
 
 The base registers no family and imports nothing from ``reef_adapters``;
@@ -390,8 +390,8 @@ The step reports aggregate metrics only, as sums of per-sample means:
 ``score_centering_sampler_head_mass``, ``score_centering_trainer_head_mass``,
 ``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
 fraction of positions where a tail fell below the floor); ``loss`` includes
-the term. ``tests/reef_service/test_score_centering_parity.py`` checks the
+the term. ``tests/slime_backend/test_score_centering_parity.py`` checks the
 term, added to each weight's loss and to SAO's own loss, against a
-full-vocabulary reference. ``tests/reef_service/test_distill_score_centering.py``
+full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
 checks the sampled OPD loss against that gradient, including skipped tokens,
 masked positions and sample weights.

@@ -217,6 +217,7 @@ class ReportRecord2Record(Record2Record):
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
+        self.available_limit = context.held_set_limit
         self.grouping = grouping
         self.exclusive_sources = exclusive_sources
         self.formed: list[ReportCandidate] = []
@@ -230,7 +231,6 @@ class ReportRecord2Record(Record2Record):
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()
         self.groups: dict[Hashable, ReportGroup] = {}
-        self.available_limit: int | None = None
         self.limit_warned = False
 
     @classmethod
@@ -239,8 +239,10 @@ class ReportRecord2Record(Record2Record):
         NoSettings.parse(config, plugin_class=cls)
         return cls(context, ReportGrouping())
 
-    def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
-        self.admitted_report_type = report_type
+    def context_changed(self, context: PipelineContext) -> None:
+        self.admitted_report_type = context.admitted_report_type
+        self.available_limit = context.held_set_limit
+        self.apply_limit()
 
     # ------------------------------------------------------------- formation
 
@@ -380,10 +382,6 @@ class ReportRecord2Record(Record2Record):
 
     # ------------------------------------------------------- available limit
 
-    def limit_available(self, max_set_count: int | None) -> None:
-        self.available_limit = max_set_count
-        self.apply_limit()
-
     def apply_limit(self) -> None:
         """Release the oldest unreserved sets beyond the limit. The reserved batch stays."""
         limit = self.available_limit
@@ -420,13 +418,15 @@ class ReportRecord2Record(Record2Record):
 
     def reserved_report_ids(self) -> set[str]:
         """Return the IDs of the reports in the reserved batch."""
-        return {entry.report_id for report_set in report_sets(self.reserved_sets()) for entry in report_set.entries}
+        return {
+            entry.report_id for report_set in report_sets(self.pool.reserved_sets()) for entry in report_set.entries
+        }
 
-    def mark_trained(self, trained_sets: tuple[RecordSet, ...]) -> frozenset[str]:
+    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
         trained_reports: set[str] = set()
         trained_sources: set[str] = set()
         changed_groups: set[Hashable] = set()
-        for entry in (entry for report_set in report_sets(trained_sets) for entry in report_set.entries):
+        for entry in (entry for report_set in report_sets(record_sets) for entry in report_set.entries):
             self.reports[entry.report_id] = ReportState(entry.context.report, ReportStatus.TRAINED)
             trained_reports.add(entry.report_id)
             trained_sources.update(entry.context.references)

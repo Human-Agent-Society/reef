@@ -28,6 +28,14 @@ from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
+from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
+from reef.evaluation.harness import (
+    EpisodeScorer,
+    FloorPlugin,
+    ScoreComparisonPlugin,
+    evaluation_selection,
+    legacy_worker_settings,
+)
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
@@ -41,7 +49,7 @@ from reef.harness.episodes.executor import (
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
-from reef.harness.tree.render import render_composition
+from reef.harness.tree.render import render_composition, tree_files
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -52,11 +60,9 @@ from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
-from reef.train.cordis_backend.backend import CordisBackend, FloorPlugin, ScoreComparisonPlugin, tree_files
-from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
+from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.processor import TraceBatches, TraceRecord2Record, TraceTasks
-from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer
-from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
+from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
@@ -186,7 +192,7 @@ class CordisRecipe(Recipe):
     candidate-selection policy: ``score_comparison``, the default; ``floor``,
     which runs the candidate alone and selects it when every task scores at
     least ``floor_score``, default ``1.0``; ``always``;
-    or a reference to a :class:`~reef.train.evaluation.SelectionPlugin` class),
+    or a reference to a :class:`~reef.evaluation.SelectionPlugin` class),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each evaluation
     episode's trajectory files, so the decision is reconstructible; off by

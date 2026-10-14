@@ -92,8 +92,8 @@ class Record2Task(ABC, Plugin):
         """Return numeric state that the pipeline adds to its metrics."""
         return {}
 
-    def derivation_pending(self) -> bool:
-        """Return True while background work, such as a running round, can change what trains."""
+    def background_jobs_running(self) -> bool:
+        """Return True while background jobs, such as a round, run. A finished job can change what trains."""
         return False
 
     def close(self) -> None:

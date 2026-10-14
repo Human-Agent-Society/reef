@@ -89,7 +89,6 @@ def test_the_generator_role_selects_its_own_executor() -> None:
 
 def test_a_versioned_deployment_with_a_generator_section_assembles_the_service(tmp_path: Path) -> None:
     deployment = {
-        "schema-version": 2,
         "reef": {"host": "127.0.0.1", "port": 8900},
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
         "generator": {"tasks-root": str(tmp_path / "tasks"), "port": 8912},
@@ -104,7 +103,6 @@ def test_a_versioned_deployment_with_a_generator_section_assembles_the_service(t
 
 def test_the_service_carries_the_designer_model_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
     deployment = {
-        "schema-version": 2,
         "reef": {"host": "127.0.0.1", "port": 8900},
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
         "generator": {"tasks-root": str(tmp_path / "tasks"), "designer-model": "openai/gpt-5"},

@@ -9,11 +9,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.mutations import Mutation
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer
+from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectoryItem
 
 from . import skillclaw

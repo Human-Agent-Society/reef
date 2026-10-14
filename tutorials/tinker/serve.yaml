@@ -1,5 +1,4 @@
 # Four short rollouts and one optimizer step; synthetic smoke rewards, not an evaluation.
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

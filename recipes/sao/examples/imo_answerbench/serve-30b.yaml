@@ -9,7 +9,6 @@
 #
 # Started by run.sh with SAO_SERVE_YAML=serve-30b.yaml SAO_DRIVER=stream.py.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

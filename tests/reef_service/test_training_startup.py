@@ -22,7 +22,6 @@ RECIPE = "recipes.sao.recipe:SAORecipe"
 
 def training_config():
     return {
-        "schema-version": 2,
         "recipe": {"implementation": RECIPE},
         "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
         "inference": {"model-path": "/models/demo"},
@@ -49,7 +48,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         "training.ready-timeout": "45",
     }
     file_config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
-    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli", standard=True)
+    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
         assert config["pipeline"] == {"task2batch": {"config": {"batch_size": 2}}}
@@ -162,15 +161,6 @@ def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, m
     assert match in capsys.readouterr().err
 
 
-def test_explicit_services_preserve_custom_training_topology(tmp_path):
-    raw = {"reef": {"recipe": RECIPE, "model_path": "/models/demo", "training_backend": "custom"}}
-    raw["services"] = [{"name": "custom-driver", "command": ["custom"]}]
-    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    assert config["services"] == raw["services"]
-    assert "execution" not in config
-    assert "inference_handler_factory" not in config["reef"]
-
-
 @pytest.mark.parametrize("checkpoint", ["/models/demo", "${inference.model-path}"])
 def test_native_checkpoint_tracks_the_resolved_model_path(tmp_path, checkpoint):
     raw = training_config()
@@ -202,7 +192,6 @@ def test_cli_only_training_resolves_public_config_references(tmp_path):
             "training.options.save": "${training.config.checkpoint_dir}/megatron",
         },
         tmp_path / "cli",
-        standard=True,
     )
     options = config["reef"]["training_backend_options"]
     assert interpolate_config(config, options["hf-checkpoint"]) == "/models/demo"

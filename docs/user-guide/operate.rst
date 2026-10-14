@@ -20,7 +20,7 @@ Check health and status
 
 ``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, latest committed step outcome, runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. The committed outcome includes the recipe-owned metrics, so a skipped or rejected update is distinguishable from one that is still running. It is the first place to look when requests keep being served by an old version.
 
-The service and every process ``reef serve`` started write logs under ``run_dir`` (``.reef/run/`` by default; a legacy ``/tmp/reef-stack`` stack keeps its own directory), one ``<service>.log`` and one ``<service>.pid`` each.
+The service and every process ``reef serve`` started write logs under ``reef.run-dir`` (``.reef/run/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
 
 Read the release chain
 ----------------------
@@ -184,7 +184,6 @@ from a checkout), then configure:
 
 .. code-block:: yaml
 
-   schema-version: 2
    storage:
      record-backend: postgres
      record-database-url: ${REEF_RECORD_DATABASE_URL}

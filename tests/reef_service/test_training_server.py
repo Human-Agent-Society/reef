@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from tests.support.runtime_stubs import StubTrainingRuntime
 
 
 from reef.recipe.checkpoint_strategy import EveryNVersions
@@ -212,7 +212,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     if not config_path.exists():
         pytest.skip("repo-owned stack: shipped with the repo, not with the package")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    from reef_service.config_helpers import load_deployment
+    from tests.support.config_helpers import load_deployment
 
     config = load_deployment(config_path)
     service = next(item for item in config["services"] if item["name"] == "reef")
@@ -234,7 +234,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     ],
 )
 def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> None:
-    from reef_service.config_helpers import load_deployment
+    from tests.support.config_helpers import load_deployment
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
 
@@ -248,7 +248,7 @@ def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> N
 )
 def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    from reef_service.config_helpers import load_deployment
+    from tests.support.config_helpers import load_deployment
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     retention = config["training"]["checkpoint_retention"]
@@ -340,7 +340,8 @@ def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatc
 def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypatch, tmp_path) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"
@@ -407,7 +408,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         lambda *args, **kwargs: lambda scenario: object(),
     )
     evaluation = {
-        "module": "reef_service._candidate_evaluation_plugin:CheckpointEvaluator",
+        "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
         "config": {"score": 1.0, "threshold": 0.0},
     }
 
@@ -451,7 +452,7 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
         "factory",
         lambda *args, **kwargs: lambda scenario: object(),
     )
-    generator = {"module": "reef_service.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+    generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
         "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
         "record2task": {
@@ -502,7 +503,9 @@ def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
         deploy.build_dispatcher(
             _settings(
                 recipe=recipe,
-                pipeline_settings={"record2task": {"module": "reef_service.test_generated_tasks:ScriptedGenerator"}},
+                pipeline_settings={
+                    "record2task": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}
+                },
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),
             connector=lambda **kwargs: stub_runtimes(),

@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 from recipes.gepa.method import Feedback
+from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.run import EpisodeResult
-from reef.train.cordis_backend.strategies import EpisodeScorer
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.

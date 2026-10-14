@@ -17,7 +17,6 @@
 # max-tokens-per-gpu and mem-fraction-static are the knobs to tune first if a
 # step runs out of memory. run.sh mints REEF_TOKEN per run directory.
 
-schema-version: 2
 reef:
   host: 0.0.0.0                        # the task container reaches Reef as host.docker.internal
   port: 28902                          # run.sh's REEF_PORT

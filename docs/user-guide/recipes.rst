@@ -121,7 +121,6 @@ point deployments configured with different recipes at the same repository.
 
 .. code:: yaml
 
-   schema-version: 2
    recipe:
      implementation: recipes.sao.recipe:SAORecipe
      config:

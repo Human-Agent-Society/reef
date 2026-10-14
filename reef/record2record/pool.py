@@ -80,6 +80,10 @@ class RecordSetPool:
         self.reserved = self.select(max_set_count)
         return self.reserved
 
+    def release_reservation(self) -> None:
+        """Clear the reservation without consuming it. The sets stay held for the next reservation."""
+        self.reserved = None
+
     def consume_reserved(self) -> tuple[RecordSet, ...]:
         """Remove the reserved sets from the pool, clear the reservation, and return the sets.
 

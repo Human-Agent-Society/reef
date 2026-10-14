@@ -7,7 +7,6 @@
 # those sections into work/recipes/harness_evolve.yaml, together with the optional
 # pipeline, execution and executors sections.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900

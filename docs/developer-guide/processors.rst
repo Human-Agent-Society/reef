@@ -80,13 +80,15 @@ The trainer calls it on its own thread, under its lock; no call may block:
   its selection order, and give their tasks to ``make_batch``. The trainer
   validates the batch against ``output_schema``. The same batch stays
   reserved until it is acknowledged or released.
-- ``acknowledge(batch_id)``: the training step consumed that batch. The record
-  stage ends the sets as trained and returns the IDs of the records that they
+- ``acknowledge(batch_id, trained=True)``: the training step consumed that
+  batch. The pipeline consumes the reservation from the record stage's pool,
+  and the stage ends the sets and returns the IDs of the records that they
   consumed. The commit record persists these IDs, so recovery never ingests
-  them again.
+  them again. ``trained=False`` says the backend dropped the batch as stale,
+  for a record stage that paces work on what trained.
 
 The pipeline also merges the three stages' ``status()``, metrics, background
-work (``derivation_pending()``), and ``close()``. ``releasable_record_ids()``
+work (``background_jobs_running()``), and ``close()``. ``releasable_record_ids()``
 returns the completed records that no held set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
 commits retain the stored bodies; consumption progress prevents retraining
@@ -96,9 +98,9 @@ component, every trainer reads the same rows and keeps its own consumption,
 so a row one pipeline releases is still stored for the others. When the
 scenario admits a wider report contract than a recipe's own,
 ``admit_reports_of(report_type)`` names it, and the record stage releases a
-report shaped for another component instead of failing it. A batch that the
-backend dropped as stale is announced through ``dropped()`` before its
-acknowledgement, for a record stage that paces work on what actually trained.
+report shaped for another component instead of failing it. The pipeline
+passes such changes to the record stage as its updated ``PipelineContext``
+(``context_changed``).
 
 ``status()`` reports ``ready_units`` (the held sets) and ``batch_size``. A
 stage adds an entry only when a terminal outcome cannot become a batch and an
@@ -110,11 +112,11 @@ The record-to-record stage
 
 1. The stage reads each record and forms record sets.
 2. The record-to-task stage makes tasks from each formed set.
-3. The stage holds the sets that train in its pool, places reports in their
-   groups, and drops sets that can no longer train. The selection policy
-   orders the pool.
-4. ``build_batch`` reserves sets from the pool. ``acknowledge`` ends them as
-   trained.
+3. The stage holds the sets that train in its ``pool``, places reports in
+   their groups, and drops sets that can no longer train. The selection
+   policy orders the pool.
+4. ``build_batch`` reserves sets from the pool. ``acknowledge`` consumes the
+   reservation, and the stage ends the consumed sets (``consume``).
 
 A record that the stage ends, for example a report in a taken slot or a set
 that is too stale, appears in ``releasable_record_ids()``. The next commit
