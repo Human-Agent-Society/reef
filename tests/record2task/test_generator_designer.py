@@ -206,6 +206,7 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
         reef.close()
     assert answer.text == "ls" and answer.record_id == "rec-1"
     call = reef.inferences[0]
+    assert call["path"] == "/v1/chat/completions", "Chat Completions by default"
     assert call["body"]["model"] == "m" and call["body"]["reasoning_effort"] == "none"
     assert call["body"]["messages"][0]["role"] == "system"
     assert call["headers"]["x-reef-tag-role"] == "designer" and call["headers"]["x-reef-tag-generation"] == "2"
@@ -213,6 +214,44 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
     report = reef.reports[0]["body"]
     assert report_id == "rep-1" and report["references"] == ["rec-1"] and report["score"] == 0.5
     assert report["metadata"] == {"generation": 2, "role": "designer"}, "the role tells a processor the report apart"
+
+
+def test_the_responses_designer_sends_instructions_and_typed_input_and_joins_the_output_text() -> None:
+    reef = StandInReef()
+    messages = [*designer_messages(request()), {"role": "assistant", "content": "a draft"}]
+    try:
+        designer = ReefDesigner(reef_url=reef.url, api="responses", request_options={"reasoning": {"effort": "low"}})
+        answer = designer.answer(messages, scenario="spade", model="m", tags={"role": "designer"})
+        designer.answer(messages[1:2], scenario="spade", model="m", tags={})
+    finally:
+        reef.close()
+    assert answer.text == "ls" and answer.record_id == "rec-1"
+    call = reef.inferences[0]
+    assert call["path"] == "/v1/responses" and call["headers"]["x-reef-tag-role"] == "designer"
+    assert call["body"] == {
+        "reasoning": {"effort": "low"},
+        "model": "m",
+        "instructions": messages[0]["content"],
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": messages[1]["content"]}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "a draft"}]},
+        ],
+    }
+    assert "instructions" not in reef.inferences[1]["body"], "no system turn, no instructions"
+
+
+@pytest.mark.parametrize("api", ["openai", "responses"])
+def test_a_reply_without_text_is_an_empty_answer_with_its_receipt(api: str) -> None:
+    reef = StandInReef(reply="")
+    try:
+        answer = ReefDesigner(reef_url=reef.url, api=api).answer(
+            designer_messages(request()), scenario="spade", model="m", tags={}
+        )
+    finally:
+        reef.close()
+    assert answer.text == "" and answer.record_id == "rec-1"
+    with pytest.raises(DesignerReplyError, match="empty"):
+        parse_harbor_reply(answer.text)
 
 
 def test_a_refused_designer_call_is_a_designer_error() -> None:

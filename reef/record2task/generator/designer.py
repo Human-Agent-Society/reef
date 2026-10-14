@@ -29,6 +29,7 @@ DEFAULT_TURN_LIMIT = 12
 GROUNDING_CHARS = 6000
 DESIGNER_TIMEOUT_S = 1800.0
 CHAT_PATH = "/v1/chat/completions"
+RESPONSES_PATH = "/v1/responses"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
 HARBOR_FILE_PATTERN = re.compile(r"^\.?[A-Za-z0-9_][A-Za-z0-9._-]{0,99}(/\.?[A-Za-z0-9_][A-Za-z0-9._-]{0,99}){0,3}$")
@@ -308,12 +309,15 @@ class ReefDesigner(Designer):
         token: str | None = None,
         request_options: Mapping[str, object] | None = None,
         timeout_s: float = DESIGNER_TIMEOUT_S,
+        api: str = "openai",
     ) -> None:
-        # Extra fields of the chat request, e.g. {"reasoning_effort": "none"} for a model that would think for
+        # Extra fields of the request, e.g. {"reasoning_effort": "none"} for a model that would think for
         # thousands of tokens before writing an environment and run past the service's inference deadline.
         self.request_options = dict(request_options or {})
         if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
             raise DesignerError("timeout_s must be a positive number of seconds")
+        # "openai" asks through Chat Completions, "responses" through the Responses API.
+        self.api = api
         # A large local model writes an environment in minutes; the service's own inference deadline must allow it too.
         self.client = ReefClient(reef_url, token=token, timeout_s=float(timeout_s))
 
@@ -321,19 +325,55 @@ class ReefDesigner(Designer):
         self, messages: Sequence[Mapping[str, str]], *, scenario: str, model: str, tags: Mapping[str, str]
     ) -> DesignerAnswer:
         headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
-        payload = {**self.request_options, "model": model, "messages": [dict(message) for message in messages]}
+        if self.api == "responses":
+            # Responses takes the system turns as instructions and every other turn as typed input.
+            path = RESPONSES_PATH
+            request: dict[str, object] = {
+                "input": [
+                    {
+                        "role": message["role"],
+                        "content": [
+                            {
+                                "type": "output_text" if message["role"] == "assistant" else "input_text",
+                                "text": message["content"],
+                            }
+                        ],
+                    }
+                    for message in messages
+                    if message["role"] != "system"
+                ]
+            }
+            instructions = "\n\n".join(message["content"] for message in messages if message["role"] == "system")
+            if instructions:
+                request["instructions"] = instructions
+        else:
+            path = CHAT_PATH
+            request = {"messages": [dict(message) for message in messages]}
         try:
-            body, record_id = self.client.inference_with_record(scenario, CHAT_PATH, payload, extra_headers=headers)
+            body, record_id = self.client.inference_with_record(
+                scenario, path, {**self.request_options, "model": model, **request}, extra_headers=headers
+            )
         except ReefClientError as exc:
             raise DesignerError(f"the designer call was refused ({exc.status}): {exc.body[:300]}") from exc
         except OSError as exc:
             raise DesignerError(
                 f"the designer call did not complete within {self.client.timeout_s:g} s: {exc}"
             ) from exc
-        choices = body.get("choices")
-        message = choices[0].get("message") if isinstance(choices, list) and choices else None
-        text = message.get("content") if isinstance(message, Mapping) else None
-        return DesignerAnswer(text=text if isinstance(text, str) else "", record_id=record_id)
+        # A reply in another shape has no text; the reply parse then refuses it, and the record stays.
+        try:
+            if self.api == "responses":
+                text = "".join(
+                    part["text"]
+                    for item in body["output"]
+                    if item["type"] == "message"
+                    for part in item["content"]
+                    if part["type"] == "output_text"
+                )
+            else:
+                text = body["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            text = ""
+        return DesignerAnswer(text=text, record_id=record_id)
 
     def report(self, record_id: str, *, scenario: str, score: float, metadata: Mapping[str, object]) -> str:
         payload = {

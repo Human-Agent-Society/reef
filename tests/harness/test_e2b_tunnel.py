@@ -319,6 +319,35 @@ def test_a_lost_reply_acknowledgement_does_not_duplicate_stream_content(lost_ack
 
 
 @pytest.mark.unit
+def test_a_relay_that_answers_after_a_refused_poll_starts_the_pump() -> None:
+    # The sandbox is reachable a moment before its relay listens, and E2B answers that first poll with 502.
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    refused: list[str] = []
+
+    class RefuseFirstReady(relay.tunnel_handler()):
+        def answer(self, status: int, body: bytes = b"") -> None:
+            if self.path == "/ready" and not refused:
+                refused.append(self.path)
+                status = 502
+            super().answer(status, body)
+
+    tunnel_server = ThreadingHTTPServer(("127.0.0.1", 0), RefuseFirstReady)
+    tunnel_server.daemon_threads = True
+    threading.Thread(target=tunnel_server.serve_forever, daemon=True).start()
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=1)
+    try:
+        pump.start(timeout=10)
+        assert refused == ["/ready"]
+        assert pump.failure is None
+    finally:
+        pump.stop()
+        tunnel_server.shutdown()
+        tunnel_server.server_close()
+        gateway.close()
+
+
+@pytest.mark.unit
 def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path: Path) -> None:
     root = tmp_path / "reef-proposer-abc"
     (root / "workspace" / "harness" / "skills").mkdir(parents=True)

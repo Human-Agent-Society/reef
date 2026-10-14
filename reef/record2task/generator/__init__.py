@@ -11,6 +11,9 @@ and the recipe and the generator drive it over HTTP:
 - ``harbor``: the reply held to the authoring rules, the task written with ``reef.core.tasks``, tasks
   deduplicated by content, Harbor's oracle and nop agents run through the ``harbor`` command line, a split
   per generation.
+- ``terminus``: Terminus 2 for the generator's plays, whose episode is still verified when the agent fills its
+  context or a send-keys to its terminal fails (selected by ``import_path``; the only module here that imports
+  harbor).
 - ``service``: the HTTP API and its job runner; ``client``: the same steps as asynchronous calls; ``wire``:
   the JSON forms. The ``generator`` section that starts the service is parsed in
   ``reef.service.deploy.generator``, and ``reef.service.deploy.generator_process`` runs the process.

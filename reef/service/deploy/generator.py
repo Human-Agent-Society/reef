@@ -62,9 +62,19 @@ class GeneratorSettings:
     designer_timeout_s: float = config_option(
         DEFAULT_DESIGNER_TIMEOUT_S, help="Seconds one designer call may take; inference.timeout-s must allow it too."
     )
+    designer_api: str | None = config_option(
+        None,
+        help=(
+            "The API the designer asks through: openai (Chat Completions) or responses. By default responses when "
+            "designer calls go to this deployment and its inference.upstream-api is responses, openai otherwise."
+        ),
+    )
     designer_options: Mapping[str, Any] | None = dataclasses.field(
         default=None,
-        metadata=config_metadata('Extra fields of the designer\'s chat request, e.g. {"reasoning_effort": "none"}.'),
+        metadata=config_metadata(
+            'Extra fields of the designer\'s request, e.g. {"reasoning_effort": "none"}; with designer-api '
+            'responses, Responses fields such as {"reasoning": {"effort": "low"}}.'
+        ),
     )
     ready_timeout: int = config_option(
         DEFAULT_READY_TIMEOUT, help="Seconds reef serve waits for the generator to answer."
@@ -79,6 +89,8 @@ class GeneratorSettings:
             raise ValueError("generator.concurrency must be at least 1")
         if self.designer_timeout_s <= 0:
             raise ValueError("generator.designer-timeout-s must be positive")
+        if self.designer_api not in (None, "openai", "responses"):
+            raise ValueError("generator.designer-api must be openai or responses")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):

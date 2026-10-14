@@ -631,6 +631,8 @@ class TunnelPump:
             try:
                 async with tunnel.get(f"{self.url}/ready", headers=self.headers) as response:
                     if response.status == 200:
+                        # A poll made before the relay listened failed; the tunnel is up now.
+                        self.failure = None
                         return True
                     self.failure = f"HTTP {response.status}"
             except Exception as exc:

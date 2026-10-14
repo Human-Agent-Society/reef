@@ -135,3 +135,26 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     generator = pipeline["record2task"]["config"]["generator"]
     assert generator["module"] == "recipes.beta.spade:SpadeTaskGenerator"
     assert generator["config"]["state_dir"] == f"{tmp_path}/generations"
+
+
+@pytest.mark.parametrize(
+    ("upstream_api", "generator", "designer_api"),
+    [
+        ("openai", {}, "openai"),
+        ("responses", {}, "responses"),
+        ("responses", {"designer-api": "openai"}, "openai"),
+        ("responses", {"designer-url": "http://127.0.0.1:9000"}, "openai"),
+    ],
+)
+def test_the_designer_asks_in_the_api_the_section_names_or_the_upstreams(
+    tmp_path: Path, upstream_api: str, generator: dict[str, str], designer_api: str
+) -> None:
+    deployment = {
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m", "upstream-api": upstream_api},
+        "generator": {"tasks-root": str(tmp_path / "tasks"), **generator},
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer.api == designer_api

@@ -301,6 +301,10 @@ without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
 
+The generator service scores an episode whose verifier ran past its timeout
+as 0, and reports it, so a training play of that kind trains. The task's
+oracle passed the same verifier, so the timeout is the agent's.
+
 The recipe splits the rounds across its stages. The record stage
 (``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due
 and holds the source sessions. The record-to-task stage (``GeneratedTaskTasks``) runs one round
