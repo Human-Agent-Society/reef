@@ -721,9 +721,9 @@ Hermes Agent
 ~~~~~~~~~~~~
 
 The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
-``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``; the
-quirks write the merged configuration as YAML. They enforce these defaults
-so an episode stays self-contained and makes one request:
+``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``, which
+the render writes as YAML. The descriptor's checks keep these defaults so an
+episode stays self-contained and makes one request:
 
 - ``security.tirith_enabled`` disables the terminal scanner download. The
   scanner would also block a command it cannot resolve, such as
@@ -808,8 +808,8 @@ Codex CLI
 
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
-``config.toml``; the quirks write the merged configuration as TOML. The
-descriptor's checks keep these defaults so an episode stays self-contained:
+``config.toml``, which the render writes as TOML. The descriptor's checks
+keep these defaults so an episode stays self-contained:
 the update check, analytics, feedback, and telemetry are off, and the
 ``workspace-write`` sandbox has no network. Rendering rejects a tree that
 changes them.
