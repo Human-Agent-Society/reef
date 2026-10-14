@@ -808,9 +808,9 @@ Codex CLI
 
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
-``config.toml``; the quirks write the merged configuration as TOML. They
-enforce these defaults so an episode stays self-contained: the update
-check, analytics, feedback, and telemetry are off, and the
+``config.toml``; the quirks write the merged configuration as TOML. The
+descriptor's checks keep these defaults so an episode stays self-contained:
+the update check, analytics, feedback, and telemetry are off, and the
 ``workspace-write`` sandbox has no network. Rendering rejects a tree that
 changes them.
 
@@ -1360,8 +1360,8 @@ Descriptor fields
   ``install`` commands, which would otherwise install the latest release
   over the person's own ``claude``). The ``claude`` episode ``env`` sets both
   too. A variable the shell sets wins. Claude Code applies the ``env`` block
-  of ``settings.json`` over the environment, so the ``claude`` quirks reject
-  a tree that sets either one there.
+  of ``settings.json`` over the environment, so the ``claude`` descriptor's
+  checks reject a tree that sets either one there.
 - ``client_args`` lists arguments the wrapper puts ahead of the person's own,
   for a setting the rendered tree must not undo. ``claude`` passes
   ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
