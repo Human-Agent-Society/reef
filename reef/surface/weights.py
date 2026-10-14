@@ -14,6 +14,7 @@ from reef.surface.base import (
     ArtifactActivator,
     ComponentSurface,
     InferenceHooks,
+    RecoveryRestorer,
     ServingRuntime,
     Surface,
     WeightRuntime,
@@ -43,7 +44,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader(ArtifactActivator):
+class WeightLoader(ArtifactActivator, RecoveryRestorer):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -136,11 +137,12 @@ class WeightLoader(ArtifactActivator):
         rollbacks, where the weights are already in place, and its signature
         cannot tell which caller it has. This runs on the startup path only.
 
-        Loads on a positive mismatch — both versions known and different. An
-        artifact recording no version says nothing about the engine, and a
-        runtime already serving that version needs nothing.
+        The runtime hook defaults to keeping resident weights. It receives a
+        lazy artifact so an opted-out runtime never downloads a checkpoint.
+        A known matching version needs no restore. When the serving version
+        is unknown, the runtime hook decides whether its weights need loading.
         """
-        if not isinstance(runtime, WeightRuntime) or artifact.local_path is None:
+        if not isinstance(runtime, WeightRuntime):
             return None
         recorded = artifact_runtime_load_id(artifact)
         if recorded is None:
@@ -148,13 +150,18 @@ class WeightLoader(ArtifactActivator):
         served = self._served_version(runtime)
         if served == recorded:
             return None
+        runtime_load_id = runtime.restore_recovered_checkpoint(artifact)
+        if runtime_load_id is None:
+            return None
+        if not isinstance(runtime_load_id, str) or not runtime_load_id:
+            raise TypeError("restore_recovered_checkpoint must return a non-empty runtime load ID or None")
         logger.info(
-            "restoring %r into the serving runtime: published under %r, engine holds %r",
+            "restored %r into the serving runtime: published under %r, engine previously held %r",
             artifact.ref.release_id,
             recorded,
             served,
         )
-        return self.load(artifact, runtime)
+        return runtime_load_id
 
 
 class WeightInferenceHooks(InferenceHooks):

@@ -198,7 +198,7 @@ class MLXInferenceBackend(InferenceHandler, InferenceBackend):
 
     def runtime_load_ids(self) -> Sequence[str]:
         """The one adapter the engine currently serves, if any."""
-        current = getattr(self._runtime, "current_runtime_load_id", None)
+        current = self._runtime.serving_runtime_load_id()
         return (current,) if isinstance(current, str) and current else ()
 
     def pause(self) -> None:

@@ -26,6 +26,7 @@ from reef.runtime.interfaces import (
     RuntimeContractError,
     TrainingMethod,
 )
+from reef.runtime.scheduler import RuntimeScheduler
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective
 from reef.train.algos.signals import StepSignal
@@ -1257,3 +1258,101 @@ def test_a_rejected_candidate_is_dropped_from_the_serving_half(tmp_path: Path) -
     assert serving.staged_candidate(candidate.candidate_id) is None
     with pytest.raises(RuntimeContractError, match="no pending mlx candidate"):
         serving.activate_candidate(candidate)
+
+
+@pytest.mark.unit
+def test_startup_recovery_materializes_the_checkpoint_only_when_loading(tmp_path: Path) -> None:
+    from reef.artifact import Artifact, InMemoryRepositoryBackend
+    from reef.surface.weights import WeightLoader
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    (adapter / "adapters.safetensors").write_bytes(b"weights")
+    backend = InMemoryRepositoryBackend.factory(adapter, root=tmp_path / "repository")("math")
+    ref = backend.fork(metadata={"runtime_load_id": "old-incarnation:4"})
+    artifact = Artifact(ref, backend, metadata=backend.metadata())
+    serving = MLXServingRuntime(FakeEngine())
+
+    assert artifact.local_path is None
+    assert WeightLoader().restore_recovered(artifact, serving) == "fake-2"
+    assert len(serving.engine.loaded) == 1
+    assert (serving.engine.loaded[0] / "adapters.safetensors").read_bytes() == b"weights"
+    assert serving.inference_admission_status["open"] is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("startup", [False, True])
+def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(tmp_path: Path, startup: bool) -> None:
+    from reef.artifact.artifact import Artifact
+    from reef.surface.weights import WeightLoader
+
+    class CheckedServing(MLXServingRuntime):
+        def release(self):
+            assert self.current_runtime_load_id() == self.serving_runtime_load_id()
+            super().release()
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    engine = FakeEngine()
+    serving = CheckedServing(engine)
+
+    artifact = Artifact.local(adapter, metadata={"runtime_load_id": "old-incarnation:4"})
+    restored = WeightLoader().restore_recovered(artifact, serving) if startup else serving.restore_checkpoint(artifact)
+
+    assert restored == "fake-2"
+    assert serving.inference_admission_status["open"] is True
+    assert serving.serving_runtime_load_id() == restored
+    assert serving.current_runtime_load_id() == restored
+    assert engine.loaded == [adapter]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("startup", [False, True])
+def test_failed_checkpoint_restore_keeps_admission_closed(tmp_path: Path, startup: bool) -> None:
+    from reef.artifact.artifact import Artifact
+    from reef.surface.weights import WeightLoader
+
+    class FailingEngine(FakeEngine):
+        def load_adapter(self, source):
+            raise RuntimeError("adapter load failed")
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    serving = MLXServingRuntime(FailingEngine())
+    current = serving.current_runtime_load_id()
+
+    artifact = Artifact.local(adapter, metadata={"runtime_load_id": "old-incarnation:4"})
+    with pytest.raises(RuntimeError, match="adapter load failed"):
+        if startup:
+            WeightLoader().restore_recovered(artifact, serving)
+        else:
+            serving.restore_checkpoint(artifact)
+
+    assert serving.inference_admission_status["open"] is False
+    assert serving.current_runtime_load_id() == current
+    assert serving.serving_runtime_load_id() == current
+
+
+@pytest.mark.unit
+def test_scheduler_commit_publishes_mlx_runtime_id_before_reopening_admission(tmp_path: Path) -> None:
+    class CheckedServing(MLXServingRuntime):
+        def resume_admission(self):
+            assert self.current_runtime_load_id() == self.serving_runtime_load_id()
+            super().resume_admission()
+
+    engine = FakeEngine()
+    serving = CheckedServing(engine)
+    training = MLXRuntime(engine, checkpoint_dir=str(tmp_path / "ckpt"), serving=serving)
+    scheduler = RuntimeScheduler(training, serving)
+    prepared = scheduler.prepare_training_step(batch(), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0)
+    candidate = scheduler.train_candidate(prepared.payload)
+
+    activated = scheduler.activate_candidate(candidate)
+    assert serving.inference_admission_status["open"] is False
+    assert serving.serving_runtime_load_id() == activated.runtime_load_id
+    assert serving.current_runtime_load_id() != activated.runtime_load_id
+
+    scheduler.acknowledge_commit(1, candidate.training_job_id)
+
+    assert serving.inference_admission_status["open"] is True
+    assert serving.current_runtime_load_id() == activated.runtime_load_id

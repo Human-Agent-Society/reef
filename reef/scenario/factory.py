@@ -43,7 +43,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
-from reef.surface.base import RecoveryRestorer, Surface
+from reef.surface.base import Surface
 from reef.surface.files import REPOSITORY_FILES
 from reef.train.trainer import ComponentTrainer
 
@@ -336,22 +336,23 @@ class ScenarioFactory:
                 local_dir=self._local_artifact_dir,
             )
             repository.synchronize_checkpoint()
-            if isinstance(surface.loader, RecoveryRestorer):
-                # Deciding which release should serve is not the same as the
-                # runtime holding it. A runtime whose weights live in this
-                # process lost them when the previous one exited, and nothing
-                # here used to put them back: the scenario resumed reporting its
-                # full step count while answering from the bare base model.
-                #
-                # `resolve` rather than `Artifact(ref, repository)`: the bare
-                # constructor carries neither the local path nor the metadata,
-                # so a restorer would see an artifact with nothing to load and
-                # no record of the version it was published under.
-                surface.restore_recovered(repository.resolve(current_artifact), runtime)
+            # Repair the head mirror before reading the checkpoint's metadata.
+            # Runtimes decide whether recovery needs bytes before fetching them.
+            recovered_metadata = None if isinstance(current_artifact, LiveWeightArtifactRef) else backend.metadata()
+            if not isinstance(current_artifact, LiveWeightArtifactRef) and backend.current() != current_artifact:
+                raise ArtifactConflict(
+                    "repository head changed while reading recovered artifact metadata; retry recovery"
+                )
+            recovered_artifact = Artifact(
+                current_artifact,
+                repository,
+                metadata=recovered_metadata,
+            )
+            surface.restore_recovered(recovered_artifact, runtime)
             if not isinstance(current_artifact, LiveWeightArtifactRef):
                 # Traffic must not reach a recovered scenario before its committed
                 # head is servable; a failed activation leaves the scenario unloaded.
-                surface.activate(Artifact(current_artifact, repository), runtime)
+                surface.activate(recovered_artifact, runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,

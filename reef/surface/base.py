@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef, ArtifactRepository, ArtifactValidator
 from reef.core.components import validate_component_name
 from reef.core.model_metadata import ModelMetadata
 
@@ -44,6 +44,15 @@ class WeightRuntime(ServingRuntime):
 
     @abstractmethod
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
+
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str | None:
+        """Optionally reload startup weights, returning their new runtime load ID.
+
+        The artifact may be unmaterialized. Runtimes that lose their weights
+        across Reef restarts materialize it here before loading. The default
+        preserves resident weights without downloading checkpoint bytes.
+        """
+        return None
 
     def activate_checkpoint(self, artifact: Artifact) -> str:
         """Bind a recovered or republished artifact before the scenario serves it.
@@ -108,7 +117,9 @@ class RecoveryRestorer(ArtifactLoader):
     """
 
     @abstractmethod
-    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None: ...
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
+        """Restore if needed, materializing the artifact only when loading it."""
+        ...
 
 
 class InferenceHooks(ABC):
@@ -238,6 +249,19 @@ class ComponentFileTree(FileTree):
 FLAT_COMPONENT = "release"
 
 
+class ComponentRepository(ArtifactRepository):
+    """Materialize one component from its recovered release on demand."""
+
+    def __init__(self, release: Artifact, name: str) -> None:
+        self.release = release
+        self.name = name
+
+    def materialize(self, ref: ArtifactRef) -> Artifact:
+        if ref.release_id != self.release.ref.release_id:
+            raise ArtifactNotFound(f"component repository does not hold release {ref.release_id!r}")
+        return self.release.component(self.name)
+
+
 @dataclass(frozen=True, init=False)
 class Surface:
     """The explicit serving capabilities bound to one scenario, per release component.
@@ -338,9 +362,23 @@ class Surface:
         """The component a client pulls as a file tree, if any."""
         return next((name for name, component in self.components.items() if component.files is not None), None)
 
-    def component_artifact(self, artifact: Artifact, name: str) -> Artifact:
-        """``name``'s view of a release: the artifact itself when the release is flat."""
-        return artifact if self.single else artifact.component(name)
+    def component_artifact(self, artifact: Artifact, name: str, *, materialize: bool = True) -> Artifact:
+        """``name``'s view of a release, optionally keeping startup bytes lazy."""
+        if self.single:
+            return artifact
+        if materialize or artifact.local_path is not None:
+            return artifact.component(name)
+        manifest = artifact.components
+        if manifest is None or name not in manifest.entries:
+            raise ArtifactNotFound(f"release {artifact.ref.release_id!r} binds no component {name!r}")
+        if manifest.single:
+            return artifact
+        entry = manifest.entries[name]
+        return Artifact(
+            ArtifactRef(entry.content_id, artifact.ref.release_id, artifact.ref.parent_release_id),
+            ComponentRepository(artifact, name),
+            metadata=entry.metadata,
+        )
 
     @property
     def loader(self) -> ArtifactLoader | None:
@@ -439,7 +477,7 @@ class Surface:
             return
         loader = self.components[name].loader
         if isinstance(loader, RecoveryRestorer):
-            loader.restore_recovered(self.component_artifact(artifact, name), runtime)
+            loader.restore_recovered(self.component_artifact(artifact, name, materialize=False), runtime)
 
     def activate(
         self,
@@ -463,7 +501,7 @@ class Surface:
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
         loader.activate(
-            self.component_artifact(artifact, name),
+            self.component_artifact(artifact, name, materialize=False),
             runtime,
             source=None if source is None else self.component_artifact(source, name),
         )
