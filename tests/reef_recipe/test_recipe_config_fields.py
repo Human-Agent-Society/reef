@@ -247,9 +247,9 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     stages = PipelineConfig.from_setting(
         {"task2batch": {"config": {"batch_size": 2}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    trainer = StagedRecipe(
-        **runtime_bindings(StubTrainingRuntime(max_staleness=3)), max_staleness=3, pipeline_stages=stages
-    ).build("scenario", SQLiteRecordStore())
+    trainer = StagedRecipe(**runtime_bindings(StubTrainingRuntime()), max_staleness=3, pipeline_stages=stages).build(
+        "scenario", SQLiteRecordStore()
+    )
 
     assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
     assert isinstance(trainer.pipeline.task2batch, ThresholdBatches)

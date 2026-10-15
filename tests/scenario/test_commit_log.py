@@ -353,7 +353,7 @@ class RecordingRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         del objective
         payload = {
@@ -395,11 +395,15 @@ class RecordingRuntime(StubTrainingRuntime):
         return self._served_version
 
 
-def sft_inference(agent_record_id: str) -> AgentRecord:
+def sft_inference(agent_record_id: str, runtime_load_id: str | None = None) -> AgentRecord:
+    """An inference record; ``runtime_load_id`` is the version that served it, when the runtime reports one."""
+    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    if runtime_load_id is not None:
+        payload["runtime_load_id"] = runtime_load_id
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        payload=payload,
         agent_record_id=agent_record_id,
     )
 
@@ -520,7 +524,9 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     )
     dispatcher.accept_record(sft_inference("i1"))
     dispatcher.accept_record(sft_report("r1", "i1"))
-    dispatcher.accept_record(sft_inference("i2"))
+    wait_for_step(dispatcher, 1)
+    # The staleness check trains only data of the served version, so the second record comes from w1.
+    dispatcher.accept_record(sft_inference("i2", "w1"))
     dispatcher.accept_record(sft_report("r2", "i2"))
     wait_for_step(dispatcher, 2)
 
@@ -575,7 +581,8 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
-    first.accept_record(sft_inference("i2"))
+    wait_for_step(first, 1)
+    first.accept_record(sft_inference("i2", "w1"))
     first.accept_record(sft_report("r2", "i2"))
     wait_for_step(first, 2)
     committed_head = first.get_or_create_scenario("math").repository.require_current_artifact()
@@ -670,7 +677,8 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     recovered = second.get_or_create_scenario("math")
     assert recovered.trainer.data_offset == 2  # resumed at the committed watermark
 
-    second.accept_record(sft_inference("i2"))
+    # The recovered head serves w1, so the new pair comes from w1.
+    second.accept_record(sft_inference("i2", "w1"))
     second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
@@ -696,7 +704,8 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
     first_runtime = RecordingRuntime()
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(sft_inference("i1"))
-    first.accept_record(sft_inference("i2"))
+    # The staleness check trains only data of the served version; the step-2 inference claims w1 for this test.
+    first.accept_record(sft_inference("i2", "w1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
@@ -751,7 +760,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     assert recovered.records.get("math", "i1") is not None
     assert recovered.scenario_step == 1
 
-    second.accept_record(sft_inference("i2"))
+    second.accept_record(sft_inference("i2", "w1"))
     second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
     assert second_runtime.trained_batches == [["i2"]]
@@ -852,9 +861,9 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     for index in (1, 2, 3):
-        first.accept_record(sft_inference(f"i{index}"))
+        first.accept_record(sft_inference(f"i{index}", None if index == 1 else f"w{index - 1}"))
         first.accept_record(sft_report(f"r{index}", f"i{index}"))
-    wait_for_step(first, 3)
+        wait_for_step(first, index)
 
     path = commit_log_path(agent_record_dir)
     lines = path.read_text(encoding="utf-8").splitlines()

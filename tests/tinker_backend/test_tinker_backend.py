@@ -351,12 +351,13 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     assert step.next_algorithm_state == {"steps": 1}
 
 
-def test_stale_policy_is_dropped_through_generic_backend(runtime, objective):
+def test_an_older_producing_version_trains_through_the_generic_backend(runtime, objective):
+    # The record-to-record stage decides which samples are too stale; the backend trains what it receives.
     value, client = runtime
     backend = value.backend(objective)
-    result = backend.prepare_step(TrainingBatch("stale", (item("old:0"),)), {}, 0)
-    assert result.outcome == "drop"
-    assert not client.calls
+    result = backend.prepare_step(TrainingBatch("older", (item("old:0"),)), {}, 0)
+    assert result.outcome != "drop"
+    assert client.calls
 
 
 def test_skip_and_unsupported_loss_do_not_mutate_remote(runtime, objective):

@@ -11,32 +11,40 @@ Terminus 2 agent through a Reef runner. With ``native``, the tree can change
 the agent's tools (``native_tool``) and its responses to loop events
 (``native_hook``).
 
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| Adapter      | Config targets                                             | Install pin                               |
-+==============+============================================================+===========================================+
-| ``pi``       | ``primary`` -> ``pi-agent/settings.json``,                 | npm ``@earendil-works/pi-coding-agent``   |
-|              | ``models`` -> ``pi-agent/models.json``                     | 0.84.2                                    |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``opencode`` | ``primary`` -> ``opencode/opencode.json``                  | npm ``opencode-ai`` 1.18.18               |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``claude``   | ``primary`` -> ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``codex``    | ``primary`` -> ``codex/config.toml``                       | npm ``@openai/codex`` 0.153.4             |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``dsh``      | ``primary`` -> ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
-|              | ``env`` -> ``dsh/.env``,                                   |                                           |
-|              | ``web`` -> ``dsh/profiles/web/cordis.patch.yml``,          |                                           |
-|              | ``web_manifest`` -> ``dsh/profiles/web/package.json``      |                                           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``hermes``   | ``primary`` -> ``hermes/config.yaml``,                     | git ``NousResearch/hermes-agent``         |
-|              | ``env`` -> ``hermes/.env``                                 | at ``v2026.8.31`` (0.21.0)                |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``native``   | ``primary`` -> ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
-|              | ``models`` -> ``native/models.json``                       |                                           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``terminus`` | ``primary`` -> ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                            | reef-eval ships with reef-infra           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
+.. list-table::
+   :header-rows: 1
+
+   * - Adapter
+     - Config targets
+     - Install pin
+   * - ``pi``
+     - ``primary`` -> ``pi-agent/settings.json``, ``models`` ->
+       ``pi-agent/models.json``
+     - npm ``@earendil-works/pi-coding-agent`` 0.84.2
+   * - ``opencode``
+     - ``primary`` -> ``opencode/opencode.json``
+     - npm ``opencode-ai`` 1.18.18
+   * - ``claude``
+     - ``primary`` -> ``claude/settings.json``
+     - npm ``@anthropic-ai/claude-code`` 2.1.257
+   * - ``codex``
+     - ``primary`` -> ``codex/config.toml``
+     - npm ``@openai/codex`` 0.153.4
+   * - ``dsh``
+     - ``primary`` -> ``dsh/profiles/headless/cordis.patch.yml``, ``env`` ->
+       ``dsh/.env``, ``web`` -> ``dsh/profiles/web/cordis.patch.yml``,
+       ``web_manifest`` -> ``dsh/profiles/web/package.json``
+     - npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5
+   * - ``hermes``
+     - ``primary`` -> ``hermes/config.yaml``, ``env`` -> ``hermes/.env``
+     - git ``NousResearch/hermes-agent`` at ``v2026.8.31`` (0.21.0)
+   * - ``native``
+     - ``primary`` -> ``native/config.json``, ``models`` ->
+       ``native/models.json``
+     - none: ``reef-native`` ships with reef
+   * - ``terminus``
+     - ``primary`` -> ``terminus/config.json``
+     - none: ``reef-terminus`` ships with reef, reef-eval ships with reef-infra
 
 Rendering
 ~~~~~~~~~
@@ -64,8 +72,9 @@ every adapter. No adapter replaces it, and an adapter registered through the
 bundled one. It turns entries into files by these rules:
 
 - Each config target is a JSON object: ``config`` entries deep-merge into it in
-  tree order, over the defaults the descriptor enforces. Every target is written
-  even when no entry touches it, so those defaults always reach the agent.
+  tree order, over the defaults the descriptor enforces. Every target is
+  written even when no entry touches it, so those defaults always reach the
+  agent.
 - All ``rules`` entries concatenate, in tree order, into the one rules file. A
   tree with no ``rules`` entry renders no rules file.
 - Each named kind renders one file per entry through the descriptor's path
@@ -79,11 +88,9 @@ whatever the adapter declares; for example:
 - An entry whose kind the descriptor gives no path, such as ``code_extension``
   under ``native``.
 - A ``config`` entry naming a target the descriptor does not declare.
-- A ``config`` entry that moves a key of the target's ``locked`` list off the
-  value its ``defaults`` set, or that sets a locked key the defaults never
-  name. A locked path is dotted key names with ``*`` for any key of an object
-  or any item of a list, and the check runs before the adapter's own steps, so
-  no adapter can skip it.
+- A tree whose nodes fail one of the ``checks`` the descriptor declares (see
+  `Node checks`_). The checks run before the adapter's own steps, so no
+  adapter can skip them.
 - A ``native_graph`` or ``native_agent`` naming a tool, skill, agent, or graph
   that no entry defines, or agents that delegate in a cycle.
 - A second ``native_loop``: a tree holds at most one.
@@ -93,8 +100,8 @@ What the adapter owns
 
 An adapter is configured mostly via declaration. ``descriptor.yaml`` supplies
 the path template for each tree node kind, the named config targets, the
-defaults merged under every tree, and the keys a tree must keep (``locked``).
-An adapter whose agent differs only in where
+defaults merged under every tree, and the checks the tree's nodes must pass
+(``checks``). An adapter whose agent differs only in where
 files go needs no code at all, although they must comply with the following
 rules:
 
@@ -102,10 +109,15 @@ rules:
 - ``files.rules`` and ``files.skill`` are required.
 - every named template must contain ``{name}``.
 
+Steps
+^^^^^
+
 An adapter may also declare a ``quirks`` module to further customize the
-rendering process. The module defines one subclass of ``AdapterRenderer``
-from ``reef.harness.adapters.descriptor``; the loader finds it in the module.
-The render calls its steps in this order, and each step is given only its own
+rendering process. Before any of its steps run, the render runs the node
+checks the descriptor declares, which `Node checks`_ explains below. The
+module defines one subclass of ``AdapterRenderer`` from
+``reef.harness.adapters.descriptor``; the loader finds it in the module. The
+render calls its steps in this order, and each step is given only its own
 files:
 
 .. list-table::
@@ -116,7 +128,7 @@ files:
      - Use it to
    * - ``process_config``
      - One merged config file, as a JSON object
-     - Refuse or adjust config, such as a shape the declaration cannot state
+     - Adjust config, or refuse a config a check cannot describe
    * - ``process_skill``
      - The text of one ``skill`` file
      - Add or check skill frontmatter
@@ -125,8 +137,8 @@ files:
      - Add or check command frontmatter
    * - ``check_model_route``
      - The processed config files, skill files and command files
-     - Refuse the model routes the harness reads beyond the binding's keys,
-       such as a fallback model or a second provider
+     - Refuse a model route that no check can describe, such as a model in
+       the frontmatter of a skill or a command
    * - ``finalize_render``
      - Every rendered file as text, each config file already written in its
        format
@@ -146,7 +158,9 @@ gets the same values from ``skill_frontmatter(path, text)``.
 
 .. important::
 
-   Prefer the narrow steps over ``finalize_render``. A ``process_*`` step sees
+   Write a rule on config values as a node check, not as a step (see
+   `Node checks`_). When you need to customize the tree processing, prefer
+   the narrow steps over ``finalize_render``. A ``process_*`` step sees
    one file of one kind, and ``check_model_route`` only reads, so a reader can
    tell what each one may change and a reviewer can check it in isolation.
    ``finalize_render`` sees and may rewrite every file, including config files
@@ -162,8 +176,9 @@ credential (the value holding ``{api_key}``) is set beside it. The binding is
 merged after the tree and wins every key it writes, so only a tree rendered
 without the binding, as admission renders a proposal, can set one; admission
 refuses an inline credential, so the credential tells the two apart. No
-adapter can turn this check off. Each adapter's ``check_model_route`` refuses
-the other routes its harness reads.
+adapter can turn this check off. Each adapter refuses the other routes its
+harness reads, such as a fallback model or a second provider, in its config
+checks, and in ``check_model_route`` what the checks cannot describe.
 
 Every step is a static method, and defining one as an ordinary method fails
 when the class is created. The render uses the class without making an
@@ -201,6 +216,106 @@ Seaming engine and adapter together
 - One rules file is mandatory. An agent reading rules from several needs its
   quirks to split the concatenated text apart again.
 
+Node checks
+^^^^^^^^^^^
+
+A descriptor's ``checks`` state what the nodes of a tree must keep or must
+not set. This is particularly useful during harness evolution. Each check has a
+``key``, a ``match`` expression that every value at the key must match, and
+an optional ``reason`` that a refusal gives.
+
+Adapter authors should use ``checks`` rather than custom steps to enforce rules
+on configuration values: a check is declared beside the defaults it protects,
+and it is more discoverable and maintainable than a snippet of code in a corner
+of ``quirks.py``.
+
+``config`` is the node kind that takes checks right now. Its nodes are
+fragments: each one merges into a config target over the target's
+``defaults``, and the model binding merges last when one is applied. So the
+checks are declared on the target, ``files.config.<target>.checks``, and match
+the merged target rather than each node. This is what lets ``IsDefault()``
+compare a key with the target's default:
+
+.. code-block:: yaml
+
+   files:
+     config:
+       primary:
+         path: "claude/settings.json"
+         defaults:
+           includeCoAuthoredBy: false
+         checks:
+           - key: includeCoAuthoredBy
+             match: IsDefault()
+           - key: [model, fallbackModel]
+             match: IsAbsent()
+             reason: Reef's model binding chooses the model
+           - key: env.DISABLE_TELEMETRY
+             match: |-
+               Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
+             reason: benchmark episodes keep telemetry off
+
+The render runs each target's checks on the merged target, before any adapter
+step. Reef owns the matchers. If the existing ones are not enough, consider
+contributing a matcher to Reef instead of overriding a step. The render refuses
+a tree whose nodes fail a check, for example::
+
+   claude composition fails the check on env key 'AWS_REGION' in
+   claude/settings.json: Reef's model binding chooses the endpoint, ...
+
+A refusal names the key, and for ``Each`` the failing key or item, but never
+the value, which can be a credential the binding wrote. A check without a
+``reason`` gives its match expression instead.
+
+**Keys.** ``key`` is required: dot-separated key names, or a list of them
+(one check per key). ``.`` names the whole checked value, for a check on its
+top-level key names; a check without a key fails to load. A ``*`` segment is
+every key of an object and every item of a list. A ``**`` segment is any
+number of segments, zero included. A key the checked value does not have is
+absent. A ``*`` or ``**`` segment visits only the values the checked value
+has.
+
+**Matchers.** Write a match expression as nested calls with JSON literals
+(``true``, ``false`` and ``null`` included). Use ``|-`` in YAML to wrap a long
+one over several lines.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Matcher
+     - Matches
+   * - ``IsDefault()``
+     - For a config target: the value its ``defaults`` give the key, or an
+       absent key when they give none. Only for a key without ``*`` or ``**``.
+   * - ``IsAbsent()``
+     - A key the checked value does not have. An empty value is a set one.
+   * - ``Eq(v)``, ``IsIn([v, ...])``
+     - A value equal to ``v``, or to one of the list, with its type: ``false``
+       matches neither ``0`` nor ``"false"``.
+   * - ``IsObject()``, ``IsInt()``, ``Ge(n)``
+     - An object; an integer that is not a boolean; a number at least ``n``.
+   * - ``StartsWith(s)``, ``EndsWith(s)``, ``HasSubstr(s)``,
+       ``MatchesRegex(s)``
+     - Text with that prefix, suffix or substring, or text that the regular
+       expression matches as a whole.
+   * - ``Lowercase(m)``, ``Uppercase(m)``, ``Strip(m)``
+     - Text that matches ``m`` after the change.
+   * - ``ParseJson(m)``
+     - A string holding JSON whose value matches ``m``.
+   * - ``Each(m)``, ``Contains(m)``
+     - Every entry of an object or item of a list matches ``m``, or at least
+       one does. ``Each`` also matches an absent key.
+   * - ``Key(m)``, ``Value(m)``
+     - An object entry whose key, or whose value, matches ``m``. Use them
+       inside ``Each`` and ``Contains``.
+   * - ``AllOf(m, ...)``, ``AnyOf(m, ...)``, ``Not(m)``
+     - Every matcher matches, at least one does, or ``m`` does not.
+
+Text matchers read a string as it is, and a number, a boolean or null as its
+JSON text, so ``Lowercase(Eq("0"))`` matches ``0``. They match no object, list
+or absent key. Only ``IsAbsent``, ``Not`` and ``Each`` match an absent key, so
+"if it is set, it must be X" is ``AnyOf(IsAbsent(), X)``.
+
 Misc
 ^^^^
 
@@ -211,8 +326,8 @@ one of the two becomes a release.
 
 Restrictions that depend on how an episode runs, rather than on what a tree
 contains, are checked at launch instead. Terminus's requirement for remote E2B
-tasks is one: a tree carrying a ``code_extension`` renders, then fails to launch
-under the wrong executor.
+tasks is one: a tree carrying a ``code_extension`` renders, then fails to
+launch under the wrong executor.
 
 Codex model metadata
 ~~~~~~~~~~~~~~~~~~~~
@@ -235,8 +350,8 @@ Endpoints without these fields can provide explicit values under
          context_window: 64000
          reasoning: false
 
-A Python ``ModelBinding`` accepts ``metadata=ModelMetadata(64000, False)``;
-a named ``evolution.models`` binding accepts the same fields under ``metadata``.
+A Python ``ModelBinding`` accepts ``metadata=ModelMetadata(64000, False)``; a
+named ``evolution.models`` binding accepts the same fields under ``metadata``.
 Values in ``evolution.model_metadata`` take precedence over discovery. Missing
 or unavailable metadata leaves Codex's existing fallback behavior intact; Reef
 does not invent a model's context window. Restart the service to refresh cached
@@ -248,30 +363,30 @@ capabilities after relocation. Codex retains its own context safety margin and
 compaction policy. Custom-model entries keep the pinned Codex unknown-model
 instructions, standard shell tools, and low/medium/high effort when reasoning
 is supported. The catalog includes all bundled models, so selecting another
-model with ``--model`` or the interactive picker retains its native instructions
-and tools, including ``gpt-6-astra``. Provider-prefixed names such as
-``openai/gpt-6-astra`` retain the same native configuration.
-Explicit and discovered capabilities override the selected model's
-context window and reasoning support even when its name matches a bundled model;
-other native fields and supported reasoning levels remain intact.
+model with ``--model`` or the interactive picker retains its native
+instructions and tools, including ``gpt-6-astra``. Provider-prefixed names such
+as ``openai/gpt-6-astra`` retain the same native configuration. Explicit and
+discovered capabilities override the selected model's context window and
+reasoning support even when its name matches a bundled model; other native
+fields and supported reasoning levels remain intact.
 ``codex/default_instructions.md`` records the effective unknown-model prompt
-exported with this adapter configuration. It is derived from
-`OpenAI Codex rust-v0.153.4 <https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/prompt.md>`__,
+exported with this adapter configuration. It is derived from `OpenAI Codex
+rust-v0.153.4
+<https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/prompt.md>`__,
 under the Apache-2.0 license, with SHA-256
-``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``.
-Codex removes instructions for tools disabled by the adapter from the source
-prompt. A real-binary regression compares the resulting request instructions
-with and without metadata. ``codex/bundled_models.json`` is configuration data
-exported from the same Apache-2.0-licensed CLI with
-``codex debug models --bundled``. Its SHA-256 is
-``661ed96cf0542e8ee117f1ddfd879f416cc05dc96dd1955249a13c04a313ba5e``.
-Keep both resources synchronized with the Codex install pin; the real-binary
-regression compares the complete bundled catalog, including instructions and
-tools. Rendering reads these packaged resources without starting Codex or
-making a network request.
-Tree rules and skills are still added normally. Tree entries may supply the
-same capability fields through the ``models`` config target, but may not set
-an arbitrary catalog path or inject native Codex model fields.
+``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``. Codex
+removes instructions for tools disabled by the adapter from the source prompt.
+A real-binary regression compares the resulting request instructions with and
+without metadata. ``codex/bundled_models.json`` is configuration data exported
+from the same Apache-2.0-licensed CLI with ``codex debug models --bundled``.
+Its SHA-256 is
+``661ed96cf0542e8ee117f1ddfd879f416cc05dc96dd1955249a13c04a313ba5e``. Keep both
+resources synchronized with the Codex install pin; the real-binary regression
+compares the complete bundled catalog, including instructions and tools.
+Rendering reads these packaged resources without starting Codex or making a
+network request. Tree rules and skills are still added normally. Tree entries
+may supply the same capability fields through the ``models`` config target, but
+may not set an arbitrary catalog path or inject native Codex model fields.
 
 Terminus 2
 ~~~~~~~~~~
@@ -489,7 +604,8 @@ Command fields have these constraints:
      - Strings when present.
    * - ``agent``
      - A string naming an enabled tree agent or a built-in agent: ``build``,
-       ``plan``, ``general``, ``explore``, ``title``, ``summary``, or ``compaction``.
+       ``plan``, ``general``, ``explore``, ``title``, ``summary``, or
+       ``compaction``.
    * - ``subtask``
      - A boolean when present.
    * - ``model``
@@ -498,10 +614,10 @@ Command fields have these constraints:
 Tree agents are configured under ``agent`` (or the older ``mode``). Their
 ``disable`` and ``hidden`` fields are booleans, and ``mode`` is ``subagent``,
 ``primary``, or ``all``. An agent may not set a different ``name``.
-``default_agent`` must name an enabled, non-hidden agent that is not a subagent.
-Without ``default_agent``, keep at least one agent meeting those conditions.
-Reef rejects invalid configurations before opencode can fail to start or load
-a command.
+``default_agent`` must name an enabled, non-hidden agent that is not a
+subagent. Without ``default_agent``, keep at least one agent meeting those
+conditions. Reef rejects invalid configurations before opencode can fail to
+start or load a command.
 
 Configuration and model binding
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -535,8 +651,8 @@ After installing a dsh harness, start its browser interface:
    reef-dsh web
 
 Stop it with Ctrl-C. The wrapper waits for dsh to exit, removes the temporary
-session copy, and exits with dsh's status (130 after Ctrl-C), without a traceback.
-The headless profile is used for evaluation episodes.
+session copy, and exits with dsh's status (130 after Ctrl-C), without a
+traceback. The headless profile is used for evaluation episodes.
 
 Rendered files and profiles
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -566,13 +682,14 @@ those settings. Node paths and transformations are:
 The model binding uses an ``llm-pi-ai`` route. Its ``apiKeyEnv`` names the
 key supplied through the ``env`` config target, dsh's ``.env`` launch layer.
 
-The ``web`` target is that profile's patch layer. It carries the same
-defaults as the headless patch, is checked the same way, and gets the model
-binding too, so the wrapper points it at its proxy. The upstream web template compresses session logs. Reef disables compression
-in both profiles so they can share the sessions root; a compressed profile
-would reject the headless profile's plain logs. The ``web_manifest`` target is the profile's
-``package.json`` with ``patchReload: startup``: the manifest dsh writes for
-a new web profile sets ``live``, and with it ``dsh web`` exits at start.
+The ``web`` target is that profile's patch layer. It carries the same defaults
+as the headless patch, is checked the same way, and gets the model binding too,
+so the wrapper points it at its proxy. The upstream web template compresses
+session logs. Reef disables compression in both profiles so they can share the
+sessions root; a compressed profile would reject the headless profile's plain
+logs. The ``web_manifest`` target is the profile's ``package.json`` with
+``patchReload: startup``: the manifest dsh writes for a new web profile sets
+``live``, and with it ``dsh web`` exits at start.
 
 A ``code_extension`` renders once; the web patch inserts it from the
 headless profile's directory (``../headless/extensions/<name>.mjs``). A
@@ -597,7 +714,8 @@ For an ``agent_command`` named ``review``, a minimal body is:
    Review the changes and report correctness problems.
 
 The adapter enforces ``disable-model-invocation: true``. The command remains
-available to the user as ``/review`` and is not available for the model to invoke.
+available to the user as ``/review`` and is not available for the model to
+invoke.
 
 Parsing and normalization
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -621,9 +739,9 @@ Hermes Agent
 ~~~~~~~~~~~~
 
 The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
-``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``; the
-quirks write the merged configuration as YAML. They enforce these defaults
-so an episode stays self-contained and makes one request:
+``HERMES_HOME`` relocated. Its ``primary`` target is ``config.yaml``, which
+the render writes as YAML. The descriptor's checks keep these defaults so an
+episode stays self-contained and makes one request:
 
 - ``security.tirith_enabled`` disables the terminal scanner download. The
   scanner would also block a command it cannot resolve, such as
@@ -708,9 +826,9 @@ Codex CLI
 
 The ``codex`` adapter runs ``codex exec --json`` headless with its user
 home relocated through ``CODEX_HOME``. Its ``primary`` target is
-``config.toml``; the quirks write the merged configuration as TOML. They
-enforce these defaults so an episode stays self-contained: the update
-check, analytics, feedback, and telemetry are off, and the
+``config.toml``, which the render writes as TOML. The descriptor's checks
+keep these defaults so an episode stays self-contained:
+the update check, analytics, feedback, and telemetry are off, and the
 ``workspace-write`` sandbox has no network. Rendering rejects a tree that
 changes them.
 
@@ -1237,6 +1355,8 @@ Descriptor fields
   ``{prompt}`` in ``argv``.
 - ``files`` maps node kinds to output paths, such as
   ``skills/{name}/SKILL.md``. ``rules`` and ``skill`` paths are required.
+  Each ``files.config.<target>`` gives a config file's ``path``, its
+  ``defaults`` and its ``checks`` (see `Node checks`_).
   Other kinds are optional; Reef rejects a mutation of a kind with no
   render path. ``files.tree`` is an optional entries-list path for agents
   that reconcile the live tree.
@@ -1258,8 +1378,8 @@ Descriptor fields
   ``install`` commands, which would otherwise install the latest release
   over the person's own ``claude``). The ``claude`` episode ``env`` sets both
   too. A variable the shell sets wins. Claude Code applies the ``env`` block
-  of ``settings.json`` over the environment, so the ``claude`` quirks reject
-  a tree that sets either one there.
+  of ``settings.json`` over the environment, so the ``claude`` descriptor's
+  checks reject a tree that sets either one there.
 - ``client_args`` lists arguments the wrapper puts ahead of the person's own,
   for a setting the rendered tree must not undo. ``claude`` passes
   ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
@@ -1316,9 +1436,10 @@ Model binding checks
 ~~~~~~~~~~~~~~~~~~~~
 
 These checks restrict the configuration rendered from a harness tree for
-``claude``, ``dsh``, ``hermes``, ``pi``, and ``terminus``. They are not request-time
-model authorization: the proxy forwards ``model`` and ``models`` as sent, so a
-tool or plugin that constructs its own request can still name another model.
+``claude``, ``dsh``, ``hermes``, ``pi``, and ``terminus``. They are not
+request-time model authorization: the proxy forwards ``model`` and ``models``
+as sent, so a tool or plugin that constructs its own request can still name
+another model.
 
 For rendered configuration, Reef's model binding supplies the endpoint, model,
 and credential after the tree and replaces every value it writes. A tree may
@@ -1331,9 +1452,9 @@ Claude Code routing
 
 Rendering rejects these settings:
 
-- In ``settings.json`` ``env``: ``ANTHROPIC_`` variables, cloud provider switches
-  and credentials (including Bedrock, Vertex, and Foundry), proxies, endpoints,
-  and model names. Names are matched without case, as on Windows.
+- In ``settings.json`` ``env``: ``ANTHROPIC_`` variables, cloud provider
+  switches and credentials (including Bedrock, Vertex, and Foundry), proxies,
+  endpoints, and model names. Names are matched without case, as on Windows.
 - Model choices such as ``model``, ``fallbackModel``, ``availableModels``,
   ``modelOverrides``, and ``advisorModel``.
 - Credential helpers: ``apiKeyHelper``, ``awsAuthRefresh``,
@@ -1349,13 +1470,14 @@ Hermes routing
 
 Rendering rejects alternative routes and model choices:
 
-- ``providers``, ``custom_providers``, ``fallback_model``, ``fallback_providers``,
-  ``moa`` presets (``presets``, or the older ``reference_models`` and
-  ``aggregator``), and ``auxiliary.openrouter_model``.
-- Aliases (``model_aliases``, ``model.aliases``) and endpoint, model, or credential
-  fields such as ``model.model``, ``model.name``, ``model.api_base``, and
-  ``model.key_env``. Top-level ``provider``, ``base_url``, and ``api_base``
-  are included because Hermes moves them into ``model``.
+- ``providers``, ``custom_providers``, ``fallback_model``,
+  ``fallback_providers``, ``moa`` presets (``presets``, or the older
+  ``reference_models`` and ``aggregator``), and ``auxiliary.openrouter_model``.
+- Aliases (``model_aliases``, ``model.aliases``) and endpoint, model, or
+  credential fields such as ``model.model``, ``model.name``,
+  ``model.api_base``, and ``model.key_env``. Top-level ``provider``,
+  ``base_url``, and ``api_base`` are included because Hermes moves them into
+  ``model``.
 - ``model.api_mode`` and ``model.openai_runtime``. These can bypass the custom
   provider: ``bedrock_converse`` calls AWS Bedrock, while ``codex_app_server``
   delegates to a ``codex app-server`` subprocess.
@@ -1393,8 +1515,8 @@ The latter would forward all calls through another host. The binding writes
 Terminus routing
 ^^^^^^^^^^^^^^^^
 
-Rendering rejects ``llm_kwargs`` fields that the binding does not write.
-It also rejects ``llm_call_kwargs`` arguments that select an endpoint, provider,
+Rendering rejects ``llm_kwargs`` fields that the binding does not write. It
+also rejects ``llm_call_kwargs`` arguments that select an endpoint, provider,
 credential, model, fallback, or logging callback, including ``base_url``,
 ``api_base``, ``custom_llm_provider``, ``model``, and ``fallbacks``. The
 Terminus quirk lists the recognized routing arguments. The binding writes
@@ -1423,18 +1545,18 @@ For installation and recovery commands, see `Install the published tree
 Temporary session copies
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-Each session runs the agent on a temporary copy of the tree whose model binding points at the
-wrapper's capture proxy and holds the token. The wrapper makes that copy in
-``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache/reef-harness/sessions``
-by default on Linux and macOS; on Windows the wrapper runs under WSL, where
-the same path applies), readable by you alone, and never in
-``$TMPDIR`` or ``/tmp``: a command in the Codex or dsh sandbox can write
-there, and Codex reads its config and rules from that copy again when you
-start a new thread with ``/new``. When the terminal closes (SIGHUP) or the
-wrapper gets SIGTERM, it passes the signal to the agent, waits for the
-agent to exit, removes the temp copy, keeps the receipts, and exits with
-128 plus the signal number. ``reef-pi update`` passes the install script to
-``bash`` on its standard input, as ``curl ... | bash`` does, so no copy of
+Each session runs the agent on a temporary copy of the tree whose model binding
+points at the wrapper's capture proxy and holds the token. The wrapper makes
+that copy in ``$XDG_CACHE_HOME/reef-harness/sessions``
+(``~/.cache/reef-harness/sessions`` by default on Linux and macOS; on Windows
+the wrapper runs under WSL, where the same path applies), readable by you
+alone, and never in ``$TMPDIR`` or ``/tmp``: a command in the Codex or dsh
+sandbox can write there, and Codex reads its config and rules from that copy
+again when you start a new thread with ``/new``. When the terminal closes
+(SIGHUP) or the wrapper gets SIGTERM, it passes the signal to the agent, waits
+for the agent to exit, removes the temp copy, keeps the receipts, and exits
+with 128 plus the signal number. ``reef-pi update`` passes the install script
+to ``bash`` on its standard input, as ``curl ... | bash`` does, so no copy of
 the script sits in ``$TMPDIR`` while it runs.
 
 Install records and validation
@@ -1527,15 +1649,15 @@ state again in the tree; what the link pointed at is left as it was.
 Session inputs and older installations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A session gets the files the install wrote and that client state, so a
-file added to the tree later is not used, and it gets only the env file
-values the release's ``env`` items name. With a record, its PATH starts
-with the agent binary's directory and the wrapper's, never the install
-root, so a program added there does not run either. ``update``, ``setup``, ``doctor``,
-``evolve`` and ``page`` run from your shell reach Reef at the recorded
-address, not at the one in the model binding. An install made before Reef
-kept this record has none, and neither has one whose record was removed:
-its sessions start without the check, and each such start prints ``<install root> has no install record``
+A session gets the files the install wrote and that client state, so a file
+added to the tree later is not used, and it gets only the env file values the
+release's ``env`` items name. With a record, its PATH starts with the agent
+binary's directory and the wrapper's, never the install root, so a program
+added there does not run either. ``update``, ``setup``, ``doctor``, ``evolve``
+and ``page`` run from your shell reach Reef at the recorded address, not at the
+one in the model binding. An install made before Reef kept this record has
+none, and neither has one whose record was removed: its sessions start without
+the check, and each such start prints ``<install root> has no install record``
 and that ``reef-pi update`` records the files, until the update writes the
 record.
 
@@ -1555,22 +1677,24 @@ To connect an agent that has no adapter yet:
 .. steps::
 
    #. The file it reads configuration from becomes a ``files.config`` target.
-   #. The command line that runs one prompt headless becomes ``binary`` and ``argv``.
-   #. The path and format of its session log become ``trajectory``. A new format
-      subclasses ``TrajectoryReader``
-      (`reef/harness/episodes/trajectory.py <../../reef/harness/episodes/trajectory.py>`__) and
-      registers with ``@register_trajectory_reader``.
+   #. The command line that runs one prompt headless becomes ``binary`` and
+      ``argv``.
+   #. The path and format of its session log become ``trajectory``. A new
+      format subclasses ``TrajectoryReader``
+      (`reef/harness/episodes/trajectory.py
+      <../../reef/harness/episodes/trajectory.py>`__) and registers with
+      ``@register_trajectory_reader``.
    #. The files its first boot creates go in ``cleanup_whitelist``, so a fresh
       episode root is treated as clean. ``dir/**`` tolerates a whole subtree
       (session storage, ``node_modules``); any other entry is a glob against
       the root-relative path, so anchor a single file with its full path, like
       ``pi-agent/auth.json``. A bare directory name matches nothing under it.
 
-`reef/harness/adapters/descriptor.py <../../reef/harness/adapters/descriptor.py>`__
-validates descriptors at load. The bundled adapters under
-`reef/harness/adapters/ <../../reef/harness/adapters>`__ provide complete
-references. External adapters register through the
-``reef.harness_adapters`` entry-point group.
+`reef/harness/adapters/descriptor.py
+<../../reef/harness/adapters/descriptor.py>`__ validates descriptors at load.
+The bundled adapters under `reef/harness/adapters/
+<../../reef/harness/adapters>`__ provide complete references. External adapters
+register through the ``reef.harness_adapters`` entry-point group.
 
 ``evolution.client_models`` adds model names that an installed client may
 select. The install script repeats each ``model_binding`` template entry
@@ -1594,12 +1718,13 @@ otherwise its ``name``. A prior successful setup check does not establish
 that the variable is set in the current shell.
 
 If a required item has not passed setup, an interactive session with a
-``reef-pi`` wrapper asks ``Set up release <id8> now?`` and runs the setup
-loop below before offering the update. It finds the wrapper through
+``reef-pi`` wrapper asks ``Set up release <id8> now?`` and runs the setup loop
+below before offering the update. It finds the wrapper through
 ``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or, for a tree run
-without ``reef-pi``, in ``~/.reef/installs``. Without a wrapper or UI, it prints the unmet items and
-``Run reef-pi setup, then start reef-pi again.``. Items still unmet after
-setup are reported, and the update offer waits until the next session.
+without ``reef-pi``, in ``~/.reef/installs``. Without a wrapper or UI, it
+prints the unmet items and ``Run reef-pi setup, then start reef-pi again.``.
+Items still unmet after setup are reported, and the update offer waits until
+the next session.
 
 The update runs ``reef-pi update`` through an available wrapper, or uses
 the install pipeline. It ends with ``Installed release <id8>. Type /reload
@@ -1629,15 +1754,14 @@ adapter's command form.
 Pi harness requests
 ~~~~~~~~~~~~~~~~~~~
 
-``evolution.requests: true`` adds two Reef-owned entries to a pi tree:
-the ``code_extension`` ``reef-requests``
-(`reef/harness/adapters/pi/requests.ts <../../reef/harness/adapters/pi/requests.ts>`__)
-and the ``skill`` ``reef-pi-extension-api``
-(`reef/harness/adapters/pi/pi_extension_api.md
-<../../reef/harness/adapters/pi/pi_extension_api.md>`__). The skill is the
-pi extension API reference read by the service proposer before it writes
-an extension. Under ``PI_OFFLINE`` the extension registers nothing.
-Otherwise it registers two commands, two tools, and two event handlers.
+``evolution.requests: true`` adds two Reef-owned entries to a pi tree: the
+``code_extension`` ``reef-requests`` (`reef/harness/adapters/pi/requests.ts
+<../../reef/harness/adapters/pi/requests.ts>`__) and the ``skill``
+``reef-pi-extension-api`` (`reef/harness/adapters/pi/pi_extension_api.md
+<../../reef/harness/adapters/pi/pi_extension_api.md>`__). The skill is the pi
+extension API reference read by the service proposer before it writes an
+extension. Under ``PI_OFFLINE`` the extension registers nothing. Otherwise it
+registers two commands, two tools, and two event handlers.
 
 ``/reefine <request>`` files a harness-change request. With a UI, it first
 clarifies the request in the background. The command returns immediately;

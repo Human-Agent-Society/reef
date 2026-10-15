@@ -30,15 +30,8 @@ class StubTrainingRuntime(TrainingRuntime):
     implementations.
     """
 
-    def __init__(self, base_url: str = "http://training-runtime", *, max_staleness: int = 0) -> None:
-        if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
-            raise ValueError("max_staleness must be a non-negative integer")
+    def __init__(self, base_url: str = "http://training-runtime") -> None:
         self.inference = StubInferenceRuntime(self, base_url=base_url)
-        self._max_staleness = max_staleness
-
-    @property
-    def max_staleness(self) -> int:
-        return self._max_staleness
 
     @property
     def inference_handler(self) -> InferenceHandler | None:  # type: ignore[override]
@@ -53,7 +46,7 @@ class StubTrainingRuntime(TrainingRuntime):
         scheduling: StepScheduling,
         scenario_step: int,
         *,
-        serving_runtime_load_id: str | None = None,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
 
@@ -184,10 +177,6 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
     @property
     def inference_timeout_s(self):
         return self.inference_runtime.inference_timeout_s
-
-    @property
-    def max_staleness(self):
-        return self.training_runtime.max_staleness
 
     @property
     def concurrent_training_scenarios(self):

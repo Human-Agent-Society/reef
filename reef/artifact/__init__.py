@@ -17,7 +17,9 @@ level up. Boundaries this package holds:
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
-any ``RepositoryBackendFactory``. ``tests/artifact/test_reef_git_lfs.py``
+any ``RepositoryBackendFactory``. A deployment selects a factory that also
+inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend``;
+Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
 Backends used with a scenario commit log must subclass
@@ -45,16 +47,18 @@ from reef.artifact.artifact import (
     LiveWeightArtifactRef,
 )
 from reef.artifact.composite import compose_release
-from reef.artifact.git_lfs import GitLFSRepositoryBackend
+from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
     CachedRepositoryBackendFactory,
+    ConfigurableRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
+    RepositoryBackendContext,
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
@@ -81,9 +85,11 @@ __all__ = [
     "ArtifactSourceError",
     "ArtifactValidator",
     "CachedRepositoryBackendFactory",
+    "ConfigurableRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
     "GitLFSRepositoryBackend",
+    "GitLFSRepositoryBackendFactory",
     "GitVersionSource",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
@@ -93,6 +99,7 @@ __all__ = [
     "ReleaseNotRestorable",
     "Repository",
     "RepositoryBackend",
+    "RepositoryBackendContext",
     "RepositoryBackendFactory",
     "StagedReleaseRepositoryBackend",
     "compose_release",

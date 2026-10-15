@@ -68,61 +68,7 @@
    "batch_id": "s:toy:1",
    "consumed": [
     "a",
-    "b"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 1.0,
-     "sources": [
-      "a"
-     ],
-     "training": {
-      "loss_mask": [
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1
-      ],
-      "runtime_load_id": "e:1",
-      "tokens": [
-       1,
-       2
-      ]
-     }
-    },
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 1.0,
-     "sources": [
-      "b"
-     ],
-     "training": {
-      "loss_mask": [
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1
-      ],
-      "runtime_load_id": "e:2",
-      "tokens": [
-       1,
-       2
-      ]
-     }
-    }
-   ],
-   "released": [
-    "a",
-    "b"
-   ],
-   "request": null
-  },
-  {
-   "batch_id": "s:toy:2",
-   "consumed": [
+    "b",
     "bad-d",
     "c",
     "e"
@@ -172,6 +118,8 @@
     }
    ],
    "released": [
+    "a",
+    "b",
     "bad-d",
     "c",
     "e"

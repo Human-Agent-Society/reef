@@ -66,14 +66,14 @@ class DurableRuntime(StubTrainingRuntime):
         return self.serving_version
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         sample = batch.items[0]
         payload = {
             "scenario_step": scenario_step,
             "loss": objective,
             "source": source_record_id(sample),
-            "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
+            "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",
@@ -87,7 +87,7 @@ class DurableRuntime(StubTrainingRuntime):
         existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
-        if payload["expected_runtime_load_id"] != self.serving_version:
+        if payload["parent_runtime_load_id"] != self.serving_version:
             raise StaleCandidate(self.stale_metrics)
         if self.block_storage:
             self.started.set()

@@ -15,6 +15,10 @@ Entry point: ``Record2Record`` in ``base.py``.
   result back (``settle``). The stage holds the sets that train in its pool,
   drops the sets that can no longer train, and gives the pipeline the next
   batch's sets in order. The stage never calls the other stages.
+* Every stage runs the staleness check. It is the only place where Reef
+  compares the version that produced training data with the version that the
+  scenario serves, and drops data that is more than ``max_staleness`` versions
+  behind.
 
 Stages:
 
@@ -35,14 +39,14 @@ Stages:
 Components of the pool:
 
 * ``RecordSet`` (``sets.py``): the base of every set, with the fields that the
-  pool, the selection policies, and the staleness check read.
+  pool and the selection policies read.
 * ``RecordSetPool`` (``pool.py``): the held sets, and the reserved batch.
 * ``SelectionPolicy`` (``selection.py``): the order in which sets go into a
   batch. ``ArrivalOrder`` takes the oldest first. ``GroupKeyOrder`` takes
   ungrouped sets, then groups by key.
-* ``stale_sets`` (``staleness.py``): finds held sets that are more than
-  ``max_staleness`` versions behind the newest held set. ``JudgingRecord2Record``
-  drops them.
+* ``stale_sets`` (``staleness.py``): finds held sets whose training data is more
+  than ``max_staleness`` versions behind the version that the scenario serves.
+  The lag counts the versions that the scenario served after the producing one.
 
 The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
 ``reef.observability``, ``reef.background_jobs``, and ``reef.pipeline_context``. Thus record-to-task and

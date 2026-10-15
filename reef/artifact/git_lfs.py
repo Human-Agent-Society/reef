@@ -8,8 +8,10 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import Any, Self
 
 from reef.artifact.artifact import (
     Artifact,
@@ -22,9 +24,16 @@ from reef.artifact.artifact import (
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
-from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
+from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
+    ConfigurableRepositoryBackendFactory,
+    RepositoryBackendContext,
+    StagedReleaseRepositoryBackend,
+)
 from reef.artifact.sources import GitVersionSource, download_huggingface_snapshot, parse_artifact_source
 from reef.core.components import validate_component_name
+from reef.core.config import config_option
+from reef.core.plugins import PluginSettings
 
 _MANIFEST = "reef-artifact.json"
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
@@ -452,7 +461,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         snapshot_download: Callable[..., str] | None = None,
         bootstrap_files: Mapping[str, str] | None = None,
         bootstrap_subdirectory: str | None = None,
-    ) -> CachedRepositoryBackendFactory:
+    ) -> GitLFSRepositoryBackendFactory:
         """A factory of scenario backends over one repository.
 
         ``bootstrap_subdirectory`` names the release component a bootstrap
@@ -461,7 +470,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         while ``bootstrap_files`` seed the others beside it.
         """
         _check_tools()
-        return _GitLFSRepositoryBackendFactory(
+        return GitLFSRepositoryBackendFactory(
             cls,
             repository,
             bootstrap_artifact,
@@ -782,7 +791,20 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         self._workspace.open_repository()
 
 
-class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
+@dataclass(frozen=True)
+class GitLFSSettings(PluginSettings):
+    """The config of ``GitLFSRepositoryBackendFactory``."""
+
+    repository: str = config_option(help="The Git repository: a local path, created on first use, or a remote URL.")
+
+    def __post_init__(self) -> None:
+        if not self.repository.strip():
+            raise ValueError("repository must be non-empty")
+
+
+class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):
+    """Scenario backends over one Git LFS repository; ``storage.artifact_backend: git_lfs`` selects it."""
+
     def __init__(
         self,
         backend_type: type[GitLFSRepositoryBackend],
@@ -804,6 +826,21 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
         self._snapshot_download = snapshot_download
         self._bootstrap_files = None if bootstrap_files is None else dict(bootstrap_files)
         self.bootstrap_subdirectory = bootstrap_subdirectory
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
+        repository = GitLFSSettings.parse(config, plugin_class=cls).repository
+        _check_tools()
+        return cls(
+            GitLFSRepositoryBackend,
+            repository if "://" in repository or repository.startswith("git@") else Path(repository),
+            None,
+            work_dir=context.work_dir,
+            cache_dir=context.cache_dir,
+            snapshot_download=None,
+            bootstrap_files=context.bootstrap_files,
+            bootstrap_subdirectory=context.bootstrap_component,
+        )
 
     def _build_backend(self, scenario: str) -> GitLFSRepositoryBackend:
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")

@@ -14,7 +14,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import ThresholdBatches, threshold_pipeline
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
@@ -939,7 +939,7 @@ def test_only_a_composite_evaluates_through_the_service(
 
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: recipe)
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
-    monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
+    monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
     assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="episode")
     if composite:

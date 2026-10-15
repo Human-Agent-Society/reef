@@ -457,8 +457,9 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
 class _StubTrainingRuntime(WeightRuntime):
     """Satisfies WeightRuntime; only the version probe does anything."""
 
-    def __init__(self, served: str | None):
+    def __init__(self, served: str | None, published: str | None = None):
         self._served = served
+        self._published = published
 
     @property
     def base_url(self) -> str:
@@ -466,6 +467,9 @@ class _StubTrainingRuntime(WeightRuntime):
 
     def serving_runtime_load_id(self) -> str | None:
         return self._served
+
+    def current_runtime_load_id(self) -> str | None:
+        return self._published
 
     def restore_checkpoint(self, artifact) -> str:
         raise AssertionError("recover must not restore a checkpoint")
@@ -478,6 +482,25 @@ def _checkpoint_ref(version: str = "checkpoint:step-7"):
     from reef.artifact import ArtifactRef
 
     return ArtifactRef(content_id="artifact:ckpt", release_id=version, parent_release_id=None)
+
+
+def test_a_live_release_serves_under_the_version_that_published_it() -> None:
+    # The engine already loaded e:2, but Reef did not commit it yet.
+    runtime = _StubTrainingRuntime("e:2", published="e:2")
+    assert create_weight_surface().served_runtime_load_id(_live_artifact("e:1"), runtime) == "e:1"
+    # A per-scenario adapter is named after the version of the committed release.
+    assert create_weight_surface(scenario="math").served_runtime_load_id(_live_artifact("e:3"), runtime) == "e:3"
+
+
+def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
+    from reef.artifact import Artifact
+
+    # A rollback or a restart loaded the release again, under a new version.
+    restored = Artifact.local(tmp_path, metadata={"runtime_load_id": "e:1"})
+    runtime = _StubTrainingRuntime("e:6", published="e:5")
+    assert create_weight_surface().served_runtime_load_id(restored, runtime) == "e:5"
+    # A release that no version published, such as the initial one, has no served version.
+    assert create_weight_surface().served_runtime_load_id(Artifact.local(tmp_path), runtime) is None
 
 
 def test_recover_keeps_the_live_head_the_engine_still_holds() -> None:

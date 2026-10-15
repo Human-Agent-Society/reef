@@ -100,7 +100,7 @@ def _successor(prior_messages, next_state: str):
 def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None, **judging):
     context = PipelineContext("s")
     settings = OpenClawRLJudgingSettings(session_ttl_s=ttl_s, **judging)
-    stage = OpenClawRLRecord2Record(context, settings, worker=worker, clients=clients)
+    stage = OpenClawRLRecord2Record(settings, worker=worker, clients=clients)
     return TrainingPipeline(
         context,
         record2record=stage,
@@ -209,11 +209,13 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
 
 
 @pytest.mark.unit
-def test_stale_runtime_load_ids_drop_from_pending_candidates() -> None:
+def test_candidates_behind_the_serving_version_drop_from_pending_candidates() -> None:
     worker = FakeWorker()
     processor = _processor(batch_size=2, worker=worker)
+    processor.observe_serving_runtime_load_id("v1")
     processor.ingest(_turn("old", Q1, runtime_load_id="v1"))
     processor.ingest(_turn("cont1", _successor(Q1, "ok")))
+    processor.observe_serving_runtime_load_id("v2")
     processor.ingest(_turn("new", Q2, runtime_load_id="v2"))
     processor.ingest(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
@@ -439,23 +441,6 @@ def test_the_batches_need_the_openclawrl_record_stage() -> None:
 
 
 @pytest.mark.unit
-def test_stale_drop_uses_record_arrival_order_not_verdict_order() -> None:
-    """A slow judgment for an old-version turn must not purge fresh candidates."""
-    worker = FakeWorker()
-    processor = _processor(batch_size=2, worker=worker)
-    processor.ingest(_turn("old", Q1, runtime_load_id="v1"))
-    processor.ingest(_turn("cont1", _successor(Q1, "ok")))
-    processor.ingest(_turn("new", Q2, runtime_load_id="v2"))
-    processor.ingest(_turn("cont2", _successor(Q2, "ok")))
-    # Judgments land in the OPPOSITE order of generation: v2 first, v1 last.
-    worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
-    worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
-    assert not processor.ready()
-    assert "old" in processor.releasable_record_ids()
-    assert "new" not in processor.releasable_record_ids()
-
-
-@pytest.mark.unit
 def test_echo_only_extension_never_binds_a_turn_to_its_own_reply() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
@@ -570,7 +555,7 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     record = tmp_path / "prm-records.jsonl"
     worker = FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
         record2record=stage,

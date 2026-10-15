@@ -459,7 +459,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         return self._served_version
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
@@ -469,7 +469,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
             **prepared.payload,
             "scenario_step": scenario_step,
             "reward": trajectory_reward(sample),
-            "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
+            "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",
@@ -483,7 +483,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
-        if payload["expected_runtime_load_id"] != self._served_version:
+        if payload["parent_runtime_load_id"] != self._served_version:
             raise StaleCandidate
         self.jobs.append(dict(payload))
         job_id = f"job-{scenario_step}"

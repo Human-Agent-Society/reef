@@ -29,5 +29,4 @@ class JudgedTasks(Record2Task, ABC):
         sample = self.make_sample(record_set.record, record_set.judgment)
         if sample is None:
             return TaskResult.skipped()
-        runtime_load_id = sample.training.get("runtime_load_id")
-        return TaskResult.ready((sample,), runtime_load_id if isinstance(runtime_load_id, str) else None)
+        return TaskResult.ready((sample,))

@@ -104,7 +104,7 @@ def session_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingP
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
-        record2record=JudgingRecord2Record(context, _SessionJudging(), _JudgedAtOnce()),
+        record2record=JudgingRecord2Record(_SessionJudging(), _JudgedAtOnce()),
         record2task=_SessionTasks(),
         task2batch=SessionBatches(context, batch_size),
     )

@@ -64,8 +64,69 @@ files:
           trace_exporter: none
         sandbox_workspace_write:
           network_access: false
+      # web_search may take any value Codex reads, because the episode argv
+      # pins it disabled and only a person's reef-codex session reads the
+      # tree's value.
+      checks:
+        # The episode argv pins never, and a reef-codex session keeps Codex's
+        # on-request default, so the person approves each command that leaves
+        # the sandbox.
+        - key: approval_policy
+          match: IsAbsent()
+          reason: episodes pin never, and a reef-codex session keeps on-request
+        # The config.toml keys a tree may set, and the keys Reef's model
+        # binding writes, which the render refuses from a tree without it.
+        # The entire file is treated as a dict.
+        - key: "."
+          match: |-
+            Each(Key(IsIn([
+              "analytics", "check_for_update_on_startup", "features", "feedback", "model_auto_compact_token_limit",
+              "model_auto_compact_token_limit_scope", "model_context_window", "model_reasoning_effort",
+              "model_reasoning_summary", "model_verbosity", "otel", "sandbox_workspace_write",
+              "tool_output_token_limit", "web_search",
+              "model", "model_provider", "model_providers"
+            ])))
+          reason: the other codex config keys are not admitted for benchmark episodes
+        - key: web_search
+          match: IsIn(["disabled", "cached", "indexed", "live"])
+        - key: [
+            check_for_update_on_startup, analytics.enabled, feedback.enabled, otel,
+            sandbox_workspace_write.network_access,
+            features.apps, features.hooks, features.plugins, features.shell_snapshot,
+            features.skill_mcp_dependency_install,
+          ]
+          match: IsDefault()
+        - key: features
+          match: |-
+            Each(Key(IsIn([
+              "apps", "enable_request_compression", "hooks", "plugins", "shell_snapshot",
+              "skill_mcp_dependency_install"
+            ])))
+        - key: sandbox_workspace_write
+          match: Each(Key(IsIn(["network_access", "writable_roots"])))
+        - key: sandbox_workspace_write.writable_roots
+          match: AnyOf(IsAbsent(), Eq([]))
+        # The provider Reef's model binding writes, with only its keys.
+        - key: model_provider
+          match: AnyOf(IsAbsent(), Eq("reef"))
+          reason: Reef's model binding chooses the model provider
+        - key: model_providers
+          match: Each(Key(Eq("reef")))
+          reason: Reef's model binding chooses the model provider
+        - key: model_providers.*
+          match: |-
+            Each(Key(IsIn(["base_url", "experimental_bearer_token", "name", "supports_websockets", "wire_api"])))
+          reason: Reef's model binding chooses the model provider
     models:
       path: "codex/models.json"
+      # Model metadata by model name, which the quirks module turns into
+      # Codex's model catalog.
+      checks:
+        # The entire file is treated as a dict.
+        - key: "."
+          match: Each(Key(Eq("models")))
+        - key: models
+          match: AnyOf(IsAbsent(), IsObject())
   rules: "codex/AGENTS.md"
   # Codex 0.153.4 loads no custom prompts (its TUI refuses /name), so an
   # agent_command renders as a skill the person types as $name. A skill and

@@ -4,11 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
+from tests.support._trajectories import policy_trajectory
 
-from reef.record2record import ArrivalOrder, GroupKeyOrder, RecordSet, RecordSetPool, SelectionPolicy
-from reef.record2record.staleness import stale_sets
+from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import RuntimeLoadSpan
+from reef.core.batches import TaskItem
+from reef.record2record import (
+    ArrivalOrder,
+    GroupKeyOrder,
+    InferenceRecord2Record,
+    RecordSet,
+    RecordSetPool,
+    SelectionPolicy,
+    SingleRecordSet,
+    TaskStatus,
+)
+from reef.record2record.staleness import producing_runtime_load_ids, stale_sets
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -21,6 +35,10 @@ class NamedSet(RecordSet):
 
 def named(set_id: str, arrival_index: int, group_key: int | None = None) -> NamedSet:
     return NamedSet(set_id=set_id, arrival_index=arrival_index, group_key=group_key)
+
+
+def inference(record_id: str) -> AgentRecord:
+    return AgentRecord.create(scenario="s", request_type=RequestType.INFERENCE, payload={}, agent_record_id=record_id)
 
 
 class ForeignSet(SelectionPolicy):
@@ -62,33 +80,76 @@ def test_a_reservation_refuses_a_negative_count_and_sets_the_pool_does_not_hold(
         pool.reserve(1)
 
 
-def test_staleness_check_keeps_sets_within_the_window_of_the_last_source_record() -> None:
-    def version(set_id: str, runtime_load_id: str, source_index: int) -> NamedSet:
-        return NamedSet(
-            set_id=set_id,
-            arrival_index=10 - source_index,
-            runtime_load_id=runtime_load_id,
-            source_index=source_index,
+def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
+    record_sets = tuple(
+        named(name, index)
+        for index, name in enumerate(
+            ("current", "one-behind", "two-behind", "never-served", "unknown", "mixed", "rolled-out"), start=1
         )
-
-    # The reference is the last source record ("newest", e:5), not the last set in the pool.
-    record_sets = (
-        version("newest", "e:5", 6),
-        version("one-behind", "e:4", 5),
-        version("two-behind", "e:3", 4),
-        version("ahead", "e:6", 3),
-        version("other-incarnation", "f:5", 2),
-        version("unparsed", "v1", 1),
     )
-    # Too far behind, ahead, another incarnation, and an unparsed version are stale.
-    stale = {"two-behind", "ahead", "other-incarnation", "unparsed"}
-    assert {record_set.set_id for record_set in stale_sets(record_sets, 1)} == stale
-    # Window 0 keeps only the reference version.
-    assert {record_set.set_id for record_set in stale_sets(record_sets, 0)} == stale | {"one-behind"}
+    producing_runtime_load_ids_by_set = {
+        "current": frozenset({"e:5"}),
+        "one-behind": frozenset({"e:4"}),
+        "two-behind": frozenset({"e:3"}),
+        "never-served": frozenset({"e:6"}),
+        "unknown": frozenset({None}),
+        "mixed": frozenset({"e:5", "e:3"}),
+        "rolled-out": frozenset(),
+    }
+    # The engine sequence skips e:2: lag counts the scenario's own versions, not sequence numbers.
+    served = ("e:1", "e:3", "e:4", "e:5")
+    stale = {"two-behind", "never-served", "unknown", "mixed"}
+    assert {
+        stale_set.set_id for stale_set in stale_sets(record_sets, producing_runtime_load_ids_by_set, served, 1)
+    } == stale
+    # Window 0 keeps only data of the current version, and data that the algorithm rolls out.
+    assert {
+        stale_set.set_id for stale_set in stale_sets(record_sets, producing_runtime_load_ids_by_set, served, 0)
+    } == stale | {"one-behind"}
+    # An unknown serving version checks nothing.
+    assert stale_sets(record_sets, producing_runtime_load_ids_by_set, (), 0) == ()
 
 
-def test_staleness_check_compares_non_canonical_ids_by_equality() -> None:
-    late_judgment = NamedSet(set_id="late", arrival_index=3, runtime_load_id="v1", source_index=1)
-    newest = NamedSet(set_id="newest", arrival_index=2, runtime_load_id="v2", source_index=3)
-    same_version = NamedSet(set_id="same", arrival_index=1, runtime_load_id="v2", source_index=2)
-    assert [record_set.set_id for record_set in stale_sets((late_judgment, newest, same_version), 5)] == ["late"]
+def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> None:
+    spans = (
+        RuntimeLoadSpan(start=0, end=1, runtime_load_id="e:1"),
+        RuntimeLoadSpan(start=1, end=2, runtime_load_id="e:2"),
+    )
+    tasks = (
+        policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:3"),
+        policy_trajectory("b", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, runtime_load_spans=spans),
+        policy_trajectory("c", (1, 2), (1,), (-0.1,), 1.0),
+        TaskItem(Path("task")),
+    )
+    assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
+
+
+def test_the_stage_drops_held_sets_behind_the_serving_version_but_not_a_reserved_batch() -> None:
+    stage = InferenceRecord2Record()
+    for record_id, version in (("old", "e:1"), ("new", "e:2")):
+        stage.settle(
+            SingleRecordSet(
+                set_id=record_id, arrival_index=stage.pool.next_arrival_index(), record=inference(record_id)
+            ),
+            TaskStatus.READY,
+            frozenset({version}),
+        )
+    stage.observe_serving_runtime_load_id("e:1")
+    stage.observe_serving_runtime_load_id("e:2")
+    stage.pool.reserve(2)
+    stage.drop_stale_sets(0)
+    assert len(stage.pool) == 2
+
+    stage.pool.release_reservation()
+    stage.drop_stale_sets(0)
+    assert [held.set_id for held in stage.pool.sets()] == ["new"]
+    assert stage.take_ended() == frozenset({"old"})
+    assert "old" in stage.releasable_record_ids()
+    assert set(stage.producing_runtime_load_ids) == {"new"}
+
+
+def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:
+    stage = InferenceRecord2Record()
+    for version in ("e:1", "e:2", "e:2", "f:0"):
+        stage.observe_serving_runtime_load_id(version)
+    assert stage.served_runtime_load_ids == ["f:0"]

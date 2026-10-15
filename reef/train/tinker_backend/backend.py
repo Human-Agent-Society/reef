@@ -1,7 +1,7 @@
 """Tinker as a native training backend for Reef's coordinator.
 
 This is the shape a hosted trainer takes when a local engine serves the
-model: Reef's coordinator owns the job marker, staleness admission, the
+model: Reef's coordinator owns the job marker, the
 publication barrier and adapter residency; this backend trains one
 optimizer step on Tinker per job and materializes the result as a PEFT
 adapter directory under its checkpoint. It delivers adapters as files

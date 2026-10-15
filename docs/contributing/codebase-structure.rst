@@ -199,7 +199,7 @@ definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdo
 ``InferenceRuntime`` scheduling interfaces, the native ``TrainingBackend`` and
 ``InferenceBackend`` contracts, and shared values and storage interfaces.
 ``scheduler.py`` owns recipe-facing candidate/commit coordination, remote job
-serialization, staleness admission and train/checkpoint ordering.
+serialization and train/checkpoint ordering.
 ``publication.py`` owns weight publication, version allocation, LoRA residency
 and transfer locking. ``recovery.py`` owns durable markers, scenario history,
 engine monitoring and restart recovery. ``deployment.py`` owns component

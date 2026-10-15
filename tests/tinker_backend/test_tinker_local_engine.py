@@ -177,7 +177,7 @@ class Stack:
             {},
             StepScheduling(unit="sample", batch_size="actual"),
         )
-        return {**prepared.payload, "scenario": "math", "scenario_step": step, "expected_runtime_load_id": version}
+        return {**prepared.payload, "scenario": "math", "scenario_step": step, "parent_runtime_load_id": version}
 
 
 def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(tmp_path, objective):
@@ -256,7 +256,7 @@ def test_the_trainer_delivers_files_and_never_sends(tmp_path, objective):
         with pytest.raises(RuntimeError, match="delivers adapter files"):
             send()
     stack.coordinator.acknowledge_training_commit(first.training_job_id)
-    with pytest.raises(ValueError, match="name their scenario"):
+    with pytest.raises(ValueError, match="must name its scenario"):
         stack.coordinator.execute_training_job({**stack.payload(objective, step=1), "scenario": ""})
 
 
@@ -279,7 +279,7 @@ def test_local_engine_topology_runs_the_model_driver_and_connects_through_the_co
     assert local_model_required(config)
     settings = service_config_from_mapping(config)
     runtime = training_deployment_for("tinker").runtime_config(
-        {**settings.__dict__, "ray_address": "ray://head:10001"}, max_staleness=0
+        {**settings.__dict__, "ray_address": "ray://head:10001"}
     )
     assert runtime["type"] == "coordinator_training" and runtime["inference_runtime"] == "sglang"
     assert "test-key" not in yaml.safe_dump(config)

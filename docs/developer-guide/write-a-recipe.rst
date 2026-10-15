@@ -352,7 +352,7 @@ the runtime scheduler.
 
 Alongside ``TrainingBackend``, ``InferenceBackend`` exposes pause,
 resume, recovery, version verification, adapter unload and memory operations.
-``TrainingCoordinator`` owns staleness admission, LoRA residency and colocated
+``TrainingCoordinator`` owns LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
 weight tensors never pass through the HTTP service or the scheduler.
 
@@ -396,7 +396,7 @@ HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
   service settings as a mapping. It validates backend combinations, binds
   derived values and returns process definitions that HTTP must wait for.
   It must not download models, allocate devices or construct a runtime.
-* ``runtime_config(settings, *, max_staleness, connector=None)`` returns the
+* ``runtime_config(settings, *, connector=None)`` returns the
   configuration consumed by ``RuntimeRegistry`` in the HTTP process. The
   result must construct a ``(TrainingRuntime, InferenceRuntime)`` pair. ``connector`` is an optional
   legacy connection injection; an in-process backend rejects it.

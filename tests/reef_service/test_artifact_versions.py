@@ -37,7 +37,7 @@ class RollbackRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         del batch, objective
         return PreparedTrainingStep(
@@ -121,11 +121,19 @@ class RecordingExperimentTracker(ExperimentTracker):
         pass
 
 
-def inference(index: int) -> AgentRecord:
+def inference(index: int, runtime_load_id: str | None = None) -> AgentRecord:
+    """The inference record of step ``index``, served by the version that step ``index - 1`` published.
+
+    ``runtime_load_id`` names another serving version, such as one that a rollback restored.
+    """
+    version = runtime_load_id if runtime_load_id is not None or index == 1 else f"w{index - 1}"
+    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    if version is not None:
+        payload["runtime_load_id"] = version
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        payload=payload,
         agent_record_id=f"i{index}",
     )
 
@@ -160,8 +168,8 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
     return value, runtime, backend_factory
 
 
-def train(dispatcher: Dispatcher, index: int) -> None:
-    dispatcher.accept_record(inference(index))
+def train(dispatcher: Dispatcher, index: int, runtime_load_id: str | None = None) -> None:
+    dispatcher.accept_record(inference(index, runtime_load_id))
     dispatcher.accept_record(report(index))
     for _ in range(1000):
         if dispatcher.get_or_create_scenario("math").scenario_step >= index:
@@ -250,7 +258,8 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     target_version = value.list_releases("math")[-2]["release_id"]
 
     value.rollback("math", target_version)
-    train(value, 4)
+    # The engine serves the restored checkpoint under the version that the restore returned.
+    train(value, 4, "restored:w1")
     # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
     for _ in range(1000):
         if len(tracker.events) == 3:

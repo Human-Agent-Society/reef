@@ -90,14 +90,15 @@ Two other extension points have separate names and purposes:
   to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
-  ``create_app`` accepts the same keyword for an injected handler.
+  ``create_app`` and ``build_app`` accept the same keyword for an injected
+  handler (see `Embed the service`_).
 
 Native backend selectors remain ``training.backend`` and ``inference.backend``.
 Custom request adapters use ``inference.handler-factory`` and
 ``inference.handler-config``. The factory path names an ``InferenceHandler``
 subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
-directly into ``create_app`` need only implement the inference methods.
+directly into ``create_app`` or ``build_app`` need only implement the inference methods.
 
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
@@ -223,8 +224,8 @@ The scenario list names it for every scenario. Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add ``training_spec()``,
 which binds the registered or dotted training objective, which declares the
-backend loss family, and the ``StepScheduling`` the runtime cuts each batch with; ``max_staleness``, the accepted
-producing-to-serving version lag, which must match the runtime; and
+backend loss family, and the ``StepScheduling`` the runtime cuts each batch with; ``max_staleness``, how many
+versions training data may lag behind the version that the scenario serves; and
 ``candidate_evaluation``, the optional plugin configured by the deployment's
 ``evaluation`` section.
 
@@ -330,6 +331,44 @@ permits it.
 The same type serves both sides: a producer constructs it and calls
 ``to_dict()``; a processor receives the parsed instance as
 ``context.parsed_report``.
+
+Embed the service
+-----------------
+
+An application can run the complete Reef service in its own process.
+``reef.service.assembly.build_app`` makes the dispatcher and the HTTP app from
+a ``ServiceConfig``. The app includes record retention, inference retries,
+the evaluation token, readiness of local cycles, and cleanup.
+
+.. code:: python
+
+   from aiohttp import web
+
+   from reef.service.app import get_dispatcher
+   from reef.service.assembly import build_app
+
+   app = build_app(settings, inference_handler=handler)
+
+   async def scenario_count(request: web.Request) -> web.Response:
+       dispatcher = get_dispatcher(request.app)
+       return web.json_response({"scenarios": len(dispatcher.list_scenarios())})
+
+   app.router.add_get("/my-app/scenario-count", scenario_count)
+   web.run_app(app, host=settings.host, port=settings.port)
+
+- ``inference_handler`` is optional. If you give one, it runs every
+  inference request in place of the recipe runtime's handler.
+- Add middleware and routes before the app starts. The service tokens also
+  protect the routes that you add.
+- ``get_dispatcher(app)`` returns the dispatcher of an app that ``build_app``
+  or ``create_app`` made.
+- ``build_app`` owns the dispatcher that it makes. The app closes it on
+  cleanup. ``create_app(dispatcher, ...)`` closes the dispatcher only if you
+  set ``close_dispatcher=True``.
+- You own the inference handler that you give. Reef does not close it.
+  Release it after the app stops.
+- If ``build_app`` fails, it closes the resources that it made and raises the
+  original error.
 
 Scenario stores
 ---------------
@@ -505,6 +544,59 @@ of exposing local file paths. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
+
+Artifact backends
+-----------------
+
+An artifact backend stores the releases of each scenario. By default, Reef
+uses Git LFS. A deployment selects a different backend in
+``storage.artifact_backend`` (see `Choose the artifact backend
+<../user-guide/operate.rst#choose-the-artifact-backend>`__).
+
+A backend plugin is a subclass of
+``reef.artifact.ConfigurableRepositoryBackendFactory``. Calling the factory
+with a scenario name returns the ``RepositoryBackend`` of that scenario. The
+plugin implements one class method:
+
+.. code:: python
+
+   @classmethod
+   def from_config(cls, config, *, context): ...
+
+- ``config`` is the plugin's own ``config`` mapping. Raise ``ValueError`` for
+  an invalid value.
+- ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
+  are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
+  ``bootstrap_files`` are the files of the recipe's base artifact. A new
+  scenario starts from these files. ``bootstrap_component`` is the release
+  component of a bootstrap model snapshot, or ``None`` for the release root.
+
+The optional capabilities are separate base classes. Inherit only the ones
+that the backend supports:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Base class
+     - Capability
+   * - ``RegistrationAwareRepositoryBackendFactory``
+     - ``has_registration(scenario)``: find a stored scenario without making
+       its backend.
+   * - ``EnumerableRepositoryBackendFactory``
+     - ``list_registrations()``: list the stored scenarios. The service
+       loads them when it starts.
+   * - ``CachedRepositoryBackendFactory``
+     - Both capabilities, and one cached backend for each scenario.
+   * - ``StagedReleaseRepositoryBackend``
+     - The backend side: ``publish(advance_head=False)`` stores a release
+       without moving the head, and ``commit_release`` moves the head
+       after the scenario commit. A durable scenario store requires it.
+
+``tests/artifact/test_reef_artifacts.py`` and
+``tests/artifact/test_reef_git_lfs.py`` show the publication and recovery
+behavior that a backend must have. ``GitLFSRepositoryBackendFactory`` is the
+built-in plugin. Reef does not call a close method on a backend factory.
 
 Record storage and audit
 ------------------------
@@ -699,7 +791,10 @@ record2task=..., task2batch=...)``):
 - ``record2record``: the record-to-record stage
   (``reef.record2record``). It decides which records train and in what order:
   it groups reports, judges records, and drops records that can no longer
-  train. Without one, each record passes through and nothing trains.
+  train, including data more than ``max_staleness`` versions behind the
+  serving version (see `the staleness check
+  <../developer-guide/processors.rst#the-record-to-record-stage>`__). Without
+  one, each record passes through and nothing trains.
 - ``record2task``: the record-to-task stage
   (``reef.record2task.Record2Task``). It turns each record set into tasks
   (``TrainDataItem`` values). Reported feedback supplies a ``make_sample`` hook
@@ -815,7 +910,7 @@ Computed feedback
 
 Use this engine when later traffic completes an earlier record and judging it
 calls a model or another slow service. The recipe writes a ``RecordJudging``.
-Its record stage is a ``JudgingRecord2Record(context, judging, worker)``,
+Its record stage is a ``JudgingRecord2Record(judging, worker)``,
 its record-to-task stage is a ``JudgedTasks``, and its ``Task2Batch`` shapes
 the judged samples into batches.
 
@@ -846,13 +941,6 @@ judgments. ``observe`` then uses the stage's ``track(record)``,
 ``abandon(receipt)``. A failed judgment or a ``None`` sample retires the record
 instead of failing a training step. All correlation state must be
 reconstructible from replay.
-
-While no batch is out, the stage retires candidates that are more than
-``max_staleness`` versions behind the newest candidate, by record arrival. The
-recipe's ``max_staleness`` reaches the stages as
-``PipelineContext.max_staleness``. With the default value 0, only candidates of
-the newest version stay. Runtime admission still checks each batch against the
-serving version.
 
 Task generation
 ~~~~~~~~~~~~~~~
