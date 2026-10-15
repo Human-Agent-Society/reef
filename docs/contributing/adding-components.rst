@@ -182,7 +182,9 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``
-  and is exposed through a repository backend factory.
+  and is exposed through a repository backend factory. To let a deployment
+  select it in ``storage.artifact_backend``, the factory also inherits
+  ``ConfigurableRepositoryBackendFactory``.
 - Put request preparation and response verification in ``InferenceHooks``,
   restore/recovery behavior in ``ArtifactLoader``, and client-pull delivery in
   ``FileTree`` under ``reef/surface/``.

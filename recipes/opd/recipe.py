@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from recipes.opd.processor import OPDBatches, OPDTasks
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.record2task.distill import DistillRecord2Record
+from reef.record2record import ExclusiveReportRecord2Record
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
 
@@ -16,7 +16,7 @@ class OPDRecipe(WeightTrainingRecipe):
 
     A report references one inference and leaves ``teacher_context`` empty.
     The teacher reads the recorded prompt and response ids, so the recipe
-    needs no tokenizer. Its stages are ``DistillRecord2Record``, ``OPDTasks``,
+    needs no tokenizer. Its stages are ``ExclusiveReportRecord2Record``, ``OPDTasks``,
     and ``OPDBatches``; the deployment's ``pipeline`` section gives their
     config: ``max_teacher_tokens`` in ``record2task`` and ``batch_size`` in
     ``task2batch``. ``batch_size`` responses form one optimizer step; the
@@ -41,4 +41,4 @@ class OPDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=DistillRecord2Record, record2task=OPDTasks, task2batch=OPDBatches)
+        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=OPDTasks, task2batch=OPDBatches)

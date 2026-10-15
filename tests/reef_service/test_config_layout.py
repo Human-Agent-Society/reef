@@ -84,9 +84,8 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
 @pytest.mark.parametrize(
     "value, message",
     [
-        ({"service": {}}, "service/services are not accepted"),
-        ({"services": []}, "service/services are not accepted"),
-        ({"execution": {"services": "uni"}}, "execution.services is not accepted"),
+        ({"service": {}}, "unknown config sections: service"),
+        ({"services": []}, "unknown config sections: services"),
         ({"infernce": {}}, "unknown config sections"),
         ({"implementation": "recipe"}, "unknown config sections"),
         ({"reef": {"recipe": "recipe"}}, r"unknown config fields: reef\.recipe"),
@@ -264,18 +263,18 @@ def test_declared_recipe_sections_support_leaf_overrides():
         "reef": {
             "recipe": "reef.recipe.cordis:CordisRecipe",
             "data": {"training_mode": "auto"},
-            "evolution": {"adapter": "pi", "tasks": ["one"], "episode_workers": 2},
+            "evolution": {"adapter": "pi", "tasks": ["one"], "episode_repeats": 2},
         }
     }
     arguments = component_config_arguments(config)
     result = _apply_overrides(
         config,
-        {"recipe.config.evolution.episode_workers": "4", "recipe.config.training-mode": "manual"},
+        {"recipe.config.evolution.episode_repeats": "4", "recipe.config.training-mode": "manual"},
         arguments=arguments,
     )
-    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_workers": 4}
+    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_repeats": 4}
     assert result["reef"]["data"]["training_mode"] == "manual"
-    assert config["reef"]["evolution"]["episode_workers"] == 2
+    assert config["reef"]["evolution"]["episode_repeats"] == 2
 
 
 @pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])

@@ -32,7 +32,6 @@ import enum
 import inspect
 import logging
 from collections.abc import AsyncIterable, Awaitable, Callable, Coroutine, Iterable
-from dataclasses import dataclass, field
 from typing import Any
 
 from .context import Context
@@ -106,14 +105,6 @@ def _issues_from(error: Exception) -> list[tuple[str, str | None]]:
                     for item in found
                 ]
     return [(str(error), None)]
-
-
-@dataclass
-class EffectMeta:
-    """One node of the inspectable effect tree: a label and collected children."""
-
-    label: str
-    children: list[EffectMeta] = field(default_factory=list)
 
 
 def _spawn(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
@@ -252,8 +243,7 @@ class EffectHandle:
     handle itself so the result is again the disposer.
     """
 
-    def __init__(self, fiber: Fiber, label: str) -> None:
-        self.meta = EffectMeta(label)
+    def __init__(self, fiber: Fiber) -> None:
         self._fiber = fiber
         self._collected: list[Disposer] = []
         self._armed = True
@@ -265,8 +255,6 @@ class EffectHandle:
         # Re-parent a nested handle: it leaves the fiber's top level and
         # disposes at its LIFO position inside this effect instead.
         self._fiber._disposables.delete(disposer)
-        if isinstance(disposer, EffectHandle):
-            self.meta.children.append(disposer.meta)
 
     def _dispose_collected(self) -> Coroutine[Any, Any, None] | None:
         pending = self._collected[:]
@@ -374,7 +362,7 @@ class Fiber:
         re-raises; an async one recovers, logs, and re-raises on await.
         """
         self.assert_active()
-        handle = EffectHandle(self, label)
+        handle = EffectHandle(self)
         try:
             coro = _drive(run(), handle._collect, lambda: handle._live)
         except BaseException:
@@ -408,10 +396,6 @@ class Fiber:
         # token rides in the handle's own list (upstream fiber.ts:338).
         handle._collected.append(self._disposables.push(handle))
         return handle
-
-    def get_effects(self) -> list[EffectMeta]:
-        """The labeled tree of this fiber's live top-level effects."""
-        return [handle.meta for handle in self._disposables if isinstance(handle, EffectHandle)]
 
     def dispose(self) -> Awaitable[Any] | None:
         """Retire this fiber, replaying its disposers LIFO.

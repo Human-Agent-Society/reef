@@ -56,7 +56,7 @@ from reef.record2task.generator.wire import (
     task_document,
     task_from_document,
 )
-from reef.service.deploy.generator import generator_settings
+from reef.service.deploy.generator import GeneratorSettings
 
 pytestmark = pytest.mark.unit
 
@@ -616,9 +616,11 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
-    settings = generator_settings({"tasks-root": "/tmp/t", "designer-timeout-s": 60, "agent": {"name": "terminus-2"}})
+    settings = GeneratorSettings.from_config(
+        {"tasks-root": "/tmp/t", "designer-timeout-s": 60, "agent": {"name": "terminus-2"}}, setting="generator"
+    )
     assert settings.tasks_root == "/tmp/t" and settings.designer_timeout_s == 60.0 and settings.port == 8910
-    assert generator_settings({"tasks_root": "/tmp/t"}).tasks_root == "/tmp/t"
+    assert GeneratorSettings.from_config({"tasks_root": "/tmp/t"}, setting="generator").tasks_root == "/tmp/t"
     for section, message in (
         ({}, "tasks_root is required"),
         ({"tasks-root": "/tmp/t", "bogus": 1}, "unknown config fields: bogus"),
@@ -629,9 +631,9 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "designer-api": "anthropic"}, "designer-api must be openai or responses"),
     ):
         with pytest.raises(ValueError, match=message):
-            generator_settings(section)
+            GeneratorSettings.from_config(section, setting="generator")
     with pytest.raises(ValueError, match="must be an object"):
-        generator_settings("tasks")  # type: ignore[arg-type]
+        GeneratorSettings.from_config("tasks", setting="generator")  # type: ignore[arg-type]
 
 
 def source_records() -> tuple[AgentRecord, ...]:

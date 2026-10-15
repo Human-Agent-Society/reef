@@ -52,12 +52,12 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
+        runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path)
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
         assert runtime.config["label"] == "001"
-        assert runtime.max_staleness == 2
+        assert "max_staleness" not in runtime.config
         inference.shutdown()
         runtime.shutdown()
         assert runtime.closed
@@ -112,9 +112,7 @@ def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
     monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
     monkeypatch.setattr(type(runtime_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="TrainingRuntime"):
-        _connect_training_runtime(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", max_staleness=0
-        )
+        _connect_training_runtime(ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo")
     assert closed == [True]
 
 

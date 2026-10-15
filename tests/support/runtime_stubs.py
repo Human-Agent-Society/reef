@@ -5,16 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.evaluation import SelectionDecision
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.interfaces import (
     ActivatedModel,
     InferenceHandler,
     ModelCandidate,
     PreparedTrainingStep,
+    TrainingMethod,
     TrainingRuntime,
 )
 from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethodSelector
 from reef.train.types import TrainingBatch
 
 
@@ -29,15 +30,8 @@ class StubTrainingRuntime(TrainingRuntime):
     implementations.
     """
 
-    def __init__(self, base_url: str = "http://training-runtime", *, max_staleness: int = 0) -> None:
-        if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
-            raise ValueError("max_staleness must be a non-negative integer")
+    def __init__(self, base_url: str = "http://training-runtime") -> None:
         self.inference = StubInferenceRuntime(self, base_url=base_url)
-        self._max_staleness = max_staleness
-
-    @property
-    def max_staleness(self) -> int:
-        return self._max_staleness
 
     @property
     def inference_handler(self) -> InferenceHandler | None:  # type: ignore[override]
@@ -47,12 +41,12 @@ class StubTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
         *,
-        serving_runtime_load_id: str | None = None,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
 
@@ -62,7 +56,7 @@ class StubTrainingRuntime(TrainingRuntime):
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         raise NotImplementedError("StubTrainingRuntime does not activate candidates")
 
-    def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
+    def reject_candidate(self, candidate: ModelCandidate) -> None:
         raise NotImplementedError("StubTrainingRuntime does not reject candidates")
 
     @property
@@ -133,12 +127,13 @@ def runtime_bindings(value):
 
 
 def candidate_backend(value, objective, scheduling, **kwargs):
+    """A runtime backend that trains every job with the objective named ``objective``."""
     from reef.train.runtime_backend import RuntimeCandidateBackend
 
     bindings = runtime_bindings(value)
     return RuntimeCandidateBackend(
         bindings["training_runtime"],
-        objective,
+        FixedTrainingMethodSelector(TrainingMethod(objective)),
         scheduling,
         inference_runtime=bindings["runtime"],
         **kwargs,
@@ -155,7 +150,9 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
         from reef.service.runtime import connect_executor_runtimes
 
         training, inference = components if components is not None else connect_executor_runtimes(**kwargs)
-        super().__init__(training, "sft", StepScheduling(), inference_runtime=inference)
+        super().__init__(
+            training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+        )
 
     @property
     def inference(self):
@@ -180,10 +177,6 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
     @property
     def inference_timeout_s(self):
         return self.inference_runtime.inference_timeout_s
-
-    @property
-    def max_staleness(self):
-        return self.training_runtime.max_staleness
 
     @property
     def concurrent_training_scenarios(self):

@@ -17,9 +17,9 @@ from typing import Any
 
 from reef.core.plugins import ConfiguredPlugin
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree.mutations import Mutation
+from reef.sandbox.process import EpisodeExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TrajectoryItem
 

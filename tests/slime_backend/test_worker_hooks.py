@@ -297,13 +297,23 @@ def test_updater_and_policy_gradient_hooks_replace_only_worker_globals(monkeypat
             loaded.append(path) or (lambda args, ppo_kl, log_probs, advantages: (args, ppo_kl, log_probs, advantages))
         ),
     )
-    loss = _stub_module(monkeypatch, "slime.backends.megatron_utils.loss")
+    loss = _stub_module(
+        monkeypatch,
+        "slime.backends.megatron_utils.loss",
+        compute_cispo_loss=lambda ppo_kl, log_probs, advantages, eps_clip, eps_clip_high: ("slime", eps_clip),
+    )
     args = SimpleNamespace(custom_pg_loss_function_path="reef.loss", advantage_estimator="grpo")
     worker_hooks._install_pg_primitive(args)
+    wrapped = loss.compute_cispo_loss
+    worker_hooks._install_pg_primitive(args)
+    assert loss.compute_cispo_loss is wrapped
     assert loss.compute_cispo_loss("kl", "logp", "adv", 0.1, 0.2) == (args, "kl", "logp", "adv")
     # Routing the estimator to cispo is the driver's job (configure_reef_loss_args).
     assert args.advantage_estimator == "grpo"
     assert loaded == ["reef.loss"]
+    # A job of a family without a primitive reaches Slime's own CISPO loss.
+    args.custom_pg_loss_function_path = None
+    assert loss.compute_cispo_loss("kl", "logp", "adv", 0.1, 0.2) == ("slime", 0.1)
 
 
 @pytest.mark.unit
@@ -399,3 +409,76 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
     worker_hooks.configure_critic_objective(critic)
     assert calls[-1] == "custom.critic"
     assert configured == [("sao", critic)]
+
+
+@pytest.mark.unit
+def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState
+
+    chained: list[tuple[object, ...]] = []
+    misc = importlib.import_module("slime.utils.misc")
+    monkeypatch.setattr(misc, "load_function", lambda path: lambda *call: chained.append((path, *call[1:3])))
+    groups = [{"lr": 9.0, "lr_mult": 1.0}, {"lr": 9.0, "lr_mult": 0.5}, {"lr": 9.0}]
+    optimizer = SimpleNamespace(param_groups=groups)
+    schedule_state = LearningRateScheduleState(LearningRateSchedule("warmup", 1e-4, warmup_steps=4), completed_steps=2)
+    args = SimpleNamespace(
+        reef_chained_before_train_step_hook_path="user.before_step",
+        reef_learning_rate_schedule_state=schedule_state.to_dict(),
+    )
+
+    worker_hooks.apply_learning_rate_schedule(args, 7, 1, "model", optimizer, "scheduler")
+
+    # The job's second step is the schedule's step 3; each group keeps its multiplier.
+    assert [group["lr"] for group in groups] == pytest.approx([7.5e-5, 3.75e-5, 7.5e-5])
+    assert chained == [("user.before_step", 7, 1)]
+    assert worker_hooks.APPLIED_LEARNING_RATE.value == pytest.approx(7.5e-5)
+
+    # Without a schedule Slime's scheduler keeps the rate it set.
+    args.reef_learning_rate_schedule_state = None
+    worker_hooks.apply_learning_rate_schedule(args, 7, 2, "model", optimizer, "scheduler")
+    assert [group["lr"] for group in groups] == pytest.approx([7.5e-5, 3.75e-5, 7.5e-5])
+    assert worker_hooks.APPLIED_LEARNING_RATE.value is None
+
+
+@pytest.mark.unit
+def test_logged_step_rates_follow_the_recipe_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    logged: list[dict[str, object]] = []
+    _stub_module(monkeypatch, "slime.utils.logging_utils", log=lambda args, metrics, step: logged.append(metrics))
+    worker_hooks.drain_worker_metrics()
+    worker_hooks._install_metric_capture()
+    from slime.utils import logging_utils
+
+    step = {"train/lr-pg_0": 3e-6, "train/critic-lr-pg_0": 1e-6, "train/loss": 1.0, "train/step": 4}
+    worker_hooks.APPLIED_LEARNING_RATE.value = 2e-5
+    try:
+        logging_utils.log("args", step, "train/step")
+    finally:
+        worker_hooks.APPLIED_LEARNING_RATE.value = None
+    # The actor's rate is the schedule's; the critic's is its own scheduler's.
+    assert logged[-1] == {**step, "train/lr-pg_0": 2e-5}
+    assert worker_hooks.drain_worker_metrics()["train/lr-pg_0"] == 2e-5
+    logging_utils.log("args", step, "train/step")
+    assert logged[-1] == step
+
+
+@pytest.mark.unit
+def test_switching_a_loss_family_replaces_the_previous_familys_hooks() -> None:
+    args = SimpleNamespace(loss_family="tttd", loss_family_ref=None, score_centering=False)
+    worker_hooks.resolve_objective_paths(args)
+    assert args.custom_loss_function_path == "recipes.tttd.slime.objective.tttd_loss"
+    assert args.custom_advantage_function_path == "recipes.tttd.slime.objective.tttd_advantages"
+
+    # The suite's sft family registers no hooks: nothing of TTTD's stays behind.
+    args.loss_family = "sft"
+    worker_hooks.switch_loss_family(args)
+    assert args.custom_loss_function_path is None
+    assert args.custom_advantage_function_path is None
+
+    args.loss_family = "tttd"
+    args.loss_type = "custom_loss"
+    args.score_centering = True
+    worker_hooks.switch_loss_family(args)
+    assert args.custom_loss_function_path == worker_hooks.SCORE_CENTERED_CUSTOM_LOSS_PATH
+    assert args.reef_score_centering_base_loss_path == "recipes.tttd.slime.objective.tttd_loss"

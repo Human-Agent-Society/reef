@@ -230,8 +230,8 @@ def _commit_step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | 
 def test_component_trainers_meet_at_the_commit_boundary(dispatchers: _Dispatchers) -> None:
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
-    assert [bound.component for bound in scenario.component_trainers] == [WEIGHTS, HARNESS]
-    assert scenario.trainer_for(HARNESS) is scenario.component_trainers[1].trainer
+    assert [bound.component for bound in scenario.trainers] == [WEIGHTS, HARNESS]
+    assert scenario.trainer_for(HARNESS) is scenario.trainers[1].trainer
     base = scenario.current_artifact_ref().release_id
 
     weights = scenario.prepare_training_step(WEIGHTS)
@@ -1342,7 +1342,7 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             # Trains the judged turns of ``_RetiringRetriesJudging``.
             return TrainingPipeline(
                 context,
-                record2record=JudgingRecord2Record(context, _RetiringRetriesJudging(), _JudgedAtOnce()),
+                record2record=JudgingRecord2Record(_RetiringRetriesJudging(), _JudgedAtOnce()),
                 record2task=_RetiringRetriesTasks(),
                 task2batch=RetiringRetriesBatches(context, 1),
             )
@@ -1468,7 +1468,7 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
     scenario = _scenario(dispatcher)
     with pytest.raises(NotImplementedError, match=r"harness \(ThresholdBatches\)"):
         scenario.set_training_mode("hybrid")
-    assert [bound.trainer.pipeline.training_mode for bound in scenario.component_trainers] == ["auto", "auto"]
+    assert [bound.trainer.pipeline.training_mode for bound in scenario.trainers] == ["auto", "auto"]
     with pytest.raises(ValueError, match="training_mode must be"):
         scenario.set_training_mode("bogus")
 

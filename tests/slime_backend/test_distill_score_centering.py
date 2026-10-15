@@ -64,8 +64,9 @@ def cpu_batch_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("skip", [0, 1])
 @pytest.mark.parametrize("head_size", [3, 7])
 @pytest.mark.parametrize("matched", [False, True])
+@pytest.mark.parametrize("advantage_clip", [0.0, 0.5])
 def test_opd_loss_matches_full_vocabulary_centered_gradient(
-    cpu_batch_adapters, cap: float, skip: int, head_size: int, matched: bool
+    cpu_batch_adapters, cap: float, skip: int, head_size: int, matched: bool, advantage_clip: float
 ) -> None:
     from slime.backends.megatron_utils.cp_utils import get_sum_of_sample_mean
 
@@ -118,6 +119,7 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
             top_k=2,
             importance_sampling_cap=cap,
             importance_sampling_level="token",
+            advantage_clip=advantage_clip,
             skip_response_tokens=skip,
         ),
     )
@@ -133,6 +135,8 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         weights = (probabilities / sampler).clamp(max=cap)
     rows = torch.arange(7)
     advantages = teacher_log_probs.detach()[rows, sampled] - probabilities.log()[rows, sampled]
+    if advantage_clip > 0:
+        advantages = advantages.clamp(min=-advantage_clip, max=advantage_clip)
     expected = -advantages[:, None] * (
         weights[rows, sampled, None] * scores[rows, sampled] - ((sampler * weights)[:, :, None] * scores).sum(1)
     )

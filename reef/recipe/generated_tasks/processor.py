@@ -1,6 +1,6 @@
 """The generated-task stages: rounds of generated tasks played here, their training episodes trained here.
 
-The record stage (``RoundRecord2Record``, built in ``recipe.py``) groups the task player's reports: every
+The record stage (``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) groups the task player's reports: every
 episode of the training arm names its task under ``metadata.task``, the episodes of one task form a
 group, and a group is complete at ``plays_per_task`` episodes. A training play that reports nothing, such
 as a failed trial, never joins its group. So when a task's plays end, its group is complete at the number
@@ -411,8 +411,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         """Absorb the finished plays and rounds, then start the next round when the record stage says one is due."""
         while not self.reported_play_counts.empty():
             self.round_stage.plays_reported(*self.reported_play_counts.get_nowait())
-        if self.worker is not None:
-            self.absorb_finished_rounds()
+        self.absorb_finished_rounds()
         if self.round_stage.round_due():
             self.start_round()
 
@@ -437,7 +436,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     def absorb_finished_rounds(self) -> None:
         """Take the rounds that the worker finished, and tell the record stage whether each one played no task."""
         if self.worker is None:
-            raise RuntimeError("no round worker to poll")
+            return
         for outcome in self.worker.poll():
             self.round_in_flight = None
             if isinstance(outcome, Failed):

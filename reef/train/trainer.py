@@ -280,6 +280,21 @@ class Trainer:
         with self._lock:
             return self._pending is not None or self._pipeline.ready()
 
+    def holds_untrained_records(self) -> bool:
+        """Whether this trainer has records that its backend would still train on.
+
+        That is the case when rows are unread, a batch is ready or reserved,
+        or a background job runs. A trainer without a candidate backend
+        trains nothing. The rows that the pipeline keeps for a later batch do
+        not count, because a rebuilt trainer reads them again from storage.
+        """
+        if self._candidate_backend is None:
+            return False
+        with self._lock:
+            if self._pending is not None or self._pipeline.background_jobs_running() or self._pipeline.ready():
+                return True
+            return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
@@ -348,7 +363,13 @@ class Trainer:
                 if self._pipeline.ready():
                     return
 
-    def run_once(self, scenario_step: int = 0, *, base_release_id: str | None = None) -> TrainStepResult | None:
+    def run_once(
+        self,
+        scenario_step: int = 0,
+        *,
+        base_release_id: str | None = None,
+        serving_runtime_load_id: str | None = None,
+    ) -> TrainStepResult | None:
         """Consume available data and, with a candidate backend, prepare one step.
 
         Returns ``None`` when this trainer has no candidate backend (it
@@ -356,6 +377,7 @@ class Trainer:
         has to advance its record cursor) or when the pipeline is not yet
         ready to produce a batch. ``base_release_id`` names the release served
         now; a batch reserved by this call is prepared against it.
+        ``serving_runtime_load_id`` is the version that serves the scenario now, for the staleness check.
         """
         if self.dispatched:
             raise RuntimeError("dispatched candidate backends must reserve a batch before execution")
@@ -363,21 +385,12 @@ class Trainer:
             if self._candidate_backend is None:
                 self._consume_data()
                 return None
-            kept: PreparedStep | None = None
-            if self._pending is not None:
-                result = self._pending.result
-                if result is not None:
-                    return result
-                if self._pending.base_release_id is None:
-                    self._pending.base_release_id = base_release_id
-                batch = self._pending.batch
-                kept = self._pending.prepared
-            else:
-                self._consume_data()
-                if not self._pipeline.ready():
-                    return None
-                batch = self._build_validated_batch()
-                self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
+            if self._pending is not None and self._pending.result is not None:
+                return self._pending.result
+            kept = None if self._pending is None else self._pending.prepared
+            batch = self.reserve_batch(base_release_id, serving_runtime_load_id)
+            if batch is None:
+                return None
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
@@ -460,21 +473,34 @@ class Trainer:
             raise ValueError("candidate evaluator must retain the evaluation result supplied by Reef")
         return decision
 
-    def reserve_training_batch(self, *, base_release_id: str | None = None) -> TrainingBatch | None:
+    def reserve_training_batch(
+        self, *, base_release_id: str | None = None, serving_runtime_load_id: str | None = None
+    ) -> TrainingBatch | None:
         """Reserve one batch for a dispatched backend, prepared against the release served now."""
         if not self.dispatched:
             raise RuntimeError("trainer has no dispatched candidate backend")
         with self._lock:
-            if self._pending is not None:
-                if self._pending.base_release_id is None:
-                    self._pending.base_release_id = base_release_id
-                return self._pending.batch
-            self._consume_data()
-            if not self._pipeline.ready():
-                return None
-            batch = self._build_validated_batch()
-            self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
-            return batch
+            return self.reserve_batch(base_release_id, serving_runtime_load_id)
+
+    def reserve_batch(self, base_release_id: str | None, serving_runtime_load_id: str | None) -> TrainingBatch | None:
+        """Return the reserved batch, or reserve the next one when the pipeline is ready. The caller holds the lock.
+
+        The reservation is prepared against ``base_release_id`` unless it already names a release.
+        ``serving_runtime_load_id`` is the version that serves the scenario now.
+        The staleness check of the pipeline measures the lag of each held set against it.
+        """
+        if self._pending is not None:
+            if self._pending.base_release_id is None:
+                self._pending.base_release_id = base_release_id
+            return self._pending.batch
+        if serving_runtime_load_id is not None:
+            self._pipeline.observe_serving_runtime_load_id(serving_runtime_load_id)
+        self._consume_data()
+        if not self._pipeline.ready():
+            return None
+        batch = self._build_validated_batch()
+        self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
+        return batch
 
     def retry_pending(self, *, keep_candidate: bool = False) -> None:
         """Keep the reserved batch but forget its result, so the next step prepares it again.

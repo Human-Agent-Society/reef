@@ -14,10 +14,10 @@ from tests.support._threshold_processor import threshold_pipeline
 
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime, TrainingMethod, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
 
@@ -61,8 +61,13 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                 context, batch_size=self.batch_size, accept_multi_turn=True
             ),
             candidate_backend=RuntimeCandidateBackend(
-                self.training_runtime, "sft", StepScheduling(), inference_runtime=self.runtime, scenario=scenario
+                self.training_runtime,
+                FixedTrainingMethodSelector(TrainingMethod("sft")),
+                StepScheduling(),
+                inference_runtime=self.runtime,
+                scenario=scenario,
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            max_staleness=self.max_staleness,
         )

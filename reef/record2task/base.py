@@ -22,20 +22,15 @@ from reef.record2record import Record2Record, RecordSet, TaskStatus
 
 @dataclass(frozen=True)
 class TaskResult:
-    """The tasks made from one record set, and what the record stage does with the set.
-
-    ``runtime_load_id`` is the version of the tasks' training data, when the
-    stage knows it. The record stage's eligibility checks read it.
-    """
+    """The tasks made from one record set, and what the record stage does with the set."""
 
     status: TaskStatus
     tasks: tuple[TrainDataItem, ...] = ()
-    runtime_load_id: str | None = None
 
     @classmethod
-    def ready(cls, tasks: tuple[TrainDataItem, ...], runtime_load_id: str | None = None) -> TaskResult:
+    def ready(cls, tasks: tuple[TrainDataItem, ...]) -> TaskResult:
         """The set trains as ``tasks``."""
-        return cls(TaskStatus.READY, tasks, runtime_load_id)
+        return cls(TaskStatus.READY, tasks)
 
     @classmethod
     def skipped(cls) -> TaskResult:

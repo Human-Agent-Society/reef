@@ -32,7 +32,7 @@ def training_config():
 @pytest.fixture(autouse=True)
 def clean_environment(monkeypatch):
     for key in list(os.environ):
-        if key.startswith("REEF_") or key in {"RAY_ADDRESS", "SLIME_ARGS_FILE"}:
+        if key.startswith("REEF_") or key == "RAY_ADDRESS":
             monkeypatch.delenv(key)
 
 
@@ -305,7 +305,7 @@ def test_generated_services_share_connection_wait_for_bridge_and_clean_up(
     driver_script = """
 import json, os, time
 from pathlib import Path
-keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME', 'SLIME_ARGS_FILE']
+keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME']
 Path('driver-env.json').write_text(json.dumps({key: os.environ[key] for key in keys}))
 Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-training-ready')
 time.sleep(120)
@@ -343,7 +343,6 @@ HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
             assert environment["RAY_ADDRESS"] == child["ray_address"]
             assert environment["REEF_RAY_NAMESPACE"] == child["ray_namespace"] == "test-namespace"
             assert environment["REEF_RAY_ACTOR_NAME"] == child["ray_actor_name"] == "test-actor"
-            assert environment["SLIME_ARGS_FILE"] == ""
             assert child["ray_address"] == ("127.0.0.1:6380" if external_cluster else "127.0.0.1:6379")
     finally:
         stack.shutdown(grace=1)
@@ -446,21 +445,6 @@ def test_legacy_native_driver_arguments_remain_available():
         }
     }
     assert driver_arguments(config) == ["--rollout-num-gpus=3", "--sglang-context-length=1024", "--rollout-external"]
-
-
-def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp_path, monkeypatch):
-    from reef.train.slime_backend import driver as slime_driver
-
-    config, _ = resolve_deployment_config(training_config(), None, tmp_path / "c")
-    monkeypatch.setenv("RAY_ADDRESS", "local")
-    monkeypatch.setenv("REEF_CONFIG", str(tmp_path / "config"))
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("direct managed flags must fail before connecting or parsing Slime")
-
-    monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
-    with pytest.raises(RuntimeError, match="pass options through reef serve"):
-        slime_driver.create_training_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")
 
 
 def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags(tmp_path):

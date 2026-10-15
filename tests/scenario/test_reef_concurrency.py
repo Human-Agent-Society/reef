@@ -24,7 +24,6 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.evaluation import SelectionDecision
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -44,7 +43,7 @@ class CountingRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         del batch, objective
         return PreparedTrainingStep(
@@ -70,15 +69,21 @@ class CountingRuntime(StubTrainingRuntime):
     def activate_candidate(self, candidate):
         return ActivatedModel(candidate.candidate_id, str(candidate.metadata["runtime_load_id"]))
 
-    def reject_candidate(self, candidate, decision: SelectionDecision):
-        del candidate, decision
+    def reject_candidate(self, candidate):
+        del candidate
 
 
 def sft_inference(agent_record_id: str) -> AgentRecord:
+    """An inference record from the first published version, w1.
+
+    Accepts race with commits, so no record can name the version that serves
+    it. The tests set ``max_staleness`` to their step count instead: every
+    record stays within the window of every later version.
+    """
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2], "runtime_load_id": "w1"},
         agent_record_id=agent_record_id,
     )
 
@@ -151,14 +156,19 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime = CountingRuntime()
+    pairs_per_thread = 4
+    thread_count = 4
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(
+            **runtime_bindings(runtime),
+            batch_size=1,
+            checkpoint_strategy=EveryNVersions(1000),
+            max_staleness=pairs_per_thread * thread_count,
+        ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
     )
-    pairs_per_thread = 4
-    thread_count = 4
 
     def worker(seed: int) -> None:
         for offset in range(pairs_per_thread):
@@ -193,7 +203,9 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(
+            **runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000), max_staleness=4
+        ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

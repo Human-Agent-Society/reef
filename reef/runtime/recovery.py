@@ -27,13 +27,7 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Any, Literal
 
-from reef.runtime.interfaces import (
-    MarkerStatus,
-    RuntimeLoadId,
-    ScenarioHistoryStore,
-    TrainingJobResult,
-    TrainingJobStore,
-)
+from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 
 logger = logging.getLogger(__name__)
@@ -348,22 +342,6 @@ class ScenarioHistory(ScenarioHistoryStore):
             return None
         return str(entry["publications"][-1])
 
-    def lag(self, scenario: str, producing: RuntimeLoadId) -> int | None:
-        """How many of ``scenario``'s publications postdate ``producing``.
-
-        ``None`` means the producing version belongs to another incarnation
-        (a previous training-group lifetime), which is never admissible.
-        """
-        entry = self._entries.get(scenario)
-        publications = [RuntimeLoadId.parse(value) for value in ([] if entry is None else entry["publications"])]
-        if publications and publications[-1].incarnation != producing.incarnation:
-            return None
-        return sum(
-            1
-            for published in publications
-            if published.incarnation == producing.incarnation and published.sequence > producing.sequence
-        )
-
     def protected_rollouts(self) -> set[int]:
         """Global rollout ids whose checkpoints carry a scenario's latest adapter."""
         return {
@@ -451,10 +429,6 @@ class InferenceEngineGroup(ABC):
     @abstractmethod
     def terminate(self) -> int:
         """Retire owned engines after an uncertain update; never kill borrowed engines."""
-
-
-#: Legacy name of :class:`InferenceEngineGroup`, kept for integrations written against it.
-InferenceEngines = InferenceEngineGroup
 
 
 class InferenceMonitor(ABC):
@@ -799,9 +773,7 @@ class TrainingRecovery:
             # Restore the frozen base before registering scenario adapters,
             # including runs that only release KV/graphs on later steps.
             publisher.inference.onload_weights()
-        if status == "REJECTING":
-            if marker is None:
-                raise RuntimeError("REJECTING marker status has no marker payload")
+        if marker is not None and status == "REJECTING":
             self.publication.reject(str(marker["job_id"]))
             marker["status"] = status = "REJECTED"
             publisher.pause_generation(reconcile=True)
@@ -823,9 +795,7 @@ class TrainingRecovery:
         # recovery reuses its persisted target; a fresh deployment keeps the
         # incarnation Reef assigned before either backend was started.
         recovered_runtime_load_id = None
-        if status in PUBLISHED_STATES:
-            if marker is None:
-                raise RuntimeError(f"{status} marker status has no marker payload")
+        if marker is not None and status in PUBLISHED_STATES:
             recovered_runtime_load_id = str(marker["runtime_load_id"])
         if config.save_hf_template is not None and status != "REJECTED" and not (config.lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
@@ -851,9 +821,7 @@ class TrainingRecovery:
                 publisher.inference.onload_weights()
                 publisher.inference.onload_kv()
             publisher.initialize_version()
-        elif status == "REJECTED":
-            if marker is None:
-                raise RuntimeError("REJECTED status requires a durable job marker")
+        elif marker is not None and status == "REJECTED":
             publisher.runtime_load_id = str(marker.get("parent_runtime_load_id") or versions[0])
             publisher.initialize_version()
         elif config.save_hf_template is None:

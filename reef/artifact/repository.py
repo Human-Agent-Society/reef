@@ -7,9 +7,11 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
 from time import monotonic
+from typing import Any, Self
 
 from reef.artifact.artifact import (
     LOCAL_RELEASE_PREFIX,
@@ -20,6 +22,7 @@ from reef.artifact.artifact import (
     ArtifactRepository,
 )
 from reef.artifact.composite import compose_release
+from reef.core.plugins import Plugin
 
 
 class RepositoryBackend(ArtifactRepository):
@@ -87,6 +90,43 @@ class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
 class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
     @abstractmethod
     def list_registrations(self) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True)
+class RepositoryBackendContext:
+    """The deployment values that a configured factory gets in addition to its own config.
+
+    ``work_dir`` and ``cache_dir`` are ``storage.artifact_work_dir`` and
+    ``storage.artifact_cache_dir``. ``bootstrap_files`` are the files of the
+    recipe's base artifact. A new scenario starts from them.
+    ``bootstrap_component`` is the release component of a bootstrap model
+    snapshot, or ``None`` for the release root.
+    """
+
+    work_dir: Path
+    cache_dir: Path
+    bootstrap_files: Mapping[str, str] = field(default_factory=dict)
+    bootstrap_component: str | None = None
+
+
+class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
+    """A repository backend factory that a deployment names in ``storage.artifact_backend``.
+
+    Optional capabilities are separate base classes. To find or list stored
+    scenarios, also inherit ``RegistrationAwareRepositoryBackendFactory`` or
+    ``EnumerableRepositoryBackendFactory``. ``CachedRepositoryBackendFactory``
+    gives both. To work with a scenario commit log, the backends must
+    subclass ``StagedReleaseRepositoryBackend``.
+    """
+
+    @classmethod
+    @abstractmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
+        """Build the factory a deployment names.
+
+        ``config`` is the plugin's own configuration. Raise ``ValueError`` for
+        an invalid configuration.
+        """
 
 
 class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, EnumerableRepositoryBackendFactory):
@@ -205,6 +245,11 @@ class Repository(ArtifactRepository):
     @property
     def local_root(self) -> Path:
         return self._local_root
+
+    @property
+    def holds_local_releases(self) -> bool:
+        """Whether a release that this process staged exists only in memory. A close of the repository loses it."""
+        return bool(self._local_artifacts)
 
     @property
     def backend(self) -> RepositoryBackend:

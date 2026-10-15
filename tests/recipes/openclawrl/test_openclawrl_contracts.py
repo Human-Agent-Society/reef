@@ -21,6 +21,7 @@ from recipes.openclawrl.prm import (
 from recipes.openclawrl.processor import OpenClawRLBatches, OpenClawRLBatchSettings, OpenClawRLTasks
 from recipes.openclawrl.turns import TurnJob
 from reef.core.trajectories import source_record_id
+from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -263,7 +264,7 @@ class TestTopkTestObjective:
                 _sample(-1.0),
             ),
         )
-        step = prepare_slime_step(batch, "openclawrl", {}, StepScheduling(unit="sample"))
+        step = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"))
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
         # The family's wire row: policy 5-tuple + the three top-K channels.
@@ -471,7 +472,7 @@ def _judge_one_turn(judge, teacher):
 
     context = PipelineContext("s")
 
-    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), clients=(judge, teacher, None))
+    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), clients=(judge, teacher, None))
     processor = TrainingPipeline(
         context,
         record2record=stage,
@@ -583,7 +584,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
 
     worker = FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
         record2record=stage,

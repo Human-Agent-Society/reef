@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -13,7 +12,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA, METADATA_SCHEMA
+from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA, METADATA_SCHEMA, file_sha256
 from reef.train.slime_backend.reef_adapters.megatron.lora import build_sglang_lora_config, is_lora_weight_name
 
 ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
@@ -136,8 +135,8 @@ def _write_adapter_checkpoint(
             "dtype": _tensor_dtype(tensors),
             "source": {"scenario": scenario, "scenario_step": scenario_step},
             "files": {
-                ADAPTER_CONFIG: _digest(config_path),
-                ADAPTER_WEIGHTS_FILE: _digest(weights_path),
+                ADAPTER_CONFIG: file_sha256(config_path),
+                ADAPTER_WEIGHTS_FILE: file_sha256(weights_path),
             },
         }
         metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -153,14 +152,6 @@ def _write_adapter_checkpoint(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
-
-
-def _digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def _tensor_dtype(tensors: dict[str, torch.Tensor]) -> str | None:
@@ -188,7 +179,7 @@ def _tokenizer_identity(base_model: str) -> dict[str, str]:
     for name in TOKENIZER_FILES:
         candidate = root / name
         if candidate.is_file():
-            identity[name] = _digest(candidate)
+            identity[name] = file_sha256(candidate)
     return identity
 
 

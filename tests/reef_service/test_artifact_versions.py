@@ -28,7 +28,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
-from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.commit_log import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainStepResult
 
@@ -130,7 +130,8 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     target_version = value.list_releases("math")[-2]["release_id"]
 
     value.rollback("math", target_version)
-    train(value, 4)
+    # The engine serves the restored checkpoint under the version that the restore returned.
+    train(value, 4, "restored:w1")
     # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
     for _ in range(1000):
         if len(tracker.events) == 3:
@@ -159,8 +160,8 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
 
     scenario = value.get_or_create_scenario("math")
     assert scenario is not None
-    assert isinstance(scenario.store, CommitLogScenarioStore)
-    journal = scenario.store.commit_log
+    assert isinstance(scenario.store, CommitHistoryScenarioStore)
+    journal = scenario.store.commit_history
     assert journal is not None
     path = journal.path
     records = path.read_text(encoding="utf-8").splitlines()
@@ -173,7 +174,6 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
@@ -202,7 +202,6 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         TestPolicyRecipe(**runtime_bindings(restarted_runtime), checkpoint_strategy=EveryNVersions(1)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")

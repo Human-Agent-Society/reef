@@ -15,14 +15,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
-from reef.harness.adapters.descriptor import (
-    AdapterDescriptor,
-    AdapterRenderer,
-    ClientState,
-    ConfigTarget,
-    DescriptorError,
-    load_descriptor,
-)
+from reef.harness.adapters.descriptor import AdapterRenderer, ClientState, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.quirks import read_frontmatter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
@@ -112,25 +105,31 @@ def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> 
 def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
     descriptor = get_adapter("codex")
     for approval_policy in ("on-request", "never"):
-        with pytest.raises(RenderError, match="may not set approval_policy"):
+        with pytest.raises(RenderError, match=r"on approval_policy in codex/config\.toml: episodes pin never"):
             render_composition([("config", {"data": {"approval_policy": approval_policy}})], descriptor)
-    with pytest.raises(RenderError, match="web_search must be one of disabled, cached, indexed, live"):
+    with pytest.raises(RenderError, match=r"on web_search in codex/config\.toml: it must match IsIn\("):
         render_composition([("config", {"data": {"web_search": "always"}})], descriptor)
     for data, message in (
-        ({"features": {"apps": True}}, r"features\.apps disabled"),
-        ({"features": {"hooks": True}}, r"features\.hooks disabled"),
-        ({"features": {"plugins": True}}, r"features\.plugins disabled"),
-        ({"features": {"skill_mcp_dependency_install": True}}, r"skill_mcp_dependency_install disabled"),
-        ({"sandbox_workspace_write": {"network_access": True}}, r"network_access false"),
-        ({"sandbox_workspace_write": {"writable_roots": ["/tmp/outside"]}}, "may not add"),
-        ({"otel": {"exporter": "otlp-http"}}, "OpenTelemetry exporter disabled"),
-        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted"),
-        ({"hooks": {"SessionStart": []}}, "config keys are not admitted"),
-        ({"notify": ["untrusted-command"]}, "config keys are not admitted"),
-        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted"),
-        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted"),
-        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted"),
-        ({"agents": {"reviewer": {"config_file": "/etc/passwd"}}}, "config keys are not admitted"),
+        ({"features": {"apps": True}}, r"on features\.apps in"),
+        ({"features": {"hooks": True}}, r"on features\.hooks in"),
+        ({"features": {"plugins": True}}, r"on features\.plugins in"),
+        ({"features": {"skill_mcp_dependency_install": True}}, r"on features\.skill_mcp_dependency_install in"),
+        ({"sandbox_workspace_write": {"network_access": True}}, r"on sandbox_workspace_write\.network_access in"),
+        (
+            {"sandbox_workspace_write": {"writable_roots": ["/tmp/outside"]}},
+            r"on sandbox_workspace_write\.writable_roots in",
+        ),
+        ({"otel": {"exporter": "otlp-http"}}, "on otel in"),
+        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted for benchmark episodes"),
+        ({"hooks": {"SessionStart": []}}, "config keys are not admitted for benchmark episodes"),
+        ({"notify": ["untrusted-command"]}, "config keys are not admitted for benchmark episodes"),
+        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
+        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
+        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted for benchmark episodes"),
+        (
+            {"agents": {"reviewer": {"config_file": "/etc/passwd"}}},
+            "config keys are not admitted for benchmark episodes",
+        ),
     ):
         with pytest.raises(RenderError, match=message):
             render_composition([("config", {"data": data})], descriptor)
@@ -202,7 +201,9 @@ def test_terminus_folds_agent_commands_into_a_second_skill_root() -> None:
 
 
 def test_terminus_rejects_config_keys_that_are_not_constructor_arguments() -> None:
-    with pytest.raises(RenderError, match="not Terminus 2 arguments"):
+    with pytest.raises(
+        RenderError, match=r"key 'tmux_pane_width' in terminus/config\.json: each key must be a Terminus 2 argument"
+    ):
         render_composition([("config", {"data": {"tmux_pane_width": 200}})], get_adapter("terminus"))
 
 
@@ -414,22 +415,23 @@ def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> N
 
 def test_dsh_locks_refuse_a_patch_that_breaks_the_episode() -> None:
     descriptor = get_adapter("dsh")
-    with pytest.raises(RenderError, match=r'must keep session-persistence-jsonl\.config\.compression "none"'):
+    with pytest.raises(
+        RenderError,
+        match=r"on session-persistence-jsonl\.config\.compression in dsh/profiles/headless/cordis\.patch\.yml",
+    ):
         render_composition(
             [("config", {"data": {"session-persistence-jsonl": {"config": {"compression": "zstd"}}}})], descriptor
         )
-    with pytest.raises(RenderError, match=r"must keep session-telemetry-otel\.disabled true"):
+    with pytest.raises(RenderError, match=r"on session-telemetry-otel\.disabled in"):
         render_composition([("config", {"data": {"session-telemetry-otel": {"disabled": False}}})], descriptor)
-    with pytest.raises(RenderError, match="must be an object"):
+    with pytest.raises(RenderError, match=r"key 'agent-loop' in .*: a patch entry is an object"):
         render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
-    # A patch entry that is not an object takes the locked keys below it away; the lock refuses it as such,
+    # A patch entry that is not an object takes the checked keys below it away; the check refuses it as such,
     # where the chained reads a hand written check needs would crash on the shape.
-    with pytest.raises(RenderError, match=r'must keep session-persistence-jsonl\.config\.compression "none"'):
+    with pytest.raises(RenderError, match=r"on session-persistence-jsonl\.config\.compression in"):
         render_composition([("config", {"data": {"session-persistence-jsonl": "zstd"}})], descriptor)
     # The web profile's patch is held to the same checks: a compressed web profile refuses the shared sessions root.
-    with pytest.raises(
-        RenderError, match=rf'must keep session-persistence-jsonl\.config\.compression "none" in {DSH_WEB_PATCH}'
-    ):
+    with pytest.raises(RenderError, match=rf"on session-persistence-jsonl\.config\.compression in {DSH_WEB_PATCH}"):
         render_composition(
             [
                 (
@@ -439,13 +441,13 @@ def test_dsh_locks_refuse_a_patch_that_breaks_the_episode() -> None:
             ],
             descriptor,
         )
-    with pytest.raises(RenderError, match=f"must keep session-title-llm.disabled true in {DSH_WEB_PATCH}"):
+    with pytest.raises(RenderError, match=f"on session-title-llm.disabled in {DSH_WEB_PATCH}"):
         render_composition(
             [("config", {"target": "web", "data": {"session-title-llm": {"disabled": False}}})], descriptor
         )
     # And its manifest keeps the patch read once at start: with live reload dsh web exits at start.
     live = {"dsh": {"profile": {"patchReload": "live"}}}
-    with pytest.raises(RenderError, match=r"must keep dsh\.profile\.patchReload"):
+    with pytest.raises(RenderError, match=r"on dsh\.profile\.patchReload in"):
         render_composition([("config", {"target": "web_manifest", "data": live})], descriptor)
 
 
@@ -520,17 +522,17 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
 
 def test_hermes_locks_refuse_a_config_that_breaks_the_episode() -> None:
     descriptor = get_adapter("hermes")
-    with pytest.raises(RenderError, match=r"must keep security\.tirith_enabled false"):
+    with pytest.raises(RenderError, match=r"on security\.tirith_enabled in"):
         render_composition([("config", {"data": {"security": {"tirith_enabled": True}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep auxiliary\.title_generation\.enabled false"):
+    with pytest.raises(RenderError, match=r"on auxiliary\.title_generation\.enabled in"):
         render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep sessions\.write_json_snapshots true"):
+    with pytest.raises(RenderError, match=r"on sessions\.write_json_snapshots in"):
         render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep memory\.nudge_interval 0"):
+    with pytest.raises(RenderError, match=r"on memory\.nudge_interval in"):
         render_composition([("config", {"data": {"memory": {"nudge_interval": 10}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep skills\.creation_nudge_interval 0"):
+    with pytest.raises(RenderError, match=r"on skills\.creation_nudge_interval in"):
         render_composition([("config", {"data": {"skills": {"creation_nudge_interval": 10}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep curator\.enabled false"):
+    with pytest.raises(RenderError, match=r"on curator\.enabled in"):
         render_composition([("config", {"data": {"curator": {"enabled": True}}})], descriptor)
 
 
@@ -550,7 +552,9 @@ def test_hermes_admission_refuses_a_config_section_that_is_not_an_object() -> No
         entries, refusal = admit_mutations(
             [], [Mutation("create", "c1", {"name": "config", "config": {"data": data}})], descriptor
         )
-        assert entries == [] and refusal is not None and refusal.startswith("hermes composition must keep"), data
+        assert (
+            entries == [] and refusal is not None and refusal.startswith("hermes composition fails the check on")
+        ), data
     tracer = Mutation(
         "create",
         "e1",
@@ -665,7 +669,7 @@ def test_two_nodes_cannot_render_to_the_same_path() -> None:
 
 
 def test_opencode_descriptor_lock_rejects_reopened_autoupdate() -> None:
-    with pytest.raises(RenderError, match=r"must keep autoupdate false in opencode/opencode\.json"):
+    with pytest.raises(RenderError, match=r"on autoupdate in opencode/opencode\.json: it must match IsDefault\(\)"):
         render_composition([("config", {"data": {"autoupdate": True}})], get_adapter("opencode"))
 
 
@@ -690,13 +694,13 @@ BINDING_COPY = {
         ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "must not set provider"),
         (BINDING_COPY, "must not set provider"),
         ({"model": "reef/other"}, "must not set model"),
-        ({"small_model": "reef/served"}, "must not set small_model"),
-        ({"disabled_providers": ["reef"]}, "must not set disabled_providers"),
-        ({"enabled_providers": ["reef", "opencode"]}, r'must keep enabled_providers \["reef"\]'),
-        ({"enabled_providers": []}, r'must keep enabled_providers \["reef"\]'),
-        ({"agent": {"build": {"model": "evil/m"}}}, "must not set agent.build.model"),
-        ({"mode": {"chat": {"model": "evil/m"}}}, "must not set mode.chat.model"),
-        ({"command": {"hi": {"template": "Hi.", "model": "evil/m"}}}, "must not set command.hi.model"),
+        ({"small_model": "reef/served"}, r"on small_model in opencode/opencode\.json: Reef's model binding"),
+        ({"disabled_providers": ["reef"]}, "on disabled_providers in"),
+        ({"enabled_providers": ["reef", "opencode"]}, "on enabled_providers in"),
+        ({"enabled_providers": []}, "on enabled_providers in"),
+        ({"agent": {"build": {"model": "evil/m"}}}, r"on agent\.build\.model in"),
+        ({"mode": {"chat": {"model": "evil/m"}}}, r"on mode\.chat\.model in"),
+        ({"command": {"hi": {"template": "Hi.", "model": "evil/m"}}}, r"on command\.hi\.model in"),
     ],
 )
 def test_opencode_quirk_refuses_a_composition_that_chooses_the_model(data: dict, message: str) -> None:
@@ -1041,7 +1045,9 @@ def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, va
     """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
     yes or on, so a tree must not set them at all: the episode env and reef-claude's client_env own them. Windows
     matches env names in any case."""
-    with pytest.raises(RenderError, match=f"must not set {key} in settings.env"):
+    with pytest.raises(
+        RenderError, match=f"on env key {key!r} in claude/settings.json: the episode env and reef-claude set it"
+    ):
         render_composition([("config", {"data": {"env": {key: value}}})], get_adapter("claude"))
 
 
@@ -1059,107 +1065,6 @@ def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
     assert rendered["disableDeepLinkRegistration"] == "disable"
     with pytest.raises(RenderError, match="disableDeepLinkRegistration"):
         render_composition([("config", {"data": {"disableDeepLinkRegistration": value}})], get_adapter("claude"))
-
-
-def _locked(locked: list[str], defaults: dict[str, object] | None = None) -> AdapterDescriptor:
-    """The opencode descriptor with its config target replaced and the base renderer, so only the locks act."""
-    target = ConfigTarget(
-        path="opencode/opencode.json", defaults=defaults if defaults is not None else {}, locked=tuple(locked)
-    )
-    return replace(get_adapter("opencode"), config_targets={"primary": target}, renderer=AdapterRenderer)
-
-
-def test_a_locked_key_keeps_its_defaults_value() -> None:
-    descriptor = _locked(["autoupdate", "nested.key"], {"autoupdate": False, "nested": {"key": 1}})
-    repeated = ("config", {"data": {"autoupdate": False, "nested": {"key": 1}}})
-    assert json.loads(render_composition([repeated], descriptor)["opencode/opencode.json"])["nested"] == {"key": 1}
-    with pytest.raises(
-        RenderError, match=r"must keep autoupdate false in opencode/opencode\.json: the descriptor locks it"
-    ):
-        render_composition([("config", {"data": {"autoupdate": True}})], descriptor)
-    # Booleans only match booleans: a locked false refuses 0, which == false.
-    with pytest.raises(RenderError, match=r"must keep autoupdate false"):
-        render_composition([("config", {"data": {"autoupdate": 0}})], descriptor)
-    # A section the tree clobbers with a non object takes the locked keys below it away, and refuses too.
-    with pytest.raises(RenderError, match=r"must keep nested\.key 1 .*the merged config does not have it"):
-        render_composition([("config", {"data": {"nested": "flat"}})], descriptor)
-
-
-def test_a_locked_key_without_a_default_must_not_be_set() -> None:
-    descriptor = _locked(["small_model"])
-    for value in ["reef/served", None, "", {}, []]:
-        # An empty value is a set one: only the absence the defaults name keeps a lock without a default.
-        with pytest.raises(RenderError, match=r"must not set small_model in opencode/opencode\.json"):
-            render_composition([("config", {"data": {"small_model": value}})], descriptor)
-    assert "small_model" not in render_composition([], descriptor)["opencode/opencode.json"]
-
-
-def test_a_locked_star_matches_every_key_of_an_object_and_every_item_of_a_list() -> None:
-    descriptor = _locked(["agents.*.model"], {"agents": {"build": {"model": "reef/served"}}})
-    # An agent the tree adds under any name may not choose a model either.
-    with pytest.raises(RenderError, match=r"must not set agents\.reviewer\.model"):
-        render_composition([("config", {"data": {"agents": {"reviewer": {"model": "m"}}}})], descriptor)
-    with pytest.raises(RenderError, match=r"must keep agents\.build\.model .*the descriptor locks it"):
-        render_composition([("config", {"data": {"agents": {"build": {"model": "m"}}}})], descriptor)
-    add = render_composition([("config", {"data": {"agents": {"reviewer": {"tools": ["read"]}}}})], descriptor)
-    assert json.loads(add["opencode/opencode.json"])["agents"]["reviewer"] == {"tools": ["read"]}
-    listed = _locked(["tasks.*.model"])
-    with pytest.raises(RenderError, match=r"must not set tasks\.0\.model"):
-        render_composition([("config", {"data": {"tasks": [{"model": "m"}]}})], listed)
-    keep = render_composition([("config", {"data": {"tasks": [{"name": "a"}]}})], listed)
-    assert json.loads(keep["opencode/opencode.json"])["tasks"] == [{"name": "a"}]
-
-
-def test_a_locked_null_keeps_only_null() -> None:
-    descriptor = _locked(["share"], {"share": None})
-    assert "share" in json.loads(render_composition([], descriptor)["opencode/opencode.json"])
-    with pytest.raises(RenderError, match=r"must keep share null in opencode/opencode\.json"):
-        render_composition([("config", {"data": {"share": "disabled"}})], descriptor)
-
-
-def _locked_descriptor_yaml(tmp_path: Path, locked: object) -> Path:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "opencode" / "descriptor.yaml").read_text())
-    if locked is None:
-        data["files"]["config"]["primary"].pop("locked", None)
-    else:
-        data["files"]["config"]["primary"]["locked"] = locked
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return target
-
-
-@pytest.mark.parametrize(
-    ("locked", "message"),
-    [
-        pytest.param(["autoupdate..x"], "dot separated key names", id="empty-segment"),
-        pytest.param([".autoupdate"], "dot separated key names", id="leading-dot"),
-        pytest.param(["autoupdate", 5], "list of non-empty strings", id="not-a-string"),
-        pytest.param(["model"], r"locks 'model', which the \w+ model binding writes \(model\)", id="binding-key"),
-        pytest.param(
-            ["provider.reef.options"],
-            r"locks 'provider\.reef\.options', which the \w+ model binding writes",
-            id="binding-parent",
-        ),
-        pytest.param(["provider.*"], r"locks 'provider\.\*'", id="binding-star"),
-    ],
-)
-def test_locked_paths_are_validated_at_load(tmp_path: Path, locked: object, message: str) -> None:
-    with pytest.raises(DescriptorError, match=message):
-        load_descriptor(_locked_descriptor_yaml(tmp_path, locked))
-
-
-def test_a_star_lock_below_the_binding_is_refused(tmp_path: Path) -> None:
-    # `agent.*.model` and the binding's `model` are different keys: siblings, no overlap, so it loads and holds.
-    descriptor = load_descriptor(_locked_descriptor_yaml(tmp_path, ["autoupdate", "agent.*.model"]))
-    assert descriptor.config_targets["primary"].locked == ("autoupdate", "agent.*.model")
-    with pytest.raises(RenderError, match="must keep autoupdate false"):
-        render_composition([("config", {"data": {"autoupdate": True}})], descriptor)
-
-
-def test_a_descriptor_without_locked_keys_loads_and_renders_as_before(tmp_path: Path) -> None:
-    descriptor = load_descriptor(_locked_descriptor_yaml(tmp_path, None))
-    assert descriptor.config_targets["primary"].locked == ()
-    assert render_composition([], descriptor) == render_composition([], get_adapter("opencode"))
 
 
 def test_bundled_adapters_are_discoverable() -> None:
@@ -1274,50 +1179,19 @@ def test_an_adapter_renderer_step_must_be_a_static_method() -> None:
                 return text
 
 
-def test_a_quirks_module_with_only_finalize_render_still_gets_the_last_word(tmp_path, monkeypatch) -> None:
-    """An external quirks module written before AdapterRenderer keeps working, with a deprecation warning."""
-    (tmp_path / "legacy_quirks.py").write_text(
-        "def finalize_render(files):\n    return {**files, 'native/LEGACY': 'seen ' + str(len(files)) + '\\n'}\n"
+def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch) -> None:
+    module_name = "two_renderer_quirks"
+    (tmp_path / f"{module_name}.py").write_text(
+        "from reef.harness.adapters.descriptor import AdapterRenderer\n"
+        "class FirstRenderer(AdapterRenderer):\n    pass\n"
+        "class SecondRenderer(AdapterRenderer):\n    pass\n"
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
-    data["quirks"] = "legacy_quirks"
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.warns(DeprecationWarning, match="finalize_render, which is deprecated"):
-        descriptor = load_descriptor(target)
-    files = render_composition([], descriptor)
-    assert files["native/LEGACY"] == f"seen {len(files) - 1}\n"
-
-
-@pytest.mark.parametrize(
-    ("source", "message"),
-    [
-        (
-            "from reef.harness.adapters.descriptor import AdapterRenderer\n"
-            "class FirstRenderer(AdapterRenderer):\n    pass\n"
-            "class SecondRenderer(AdapterRenderer):\n    pass\n",
-            "more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer",
-        ),
-        (
-            "from reef.harness.adapters.descriptor import AdapterRenderer\n"
-            "class Renderer(AdapterRenderer):\n    pass\n"
-            "def finalize_render(files):\n    return files\n",
-            "an AdapterRenderer subclass or finalize_render, not both",
-        ),
-    ],
-    ids=["two-renderers", "renderer-and-finalize-render"],
-)
-def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch, source: str, message: str) -> None:
-    # One module name per case, since Python caches an imported module by its name.
-    module_name = f"invalid_quirks_{tmp_path.name.replace('-', '_')}"
-    (tmp_path / f"{module_name}.py").write_text(source)
     monkeypatch.syspath_prepend(str(tmp_path))
     data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
     data["quirks"] = module_name
     target = tmp_path / "descriptor.yaml"
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match=message):
+    with pytest.raises(DescriptorError, match="more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer"):
         load_descriptor(target)
 
 

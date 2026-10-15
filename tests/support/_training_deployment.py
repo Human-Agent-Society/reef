@@ -27,7 +27,7 @@ class Options(RuntimeConnectionConfig):
 
 class LocalRuntime(StubTrainingRuntime):
     def __init__(self, config, model_path):
-        super().__init__(max_staleness=config["max_staleness"])
+        super().__init__()
         self.config = dict(config)
         self.received_model_path = model_path
         self.closed = False

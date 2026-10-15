@@ -2856,13 +2856,13 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
 def test_setup_runs_an_item_again_when_its_check_changed_since_the_check_off(tmp_path, capsys) -> None:
     """A check off records the check it stood for: an item whose check differs counts as unmet everywhere the
     check offs are read, setup runs it again, and the new record carries the new check."""
-    from reef.harness.client.wrapper import _unmet
+    from reef.harness.client.wrapper import _met
 
     ran = tmp_path / "ran"
     item = {"name": "notify", "kind": "permission", "check": f"touch {ran}"}
     stale = {"name": "notify", "checked_at": 1.0, "check": "touch elsewhere"}
-    assert _unmet([item], [stale]) == [item]
-    assert _unmet([item], [{**stale, "check": item["check"]}]) == [] and _unmet([item], [{"name": "notify"}]) == []
+    assert not _met(item, stale)
+    assert _met(item, {**stale, "check": item["check"]}) and _met(item, {"name": "notify"})
     reef = _ReleasesReef([_row("v1"), _row("v2", [item])])
     compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "setup": [stale]})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):

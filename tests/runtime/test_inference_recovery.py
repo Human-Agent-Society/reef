@@ -3,13 +3,7 @@
 import pytest
 
 from reef.runtime.publication import WeightUpdateLock
-from reef.runtime.recovery import (
-    FileTrainingJobStore,
-    InferenceControl,
-    InferenceEngineGroup,
-    InferenceMonitor,
-    WeightUpdateConnection,
-)
+from reef.runtime.recovery import InferenceControl, InferenceEngineGroup, InferenceMonitor, WeightUpdateConnection
 
 
 class MemoryEngines(InferenceEngineGroup):
@@ -227,76 +221,6 @@ def test_weight_update_lock_can_clear_finished_phases_only_when_idle():
 def test_weight_update_lock_rejects_invalid_phase_records(phase, error):
     with pytest.raises(ValueError):
         WeightUpdateLock().complete_phase(phase, error)
-
-
-@pytest.mark.parametrize("committed", [False, True])
-def test_republication_restores_engine_and_monitor_pause_through_commit_gate(control, tmp_path, committed):
-    from reef.runtime.publication import TrainingPublication, WeightPublisher
-    from reef.runtime.recovery import read_marker, write_marker
-
-    controller, engines, connection, monitor, events = control
-    path = tmp_path / "job.json"
-    checkpoint = tmp_path / "checkpoint"
-    checkpoint.mkdir()
-    write_marker(
-        path,
-        {
-            "status": "COMPLETE" if committed else "READY_TO_COMMIT",
-            "job_id": "job",
-            "rollout_id": 0,
-            "scenario_step": 0,
-            "checkpoint_path": str(checkpoint),
-            "runtime_load_id": "engine:1",
-        },
-    )
-    # The bridge may still remember a pause from a previous controller. The
-    # new owner starts unpaused and needs to observe the barrier again.
-    connection.usable = False
-
-    class Publisher(WeightPublisher):
-        def pause(self):
-            controller.pause()
-
-        def recover(self, marker):
-            controller.recover()
-
-        def publish(self, marker, *, force_full):
-            raise AssertionError("republication must not publish a new candidate")
-
-        def republish(self, runtime_load_id, marker):
-            assert engines.paused and monitor.paused and controller.paused
-            assert controller.reconnect_required
-            events.append("transfer")
-            controller.acknowledge_reconnect()
-            return runtime_load_id
-
-        def resume(self):
-            assert read_marker(path)["status"] in {"HEAD_COMMITTED", "COMPLETE"}
-            controller.resume()
-
-        def abort(self):
-            controller.terminate()
-
-        def restore_incumbent(self):
-            raise AssertionError("republication must not reject a candidate")
-
-    publication = TrainingPublication(FileTrainingJobStore(path), Publisher())
-    assert publication.republish("engine:1") == "engine:1"
-    assert events[:6] == [
-        "pause_monitor",
-        "pause_engines",
-        "pause_monitor",
-        "lock_status",
-        "replace_lock",
-        "recover_engines",
-    ]
-    assert events[6:8] == ["pause_engines", "transfer"]
-    if not committed:
-        assert controller.paused and engines.paused and monitor.paused
-        assert "resume_monitor" not in events
-        publication.acknowledge("job")
-    assert not controller.paused and not engines.paused and not monitor.paused
-    assert events[-2:] == ["resume_engines", "resume_monitor"]
 
 
 def test_new_trainer_requires_attachment_even_to_healthy_engines(control):

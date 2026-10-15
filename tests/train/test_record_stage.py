@@ -74,22 +74,15 @@ class RecordingTasks(Record2Task):
 
 
 class RecordingBatches(Task2Batch):
-    """Takes instructions in every mode, adds its own status, and notes when it closes."""
+    """Takes instructions in every mode."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, 1)
-        self.closed = False
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
         return TrainingBatch(f"recording:{batch_number}", tasks)
-
-    def status(self) -> Mapping[str, Any]:
-        return {"batch_label": "recording"}
-
-    def close(self) -> None:
-        self.closed = True
 
 
 class RecordingPipeline(TrainingPipeline):
@@ -198,10 +191,9 @@ def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them
         "batch_size": 1,
         "buffered_requests": 0,
         "ended_records": 0,
-        "batch_label": "recording",
     }
     processor.close()
-    assert processor.stage.closed and processor.batches.closed
+    assert processor.stage.closed
 
 
 @pytest.mark.unit
@@ -285,6 +277,22 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
     assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
     assert not processor.tasks
+
+
+@pytest.mark.unit
+def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
+    processor = threshold_pipeline(PipelineContext("s"))
+    processor.observe_serving_runtime_load_id("e:1")
+    processor.ingest(inference("i1", version="e:1"))
+    processor.ingest(report("r1", "i1"))
+    processor.observe_serving_runtime_load_id("e:2")
+    processor.ingest(inference("i2", version="e:2"))
+    processor.ingest(report("r2", "i2"))
+    batch = processor.build_batch()
+    assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
+    # The stale report ended with the inference that it owns, and its tasks are gone.
+    assert {"r1", "i1"} <= processor.releasable_record_ids()
+    assert "r1" not in processor.tasks
 
 
 @pytest.mark.unit

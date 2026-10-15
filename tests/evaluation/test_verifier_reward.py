@@ -14,12 +14,6 @@ from reef.harness.runners.terminus.runner import trial_record
 TASK = "/tasks/openenv-00012-003-deduction"
 
 
-def test_the_trajectory_reward_import_remains_compatible() -> None:
-    from reef.harness.episodes.trajectory import primary_reward as trajectory_primary_reward
-
-    assert trajectory_primary_reward is primary_reward
-
-
 def episode(*events: dict[str, object], exit_code: int = 0) -> EpisodeResult:
     return EpisodeResult(exit_code=exit_code, stdout="", stderr="", trajectory=tuple(events), residue=())
 

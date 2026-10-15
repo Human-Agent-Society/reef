@@ -7,7 +7,6 @@ backends in this package implement this interface; importing it loads no databas
 
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
 
 from collections.abc import Mapping, Sequence
@@ -60,21 +59,12 @@ class RecordRetention:
     """Deployment-wide budget for all record bodies, regardless of consumption.
 
     Retry metadata, indexes and database overhead are outside the body budget.
-    ``days`` is accepted for configuration compatibility but no longer expires
-    data: capacity alone triggers automatic eviction.
+    Capacity alone triggers automatic eviction; records do not expire by age.
     """
 
-    days: float = 7.0
     max_bytes: int = 20 * 1024**3
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.days, bool)
-            or not isinstance(self.days, (int, float))
-            or not math.isfinite(self.days)
-            or self.days <= 0
-        ):
-            raise ValueError("agent_record_retention_days must be positive and finite")
         if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes <= 0:
             raise ValueError("agent_record_retention_max_bytes must be a positive integer")
 

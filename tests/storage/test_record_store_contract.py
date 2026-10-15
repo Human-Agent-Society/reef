@@ -14,6 +14,7 @@ from sqlalchemy.engine import Connection
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.postgres import PostgresRecordStore
 from reef.storage.records import AppendResult, RecordConflict, RecordStore
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_records import RecordTables, SQLRecordStore
 from reef.storage.sqlite import SQLiteRecordStore
 
@@ -80,7 +81,7 @@ class TransactionRecordStore(SQLRecordStore):
         self.connection = connection
         self.closed = False
 
-    def _transaction(self, scenario: str, *, write: bool) -> AbstractContextManager[Connection]:
+    def _transaction(self, *, write: bool) -> AbstractContextManager[Connection]:
         if self.closed or not self.connection.in_transaction():
             raise RuntimeError("an open caller-owned transaction is required")
         return nullcontext(self.connection)
@@ -138,6 +139,12 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("first_sequence", Integer, nullable=False),
             Column("last_sequence", Integer, nullable=False),
         ),
+        Table(
+            "custom_settings",
+            metadata,
+            Column("name", Text, primary_key=True),
+            Column("value_json", Text, nullable=False),
+        ),
     )
 
 
@@ -155,11 +162,15 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
             with pytest.raises(RuntimeError, match="abort outer transaction"), connection.begin():
                 records.append(original)
                 records.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
+                records.write_settings(ScenarioSettings(training_mode="manual"))
                 assert len(records.consumption_receipts("math")) == 1
+                assert records.read_settings().training_mode == "manual"
                 raise RuntimeError("abort outer transaction")
 
             committed = replace(original, payload={"value": "replacement"})
             with connection.begin():
+                assert records.read_settings() == ScenarioSettings()
+                records.write_settings(ScenarioSettings(model_config={"url": "http://model", "model": "m"}))
                 assert records.audit_page("math") == ()
                 assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
@@ -172,6 +183,7 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert [entry.agent_record_id for entry in records.replay("math")] == ["first", "second"]
                 assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["first", "second"]
                 assert records.consumption_receipts("math")[0]["metadata"] == {"step": 2}
+                assert records.read_settings() == ScenarioSettings(model_config={"url": "http://model", "model": "m"})
             records.close()
     finally:
         engine.dispose()

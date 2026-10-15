@@ -184,15 +184,13 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
         "prepare_training_connection",
         "recover_updatable_engines",
         "clear_updatable_num_new_engines",
-        "health_monitoring_pause",
-        "health_monitoring_resume",
     ]
     for method in methods:
         result = getattr(manager, method)()
         assert result == (None if method == "prepare_training_connection" else method)
-    assert manager.onload(["weights"]) == "onload"
+    assert manager.offload(["weights"]) == "offload"
     assert manager.check_weights("snapshot") == "check_weights"
-    assert executor.calls[-2:] == [("onload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
+    assert executor.calls[-2:] == [("offload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
     manager.shutdown()
     assert executor.closed
 

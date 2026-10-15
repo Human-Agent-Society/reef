@@ -19,7 +19,6 @@ from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOBatches, SAOTasks
-from recipes.sao.recipe import SAORecord2Record
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -29,8 +28,15 @@ from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, StaleCandidate
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    ModelCandidate,
+    PreparedTrainingStep,
+    StaleCandidate,
+    TrainingMethod,
+)
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
@@ -47,7 +53,7 @@ EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 def sao_processor(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2record=SAORecord2Record(context),
+        record2record=ExclusiveReportRecord2Record(context),
         record2task=SAOTasks(SampleAssemblySettings()),
         task2batch=SAOBatches(context, batch_size),
     )
@@ -70,7 +76,7 @@ class _StateOnlySaoBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, "sao", state, StepScheduling(unit="sample"))
+        prepared = prepare_slime_step(batch, TrainingMethod("sao"), state, StepScheduling(unit="sample"))
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -151,7 +157,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     # owns only its stages and checkpoint cadence.
     stages = recipe.stages()
     assert (stages.record2record.plugin_class, stages.record2task.plugin_class, stages.task2batch.plugin_class) == (
-        SAORecord2Record,
+        ExclusiveReportRecord2Record,
         SAOTasks,
         SAOBatches,
     )
@@ -184,7 +190,7 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
 
     pipeline = recipe.build_pipeline(PipelineContext("math"))
 
-    assert isinstance(pipeline.record2record, SAORecord2Record)
+    assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, SAOTasks)
     assert isinstance(pipeline.task2batch, SAOBatches)
     assert pipeline.batch_size == deployment["training"]["config"]["global_batch_size"]
@@ -203,7 +209,7 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
     [
         ({"task2batch": {"config": {"batch_size": 0}}}, "batch_size must be positive"),
         ({"task2batch": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
-        ({"record2record": {"config": {"batch_size": 2}}}, "SAORecord2Record takes no config"),
+        ({"record2record": {"config": {"batch_size": 2}}}, "ExclusiveReportRecord2Record takes no config"),
     ],
 )
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
@@ -317,7 +323,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -330,7 +336,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -352,7 +358,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     processor.ingest(_sao_inference("i1", loss_mask=(0, 0, 0)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
     batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -397,7 +403,7 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    result = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    result = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
 
     assert result.payload is not None and result.payload["loss"] == "sao"
     assert "advantages" not in result.payload
@@ -411,8 +417,10 @@ def test_backend_preparation_advances_step_state() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    first = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
-    second = prepare_slime_step(batch, "sao", first.next_algorithm_state, StepScheduling(unit="sample"))
+    first = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    second = prepare_slime_step(
+        batch, TrainingMethod("sao"), first.next_algorithm_state, StepScheduling(unit="sample")
+    )
 
     assert first.next_algorithm_state == {"steps": 1}
     assert second.next_algorithm_state == {"steps": 2}
@@ -436,7 +444,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         self.jobs: list[dict[str, Any]] = []
         self.completed: dict[int, ModelCandidate] = {}
         self.activations: list[ModelCandidate] = []
-        self.rejections: list[tuple[ModelCandidate, Any]] = []
+        self.rejections: list[ModelCandidate] = []
         # The version the serving engine answers from. A train step hot-swaps
         # new weights in, so this moves from v3 -> v4 the first time a job
         # completes; starting below the synced value keeps the serving-swap
@@ -451,7 +459,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         return self._served_version
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
@@ -461,7 +469,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
             **prepared.payload,
             "scenario_step": scenario_step,
             "reward": trajectory_reward(sample),
-            "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
+            "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",
@@ -475,7 +483,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
-        if payload["expected_runtime_load_id"] != self._served_version:
+        if payload["parent_runtime_load_id"] != self._served_version:
             raise StaleCandidate
         self.jobs.append(dict(payload))
         job_id = f"job-{scenario_step}"
@@ -498,8 +506,8 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         self._served_version = "slime-v4"
         return ActivatedModel(candidate.candidate_id, self._served_version)
 
-    def reject_candidate(self, candidate, decision):
-        self.rejections.append((candidate, decision))
+    def reject_candidate(self, candidate):
+        self.rejections.append(candidate)
 
 
 def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
@@ -578,14 +586,17 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         assert runtime.serving_runtime_load_id() == "slime-v3"
         assert runtime.activations == []
         assert len(runtime.rejections) == 1
-        candidate, decision = runtime.rejections[0]
-        assert decision.selected is False
-        assert decision.evaluation.evaluator == "external_checkpoint"
-        assert decision.evaluation.metrics == {
+        candidate = runtime.rejections[0]
+        status = dispatcher.get_or_create_scenario("math").commit_status
+        selection = status["last_committed_step"]["metrics"]["selection"]
+        assert selection["candidate_id"] == candidate.candidate_id
+        assert selection["selected"] is False
+        assert selection["evaluation"]["evaluator"] == "external_checkpoint"
+        assert selection["evaluation"]["metrics"] == {
             "score": 0.25,
             "checkpoint_path": candidate.checkpoint_path,
         }
-        assert decision.evaluation.metadata == {"scenario": "math", "token_present": True}
+        assert selection["evaluation"]["metadata"] == {"scenario": "math", "token_present": True}
     finally:
         dispatcher.close()
 
@@ -647,7 +658,6 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
             SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
             backend,
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=agent_dir,
             scenario_storage=SQLiteScenarioStorage(agent_dir),
         )
 

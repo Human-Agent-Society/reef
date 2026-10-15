@@ -25,6 +25,7 @@ TEST_DIRECTORIES = {
     "reef_recipe",
     "reef_service",
     "runtime",
+    "sandbox",
     "scenario",
     "slime_backend",
     "smoke",

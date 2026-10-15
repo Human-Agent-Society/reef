@@ -18,13 +18,14 @@ from reef.runtime.interfaces import (
     ModelCandidate,
     PreparedTrainingStep,
     TrainingBackend,
+    TrainingMethod,
     TrainingRuntime,
 )
 from reef.service.runtime import connect_executor_runtimes
 from reef.train import CandidateBackend
 from reef.train.algos import StepScheduling
 from reef.train.runtime import ExecutorTrainingRuntime
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 
 
 class CheckpointTrainer(TrainingRuntime):
@@ -32,7 +33,7 @@ class CheckpointTrainer(TrainingRuntime):
         self.checkpoint = checkpoint
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
         return PreparedTrainingStep("train", algorithm_state, {}, {"value": 7})
 
@@ -45,7 +46,7 @@ class CheckpointTrainer(TrainingRuntime):
             current_runtime_load_id=None,
         )
 
-    def reject_candidate(self, candidate, decision):
+    def reject_candidate(self, candidate):
         self.checkpoint.unlink()
 
 
@@ -70,7 +71,9 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
     async def run():
         control = Coordinator(colocate=colocate)
         training, inference = connect_executor_runtimes(train_group_handle=control)
-        backend = RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=inference)
+        backend = RuntimeCandidateBackend(
+            training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+        )
         assert isinstance(training, ExecutorTrainingRuntime)
         assert isinstance(inference, ExecutorInferenceRuntime)
         assert not hasattr(inference, "train_candidate")
@@ -120,7 +123,9 @@ def test_receiver_shutdown_does_not_stop_training_workers():
 def test_recovery_retargets_only_the_inference_component():
     control = Coordinator(inference_url="http://old-engine")
     training, inference = connect_executor_runtimes(train_group_handle=control)
-    backend = RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=inference)
+    backend = RuntimeCandidateBackend(
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+    )
     control.inference_url = "http://replacement-engine/"
     backend.recover_pending_step(0)
     assert inference.base_url == "http://replacement-engine"
@@ -147,7 +152,9 @@ def test_attached_receiver_waits_for_coordinator_recovery():
     control = Coordinator()
     training, inference = connect_executor_runtimes(train_group_handle=control)
     assert not inference.inference_admission_status["open"]
-    RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=inference)
+    RuntimeCandidateBackend(
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+    )
     assert inference.inference_admission_status["open"]
     training.shutdown()
     inference.shutdown()

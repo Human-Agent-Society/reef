@@ -13,6 +13,7 @@ from reef.service.routes.payload import read_object
 from reef.service.streaming import (
     SSEFrameDecoder,
     chat_completion_chunk_identity,
+    frame_for_codex,
     is_terminal_sse_event,
     receipt_sse_events,
     stream_record,
@@ -33,12 +34,15 @@ class _SSERelay:
 
     The terminal event is withheld so Reef can append its receipt frames before
     it, and the chat-completion identity those frames need is picked up from the
-    first frame that carries one.
+    first frame that carries one. On a codex-bound stream, OpenRouter's web
+    search output items reach the client as the ``web_search_call`` items Codex
+    reads; the recorded body keeps the raw upstream frames.
     """
 
-    def __init__(self, path: str, response: web.StreamResponse) -> None:
+    def __init__(self, path: str, response: web.StreamResponse, *, for_codex: bool = False) -> None:
         self._path = path
         self._response = response
+        self._for_codex = for_codex
         self._decoder = SSEFrameDecoder()
         self.chat_identity: dict[str, Any] = {}
         self.terminal: bytes | None = None
@@ -62,6 +66,8 @@ class _SSERelay:
 
     async def _write(self, frames: Iterable[bytes]) -> bool:
         for frame in frames:
+            if self._for_codex:
+                frame = frame_for_codex(frame)
             if is_terminal_sse_event(self._path, frame):
                 self.terminal = frame
                 return True
@@ -113,7 +119,13 @@ async def _relay_inference_stream(
     try:
         await response.prepare(request)
         if is_sse:
-            relay = _SSERelay(path, response)
+            # A codex-bound stream speaks for a Codex client, which drops OpenRouter's
+            # web search output item unless it arrives as web_search_call. This fixes
+            # the client-facing frames of the current turn only; whether OpenRouter
+            # accepts the replayed web_search_call item on the next turn's input is a
+            # verified-online follow-up tracked in #621, not settled here.
+            codex_client = request_service.dispatcher.recipe.harness_adapter == "codex"
+            relay = _SSERelay(path, response, for_codex=codex_client)
             async for chunk in upstream.chunks:
                 body.extend(chunk)
                 if await relay.feed(chunk):

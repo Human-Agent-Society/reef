@@ -18,13 +18,11 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.records_types import AgentRecord
-from reef.pipeline_context import PipelineContext
 from reef.record2record.base import Record2Record
-from reef.record2record.eligibility import StalenessCheck
 from reef.record2record.selection import ArrivalOrder
 from reef.record2record.sets import RecordSet
 
@@ -60,7 +58,7 @@ class RecordJudging(BackgroundJobRunner, ABC):
 
 @dataclass(frozen=True, kw_only=True)
 class JudgedSet(RecordSet):
-    """One judged record. ``set_id`` is the record's receipt; ``source_index`` is its arrival order."""
+    """One judged record. ``set_id`` is the record's receipt."""
 
     record: AgentRecord
     judgment: SupportsReceipt
@@ -86,28 +84,17 @@ class JudgingRecord2Record(Record2Record):
 
     Every record is in exactly one state: tracked, in flight, held in the
     pool, or terminal. Terminal records are released from memory and never
-    batch. Judged sets wait in the order that their judgments arrived. A
-    ``StalenessCheck`` drops sets that are more than ``max_staleness``
-    versions behind the newest one (the context's ``max_staleness``), by record arrival, while no batch is out:
-    continual serving advances the version every step, and stale sets would
-    otherwise block the queue.
+    batch. Judged sets wait in the order that their judgments arrived.
 
     Without a worker, records track and expire, and nothing is ever judged.
     """
 
-    def __init__(self, context: PipelineContext, judging: RecordJudging, worker: BackgroundJobWorker | None) -> None:
-        super().__init__(ArrivalOrder(), (StalenessCheck(context.max_staleness),))
+    def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None) -> None:
+        super().__init__(ArrivalOrder())
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
         self.in_flight: dict[str, AgentRecord] = {}
-        #: Terminal receipts: retired or trained, both releasable.
-        self.terminal: set[str] = set()
-        # Record-arrival order per live receipt: the staleness check needs
-        # generation recency, which judgment completion order is not.
-        self.arrival_order: dict[str, int] = {}
-        self.arrival_count = 0
-        self.formed: list[JudgedSet] = []
 
     # ------------------------------------------------------------- formation
 
@@ -135,24 +122,10 @@ class JudgingRecord2Record(Record2Record):
                 JudgedSet(
                     set_id=judgment.receipt,
                     arrival_index=self.pool.next_arrival_index(),
-                    source_index=self.arrival_order[judgment.receipt],
                     record=record,
                     judgment=judgment,
                 )
             )
-
-    def take_formed(self) -> tuple[JudgedSet, ...]:
-        formed, self.formed = tuple(self.formed), []
-        return formed
-
-    def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
-        self.pool.put(replace(record_set, runtime_load_id=runtime_load_id))
-        # The eligibility checks never run under a reserved batch: its samples reference held sets.
-        if self.pool.reserved is None:
-            dropped_sets = judged_sets(tuple(dropped.record_set for dropped in self.pool.drop_ineligible()))
-            for judged_set in dropped_sets:
-                self.retire(judged_set.receipt)
-                self.ended_set_ids.add(judged_set.set_id)
 
     def reject(self, record_set: RecordSet) -> None:
         self.retire(judged_sets((record_set,))[0].receipt)
@@ -161,8 +134,6 @@ class JudgingRecord2Record(Record2Record):
 
     def track(self, record: AgentRecord) -> None:
         """This record awaits later traffic."""
-        self.arrival_count += 1
-        self.arrival_order[record.agent_record_id] = self.arrival_count
         self.tracked[record.agent_record_id] = record
 
     def tracked_record(self, receipt: str) -> AgentRecord | None:
@@ -182,7 +153,6 @@ class JudgingRecord2Record(Record2Record):
     def retire(self, receipt: str) -> None:
         """This receipt is terminal: released from memory, never batched."""
         self.terminal.add(receipt)
-        self.arrival_order.pop(receipt, None)
 
     def abandon(self, receipt: str) -> None:
         """A tracked record's later traffic never came: stop awaiting it, and retire it."""
@@ -192,12 +162,7 @@ class JudgingRecord2Record(Record2Record):
     # ------------------------------------------------------------ consumption
 
     def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
-        consumed = frozenset(judged_set.receipt for judged_set in judged_sets(record_sets))
-        for receipt in consumed:
-            self.arrival_order.pop(receipt, None)
-            self.terminal.add(receipt)
-        self.ended_set_ids.update(consumed)
-        return consumed
+        return super().consume(judged_sets(record_sets), trained=trained)
 
     # --------------------------------------------------------- background work
 
@@ -214,15 +179,15 @@ class JudgingRecord2Record(Record2Record):
     def releasable_record_ids(self) -> frozenset[str]:
         held = frozenset(judged_set.receipt for judged_set in judged_sets(self.pool.sets()))
         protected = frozenset(self.tracked) | frozenset(self.in_flight) | held
-        return frozenset(self.terminal) - protected
+        return super().releasable_record_ids() - protected
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
-        self.terminal -= agent_record_ids
+        super().release_records(agent_record_ids)
         for agent_record_id in agent_record_ids:
             self.tracked.pop(agent_record_id, None)
             self.in_flight.pop(agent_record_id, None)
             self.pool.remove(agent_record_id)
-            self.arrival_order.pop(agent_record_id, None)
+            self.producing_runtime_load_ids.pop(agent_record_id, None)
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         reserved = len(self.pool.reserved_sets())

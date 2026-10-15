@@ -345,35 +345,6 @@ def test_stop_requested_during_startup_does_not_publish_readiness(tmp_path, monk
     assert events[-3:] == ["training-close", "inference-close", "release"]
 
 
-def test_legacy_cli_delegates_lifecycle_and_preserves_its_native_arguments(tmp_path, monkeypatch):
-    from reef.service import slime_driver
-    from reef.train.slime_backend import driver
-
-    config = {"reef": {"recipe": "recipes.sao.recipe:SAORecipe"}}
-    plan, _ = plan_for()
-    captured = {}
-
-    def create(received, arguments, *, loss_family):
-        assert received is config
-        assert loss_family == "sao"
-        captured["arguments"] = list(arguments)
-        return plan
-
-    def run(received, ready_file, *, marker):
-        assert received is plan
-        assert ready_file == tmp_path / "ready"
-        assert marker == "reef-slime-bridge-ready"
-        return 0
-
-    monkeypatch.setenv("REEF_CONFIG", "unused")
-    monkeypatch.setattr(slime_driver, "load_config", lambda path: config)
-    monkeypatch.setattr(driver, "create_training_plan", create)
-    monkeypatch.setattr(slime_driver, "assemble_model_plan", lambda config, training: training)
-    monkeypatch.setattr(slime_driver, "run_deployment", run)
-    assert slime_driver.main(["serve", "--ready-file", str(tmp_path / "ready"), "--lr=1e-6"]) == 0
-    assert captured["arguments"] == ["--lr=1e-6"]
-
-
 def test_rebuild_assigns_a_new_weight_transfer_session():
     sessions = []
     for _ in range(2):

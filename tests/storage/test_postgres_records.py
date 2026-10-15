@@ -13,7 +13,8 @@ from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config_utils import load_config
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.deployment_config import translate_layout
+from reef.service.deploy.service_config import ServiceConfig, service_config_arguments, service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
 from reef.storage.records import RecordConflict, RecordRetention
@@ -137,7 +138,7 @@ def test_sequence_allocation_waits_for_prior_commit(postgres_database):
             return second.append(record("second"))
 
         with ThreadPoolExecutor(1) as pool:
-            with first._transaction("math", write=True) as connection:
+            with first._transaction(write=True) as connection:
                 first._insert(
                     connection, first._tables.records, {**first._encode(record())._asdict(), "body_bytes": 30}
                 )
@@ -159,7 +160,7 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
         closing(PostgresRecordStore(postgres_database)) as second,
     ):
         original = first.append(record())
-        with first._transaction("math", write=False) as connection:
+        with first._transaction(write=False) as connection:
             query = select(first._tables.consumption.c.receipt_id)
             assert connection.execute(query).all() == []
             second.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
@@ -167,7 +168,7 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
         assert len(first.consumption_receipts("math")) == 1
         assert first.get("math", "first") == original
         assert first.get_for_audit("math", "first").item == original
-        with pytest.raises(RuntimeError, match="rollback"), first._transaction("math", write=True) as connection:
+        with pytest.raises(RuntimeError, match="rollback"), first._transaction(write=True) as connection:
             first._insert(
                 connection, first._tables.records, {**first._encode(record("failed"))._asdict(), "body_bytes": 10}
             )
@@ -252,31 +253,16 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         with closing(factory.open("math")) as store:
             assert store.history() == ()
             assert store.records.append_result(record()).inserted
-        assert factory.prune(days=7, max_bytes=1) == 2
-
-
-def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, monkeypatch):
-    url, schema = postgres_config
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
-        with closing(factory.open("math")) as store:
-            path = store.commit_log.path
-            path.touch()
-
-        def failed_move(*args):
-            raise OSError("move failed")
-
-        monkeypatch.setattr("reef.storage.postgres.shutil.move", failed_move)
-        with pytest.raises(OSError, match="move failed"):
-            factory.archive("math")
-        with closing(factory.open("math")) as store:
-            assert store.commit_log.path != path
-            assert store.history() == ()
+        assert factory.prune(max_bytes=1) == 2
 
 
 @pytest.mark.parametrize(
     "values",
     [
         {"record_backend": "unknown"},
+        {"record_backend": "reef.storage.scenario:ScenarioStorage"},
+        {"record_backend": {"module": "reef.storage.sqlite:SQLiteRecordStore"}},
+        {"record_backend": {"module": "reef.storage.sqlite:SQLiteScenarioStorage", "options": {}}},
         {"record_backend": "postgres"},
         {"record_database_url": "postgresql:///db"},
         {"record_backend": "postgres", "record_database_url": "sqlite:///local"},
@@ -287,6 +273,23 @@ def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, m
 def test_deployment_rejects_invalid_record_backend(values):
     with pytest.raises(ValueError):
         ServiceConfig(recipe="recipe", **values)
+
+
+def test_deployment_file_names_a_storage_plugin_with_its_config(tmp_path):
+    path = tmp_path / "deployment.yaml"
+    path.write_text(
+        "recipe:\n  implementation: recipe\n"
+        "storage:\n  record_backend:\n    module: reef.storage.postgres:PostgresScenarioStorage\n"
+        "    config:\n      database_url: postgresql://user:secret@example.invalid/db\n"
+    )
+    settings = service_config_from_mapping(translate_layout(load_config(path)))
+    assert settings.record_backend == {
+        "module": "reef.storage.postgres:PostgresScenarioStorage",
+        "config": {"database_url": "postgresql://user:secret@example.invalid/db"},
+    }
+    argument = next(argument for argument in service_config_arguments() if argument.name == "record_backend")
+    assert argument.parse("reef.storage.sqlite:SQLiteScenarioStorage") == "reef.storage.sqlite:SQLiteScenarioStorage"
+    assert argument.parse('{"module": "a.b:C"}') == {"module": "a.b:C"}
 
 
 def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
@@ -307,12 +310,21 @@ def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
     assert "secret" not in str(error.value)
 
 
-@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize("backend", ["sqlite", "postgres", "sqlite-plugin", "postgres-plugin"])
 def test_deployment_selects_record_backend(backend, request, tmp_path):
-    values = {}
+    values: dict = {}
     if backend == "postgres":
         url, schema = request.getfixturevalue("postgres_config")
         values = {"record_backend": backend, "record_database_url": url, "record_database_schema": schema}
+    elif backend == "sqlite-plugin":
+        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage"}
+    elif backend == "postgres-plugin":
+        url, schema = request.getfixturevalue("postgres_config")
+        plugin = {
+            "module": "reef.storage.postgres:PostgresScenarioStorage",
+            "config": {"database_url": url, "schema": schema},
+        }
+        values = {"record_backend": plugin}
     settings = ServiceConfig(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
@@ -321,8 +333,11 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         artifact_cache_dir=str(tmp_path / "cache"),
         **values,
     )
-    expected = PostgresRecordStore if backend == "postgres" else SQLiteRecordStore
+    expected = PostgresRecordStore if backend.startswith("postgres") else SQLiteRecordStore
     for restart in (False, True):
+        if restart and backend.startswith("postgres"):
+            # PostgreSQL keeps all scenario state, so a new host starts from an empty record directory.
+            settings = replace(settings, agent_record_dir=str(tmp_path / "new-host-records"))
         dispatcher = build_dispatcher(settings)
         try:
             scenario = dispatcher.get_or_create_scenario("math")

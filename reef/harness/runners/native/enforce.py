@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from reef.sandbox.process import TOOL_ISOLATION as ISOLATION
+from reef.sandbox.process import EpisodeLaunchError, run_process
 
 ENFORCE_ENV = "REEF_NATIVE_ENFORCE"
 #: What a profile can withhold; ``read`` is not here because every tool sees the workspace, read only at least.
@@ -34,26 +36,6 @@ LIBRARY_PATHS: tuple[str, ...] = (
     "/etc/nsswitch.conf",
     "/etc/passwd",
     "/etc/group",
-)
-#: What the tool jail unshares and mounts before its binds; it binds the episode's ``/proc`` read only rather than
-#: mounting a fresh one, which a jail inside the episode's cannot do, and which the interpreter needs to resolve
-#: ``$ORIGIN`` in its RPATH and so find its own ``libpython``.
-ISOLATION: tuple[str, ...] = (
-    "--unshare-user",
-    "--unshare-ipc",
-    "--unshare-pid",
-    "--unshare-uts",
-    "--unshare-cgroup-try",
-    "--die-with-parent",
-    "--new-session",
-    "--ro-bind",
-    "/proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-    "--clearenv",
 )
 #: What ``exec`` adds: the base directories the sandbox executor binds for a whole episode.
 EXEC_PATHS: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
@@ -172,24 +154,24 @@ class BwrapEnforcer(Enforcer):
         )
         request = json.dumps({"path": str(tool.path), "arguments": arguments, "workdir": str(workdir)}, default=str)
         try:
-            done = subprocess.run(
+            done = run_process(
                 argv,
-                input=request,
-                capture_output=True,
-                text=True,
+                cwd=workdir,
                 env={"PATH": os.environ.get("PATH", "")},
-                check=False,
+                timeout=None,
+                stdin_text=request,
+                new_session=False,
             )
-        except OSError as exc:
+        except (OSError, EpisodeLaunchError) as exc:
             raise SandboxFailed(f"bwrap could not start: {exc}") from exc
         reply: Any = None
-        if done.returncode == 0:
+        if done.exit_code == 0:
             try:
                 reply = json.loads(done.stdout)
             except json.JSONDecodeError:
                 reply = None
         if not isinstance(reply, dict):
-            raise SandboxFailed(f"tool process exited {done.returncode}: {done.stderr.strip()[-600:]}")
+            raise SandboxFailed(f"tool process exited {done.exit_code}: {done.stderr.strip()[-600:]}")
         if not reply.get("ok"):
             raise ToolFailed(str(reply.get("error") or "the tool failed"))
         return reply.get("text", "")

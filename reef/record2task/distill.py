@@ -21,10 +21,9 @@ from typing import Any, Self, cast
 
 from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
-from reef.core.plugins import NoSettings
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2record import Record2Record, ReportContext
 from reef.record2task import ReportTasks, SkippedReport
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.samples import flatten_content, recorded_request, recorded_response
@@ -62,18 +61,6 @@ def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
                 function["arguments"] = {}
         normalized["function"] = function
     return normalized
-
-
-class DistillRecord2Record(ReportRecord2Record):
-    """The record stage for distillation: every report trains by itself and owns its inference record."""
-
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, ReportGrouping(), exclusive_sources=True)
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
 
 
 @dataclass(frozen=True)
@@ -238,7 +225,6 @@ class DistillTasks(ReportTasks):
 
 
 __all__ = [
-    "DistillRecord2Record",
     "DistillSettings",
     "DistillTasks",
     "TeacherRenderer",

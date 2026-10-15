@@ -10,7 +10,7 @@ from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks,
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
 
 import reef.record2task.assembly as reported_module
-from recipes.sao import SAOBatches, SAORecord2Record, SAOTasks
+from recipes.sao import SAOBatches, SAOTasks
 from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -25,9 +25,9 @@ from reef.evaluation import (
     UpdateCandidate,
 )
 from reef.recipe import WeightTrainingRecipe
-from reef.record2record import ReportGrouping, ReportRecord2Record
+from reef.record2record import ExclusiveReportRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos import StepScheduling
@@ -43,7 +43,7 @@ def sao_pipeline(
 ) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2record=SAORecord2Record(context),
+        record2record=ExclusiveReportRecord2Record(context),
         record2task=SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
         task2batch=SAOBatches(context, batch_size),
     )
@@ -75,7 +75,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, self._objective, state, StepScheduling())
+        prepared = prepare_slime_step(batch, TrainingMethod(self._objective), state, StepScheduling())
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -299,7 +299,7 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
-            record2record=SAORecord2Record(context),
+            record2record=ExclusiveReportRecord2Record(context),
             record2task=SAOTasks(SampleAssemblySettings()),
             task2batch=SAOBatches(context, 1),
         )
@@ -419,14 +419,16 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = threshold_pipeline(PipelineContext("math"))
     sft_processor.ingest(inference("i1"))
     sft_processor.ingest(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {}, StepScheduling())
+    sft_result = prepare_slime_step(sft_processor.build_batch(), TrainingMethod("sft"), {}, StepScheduling())
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = grouped_policy_pipeline(PipelineContext("math"))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.ingest(inference(rid))
         grpo_processor.ingest(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {}, StepScheduling())
+    result = prepare_slime_step(
+        grpo_processor.build_batch(), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling()
+    )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
 
@@ -827,7 +829,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             return None
 
         def prepare_training_step(
-            self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+            self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
         ):
             prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
             assert prepared.payload is not None
@@ -852,7 +854,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         def activate_candidate(self, candidate):
             return ActivatedModel(candidate.candidate_id, "slime-v1")
 
-        def reject_candidate(self, candidate, decision):
+        def reject_candidate(self, candidate):
             raise AssertionError("candidate should be selected")
 
     training_runtime = FakeTrainingRuntime()
@@ -896,7 +898,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     assert runtime.scenario_step == 1
     assert runtime.repository.current_artifact == runtime.repository.checkpoint_artifact
     prepare = training_runtime.calls[0]
-    assert prepare[2] == _GROUPED_PG_OBJECTIVE
+    assert prepare[2] == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     assert trajectory_reward(trajectory_groups(prepare[1])[0][1]) == 0.8
     assert training_runtime.calls[1][1]["advantages"] == pytest.approx([-1.0, 1.0])
     assert [call[0] for call in training_runtime.calls] == ["prepare", "execute"]
@@ -943,7 +945,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.ingest(report("r1", "i1", 1.0))
     batch = processor.build_batch()
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
@@ -957,12 +959,12 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         records.append(positioned_inference(1))
         records.append(positioned_report(2, "i1", 1.0))
         # Keep the report but evict its input before the processor sees either.
-        with records._transaction("math", write=False) as connection:
+        with records._transaction(write=False) as connection:
             keep_bytes = connection.exec_driver_sql(
                 "SELECT body_bytes FROM agent_record WHERE agent_record_id='r2'"
             ).scalar_one()
         with closing(SQLiteScenarioStorage(tmp_path)) as storage:
-            assert storage.prune(days=7, max_bytes=keep_bytes) == 1
+            assert storage.prune(max_bytes=keep_bytes) == 1
         records.append(positioned_inference(3))
         records.append(positioned_report(4, "i3", 1.0))
         trainer = Trainer.build(
@@ -1001,7 +1003,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
 def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
     from reef.core.components import RECORDS_COMPONENT
     from reef.scenario.factory import recovered_trainer_states
-    from reef.storage.commit_log import CommitLogScenarioStore
+    from reef.storage.commit_log import CommitHistoryScenarioStore
     from reef.surface.base import Surface
 
     database = tmp_path / "records.sqlite3"
@@ -1015,7 +1017,7 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
                 pipeline_factory=threshold_pipeline,
                 candidate_backend=_PreparingBackend(),
             )
-            with closing(CommitLogScenarioStore("math", records)) as session:
+            with closing(CommitHistoryScenarioStore("math", records)) as session:
                 consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
                 trainer.reingest(up_to_sequence=0, consumed_ids=consumed)
                 batch = trainer.reserve_training_batch()

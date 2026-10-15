@@ -74,7 +74,6 @@ def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     return Dispatcher(
         recipe,
         factory,
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 

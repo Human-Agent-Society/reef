@@ -6,27 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.interfaces import RuntimeLoadId
 from reef.runtime.recovery import ScenarioHistory, history_path
 
 
-def test_history_round_trips_and_computes_per_scenario_lag(tmp_path: Path) -> None:
+def test_history_round_trips_per_scenario_publications(tmp_path: Path) -> None:
     path = history_path(str(tmp_path / "hf" / "{rollout_id}"))
     history = ScenarioHistory(path)
-    assert history.scenarios == () and history.lag("a", RuntimeLoadId("inc", 1)) == 0
+    assert history.scenarios == ()
     history.record_checkpoint("a", 0)
     history.record_publication("a", "inc:1", "name-1")
     history.record_checkpoint("b", 1)
     history.record_publication("b", "inc:2", "name-b")
     history.record_checkpoint("a", 2)
     history.record_publication("a", "inc:3", "name-3")
-    # b's publication (inc:2) does not age a's rollouts; a's own do.
-    assert history.lag("a", RuntimeLoadId("inc", 1)) == 1
-    assert history.lag("a", RuntimeLoadId("inc", 2)) == 1
-    assert history.lag("a", RuntimeLoadId("inc", 3)) == 0
-    assert history.lag("b", RuntimeLoadId("inc", 1)) == 1
-    assert history.lag("b", RuntimeLoadId("inc", 3)) == 0
-    assert history.lag("a", RuntimeLoadId("other", 3)) is None
     assert history.protected_rollouts() == {1, 2}
     reloaded = ScenarioHistory(path)
     assert reloaded.status() == history.status()

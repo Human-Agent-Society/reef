@@ -110,11 +110,6 @@ class TrainStepResult:
             raise ValueError("a pending step must carry durable bytes: set artifact or checkpoint_path")
 
     @property
-    def has_model_update(self) -> bool:
-        """True when this step produced a new model weight update."""
-        return self.runtime_load_id is not None
-
-    @property
     def publication(self) -> ArtifactPublication:
         if self.artifact is not None:
             return SavedArtifactPublication(self.artifact, self.component)

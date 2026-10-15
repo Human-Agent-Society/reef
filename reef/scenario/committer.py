@@ -145,18 +145,6 @@ class ScenarioCommitter:
         return self._lock
 
     @property
-    def artifacts(self) -> ArtifactReleaseChain:
-        return self._artifacts
-
-    @property
-    def checkpoint_strategy(self) -> CheckpointStrategy:
-        return self._checkpoint_strategy
-
-    @property
-    def store(self) -> ScenarioStore:
-        return self._store
-
-    @property
     def step(self) -> int:
         return self._step
 
@@ -379,7 +367,9 @@ class ScenarioCommitter:
             checkpoint = artifacts.checkpoint
             next_step = self._step + 1
             prepared = self._trainer.prepare_commit(None)
-            recorded = self._recorded_operation_retry(prepared, operation, release_id, next_step)
+            recorded = self.recorded_retry(
+                prepared, next_step, operation=operation, rollback_target_release_id=release_id
+            )
             if recorded is not None:
                 recorded = self.finish_recorded_retry(recorded, prepared, self._trainer)
                 if self.recorded_rollback_restored_weights(recorded):
@@ -430,32 +420,12 @@ class ScenarioCommitter:
                     surface.load(source, self._binding.runtime)
                 if staged is None:
                     staged = artifacts.stage(next_step, source, parent=checkpoint)
-                commit_metadata = scenario_metadata_for(
-                    name=self._name,
-                    base_artifact=artifacts.base,
-                    scenario_step=next_step,
-                    algorithm_state=prepared.algorithm_state,
-                    record_progress=RecordProgress(
-                        high_water_sequence=prepared.high_water_sequence,
-                        high_water_offset=prepared.high_water_offset,
-                        consumed_ids=prepared.consumed_ids,
-                    ),
-                    metrics=prepared.metrics,
-                    training_job_id=prepared.training_job_id,
-                    operation=operation,
-                    rollback_target_release_id=release_id,
-                )
-                commit_metadata["rollback"] = {
-                    "target_release_id": release_id,
-                }
                 published_ref = artifacts.publish(
                     staged,
                     expected_parent=checkpoint,
-                    metadata={
-                        **dict(source.metadata),
-                        COMPONENTS_METADATA_KEY: self.release_manifest(source).to_dict(),
-                        SCENARIO_METADATA_KEY: commit_metadata,
-                    },
+                    metadata=self.release_metadata(
+                        source, prepared, next_step, operation=operation, rollback_target_release_id=release_id
+                    ),
                     advance_heads=not durable,
                 )
                 surface.activate(
@@ -645,7 +615,7 @@ class ScenarioCommitter:
                 result = self.prepare_experiment(result, trainer, next_step, component)
             with self._publication_lock:
                 prepared = trainer.prepare_commit(result)
-                recorded = self._recorded_training_retry(prepared, result, next_step, component)
+                recorded = self.recorded_retry(prepared, next_step, pending=result.pending, component=component)
                 if recorded is not None:
                     self.finish_recorded_retry(recorded, prepared, trainer)
                     return result.state
@@ -690,7 +660,7 @@ class ScenarioCommitter:
                     self.commit_live_weights(publication, prepared, trainer)
                 else:
                     self.commit_saved_artifact(
-                        result, publication, prepared, trainer, component, checkpointed=result.pending or checkpointed
+                        result, publication, prepared, trainer, component, checkpointed=checkpointed
                     )
                 return result.state
 
@@ -798,31 +768,10 @@ class ScenarioCommitter:
             if not pending:
                 self._activate(local_artifact)
             if checkpointed:
-                commit_metadata = scenario_metadata_for(
-                    name=self._name,
-                    base_artifact=artifacts.base,
-                    scenario_step=next_step,
-                    algorithm_state=prepared.algorithm_state,
-                    record_progress=RecordProgress(
-                        high_water_sequence=prepared.high_water_sequence,
-                        high_water_offset=prepared.high_water_offset,
-                        consumed_ids=prepared.consumed_ids,
-                    ),
-                    metrics=prepared.metrics,
-                    training_job_id=prepared.training_job_id,
-                    component=self.component_on_record(component),
-                    base_release_id=self.base_release_on_record(prepared),
-                )
                 published_ref = artifacts.publish(
                     local_artifact,
                     expected_parent=checkpoint,
-                    # The staged release's metadata (the publication's own for a
-                    # flat release) plus the manifest naming its components.
-                    metadata={
-                        **dict(local_artifact.metadata),
-                        COMPONENTS_METADATA_KEY: self.release_manifest(local_artifact).to_dict(),
-                        SCENARIO_METADATA_KEY: commit_metadata,
-                    },
+                    metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
                     advance_heads=not pending and not durable,
                 )
                 if not pending:
@@ -850,6 +799,45 @@ class ScenarioCommitter:
             raise
 
         self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=checkpoint)
+
+    def release_metadata(
+        self,
+        artifact: Artifact,
+        prepared: PreparedCommit,
+        scenario_step: int,
+        *,
+        operation: str = "training",
+        rollback_target_release_id: str | None = None,
+        component: str | None = None,
+    ) -> dict[str, Any]:
+        """The metadata a committed release carries.
+
+        It is the staged release's own metadata (the publication's own for a
+        flat release), the manifest naming its components, and the scenario
+        metadata of the commit ``prepared`` describes.
+        """
+        scenario_metadata = scenario_metadata_for(
+            name=self._name,
+            base_artifact=self._artifacts.base,
+            scenario_step=scenario_step,
+            algorithm_state=prepared.algorithm_state,
+            record_progress=RecordProgress(
+                high_water_sequence=prepared.high_water_sequence,
+                high_water_offset=prepared.high_water_offset,
+                consumed_ids=prepared.consumed_ids,
+            ),
+            metrics=prepared.metrics,
+            training_job_id=prepared.training_job_id,
+            operation=operation,
+            rollback_target_release_id=rollback_target_release_id,
+            component=self.component_on_record(component),
+            base_release_id=self.base_release_on_record(prepared) if operation == "training" else None,
+        )
+        return {
+            **dict(artifact.metadata),
+            COMPONENTS_METADATA_KEY: self.release_manifest(artifact).to_dict(),
+            SCENARIO_METADATA_KEY: scenario_metadata,
+        }
 
     def _install_committed_checkpoint(
         self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef
@@ -991,44 +979,29 @@ class ScenarioCommitter:
             self.finish_recorded_retry(record, prepared, bound.trainer)
             return
 
-    def _recorded_training_retry(
+    def recorded_retry(
         self,
         prepared: PreparedCommit,
-        result: TrainStepResult,
         next_step: int,
-        component: str | None,
+        *,
+        operation: str = "training",
+        rollback_target_release_id: str | None = None,
+        pending: bool = False,
+        component: str | None = None,
     ) -> CommitRecord | None:
-        records = self._store.history()
-        if not records or records[-1].step != next_step:
-            return None
-        record = records[-1]
-        matches = (
-            record.operation == "training"
-            and record.pending == result.pending
-            and self.own_record(record, component)
-            and self._record_matches_prepared(record, prepared)
-        )
-        if not matches:
-            raise ScenarioStoreConflict(f"commit step {next_step} conflicts with the pending training result")
-        return record
-
-    def _recorded_operation_retry(
-        self,
-        prepared: PreparedCommit,
-        operation: str,
-        target_release_id: str,
-        next_step: int,
-    ) -> CommitRecord | None:
+        """The record an earlier attempt of this commit left at ``next_step``, or ``None`` when there is none."""
         records = self._store.history()
         if not records or records[-1].step != next_step:
             return None
         record = records[-1]
         if (
             record.operation != operation
-            or record.rollback_target_release_id != target_release_id
+            or record.rollback_target_release_id != rollback_target_release_id
+            or record.pending != pending
+            or not self.own_record(record, component)
             or not self._record_matches_prepared(record, prepared)
         ):
-            raise ScenarioStoreConflict(f"commit step {next_step} conflicts with the pending {operation}")
+            raise ScenarioStoreConflict(f"commit step {next_step} conflicts with the pending {operation} commit")
         return record
 
     @staticmethod
@@ -1078,9 +1051,6 @@ class ScenarioCommitter:
     def base_release_on_record(self, prepared: PreparedCommit) -> str | None:
         """The release a batch was reserved against, recorded only where another trainer can replace it."""
         return prepared.base_release_id if len(self.trainers) > 1 else None
-
-    def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
-        return self._releases.metrics_for_version(release_id)
 
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
         return self._releases.entries_for_version(release_id)

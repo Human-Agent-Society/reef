@@ -98,7 +98,7 @@ def session_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingP
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
-        record2record=JudgingRecord2Record(context, _SessionJudging(), _JudgedAtOnce()),
+        record2record=JudgingRecord2Record(_SessionJudging(), _JudgedAtOnce()),
         record2task=_SessionTasks(),
         task2batch=SessionBatches(context, batch_size),
     )
@@ -180,7 +180,6 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
         _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
 

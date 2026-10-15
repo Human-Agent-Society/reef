@@ -17,6 +17,7 @@ import pytest
 import ray
 from tests.support.slime_coordinator import build_slime_coordinator
 
+from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, read_marker
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -55,6 +56,7 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
         "samples": rows,
         "rollout_ids": list(range(len(rows))) if rollout_ids is None else rollout_ids,
         "loss": "sao",
+        "method": TrainingMethod("sao").to_dict(),
     }
 
 
@@ -346,7 +348,7 @@ def _sao_actor(
             _sao_row("b", reward=1.0, producing_runtime_load_id="inc:3"),
         ]
     )
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
     return actor, actor_group, critic_group, payload
 
 
@@ -393,7 +395,7 @@ def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_
     actor.acknowledge_training_commit(first.training_job_id)
     # The next batch, reserved four scenario steps later.
     next_batch = _payload([_sao_row("c", producing_runtime_load_id=first.runtime_load_id)])
-    next_batch.update(scenario_step=4, expected_runtime_load_id=first.runtime_load_id)
+    next_batch.update(scenario_step=4, parent_runtime_load_id=first.runtime_load_id)
     later = _execute_and_update_weights(actor, next_batch)
 
     assert (first.outcome, later.outcome) == ("complete", "complete")
@@ -510,7 +512,7 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
         loss_family="sao",
     )
     payload = _payload([_sao_row("a", producing_runtime_load_id="inc:4")])
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -588,7 +590,7 @@ def critic_prep_args(**overrides):
 @pytest.mark.unit
 def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args()
     configure_megatron_runtime(args)
@@ -604,7 +606,7 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 @pytest.mark.unit
 def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_has_its_own(tmp_path) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     critic_save, critic_init = tmp_path / "megatron-critic", tmp_path / "critic-init"
     critic_init.mkdir()
@@ -636,7 +638,7 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
 @pytest.mark.unit
 def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(critic_lr=5e-6, lr=1e-6)
     configure_megatron_runtime(args)
@@ -649,7 +651,7 @@ def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
 @pytest.mark.unit
 def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(lr=1e-6)
     configure_megatron_runtime(args)
@@ -666,8 +668,8 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
     parameter and could not sit beside a LoRA actor of the same model.
     """
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
     from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     # The state finalize_reef_slime_args leaves for a LoRA actor: alpha
     # defaulted, Reef's provider installed, the user's provider chained.
@@ -691,7 +693,7 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 @pytest.mark.unit
 def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
     configure_megatron_runtime(args)
@@ -704,7 +706,7 @@ def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
 
 @pytest.mark.unit
 def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path) -> None:
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     critic_root = tmp_path / "megatron-critic"
     critic_root.mkdir()
@@ -721,7 +723,7 @@ def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path
 
 @pytest.mark.unit
 def test_prepare_critic_args_first_boot_keeps_the_inherited_load_fallback(tmp_path) -> None:
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     critic_root = tmp_path / "megatron-critic"  # no checkpoint tracker yet
 
@@ -739,7 +741,7 @@ def test_megatron_config_critic_role_pins_lambda(tmp_path) -> None:
     # The --megatron-config-path role surgery must still apply SAO's
     # critic-role lambda policy even with a megatron config.
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     _install_slime_parser_stubs()
     config_path = tmp_path / "megatron.yaml"
@@ -875,7 +877,7 @@ def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
         loss_family="sao",
     )
     payload = _payload([_sao_row("a")])
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
 
     with pytest.raises(RuntimeError, match="SAO requires a value model"):
         _execute_and_update_weights(actor, payload)

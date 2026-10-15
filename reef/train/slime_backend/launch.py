@@ -223,8 +223,7 @@ class SlimeDeployment(TrainingDeployment):
             ray_actor_name=settings["ray_actor_name"] or DEFAULT_ACTOR_NAME,
             inference_handler_factory=settings["inference_handler_factory"],
         )
-        # Managed launches take native options from the resolved config.
-        driver = driver_service("slime-driver", settings, {**driver_environment(os.environ), "SLIME_ARGS_FILE": ""})
+        driver = driver_service("slime-driver", settings, driver_environment(os.environ))
         teacher = teacher_service(settings)
         if teacher is not None:
             driver["depends_on"] = [TEACHER_SERVICE]
@@ -236,9 +235,7 @@ class SlimeDeployment(TrainingDeployment):
 
         return create_training_plan(config, loss_family=loss_family)
 
-    def runtime_config(
-        self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None
-    ) -> dict[str, Any]:
+    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
         ray_address = settings["ray_address"]
         if not isinstance(ray_address, str) or not ray_address.strip():
             raise ValueError("reef.ray_address is required")
@@ -257,8 +254,6 @@ class SlimeDeployment(TrainingDeployment):
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
         }
-        if max_staleness:
-            runtime_config["max_staleness"] = max_staleness
         inference_handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if inference_handler_factory is not None:
             runtime_config["inference_handler_factory"] = inference_handler_factory

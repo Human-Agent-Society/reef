@@ -212,6 +212,23 @@ def test_sampled_reverse_kl_is_the_gap_with_the_score_function_gradient() -> Non
     assert torch.allclose(logits.grad, gap[:, None] * (onehot - probs), atol=1e-9)
 
 
+@pytest.mark.unit
+def test_sampled_reverse_kl_clips_gradient_but_preserves_reported_gap() -> None:
+    logits = torch.tensor([[-6.0, 0.0]] * 3, dtype=torch.float64, requires_grad=True)
+    student_log_probs = logits.log_softmax(-1)[:, 0]
+    gap = torch.tensor([-4.0, 0.25, 4.0], dtype=torch.float64)
+    teacher_log_probs = (student_log_probs.detach() - gap).requires_grad_()
+
+    loss = sampled_reverse_kl(student_log_probs, teacher_log_probs, advantage_clip=1.0)
+    loss.sum().backward()
+
+    scores = torch.tensor([[1.0, 0.0]] * 3, dtype=torch.float64) - logits.detach().softmax(-1)
+    expected_gradient = torch.tensor([-1.0, 0.25, 1.0], dtype=torch.float64)[:, None] * scores
+    torch.testing.assert_close(logits.grad, expected_gradient)
+    torch.testing.assert_close(loss.detach(), gap)
+    assert teacher_log_probs.grad is None
+
+
 # --- the importance weight and the teacher copy -------------------------------------
 
 

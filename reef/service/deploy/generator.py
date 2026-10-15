@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.core.config import Settings, config_metadata, config_option
 from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 
@@ -29,7 +29,7 @@ DEFAULT_READY_TIMEOUT = 60
 
 
 @dataclass(frozen=True)
-class GeneratorSettings:
+class GeneratorSettings(Settings):
     """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section."""
 
     tasks_root: str = config_option(help="The directory generated tasks, manifests and Harbor job files live under.")
@@ -97,26 +97,15 @@ class GeneratorSettings:
             raise ValueError("generator.agent must carry a Harbor agent name or an import_path")
 
 
-def generator_settings(section: Mapping[str, Any]) -> GeneratorSettings:
-    """Parse the ``generator`` section, in its public hyphen spelling or the field spelling; unknown fields are refused."""
-    if not isinstance(section, Mapping):
-        raise ValueError("generator must be an object")
-    folded = {str(key).replace("-", "_"): value for key, value in section.items()}
-    if len(folded) != len(section):
-        raise ValueError("generator names a field twice, in both spellings")
-    values = parse_config_values(config_arguments(GeneratorSettings, prefix=("generator",)), folded)
-    return GeneratorSettings(**values)
-
-
 def generator_service(config: dict[str, Any]) -> dict[str, Any] | None:
     """The generator's process definition, or None when the deployment has no ``generator`` section."""
     section = config.get("generator")
     if section is None:
         return None
     try:
-        generator = generator_settings(section)
+        generator = GeneratorSettings.from_config(section, setting=GENERATOR_SERVICE)
     except ValueError as exc:
-        raise DeployConfigError(f"generator: {exc}") from exc
+        raise DeployConfigError(str(exc)) from exc
     # The same interpreter as every child reef serve starts.
     python = os.environ.get("REEF_PYTHON", sys.executable)
     probe_host = "127.0.0.1" if generator.host in ("0.0.0.0", "") else generator.host

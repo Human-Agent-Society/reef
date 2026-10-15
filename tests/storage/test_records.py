@@ -35,7 +35,7 @@ def item(
 def test_read_transaction_keeps_one_snapshot_during_another_connection_commit(tmp_path):
     database = tmp_path / "records.sqlite3"
     with SQLiteRecordStore(database) as reader, SQLiteRecordStore(database) as writer:
-        with reader._transaction("math", write=False) as connection:
+        with reader._transaction(write=False) as connection:
             assert connection.exec_driver_sql("SELECT COUNT(*) FROM agent_record").scalar_one() == 0
             writer.append(item("first", "math"))
             assert connection.exec_driver_sql("SELECT COUNT(*) FROM agent_record").scalar_one() == 0
@@ -243,7 +243,7 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
         assert records.get("math", "live") == item("live", "math")
         assert records.get_for_audit("math", "live").item == item("live", "math")
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
-            assert factory.prune(days=7, max_bytes=1) == 2
+            assert factory.prune(max_bytes=1) == 2
         assert records.get_for_audit("math", "live") is None
         assert records.get("math", "next") is None
         assert records.loss("math").record_count == 2
@@ -280,8 +280,8 @@ def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_pa
         expected_bytes = len((payload_json + references_json + artifact_json).encode("utf-8"))
         expected_bytes += len(b'{"value":"live"}[]')
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
-            assert factory.prune(days=7, max_bytes=expected_bytes) == 0
-            assert factory.prune(days=7, max_bytes=expected_bytes - 1) == 1
+            assert factory.prune(max_bytes=expected_bytes) == 0
+            assert factory.prune(max_bytes=expected_bytes - 1) == 1
         assert records.get_for_audit("math", "retired") is None
         assert records.get("math", "live") == item("live", "math")
 

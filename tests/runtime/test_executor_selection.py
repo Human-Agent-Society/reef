@@ -8,7 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from reef.runtime.executor import Executor
-from reef.runtime.executor.config import ExecutorSettings, executor_settings, select_executor
+from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, select_executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.runtime.executor.uniproc import UniProcExecutor
@@ -154,11 +154,11 @@ def test_scorer_can_declare_gpu_needs_without_yaml(monkeypatch):
             return 1.0
 
     monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1"))
-    selected, requirements = evaluation_selection(GPUScorer(), 2, ExecutorSettings())
+    selected, requirements = evaluation_selection(GPUScorer(), ExecutorSettings(workers=2))
     assert selected.settings.backend == "mp"
     assert requirements.workers == 2 and requirements.gpus_per_worker == 1
     with pytest.raises(ValueError, match="below"):
-        evaluation_selection(GPUScorer(), 2, ExecutorSettings(), 0)
+        evaluation_selection(GPUScorer(), ExecutorSettings(workers=2, resources=WorkerResources(gpus_per_worker=0)))
 
 
 @pytest.mark.parametrize("value", [-1, True, float("nan"), float("inf"), "1"])

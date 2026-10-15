@@ -14,10 +14,11 @@ import yaml
 from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
+from reef.core.config import config_arguments
 from reef.evaluation import BackendAlwaysSelectPlugin
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
+from reef.recipe.config_fields import resolve_config_field_values
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.runtime_backend import RuntimeCandidateBackend
@@ -57,7 +58,7 @@ class StagedRecipe(WeightTrainingRecipe):
 
 @pytest.mark.unit
 def test_config_fields_declare_the_whole_configuration_surface() -> None:
-    config_fields = recipe_config_fields(ConfiguredRecipe)
+    config_fields = {argument.name: argument for argument in config_arguments(ConfiguredRecipe)}
 
     assert sorted(config_fields) == [
         "batch_size",
@@ -190,7 +191,6 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
         ({"temperature": "warm"}, r"reef\.temperature must be a valid float"),
         ({"strict": "maybe"}, r"reef\.strict must be a valid bool"),
         ({"label": 3}, r"reef\.label must be a string"),
-        ({"checkpoint_every_n_versions": "x"}, r"reef\.checkpoint_every_n_versions must be a valid int"),
     ],
 )
 def test_service_config_names_the_setting_and_the_expected_type(settings, match) -> None:
@@ -239,7 +239,7 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
         sizes: list = config_field(None)  # noqa: RUF009 - the invalid declaration under test
 
     with pytest.raises(TypeError, match="unsupported config field type: sizes"):
-        recipe_config_fields(BadRecipe)
+        config_arguments(BadRecipe)
 
 
 @pytest.mark.unit
@@ -247,16 +247,16 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     stages = PipelineConfig.from_setting(
         {"task2batch": {"config": {"batch_size": 2}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    trainer = StagedRecipe(
-        **runtime_bindings(StubTrainingRuntime(max_staleness=3)), max_staleness=3, pipeline_stages=stages
-    ).build("scenario", SQLiteRecordStore())
+    trainer = StagedRecipe(**runtime_bindings(StubTrainingRuntime()), max_staleness=3, pipeline_stages=stages).build(
+        "scenario", SQLiteRecordStore()
+    )
 
     assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
     assert isinstance(trainer.pipeline.task2batch, ThresholdBatches)
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
     assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
     assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
-    assert trainer.candidate_backend.objective == "sft"
+    assert trainer.candidate_backend.training_method_selector.method.objective == "sft"
     assert trainer.pipeline.batch_size == 2
     # The shared recipe field reaches the stages as the typed context field, not as stage config.
     assert trainer.pipeline.context.max_staleness == 3
@@ -296,4 +296,4 @@ def test_opd_config_keeps_objective_options_out_of_recipe_fields() -> None:
     assert values["max_staleness"] == 0
     # The stage settings belong to the pipeline section, and the objective options to the backend.
     for name in ("batch_size", "max_teacher_tokens", "teacher_checkpoint", "tokenizer_path"):
-        assert name not in recipe_config_fields(OPDRecipe)
+        assert name not in {argument.name for argument in config_arguments(OPDRecipe)}

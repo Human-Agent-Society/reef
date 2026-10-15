@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -22,8 +22,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.executor.config import ExecutorSettings
-from reef.storage.model_config import read_model_config, write_model_config
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.scenario import ScenarioSettings
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.types import TrainingBatch
 
@@ -233,24 +233,22 @@ def test_recipe_uses_model_config_without_a_persistence_interface(platform, tmp_
     assert recipe.model_bindings().served.api_key == "platform-key"
 
 
-def test_model_settings_persist_privately_and_corruption_fails_recovery(platform, tmp_path):
+def test_model_settings_persist_privately_and_invalid_values_fail_recovery(platform, tmp_path):
     value = configure(platform, "alpha", "openai")
-    write_model_config(tmp_path, "alpha", value)
-    path = next(tmp_path.glob("*-model.json"))
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert read_model_config(tmp_path, "alpha") == value
-    recovered = ModelConfig.from_value(read_model_config(tmp_path, "alpha"))
+    storage = SQLiteScenarioStorage(tmp_path)
+    storage.write_settings("alpha", ScenarioSettings(model_config=value))
+    database = next(tmp_path.glob("*.sqlite3"))
+    assert database.stat().st_mode & 0o777 == 0o600
+    assert SQLiteScenarioStorage(tmp_path).read_settings("alpha").model_config == value
+    recovered = ModelConfig.from_value(storage.read_settings("alpha").model_config)
     assert recovered.runtime.api_key == "scoped-alpha-1"
     assert "scoped-alpha-1" not in json.dumps(recovered.view())
     assert "scoped-alpha-1" not in repr(recovered)
-    write_model_config(tmp_path, "alpha", None)
-    assert ModelConfig.from_value(read_model_config(tmp_path, "alpha")).runtime is None
-    path.write_text("{broken")
+    storage.write_settings("alpha", ScenarioSettings())
+    assert ModelConfig.from_value(storage.read_settings("alpha").model_config).runtime is None
+    storage.write_settings("alpha", ScenarioSettings(model_config={"url": "http://user:secret@host", "model": "bad"}))
     with pytest.raises(ValueError):
-        read_model_config(tmp_path, "alpha")
-    path.write_text(json.dumps({"url": "http://user:secret@host", "model": "bad"}))
-    with pytest.raises(ValueError):
-        ModelConfig.from_value(read_model_config(tmp_path, "alpha"))
+        ModelConfig.from_value(storage.read_settings("alpha").model_config)
 
 
 def test_model_auth_failure_never_falls_back(platform, tmp_path):
@@ -360,10 +358,10 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     records = tmp_path / "records"
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = make_recipe(platform, tmp_path)
-    first = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
+    first = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
     first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
     first.close()
-    recovered = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
+    recovered = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert scenario.runtime.api_key == "scoped-alpha-1"
@@ -376,11 +374,11 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
         recovered.configure_scenario_model("alpha", configure(platform, "alpha", "openai", "2"))
         assert reloaded.runtime.api_key == "scoped-alpha-2"
         assert previous_runtime.api_key == "scoped-alpha-1"
-        model_file = next(records.glob("*-model.json"))
-        assert model_file.stat().st_mode & 0o777 == 0o600
+        assert not list(records.glob("*-model.json"))
         recovered.delete_scenario("alpha")
-        assert not model_file.exists()
-        assert list((records / "archived").glob("*/*-model.json"))
+        assert recovered._storage.read_settings("alpha") == ScenarioSettings()
+        with closing(SQLiteRecordStore(next((records / "archived").glob("*/*.sqlite3")))) as archived:
+            assert archived.read_settings().model_config["api_key"] == "scoped-alpha-2"
         recreated = recovered.get_or_create_scenario("alpha")
         assert recreated.model_config is not config
         assert recreated.runtime.api_key == "platform-key"
@@ -396,7 +394,6 @@ def test_model_update_write_failure_keeps_active_config_and_saved_value(platform
     dispatcher = Dispatcher(
         make_recipe(platform, tmp_path),
         factory,
-        agent_record_dir=records,
         scenario_storage=SQLiteScenarioStorage(records),
     )
     try:
@@ -404,19 +401,18 @@ def test_model_update_write_failure_keeps_active_config_and_saved_value(platform
         scenario = dispatcher.configure_scenario_model("alpha", original, create=True)
         runtime = scenario.runtime
 
-        def fail_replace(source, destination):
-            raise OSError("injected model file write failure")
+        def fail_write(storage, scenario, settings):
+            raise OSError("injected settings write failure")
 
         with monkeypatch.context() as patch:
-            patch.setattr(os, "replace", fail_replace)
-            with pytest.raises(OSError, match="injected model file write failure"):
+            patch.setattr(SQLiteScenarioStorage, "write_settings", fail_write)
+            with pytest.raises(OSError, match="injected settings write failure"):
                 dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic", "2"))
         assert scenario.runtime is runtime
-        assert read_model_config(records, "alpha") == original
-        assert not list(records.glob(".model-*"))
+        assert SQLiteScenarioStorage(records).read_settings("alpha").model_config == original
         with pytest.raises(ValueError):
             dispatcher.configure_scenario_model("alpha", {"url": "http://user:secret@host", "model": "bad"})
         assert scenario.runtime is runtime
-        assert read_model_config(records, "alpha") == original
+        assert SQLiteScenarioStorage(records).read_settings("alpha").model_config == original
     finally:
         dispatcher.close()

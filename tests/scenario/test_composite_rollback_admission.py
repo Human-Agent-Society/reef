@@ -61,7 +61,6 @@ def _dispatcher(tmp_path: Path) -> Dispatcher:
         _LoadedRecipe(backends=backends),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=records,
         scenario_storage=SQLiteScenarioStorage(records),
     )
 
@@ -280,7 +279,6 @@ def test_a_composite_without_loaded_weights_never_resumes_admission_on_a_recorde
         _TwoTrainerRecipe(backends=backends),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:

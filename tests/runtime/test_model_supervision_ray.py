@@ -14,12 +14,14 @@ from uuid import uuid4
 
 import pytest
 
+from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.recovery import FileTrainingJobStore
 from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethodSelector
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from reef.inference.sglang.service import RayHealthProbe
+from reef.inference.process import RayHealthProbe
 from reef.runtime.deployment import (
     ComponentHealth,
     DeploymentResources,
@@ -111,9 +113,6 @@ class Publisher(WeightPublisher):
 
     def publish(self, marker, *, force_full):
         raise AssertionError("startup must not publish a new candidate")
-
-    def republish(self, runtime_load_id, marker):
-        raise AssertionError("startup restores its checkpoint explicitly")
 
     def restore_incumbent(self):
         raise AssertionError("startup must not reject a candidate")
@@ -330,7 +329,9 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
 
     ray, namespace = deployment.ray, deployment.namespace
     training, runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
-    RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=runtime)
+    RuntimeCandidateBackend(
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
+    )
     backend = runtime.inference_handler
 
     async def infer():
@@ -388,7 +389,9 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
     training, runtime = connect_ray_runtime(
         actor_name="training", namespace=deployment.namespace, inference_timeout_s=30
     )
-    coordinator = RuntimeCandidateBackend(training, "sft", StepScheduling(), inference_runtime=runtime)
+    coordinator = RuntimeCandidateBackend(
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
+    )
     path = deployment.directory / "job.json"
     marker = read_marker(path)
     (deployment.directory / "checkpoint.json").write_text(json.dumps({"version": "checkpoint:2"}))

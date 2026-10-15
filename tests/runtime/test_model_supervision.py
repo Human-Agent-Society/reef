@@ -84,7 +84,7 @@ def test_recovery_requires_cleanup_and_preflight_and_obeys_stop(tmp_path, failur
 
 def test_pending_health_probe_is_not_failure_and_does_not_queue_more_work(monkeypatch):
     pytest.importorskip("ray")
-    from reef.inference.sglang.service import RayHealthProbe
+    from reef.inference.process import RayHealthProbe
     from reef.train.slime_backend import resources
 
     submitted = []

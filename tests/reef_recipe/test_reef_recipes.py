@@ -44,11 +44,11 @@ def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
 def test_training_recipes_share_max_staleness(recipe_type) -> None:
     assert recipe_type(**runtime_bindings(StubTrainingRuntime())).max_staleness == 0
-    assert recipe_type(**runtime_bindings(StubTrainingRuntime(max_staleness=2)), max_staleness=2).max_staleness == 2
+    recipe = recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=2)
+    assert recipe.max_staleness == 2
+    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.context.max_staleness == 2
     with pytest.raises(ValueError, match="max_staleness must be a non-negative integer"):
         recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=-1)
-    with pytest.raises(ValueError, match="must match the training runtime"):
-        recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=2)
 
 
 def test_recipe_class_resolver_has_no_method_short_names() -> None:
@@ -137,7 +137,7 @@ def test_concrete_recipe_builds_its_processor_objective_and_report_type(
         assert trainer.candidate_backend is None
     else:
         assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-        assert trainer.candidate_backend.objective == objective
+        assert trainer.candidate_backend.training_method_selector.method.objective == objective
     assert trainer.pipeline.context.report_type is report_type
 
 
@@ -183,7 +183,7 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), pipeline_stages=stages)"
                 ".build('math', SQLiteRecordStore())\n"
-                "assert trainer.candidate_backend.objective == 'tttd'\n"
+                "assert trainer.candidate_backend.training_method_selector.method.objective == 'tttd'\n"
             ),
         ],
         check=True,

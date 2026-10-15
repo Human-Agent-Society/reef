@@ -18,8 +18,9 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
+from reef.storage.commit_log import CommitHistoryScenarioStore, CommitLog
 from reef.storage.commits import CommitRecord
+from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioStoreConflict
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
@@ -47,13 +48,26 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     )
 
 
-@pytest.fixture(params=[False, True], ids=["memory", "durable"])
+@pytest.fixture(params=["memory", "durable", "postgres"])
 def store(request, tmp_path):
-    factory = SQLiteScenarioStorage(tmp_path if request.param else None)
+    if request.param == "postgres":
+        url, schema = request.getfixturevalue("postgres_config")
+        factory = PostgresScenarioStorage(url, tmp_path, schema=schema)
+    else:
+        factory = SQLiteScenarioStorage(tmp_path if request.param == "durable" else None)
     session = factory.open("math")
     yield session
     session.close()
     factory.close()
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def open_storage(request, tmp_path):
+    """Open independent storages over one durable location."""
+    if request.param == "postgres":
+        url, schema = request.getfixturevalue("postgres_config")
+        return lambda: PostgresScenarioStorage(url, tmp_path, schema=schema)
+    return lambda: SQLiteScenarioStorage(tmp_path)
 
 
 def test_commit_is_fenced_and_preserves_readable_records(store):
@@ -195,7 +209,9 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
 
 def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(CommitLogScenarioStore("math", SQLiteRecordStore(tmp_path / "records.sqlite3"), journal)) as session:
+    with closing(
+        CommitHistoryScenarioStore("math", SQLiteRecordStore(tmp_path / "records.sqlite3"), journal)
+    ) as session:
         for step in range(1, 4):
             session.records.append(record(f"record-{step}"))
             journal.append(commit(step))
@@ -211,7 +227,7 @@ def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
 @pytest.mark.parametrize("durable_append", [False, True])
 def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch, durable_append):
     journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(CommitLogScenarioStore("math", SQLiteRecordStore(), journal)) as session:
+    with closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session:
         session.records.append(record("record-1"))
         append = journal.append
 
@@ -238,7 +254,7 @@ def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, checkpoint_step
     for step in steps:
         journal.append(commit(step))
     with (
-        closing(CommitLogScenarioStore("math", SQLiteRecordStore(), journal)) as session,
+        closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session,
         pytest.raises(ReefError, match=message),
     ):
         session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
@@ -248,22 +264,22 @@ def test_recovery_rejects_journal_for_another_scenario(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
     journal.append(commit(scenario="code"))
     with (
-        closing(CommitLogScenarioStore("math", SQLiteRecordStore(), journal)) as session,
+        closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session,
         pytest.raises(ReefError, match="holds records for 'code'"),
     ):
         session.recover(checkpoint=None)
 
 
 def test_existing_initial_step_is_fenced_without_history():
-    with closing(CommitLogScenarioStore("math", SQLiteRecordStore(), initial_step=3)) as session:
+    with closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), initial_step=3)) as session:
         with pytest.raises(ScenarioStoreConflict, match="current step is 3"):
             session.commit_step(expected_step=0, commit=commit())
         session.commit_step(expected_step=3, commit=commit(4))
 
 
-def test_conflicting_sessions_have_only_one_winner(tmp_path):
-    first_factory = SQLiteScenarioStorage(tmp_path)
-    second_factory = SQLiteScenarioStorage(tmp_path)
+def test_conflicting_sessions_have_only_one_winner(open_storage):
+    first_factory = open_storage()
+    second_factory = open_storage()
     with closing(first_factory.open("math")) as first, closing(second_factory.open("math")) as second:
         barrier = Barrier(2)
 
@@ -285,8 +301,8 @@ def test_conflicting_sessions_have_only_one_winner(tmp_path):
     second_factory.close()
 
 
-def test_session_refreshes_cached_history_after_another_writer(tmp_path):
-    factory = SQLiteScenarioStorage(tmp_path)
+def test_session_refreshes_cached_history_after_another_writer(open_storage):
+    factory = open_storage()
     with closing(factory.open("math")) as first, closing(factory.open("math")) as second:
         first.commit_step(expected_step=0, commit=commit())
         assert first.history() == (commit(),)
@@ -378,7 +394,7 @@ def test_storage_capacity_includes_unconsumed_archived_records(tmp_path):
         session.commit_step(expected_step=0, commit=commit())
     archived = factory.archive("math")
 
-    assert factory.prune(days=7.0, max_bytes=1) == 2
+    assert factory.prune(max_bytes=1) == 2
 
     database = next(Path(path) for path in archived if path.endswith(".sqlite3"))
     with SQLiteRecordStore(database) as records:
@@ -392,7 +408,7 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
     with closing(factory.open("math")) as session:
         assert factory.durable is False
         assert factory.archive("math") == ()
-        assert factory.prune(days=7.0, max_bytes=1) == 0
+        assert factory.prune(max_bytes=1) == 0
         factory.close()
         factory.close()
         session.commit_step(expected_step=0, commit=commit())
@@ -401,7 +417,7 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
         with pytest.raises(RuntimeError, match="storage is closed"):
             factory.archive("math")
         with pytest.raises(RuntimeError, match="storage is closed"):
-            factory.prune(days=7.0, max_bytes=1)
+            factory.prune(max_bytes=1)
 
 
 def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):

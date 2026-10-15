@@ -97,16 +97,12 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
         evaluate("unknown", pi_episode("### 17"))
 
 
-@pytest.mark.parametrize("selector", ["role", "worker"])
-def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selector):
+def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
-    if selector == "worker":
-        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
-        config["execution"]["evolution"] = "uni"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     assert recipe.worker_executor.backend == "mp"

@@ -17,7 +17,11 @@ import yaml
 from reef.core.config import ConfigArgument
 from reef.core.errors import DeployConfigError
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.service.deploy.deployment_config import component_config_arguments, deployment_config_arguments
+from reef.service.deploy.deployment_config import (
+    RECIPE_SECTION_PATHS,
+    component_config_arguments,
+    deployment_config_arguments,
+)
 from reef.service.deploy.service_config import service_config_arguments, service_override
 
 _DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
@@ -208,9 +212,10 @@ def _apply_overrides(
             if object_path is not None:
                 key = ".".join(object_path)
         if declared is None:
-            for public, internal in (("recipe.runtime.", "reef.runtime."), ("recipe.config.", "reef.data.")):
-                if key.startswith(public):
-                    key = internal + key[len(public) :].replace("-", "_")
+            for public, internal in RECIPE_SECTION_PATHS.items():
+                prefix = ".".join(public) + "."
+                if key.startswith(prefix):
+                    key = ".".join(internal) + "." + key[len(prefix) :].replace("-", "_")
                     break
         if "." not in key and declared is None:
             key = f"reef.{key}"
@@ -253,7 +258,7 @@ def build_serve_parser(
         "--recipe",
         default=None,
         metavar="NAME",
-        help="Start a built in recipe's profile instead of a config file (reefine; harness-evolve is its former name).",
+        help="Start a built in recipe's profile instead of a config file (reefine).",
     )
     parser.add_argument(
         "--model",

@@ -83,6 +83,7 @@ class DistillSettings:
     teacher_timeout: float = 300.0
     importance_sampling_cap: float = 2.0
     importance_sampling_level: str = "sequence"
+    advantage_clip: float = 0.0
     skip_response_tokens: int = 0
     jsd_beta: float = 0.5
 
@@ -99,6 +100,14 @@ class DistillSettings:
             raise ValueError("distill top_k_distribution must be renormalized or tail")
         if self.importance_sampling_level not in ("sequence", "token"):
             raise ValueError("distill importance_sampling_level must be sequence or token")
+        if not _is_finite(self.advantage_clip) or self.advantage_clip < 0:
+            raise ValueError("distill advantage_clip must be a finite number >= 0 (0 disables clipping)")
+        if self.advantage_clip > 0 and (
+            self.exact or self.divergence != "reverse" or self.top_k_distribution != "renormalized"
+        ):
+            raise ValueError(
+                "distill advantage_clip requires sampled reverse KL with top_k > 0 and renormalized support"
+            )
         if not _is_finite(self.teacher_update_rate) or not 0 <= self.teacher_update_rate <= 1:
             raise ValueError("distill teacher_update_rate must be a number in [0, 1]")
         if not isinstance(self.teacher_checkpoint, str):
@@ -362,6 +371,15 @@ class DistillAlgorithm(SlimeAlgorithm):
             ),
         )
         parser.add_argument(
+            f"{prefix}advantage-clip",
+            dest="advantage_clip",
+            type=float,
+            help=(
+                "Symmetric bound on the sampled reverse-KL teacher/student log-prob difference used in the gradient. "
+                f"0 disables clipping. Default {defaults['advantage_clip']}."
+            ),
+        )
+        parser.add_argument(
             f"{prefix}skip-response-tokens",
             dest="skip_response_tokens",
             type=int,
@@ -424,6 +442,7 @@ class DistillAlgorithm(SlimeAlgorithm):
         args.distill_teacher_timeout = settings.teacher_timeout
         args.distill_importance_sampling_cap = settings.importance_sampling_cap
         args.distill_importance_sampling_level = settings.importance_sampling_level
+        args.distill_advantage_clip = settings.advantage_clip
         args.distill_skip_response_tokens = settings.skip_response_tokens
         args.distill_jsd_beta = settings.jsd_beta
 
@@ -479,6 +498,7 @@ def settings_from_args(args: Namespace) -> DistillSettings:
         teacher_timeout=args.distill_teacher_timeout,
         importance_sampling_cap=args.distill_importance_sampling_cap,
         importance_sampling_level=args.distill_importance_sampling_level,
+        advantage_clip=args.distill_advantage_clip,
         skip_response_tokens=args.distill_skip_response_tokens,
         jsd_beta=args.distill_jsd_beta,
     )

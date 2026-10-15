@@ -126,6 +126,11 @@ class ConfigArgument:
                 if raw.strip().lower() in {"false", "no", "off", "0"}:
                     return False
                 raise ValueError("invalid boolean")
+            if self.kind == "plugin":
+                # A class reference stays text; an object carries module and config.
+                plugin = yaml.safe_load(raw) if raw.lstrip().startswith("{") else raw
+                if isinstance(plugin, (str, dict)):
+                    return plugin
             value = yaml.safe_load(raw)
             if self.kind == "object" and isinstance(value, dict):
                 return value
@@ -133,7 +138,11 @@ class ConfigArgument:
                 return tuple(value)
         except (ValueError, TypeError, yaml.YAMLError):
             pass
-        expected = {"object": "an object", "strings": "a list of strings"}.get(self.kind, f"a valid {self.kind}")
+        expected = {
+            "object": "an object",
+            "strings": "a list of strings",
+            "plugin": "a name, a 'package.module:ClassName' reference, or an object with module and config",
+        }.get(self.kind, f"a valid {self.kind}")
         raise argparse.ArgumentTypeError(f"{'.'.join(self.path)} must be {expected}")
 
     def add_to(self, parser: argparse.ArgumentParser) -> None:
@@ -166,7 +175,7 @@ class ConfigArgument:
             return value
         if self.kind == "str":
             raise ValueError(f"{'.'.join(self.path)} must be a string")
-        if self.kind in {"strings", "object"}:
+        if self.kind in {"strings", "object", "plugin"}:
             try:
                 return json.dumps(value)
             except (ValueError, TypeError) as exc:
@@ -192,11 +201,14 @@ def config_arguments(settings_type: type, *, prefix: tuple[str, ...] = ("reef",)
             declaration = types.SimpleNamespace(__annotations__={field.name: annotation})
             annotation = get_type_hints(declaration, globalns=vars(sys.modules[owner.__module__]))[field.name]
         nullable = False
+        plugin = False
         if get_origin(annotation) in (Union, types.UnionType):
             members = get_args(annotation)
             nullable = type(None) in members
             concrete = [member for member in members if member is not type(None)]
-            if not nullable or len(concrete) != 1:
+            # ``str | Mapping[str, Any]`` is a plugin setting: a reference, or module and config.
+            plugin = concrete == [str, Mapping[str, Any]]
+            if not plugin and (not nullable or len(concrete) != 1):
                 raise TypeError(f"unsupported config union: {field.name}")
             annotation = concrete[0]
         kinds = {
@@ -208,7 +220,7 @@ def config_arguments(settings_type: type, *, prefix: tuple[str, ...] = ("reef",)
             Mapping: "object",
             dict: "object",
         }
-        kind = kinds.get(get_origin(annotation) or annotation)
+        kind = "plugin" if plugin else kinds.get(get_origin(annotation) or annotation)
         if kind == "strings" and get_args(annotation) != (str, Ellipsis):
             kind = None
         if kind == "object" and get_args(annotation) not in ((), (str, Any)):
@@ -268,7 +280,7 @@ def parse_config_values(
         supplied.add(argument.name)
         if value is None and argument.nullable:
             parser.set_defaults(**{argument.destination: None})
-        elif argument.kind == "object" and isinstance(value, Mapping):
+        elif argument.kind in ("object", "plugin") and isinstance(value, Mapping):
             # Already-typed opaque options may include backend-owned Python
             # objects. Their contents are validated by that adapter, not JSON.
             parser.set_defaults(**{argument.destination: dict(value)})
@@ -287,13 +299,11 @@ class Settings:
     """Base of a settings dataclass: ``config_option`` fields that one config mapping parses into."""
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, setting: str, strict: bool = True) -> Self:
+    def from_config(cls, config: Mapping[str, Any], *, setting: str) -> Self:
         """Read one config into this settings dataclass, in the hyphen or the field spelling.
 
         ``setting`` names the config in errors, for example
-        ``pipeline.record2record.config``. With ``strict`` an unknown field is
-        refused; without it, fields that the dataclass does not declare are
-        ignored, for a config that several stages share in a test or a recipe.
+        ``pipeline.record2record.config``. An unknown field is refused.
         """
         if not isinstance(config, Mapping):
             raise ValueError(f"{setting} must be an object")
@@ -301,9 +311,6 @@ class Settings:
         if len(folded) != len(config):
             raise ValueError(f"{setting} names a field twice, in both spellings")
         arguments = config_arguments(cls, prefix=tuple(setting.split(".")))
-        if not strict:
-            known = {argument.name for argument in arguments}
-            folded = {key: value for key, value in folded.items() if key in known}
         try:
             values = parse_config_values(arguments, folded)
         except ValueError as exc:

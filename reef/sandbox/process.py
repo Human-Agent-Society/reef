@@ -29,10 +29,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
@@ -40,6 +41,37 @@ from reef.core.errors import ReefError
 ISOLATION_ENV = "REEF_EPISODE_ISOLATION"
 
 EPISODE_OWNER_LEASE: ContextVar[bool] = ContextVar("episode_owner_lease", default=False)
+
+
+class ProcessOwner:
+    """Terminate the local process groups belonging to one environment."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.process_groups: set[int] = set()
+        self.stopped = False
+
+    def register(self, process_group: int) -> None:
+        with self.lock:
+            if self.stopped:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process_group, signal.SIGKILL)
+                raise EpisodeLaunchError("the execution environment was stopped")
+            self.process_groups.add(process_group)
+
+    def release(self, process_group: int) -> None:
+        with self.lock:
+            self.process_groups.discard(process_group)
+
+    def stop(self) -> None:
+        with self.lock:
+            self.stopped = True
+            for process_group in self.process_groups:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process_group, signal.SIGKILL)
+
+
+PROCESS_OWNER: ContextVar[ProcessOwner | None] = ContextVar("sandbox_process_owner", default=None)
 
 
 class SandboxUnavailable(ReefError):
@@ -63,19 +95,91 @@ class EpisodeLaunchError(Exception):
     """The process could not be launched; raised for run_episode to map."""
 
 
+class SandboxProgram(ABC):
+    """The program an executor runs, and what an executor needs to resolve or install it.
+
+    A subclass sets every attribute in ``__init__``. An executor reads only
+    what its kind needs: one on the Reef host resolves :meth:`host_binary`,
+    and a remote one resolves ``binary`` in a template built for ``name`` at
+    ``version``.
+    """
+
+    #: The program's name; it names a remote template built for the program.
+    name: str
+    #: The binary name a remote image resolves on its ``PATH``.
+    binary: str
+    #: The program starts its own containers on the Reef host.
+    self_isolating: bool
+    #: ``<package>@<version>`` when a remote template can install the program with npm, else ``""``.
+    npm_package: str
+    #: The pinned version a remote template is built for, else ``""``.
+    version: str
+
+    @abstractmethod
+    def host_binary(self) -> str:
+        """The binary on the Reef host, installed there when it is missing."""
+
+    @abstractmethod
+    def host_install_dir(self) -> Path | None:
+        """The directory a Reef-installed binary needs bound into a jail, else ``None``."""
+
+
 class EpisodeExecutor(ABC):
-    """Launch one episode process and return its outcome.
+    """Synchronous launch interface adapted by ``ExecutorEnvironment``.
 
     ``run_episode`` prepares ``root`` (with ``workspace`` inside it) and the
     ``env`` overlay; an executor decides how the process sees them. It must
     kill the whole process tree on timeout and raise :class:`EpisodeTimeout`
     or :class:`EpisodeLaunchError` so ``run_episode`` maps them to the public
     ``EpisodeError`` uniformly.
+
+    Callers do not need to know which executor they hold. :meth:`for_program`
+    binds the executor to the program it runs and resolves that program's
+    binary where the process runs. :meth:`open_session` gives one run of
+    several processes access to ports on the Reef host; :meth:`push`,
+    :meth:`pull` and :meth:`close` serve that run.
     """
+
+    #: The process runs directly on the Reef host: it sees the host's paths, environment and container runtime.
+    runs_on_host: bool = False
 
     @abstractmethod
     def preflight(self) -> None:
         """Raise if this executor cannot establish its isolation on this host."""
+
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+        """This executor bound to run ``program``, and the binary its processes launch.
+
+        ``binary`` overrides the resolved binary. By default the program's binary is resolved on the Reef host and
+        installed there when it is missing.
+        """
+        return self, binary if binary is not None else program.host_binary()
+
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+        """An executor for one run of several processes, which lasts at most ``timeout_s``.
+
+        The processes reach the Reef host's loopback ``forward_ports`` in addition to this executor's own. Call
+        :meth:`close` on the result when the run ends; a result that is this executor needs no close.
+        """
+        return self
+
+    def push(self, root: Path) -> None:
+        """Copy the Reef host's ``root`` to where the session's processes read it.
+
+        An executor whose processes read the host's files directly has nothing to copy.
+        """
+        return
+
+    def pull(self, root: Path, relative: str = "") -> None:
+        """Refresh the Reef host's copy of ``root / relative`` while a process still runs.
+
+        An executor whose processes write the host's files directly has nothing to copy.
+        """
+        return
+
+    def close(self) -> None:
+        """Release what :meth:`open_session` started."""
+        return
 
     @abstractmethod
     def launch(
@@ -91,13 +195,23 @@ class EpisodeExecutor(ABC):
     ) -> ProcessOutcome: ...
 
 
-def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeout: float) -> ProcessOutcome:
+def run_process(
+    popen_argv: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    timeout: float | None,
+    limits: SandboxLimits | None = None,
+    stdin_text: str | None = None,
+    new_session: bool = True,
+) -> ProcessOutcome:
     """Start a process in its own session and wait, killing the whole group on
     timeout. Coding agents spawn tool children, so a timeout kills the session,
-    not just the direct child."""
+    not just the direct child. Nested tool jails can retain their caller's
+    process group with ``new_session=False``."""
     read_fd = write_fd = None
     command = list(popen_argv)
-    if EPISODE_OWNER_LEASE.get():
+    if EPISODE_OWNER_LEASE.get() and new_session:
         # Detect missing executables before the guard changes their exit status.
         executable = command[0]
         if "/" in executable and not os.path.isabs(executable):
@@ -111,11 +225,12 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
             command,
             cwd=cwd,
             env=dict(env),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            start_new_session=new_session,
+            preexec_fn=limits.apply if limits is not None else None,
             pass_fds=() if read_fd is None else (read_fd,),
         )
     except FileNotFoundError as exc:
@@ -129,27 +244,38 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
     finally:
         if read_fd is not None:
             os.close(read_fd)
+    owner = PROCESS_OWNER.get() if new_session else None
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if owner is not None:
+            owner.register(process.pid)
+        stdout, stderr = process.communicate(input=stdin_text, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+            if new_session:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
         process.wait()
         raise EpisodeTimeout(f"episode timed out after {timeout}s: {list(popen_argv)}") from exc
     except BaseException:
         # A local worker can be terminated while an episode is in flight.
         # Do not leave the harness's separate process group behind.
         with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+            if new_session:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
         process.wait()
         raise
     finally:
+        if owner is not None:
+            owner.release(process.pid)
         if write_fd is not None:
             os.close(write_fd)
     return ProcessOutcome(exit_code=process.returncode, stdout=stdout, stderr=stderr)
 
 
-def _inherited_env() -> dict[str, str]:
+def inherited_environment() -> dict[str, str]:
     """The minimal parent environment an episode keeps: how to find binaries.
 
     The running interpreter's scripts directory comes last on PATH, so a
@@ -170,12 +296,13 @@ def _inherited_env() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class LocalExecutor(EpisodeExecutor):
-    """Run the binary as a plain subprocess, as the engine always has.
+    """Run the binary as a plain subprocess with the caller's privileges.
 
-    No isolation beyond the episode root, the minimal environment, and the
-    process group. Suitable for development and hermetic tests, not for a
-    hosted service that evaluates untrusted proposals.
+    A minimal environment and separate process group support cleanup.
+    Filesystem and network access are not restricted.
     """
+
+    runs_on_host = True
 
     def preflight(self) -> None:
         return None
@@ -191,11 +318,11 @@ class LocalExecutor(EpisodeExecutor):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
-        return _run(argv, cwd=workspace, env={**_inherited_env(), **env}, timeout=timeout)
+        return run_process(argv, cwd=workspace, env={**inherited_environment(), **env}, timeout=timeout)
 
 
 #: What every jail unshares and mounts before its binds; the episode jail and the nesting probe share it.
-_ISOLATION: tuple[str, ...] = (
+ISOLATION: tuple[str, ...] = (
     "--unshare-user",
     "--unshare-ipc",
     "--unshare-pid",
@@ -220,6 +347,17 @@ class SandboxLimits:
     memory_bytes: int = 0  # 0 disables; else RLIMIT_AS
     processes: int = 0  # 0 disables; else RLIMIT_NPROC
     file_bytes: int = 0  # 0 disables; else RLIMIT_FSIZE
+
+    def apply(self) -> None:
+        """Apply configured limits before the child executes its command."""
+        for kind, value in (
+            (resource.RLIMIT_CPU, self.cpu_seconds),
+            (resource.RLIMIT_AS, self.memory_bytes),
+            (resource.RLIMIT_NPROC, self.processes),
+            (resource.RLIMIT_FSIZE, self.file_bytes),
+        ):
+            if value:
+                resource.setrlimit(kind, (value, value))
 
 
 @dataclass(frozen=True)
@@ -259,12 +397,12 @@ class SandboxExecutor(EpisodeExecutor):
         if self.network not in ("default", "isolated"):
             raise SandboxUnavailable(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
         if self.network == "isolated":
-            self._preflight_pasta()
+            self.preflight_pasta()
         # The native loop nests one jail per tool call inside the episode's, so a host that refuses a user namespace
         # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
         try:
             done = subprocess.run(
-                self._nested_probe_argv(),
+                self.nested_probe_argv(),
                 env={"PATH": os.environ.get("PATH", "")},
                 capture_output=True,
                 text=True,
@@ -281,7 +419,25 @@ class SandboxExecutor(EpisodeExecutor):
                 f"tool call needs: {done.stderr.strip()[-600:]}"
             )
 
-    def _preflight_pasta(self) -> None:
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+        """Bind the whole install of a binary Reef installed: npm launchers are symlinks into packages, and git
+        installs need both their editable source and their venv."""
+        if binary is not None:
+            return self, binary
+        resolved = program.host_binary()
+        install_dir = program.host_install_dir()
+        if install_dir is None:
+            return self, resolved
+        return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
+
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+        """An isolated network forwards the run's ports; the default network already reaches the host."""
+        ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
+        if self.network != "isolated" or ports == self.forward_ports:
+            return self
+        return replace(self, forward_ports=ports)
+
+    def preflight_pasta(self) -> None:
         """An isolated network is one pasta sets up: prove it can on this host, as this user.
 
         pasta cannot map users under root (it drops to nobody), and a container may deny it the namespaces it
@@ -316,17 +472,15 @@ class SandboxExecutor(EpisodeExecutor):
                 f"with user namespaces allowed): {(done.stderr or done.stdout).strip()[-600:]}"
             )
 
-    def _nested_probe_argv(self) -> list[str]:
+    def nested_probe_argv(self) -> list[str]:
         """An episode jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
-        from reef.harness.runners.native.enforce import ISOLATION as TOOL_ISOLATION
-
         bwrap = shutil.which("bwrap") or "bwrap"
         binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
-        episode = [bwrap, *_ISOLATION, "--unshare-net", *binds]
+        episode = [bwrap, *ISOLATION, "--unshare-net", *binds]
         tool = [bwrap, *TOOL_ISOLATION, "--unshare-net", *binds]
         return [*episode, "--", *tool, "--", "/bin/true"]
 
-    def _bwrap_argv(
+    def bwrap_argv(
         self,
         argv: Sequence[str],
         *,
@@ -336,7 +490,7 @@ class SandboxExecutor(EpisodeExecutor):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> list[str]:
-        cmd = ["bwrap", *_ISOLATION]
+        cmd = ["bwrap", *ISOLATION]
         isolated = self.network == "isolated"
         if isolated:
             # pasta made the network namespace; bwrap stays in it rather than unsharing a disconnected one.
@@ -365,7 +519,7 @@ class SandboxExecutor(EpisodeExecutor):
         cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
         for key, value in {
-            **_inherited_env(),
+            **inherited_environment(),
             **env,
             **self.env,
             "REEF_NATIVE_ENFORCE": "bwrap",
@@ -387,7 +541,7 @@ class SandboxExecutor(EpisodeExecutor):
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
         self.preflight()
-        full = self._bwrap_argv(
+        full = self.bwrap_argv(
             argv,
             root=root,
             workspace=workspace,
@@ -395,103 +549,30 @@ class SandboxExecutor(EpisodeExecutor):
             writable_paths=writable_paths,
             readonly_paths=readonly_paths,
         )
-        # bwrap clears the environment inside the jail; the outer process only
-        # needs PATH to find bwrap itself. Resource limits are set on the child
-        # before exec, so they apply through bwrap to the jailed process tree.
-        try:
-            process = subprocess.Popen(
-                full,
-                env={"PATH": os.environ.get("PATH", "")},
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-                preexec_fn=self._apply_limits,
-            )
-        except FileNotFoundError as exc:
-            raise EpisodeLaunchError("the sandbox runtime (bwrap) is not available") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise EpisodeTimeout(f"episode timed out after {timeout}s: {list(argv)}") from exc
-        except BaseException:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise
-        return ProcessOutcome(exit_code=process.returncode, stdout=stdout, stderr=stderr)
-
-    def _apply_limits(self) -> None:
-        if self.limits.cpu_seconds:
-            resource.setrlimit(resource.RLIMIT_CPU, (self.limits.cpu_seconds, self.limits.cpu_seconds))
-        if self.limits.memory_bytes:
-            resource.setrlimit(resource.RLIMIT_AS, (self.limits.memory_bytes, self.limits.memory_bytes))
-        if self.limits.processes:
-            resource.setrlimit(resource.RLIMIT_NPROC, (self.limits.processes, self.limits.processes))
-        if self.limits.file_bytes:
-            resource.setrlimit(resource.RLIMIT_FSIZE, (self.limits.file_bytes, self.limits.file_bytes))
+        return run_process(
+            full,
+            cwd=workspace,
+            env={"PATH": os.environ.get("PATH", "")},
+            timeout=timeout,
+            limits=self.limits,
+        )
 
 
-def build_executor(
-    config: Mapping[str, object] | None, *, environ: Mapping[str, str] | None = None
-) -> EpisodeExecutor:
-    """Build the executor a deployment selected.
-
-    ``executor`` is ``local`` (default), ``sandbox`` or ``e2b``; a sandbox reads its
-    ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
-    variable names from the same section. The executor is
-    preflighted at build so a hosted deployment that requires the sandbox
-    fails to start, not at the first episode.
-    """
-    config = config or {}
-    kind = config.get("executor", "local")
-    if kind == "local":
-        return LocalExecutor()
-    if kind == "e2b":
-        from reef.harness.adapters import get_adapter
-        from reef.harness.episodes.e2b import E2BExecutor
-
-        section = config.get("sandbox") or {}
-        if not isinstance(section, Mapping):
-            raise ReefError("evolution.sandbox must be a mapping")
-        adapter = config.get("adapter", "pi")
-        binary = config.get("binary")
-        if not isinstance(adapter, str) or (binary is not None and not isinstance(binary, str)):
-            raise ReefError("evolution.adapter and evolution.binary must be strings")
-        remote = E2BExecutor.from_config(section, os.environ if environ is None else environ)
-        remote = remote.for_adapter(get_adapter(adapter), binary=binary)
-        remote.preflight()
-        return remote
-    if kind != "sandbox":
-        raise ReefError(f"unknown episode executor {kind!r}; use 'local', 'sandbox' or 'e2b'")
-    sandbox_config = config.get("sandbox") or {}
-    if not isinstance(sandbox_config, Mapping):
-        raise ReefError("evolution.sandbox must be a mapping")
-    egress = tuple(str(host) for host in (sandbox_config.get("egress_hosts") or ()))
-    limits_config = sandbox_config.get("limits") or {}
-    if not isinstance(limits_config, Mapping):
-        raise ReefError("evolution.sandbox.limits must be a mapping")
-    limits = SandboxLimits(
-        cpu_seconds=int(limits_config.get("cpu_seconds", 0)),
-        memory_bytes=int(limits_config.get("memory_bytes", 0)),
-        processes=int(limits_config.get("processes", 0)),
-        file_bytes=int(limits_config.get("file_bytes", 0)),
-    )
-    names = sandbox_config.get("env_from", [])
-    if not isinstance(names, (list, tuple)) or not all(
-        isinstance(name, str) and name.isidentifier() for name in names
-    ):
-        raise ReefError("evolution.sandbox.env_from must be a list of environment variable names")
-    values = os.environ if environ is None else environ
-    env = {}
-    for name in names:
-        if name not in values or not values[name]:
-            raise ReefError(f"evolution.sandbox.env_from requires environment variable {name!r}")
-        env[name] = values[name]
-    executor = SandboxExecutor(egress_hosts=egress, limits=limits, env=env)
-    executor.preflight()
-    return executor
+#: Nested tool jails bind the episode's proc filesystem instead of mounting another one.
+TOOL_ISOLATION: tuple[str, ...] = (
+    "--unshare-user",
+    "--unshare-ipc",
+    "--unshare-pid",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
+    "--die-with-parent",
+    "--new-session",
+    "--ro-bind",
+    "/proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--clearenv",
+)

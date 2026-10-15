@@ -21,7 +21,7 @@ import time
 import urllib.parse
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -32,9 +32,8 @@ from reef_client.serve import RECEIPT_HEADER
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.e2b import E2BExecutor, E2BSession
-from reef.harness.episodes.executor import EpisodeLaunchError, EpisodeTimeout
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.recipe.reefine.agent import launch_pi, rendered_files
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
 from reef.record2task.generator.designer import (
@@ -44,6 +43,8 @@ from reef.record2task.generator.designer import (
     DesignerError,
     ReefDesigner,
 )
+from reef.sandbox.environment import download_directory
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
 from reef.train.cordis_backend.strategies import AgentHost, ProposerCalls
 
 logger = logging.getLogger(__name__)
@@ -352,7 +353,7 @@ class AgentTools(WorkspaceTools):
         self.root = root
         self.checks = checks
         #: The sandbox the agent edits its workspace in, once it is up.
-        self.session: E2BSession | None = None
+        self.session: EpisodeExecutor | None = None
         self.lock = threading.Lock()
         #: Each check's result by its id; ``None`` while it runs.
         self.results: dict[int, dict[str, object] | None] = {}
@@ -382,7 +383,7 @@ class AgentTools(WorkspaceTools):
         result: dict[str, object] = {"ran": False, "error": "the check failed; the service log has the cause"}
         try:
             if self.session is not None:
-                self.session.pull(self.root, "workspace")
+                download_directory(self.session, self.root, "workspace")
             result = self.checks.check(self.root / "workspace" / "task")
         finally:
             with self.lock:
@@ -390,7 +391,7 @@ class AgentTools(WorkspaceTools):
                 self.running_id = None
 
 
-def close_when_stopped(stop: threading.Event, finished: threading.Event, session: E2BSession) -> None:
+def close_when_stopped(stop: threading.Event, finished: threading.Event, session: EpisodeExecutor) -> None:
     """Close ``session`` once ``stop`` is set, unless ``finished`` is first: a cancelled generation's agent stops."""
     while not finished.is_set():
         if stop.wait(STOP_POLL_SECONDS):
@@ -466,7 +467,7 @@ class AgentAuthor(TaskAuthor):
         scenario: str,
         model: str,
         api: str,
-        executor: E2BExecutor,
+        executor: EpisodeExecutor,
         cache_dir: Path,
         timeout_seconds: float,
         max_model_calls: int,
@@ -533,10 +534,11 @@ class AgentAuthor(TaskAuthor):
         """
         if stop.is_set():
             raise AuthorError("the agent's run was stopped before it started")
+        executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
         host = AgentHost(
             descriptor=self.descriptor,
-            binary=self.descriptor.binary,
-            executor=self.executor,
+            binary=binary,
+            executor=executor,
             step_dir=None,
             calls=calls,
             timeout_s=self.timeout_seconds,
@@ -563,14 +565,10 @@ class AgentAuthor(TaskAuthor):
         }
         started = time.monotonic()
         ended = "timed out"
-        session: E2BSession | None = None
+        session: EpisodeExecutor | None = None
         finished = threading.Event()
         try:
-            session = replace(
-                self.executor.for_adapter(self.descriptor),
-                forward_ports=(gateway.port,),
-                timeout_s=self.timeout_seconds,
-            ).open()
+            session = executor.open_session(forward_ports=(gateway.port,), timeout_s=self.timeout_seconds)
             tools.session = session
             threading.Thread(
                 target=close_when_stopped, args=(stop, finished, session), name="autoenvscaling-stop", daemon=True

@@ -73,9 +73,9 @@ jobs:
       - name: Ban assert and del in Reef source
         run: python .github/scripts/check_python_statements.py
       # Type check the service package, including its training-runtime adapters.
-      # huggingface_hub is a declared core dependency (pyproject.toml);
-      # without it installed mypy degrades its call sites to Any.
-      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
+      # huggingface_hub and harbor are declared core dependencies
+      # (pyproject.toml); without them installed mypy degrades their call sites to Any.
+      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "harbor>=0.20,<0.21" "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
   select-tests:
@@ -166,13 +166,14 @@ jobs:
         run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
       - name: Add uv to PATH
         run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
-      # huggingface_hub is a declared core dependency (pyproject.toml); the
-      # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
+      # huggingface_hub and harbor are declared core dependencies
+      # (pyproject.toml); reef.sandbox imports harbor's environment contract at
+      # module load. The rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, ray for the slime bridge suites, and openai
       # for the CEO-Bench harness tests, the OpenTelemetry SDK for the
       # record tracing exporter; keeping them here avoids expanding
       # Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "harbor>=0.20,<0.21" "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -339,9 +340,18 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
+          # harbor and reef-eval are core: reef.sandbox implements Harbor's environment contract, and the
+          # terminus runner, the task player and the generator play Harbor tasks.
           expected_core = {
-              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+              "aiohttp",
+              "alembic",
+              "harbor",
+              "huggingface-hub",
+              "pyyaml",
+              "reef-client",
+              "reef-eval",
+              "sqlalchemy",
+              "tomli-w",
           }
           assert core == expected_core, core
           slime = {

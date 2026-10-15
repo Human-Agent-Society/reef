@@ -70,7 +70,7 @@ from reef.service.deploy.service_config import (
     service_override,
 )
 from reef.service.deploy.training import assemble_training_services, local_model_required
-from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_alias_notice, profile_path
+from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -441,8 +441,6 @@ def resolve_deployment_config(
         # A component named through ${VAR} is only known once the environment is applied.
         training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         reject_null_settings(config, arguments)
-        if "services" in config.get("execution", {}):
-            raise DeployConfigError("execution.services is not accepted; configure component resources instead")
         for name, flag in (("host", "reef.host"), ("model_path", "inference.model-path")):
             value = config.get("reef", {}).get(name)
             if isinstance(value, str) and not value.strip():
@@ -589,9 +587,6 @@ def _resolve_config(config: str | None, recipe: str | None) -> str | None:
             path = profile_path(recipe)
         except UnknownProfileError as exc:
             raise DeployConfigError(str(exc)) from exc
-        notice = profile_alias_notice(recipe)
-        if notice is not None:
-            print(notice, file=sys.stderr)
         return str(path)
     return None
 

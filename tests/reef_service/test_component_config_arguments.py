@@ -283,8 +283,8 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 
     def connect(**kwargs):
         assert len(resolved) == 1
-        assert kwargs["max_staleness"] == resolved[0]["max_staleness"]
-        training = StubTrainingRuntime(max_staleness=kwargs["max_staleness"])
+        assert "max_staleness" not in kwargs
+        training = StubTrainingRuntime()
         return training, training.inference
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
@@ -304,11 +304,11 @@ def test_training_adapters_share_typed_fields_without_allocating_resources(runti
     from reef.runtime.deployment import runtime_factory_for
 
     factory = runtime_factory_for(runtime_type)
-    parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", "max_staleness": "2"}, {})
+    parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5"}, {})
     assert parsed["inference_timeout_s"] == 5.5
-    assert parsed["max_staleness"] == 2
-    with pytest.raises(RuntimeConfigError, match="max_staleness"):
-        factory.parse_config({"max_staleness": True}, {})
+    # The staleness window is the recipe's setting; a runtime refuses it.
+    with pytest.raises(RuntimeConfigError, match="unknown config fields: max_staleness"):
+        factory.parse_config({"max_staleness": 2}, {})
     with pytest.raises(RuntimeConfigError, match="inference_timeout_s"):
         factory.parse_config({"inference_timeout_s": "nan"}, {})
 

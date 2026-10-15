@@ -36,24 +36,21 @@ def method_config():
 @pytest.mark.parametrize("payload", [{}, [], None])
 def test_config_rejects_process_sections_even_when_empty(tmp_path, section, payload):
     raw = {**method_config(), section: payload}
-    with pytest.raises(DeployConfigError, match="service/services are not accepted"):
+    with pytest.raises(DeployConfigError, match=f"unknown config sections: {section}"):
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
-def test_standalone_recipe_cannot_reintroduce_process_execution():
-    from reef.recipe.config import recipe_config_from_file_layout
-    from reef.recipe.errors import RecipeConfigError
-
-    raw = {**method_config(), "execution": {"services": "ray"}}
-    with pytest.raises(RecipeConfigError, match=r"execution\.services is not accepted"):
-        recipe_config_from_file_layout(raw)
+def test_deployment_rejects_a_services_execution_role(tmp_path):
+    raw = {**method_config(), "execution": {"services": "uni"}}
+    with pytest.raises(DeployConfigError, match="execution must be an object with training, rollout"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 @pytest.mark.parametrize("flag", ["service.port", "services", "execution.services.backend"])
 @pytest.mark.parametrize("from_file", [False, True])
 def test_cli_cannot_reintroduce_process_configuration(tmp_path, flag, from_file):
     raw = method_config() if from_file else command_line_config({})
-    with pytest.raises(DeployConfigError, match=r"unknown configuration flag|execution\.services is not accepted"):
+    with pytest.raises(DeployConfigError, match="unknown configuration flag"):
         resolve_deployment_config(raw, {flag: "uni"}, tmp_path / "serve.yaml")
 
 

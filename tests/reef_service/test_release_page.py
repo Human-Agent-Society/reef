@@ -93,7 +93,6 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         recipe,
         factory,
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
@@ -751,13 +750,12 @@ def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
     assert "carried no result object" in review
 
 
-@pytest.mark.parametrize("review_key", ["result", "verdict"])
-def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_key) -> None:
+def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     notes = {
         "design": "Add an <away> command.\n\nA rule alone would assume the state holds.",
         "review": {
-            review_key: "partial",
+            "result": "partial",
             "covered": ["the /away command toggles the state", "the rule reads a < b"],
             "uncovered": ["no <b>notice</b> when the state clears"],
         },
@@ -887,10 +885,9 @@ def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
         assert _sections(page) == plain and "Design" not in page.partition("<script")[0]
 
 
-@pytest.mark.parametrize("sides_key", ["evaluation_sides", "gate_sides"])
 @pytest.mark.parametrize("legacy_policy_version", [False, True])
 def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran(
-    sides_key: str, legacy_policy_version: bool
+    legacy_policy_version: bool,
 ) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     row = {
@@ -902,7 +899,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
             "passed": 1,
             "failed": 0,
             "floor_score": 1.0,
-            sides_key: ["candidate"],
+            "evaluation_sides": ["candidate"],
             "candidate_score": 1.0,
             "episode_failures": 0,
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},

@@ -130,9 +130,9 @@ def serving_release() -> str | None:
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops batches whose rollouts exceed max-staleness, and the driver
+    Reef drops rollouts that exceed max-staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
-    batch of credit; otherwise a burst of dropped batches would deadlock.
+    batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """
 
     def __init__(self, progress_file: str | None) -> None:

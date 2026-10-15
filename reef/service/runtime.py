@@ -39,7 +39,6 @@ CONNECTION_CONFIG_KEYS = (
     "inference",
     "inference_url",
     "inference_timeout_s",
-    "max_staleness",
     "inference_handler_factory",
     "inference_handler_config",
 )
@@ -54,14 +53,13 @@ def connect_executor_runtimes(
     inference_url: str | None = None,
     model_path: str = "",
     inference_timeout_s: float = 300.0,
-    max_staleness: int = 0,
     inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Assemble independent components over the existing deployment connection."""
     if inference is not None and inference_url is not None:
         raise ValueError("pass inference or inference_url, not both")
-    training = ExecutorTrainingRuntime(train_group_handle, max_staleness=max_staleness)
+    training = ExecutorTrainingRuntime(train_group_handle)
     if inference is None:
         inference = ExecutorInferenceRuntime(
             control=train_group_handle,
@@ -83,7 +81,6 @@ def connect_ray_runtime(
     model_path: str = "",
     inference_timeout_s: float = 300.0,
     train_timeout_s: float | None = None,
-    max_staleness: int = 0,
     inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
@@ -104,7 +101,6 @@ def connect_ray_runtime(
         inference_url=inference_url,
         model_path=model_path,
         inference_timeout_s=inference_timeout_s,
-        max_staleness=max_staleness,
         inference_handler_factory=inference_handler_factory,
         inference_handler_config=inference_handler_config,
     )
@@ -251,7 +247,6 @@ class CoordinatorRuntimeFactory(RuntimeFactory):
                 inference_timeout_s=config.get("inference_timeout_s", 300.0),
                 train_timeout_s=config.get("train_timeout_s"),
             ),
-            max_staleness=config.get("max_staleness", 0),
         )
         try:
             inference = registry.build(

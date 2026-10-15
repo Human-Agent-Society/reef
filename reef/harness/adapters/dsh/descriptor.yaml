@@ -68,15 +68,70 @@ files:
           disabled: true
         session-telemetry-otel:
           disabled: true
-      # Keys the merged config must keep at the defaults' value: the session log
-      # stays where the bundle put it and uncompressed (the reader cannot parse
-      # zstd), and the LLM title call (one extra model request per episode) and
-      # the telemetry stay off. The shared render refuses a composition that
-      # moves them, in either profile, before any quirks step runs.
-      locked:
-        - session-persistence-jsonl.config.compression
-        - session-title-llm.disabled
-        - session-telemetry-otel.disabled
+      # The web target repeats these checks through the anchor, so both
+      # profiles are held to them.
+      checks: &patch_checks
+        # The session log stays uncompressed (the reader cannot parse zstd),
+        # and the LLM title call (one extra model request per episode) and
+        # the telemetry stay off.
+        - key: [session-persistence-jsonl.config.compression, session-title-llm.disabled, session-telemetry-otel.disabled]
+          match: IsDefault()
+        - key: "."
+          match: Each(Value(IsObject()))
+          reason: a patch entry is an object holding config, disabled, or inject
+        - key: "*.name"
+          match: IsAbsent()
+          reason: a patch entry keeps its own package
+        # Every model call stays on Reef's model binding. The binding writes
+        # the llm-pi-ai route reef, puts its key in .env, and selects the
+        # route in agent-default-model; these hold only the keys it writes.
+        - key: [agent-default-model, llm-pi-ai]
+          match: Each(Key(Eq("config")))
+          reason: Reef's model binding writes it
+        - key: agent-default-model.config
+          match: Each(Key(IsIn(["model", "provider"])))
+          reason: Reef's model binding writes it
+        - key: agent-default-model.config.provider
+          match: AnyOf(IsAbsent(), Eq("reef"))
+          reason: Reef's model binding writes it
+        - key: llm-pi-ai.config
+          match: Each(Key(Eq("providers")))
+          reason: Reef's model binding writes it
+        - key: llm-pi-ai.config.providers
+          match: Each(Key(Eq("reef")))
+          reason: Reef's model binding writes the only route, reef
+        - key: llm-pi-ai.config.providers.reef
+          match: Each(Key(IsIn(["api", "apiKeyEnv", "baseURL", "displayName", "models"])))
+          reason: Reef's model binding writes it
+        - key: llm-pi-ai.config.providers.reef.apiKeyEnv
+          match: AnyOf(IsAbsent(), Eq("REEF_API_KEY"))
+          reason: Reef's model binding writes it
+        # DeepSeek's own adapter, whose config is its endpoint: Reef never
+        # binds it. The plugins after it choose a call's provider, endpoint,
+        # credential or model: the title call, a subagent, a declared agent,
+        # the compaction summary and the web search model. ** reaches the key
+        # under an object or under each object of a list.
+        - key: llm-deepseek
+          match: Each(Key(Eq("disabled")))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        - key: [
+            agent-loop.config.agents.**.model, agent-loop.config.agents.**.provider,
+            compaction-basic.config.modelPolicies.**.summarizationModel,
+            compaction-basic.config.modelPolicies.**.summarizationProvider,
+            session-title-llm.config.model, session-title-llm.config.provider,
+            tool-subagent.config.agentOptions.**.model, tool-subagent.config.agentOptions.**.provider,
+            tool-subagent-fork.config.agentOptions.**.model, tool-subagent-fork.config.agentOptions.**.provider,
+            web-search-deepseek.config.apiKeyEnv, web-search-deepseek.config.baseURL, web-search-deepseek.config.model,
+          ]
+          match: IsAbsent()
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        # A js expression in those plugins is a value no check can read.
+        - key: [
+            agent-loop.**, compaction-basic.**, session-title-llm.**, tool-subagent.**, tool-subagent-fork.**,
+            web-search-deepseek.**,
+          ]
+          match: Not(StartsWith("!!js "))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
     # The lowest trust layer of dsh's launch environment; the model binding
     # puts the key of its apiKeyEnv route here.
     env:
@@ -97,10 +152,7 @@ files:
           disabled: true
         session-telemetry-otel:
           disabled: true
-      locked:
-        - session-persistence-jsonl.config.compression
-        - session-title-llm.disabled
-        - session-telemetry-otel.disabled
+      checks: *patch_checks
     # The web profile's manifest. dsh writes patchReload live into a new web
     # profile, and with it the pinned `dsh web` exits at start ("user
     # patch-layer watching requires the Cordis HMR service"); startup reads
@@ -116,8 +168,9 @@ files:
           profile:
             bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
             patchReload: startup
-      locked:
-        - dsh.profile.patchReload
+      checks:
+        - key: dsh.profile.patchReload
+          match: IsDefault()
   rules: "dsh/AGENTS.md"
   agent_command: "dsh-agents/skills/{name}/SKILL.md"
   skill: "dsh/skills/{name}/SKILL.md"

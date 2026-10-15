@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
 from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
@@ -26,6 +25,7 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.tree.render import render_native_module
+from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
 
 
 class _ConstantToolRun(ToolRunner):

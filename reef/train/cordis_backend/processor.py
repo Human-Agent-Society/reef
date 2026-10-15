@@ -9,44 +9,23 @@ from reef.core import RequestType
 from reef.core.plugins import NoSettings
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
-from reef.record2record import (
-    Record2Record,
-    RecordSet,
-    ReportContext,
-    ReportGrouping,
-    ReportRecord2Record,
-    SingleRecordSet,
-)
+from reef.record2record import Record2Record, RecordSet, ReportContext, SingleRecordSet
 from reef.record2task import Record2Task, ReportTasks, TaskResult
 from reef.record2task.assembly import reported_task
-from reef.task2batch import BatchSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
-
-
-class TraceRecord2Record(ReportRecord2Record):
-    """Traces from reports: every valid report trains by itself, as one set with the requests it references.
-
-    Requests are recorded post-transform, so a trace shows exactly what the
-    backend served. The default record stage of harness evolution. A
-    deployment without outcome reports names ``InferenceRecord2Record`` and
-    ``InferenceTasks`` instead, to evolve on recorded traffic alone; a
-    measured result beats model self judgment, so a deployment with reports
-    keeps this stage.
-    """
-
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, ReportGrouping())
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
+from reef.task2batch import DistillBatches
+from reef.train.types import TrajectoryItem
 
 
 class TraceTasks(ReportTasks):
     """One report's referenced requests, as served, as one trace task with the reported score.
 
-    Several references become one trajectory sample.
+    Several references become one trajectory sample. Requests are recorded
+    post-transform, so a trace shows exactly what the backend served. Harness
+    evolution pairs it with ``ReportRecord2Record``: every valid report trains
+    by itself. A deployment without outcome reports names
+    ``InferenceRecord2Record`` and ``InferenceTasks`` instead, to evolve on
+    recorded traffic alone; a measured result beats model self judgment, so a
+    deployment with reports keeps the report stages.
     """
 
     @classmethod
@@ -93,7 +72,7 @@ class InferenceTasks(Record2Task):
         return TaskResult.ready((make_trajectory((record_set.record,)),))
 
 
-class TraceBatches(Task2Batch):
+class TraceBatches(DistillBatches):
     """Batch trace tasks unmodified; the backends consume them without more processing.
 
     In ``hybrid`` a queued instruction batches with the traces that an
@@ -101,20 +80,6 @@ class TraceBatches(Task2Batch):
     reads the request beside them; in ``manual`` it runs alone.
     """
 
+    batch_label = "harness_evolve"
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
-
-    @classmethod
-    def from_config(
-        cls,
-        config: Mapping[str, Any],
-        *,
-        context: PipelineContext,
-        record2record: Record2Record,
-        record2task: Record2Task,
-        environ: Mapping[str, str],
-    ) -> Self:
-        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
-
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", tasks)

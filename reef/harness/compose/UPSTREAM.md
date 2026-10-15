@@ -30,6 +30,7 @@ Each omission is permanent because its mechanism is host-specific, replaced by a
 - Dynamic accessor/mixin properties (reflect.ts:229-265; the mixin wiring of reflect.ts:138-148): replaced by plain delegating methods on Context, which is what the property model compiles to under Python's attribute protocol.
 - Callable services (`createCallable`, utils.ts:219-226; service.ts:26-32): a Python class defines `__call__`.
 - LoggerService (logger.ts): stdlib `logging` replaces it.
+- Inspection reads with no caller in reef: `Fiber.getEffects` with its `EffectMeta` label tree (fiber.ts:66-69, 296-304, 342-345) and `Loader.locate` (loader index.ts:144). The effect label survives only in the async setup failure log.
 - Stack-trace surgery (utils.ts:228-278: composeError, buildOuterStack, and the getOuterStack threading): Python exceptions carry tracebacks natively and `raise ... from` covers the causal chain.
 - JS host artifacts: the `prototype`/`then`/numeric-string special properties (reflect.ts:27-38), thenable wrappers (`await fiber` and `await handle` are native), StandardSchemaV1 validation (duck-typed pydantic-or-callable instead), and declaration-merged event typing (events.ts:169-178; event names are plain strings, internal signatures are documented in events.py's docstring).
 

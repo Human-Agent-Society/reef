@@ -17,7 +17,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.git_lfs import GitLFSRepositoryBackend
+from aiohttp import web
+
+from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -26,8 +28,9 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.deployment import RuntimeRegistry, runtime_pair
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
+from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
@@ -61,8 +64,8 @@ def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     return {key: value for key, value in settings.recipe_settings.items() if key not in service_owned}
 
 
-def _repository_location(value: str) -> str | Path:
-    return value if "://" in value or value.startswith("git@") else Path(value)
+#: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
+GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
 
 
 def _require_non_empty(value: str | None, setting: str) -> str:
@@ -75,22 +78,24 @@ def _connect_training_runtime(
     settings: ServiceConfig,
     *,
     model_path: str,
-    max_staleness: int,
     connector: Any = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
     """Build the selected integration's runtime, independently of its process topology."""
-    RuntimeConnectionConfig(
-        inference_timeout_s=settings.inference_timeout_s,
-        train_timeout_s=settings.train_timeout_s,
-        max_staleness=max_staleness,
-    )
     backend = training_deployment_for(settings.training_backend)
-    runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
+    runtime_config = backend.runtime_config(asdict(settings), connector=connector)
     built = RuntimeRegistry().build(runtime_config, model_path=model_path)
     pair = runtime_pair(built)
     if pair is None:
         raise TypeError("training backend runtime factory must build a (TrainingRuntime, InferenceRuntime) pair")
     return pair
+
+
+def shutdown_runtimes(*components: TrainingRuntime | InferenceRuntime | None) -> None:
+    """Release the runtimes of a failed build; the build error stays the one raised."""
+    for component in components:
+        if component is not None:
+            with suppress(Exception):
+                component.shutdown()
 
 
 def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
@@ -116,31 +121,21 @@ def _training_recipe(
 ) -> Recipe:
     """Build a weight-training recipe on the selected backend runtime."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
-    # Translate the legacy layout, then resolve the recipe fields once before
-    # connecting its runtime. Construction consumes those same resolved values.
+    # Resolve the recipe fields once before connecting its runtime.
+    # Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
     if settings.evaluation_settings is not None:
         recipe_config["evaluation"] = dict(settings.evaluation_settings)
     if settings.pipeline_settings is not None:
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
-    # The runtime must exist before the recipe can be constructed, so
-    # resolve the shared runtime-owned config field from the same inputs first.
-    # WeightTrainingRecipe then verifies that both resolved the same value.
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
-    training_runtime, runtime = _connect_training_runtime(
-        settings,
-        model_path=model_path,
-        max_staleness=resolved_recipe_data["max_staleness"],
-        connector=connector,
-    )
+    training_runtime, runtime = _connect_training_runtime(settings, model_path=model_path, connector=connector)
     try:
         return recipe_type.from_resolved_config(
             recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_runtime=training_runtime
         )
     except BaseException:
-        for component in (training_runtime, runtime):
-            with suppress(Exception):
-                component.shutdown()
+        shutdown_runtimes(training_runtime, runtime)
         raise
 
 
@@ -153,17 +148,15 @@ def composed_training_recipe(
     recipe_type: type[Recipe],
     config: dict[str, Any],
     weight_type: type[WeightTrainingRecipe],
-    weight_config: Mapping[str, Any],
     settings: ServiceConfig,
     env: Mapping[str, str],
     connector: Any,
 ) -> Recipe:
     """Build a recipe that trains weights through one of its components, on the selected backend runtime.
 
-    The component's own data resolves the staleness window the runtime is
-    connected with, and the pair reaches every component of the recipe. The
-    deployment's model path is every component's model, and a top level
-    evaluation section belongs to the component that trains.
+    The runtime pair reaches every component of the recipe. The deployment's
+    model path is every component's model, and a top level evaluation section
+    belongs to the component that trains.
     """
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     if config.get("runtime"):
@@ -176,13 +169,7 @@ def composed_training_recipe(
             f"reef.{unknown[0]} is not a setting of {recipe_type.__name__}; a component's settings go under "
             "components.<name>.config"
         )
-    resolved_weight_data = resolve_config_field_values(weight_type, weight_config.get("data", {}), env)
-    training_runtime, runtime = _connect_training_runtime(
-        settings,
-        model_path=model_path,
-        max_staleness=resolved_weight_data["max_staleness"],
-        connector=connector,
-    )
+    training_runtime, runtime = _connect_training_runtime(settings, model_path=model_path, connector=connector)
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     framework_sections = {
         key: value
@@ -202,9 +189,7 @@ def composed_training_recipe(
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
     except BaseException:
-        for component in (training_runtime, runtime):
-            with suppress(Exception):
-                component.shutdown()
+        shutdown_runtimes(training_runtime, runtime)
         raise
 
 
@@ -241,9 +226,8 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
-            weight_type, weight_config = weight_training
             return composed_training_recipe(
-                selected, recipe_type, config, weight_type, weight_config, settings, env, connector
+                selected, recipe_type, config, weight_training[0], settings, env, connector
             )
         refuse_weight_training_sections(settings)
         if settings.pipeline_settings is not None:
@@ -265,10 +249,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         try:
             return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
         except BaseException:
-            for component in (training_runtime, runtime):
-                if component is not None:
-                    with suppress(Exception):
-                        component.shutdown()
+            shutdown_runtimes(training_runtime, runtime)
             raise
     refuse_weight_training_sections(settings)
     if settings.pipeline_settings is not None:
@@ -322,26 +303,44 @@ def build_dispatcher(
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     try:
+        record_directory = Path(settings.agent_record_dir)
         if settings.record_backend == "postgres":
             scenario_storage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
-                Path(settings.agent_record_dir),
+                record_directory,
                 schema=settings.record_database_schema,
             )
+        elif settings.record_backend == "sqlite":
+            scenario_storage = SQLiteScenarioStorage(record_directory)
         else:
-            scenario_storage = SQLiteScenarioStorage(Path(settings.agent_record_dir))
+            reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
+            storage_class = ScenarioStorage.referenced_class(reference)
+            scenario_storage = storage_class.from_config(reference.config, directory=record_directory)
         # Record tracing observes storage events; the storage closes the observer with itself.
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
+        artifact_backend = (
+            {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
+            if settings.artifact_backend == "git_lfs"
+            else settings.artifact_backend
+        )
+        reference = ConfigurableRepositoryBackendFactory.reference(
+            artifact_backend, setting="storage.artifact_backend"
+        )
+        factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
-        backend_factory = GitLFSRepositoryBackend.factory(
-            _repository_location(settings.artifact_repository),
+        context = RepositoryBackendContext(
             work_dir=Path(settings.artifact_work_dir),
             cache_dir=Path(settings.artifact_cache_dir),
-            bootstrap_files=recipe.base_artifact_files(),
-            bootstrap_subdirectory=recipe.bootstrap_artifact_component(),
+            bootstrap_files=recipe.base_artifact_files() or {},
+            bootstrap_component=recipe.bootstrap_artifact_component(),
         )
+        try:
+            backend_factory = factory_class.from_config(reference.config, context=context)
+        except Exception as error:
+            error.add_note(f"while building storage.artifact_backend {factory_class.__name__}")
+            raise
         if not isinstance(settings.training_settings, Mapping):
             raise ValueError("training must be an object")
         experiment_tracker = build_experiment_tracker(
@@ -353,28 +352,46 @@ def build_dispatcher(
             recipe,
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
-            agent_record_dir=Path(settings.agent_record_dir),
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
             hold_local_cycles=hold_local_cycles and calls_service,
+            scenario_idle_unload_seconds=settings.scenario_idle_unload_s,
+            scenario_admission=(
+                ScenarioLimits(
+                    max_loaded_scenarios=settings.max_loaded_scenarios, max_scenarios=settings.max_scenarios
+                )
+                if settings.scenario_admission is None
+                else ScenarioAdmission.from_setting(settings.scenario_admission, setting="reef.scenario_admission")
+            ),
         )
     except BaseException:
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        for component in (recipe.training_runtime, recipe.runtime):
-            if component is not None:
-                with suppress(Exception):
-                    component.shutdown()
+        shutdown_runtimes(recipe.training_runtime, recipe.runtime)
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
         raise
 
 
-def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
-    record_retention = RecordRetention(settings.agent_record_retention_days, settings.agent_record_retention_max_bytes)
+def build_app(
+    settings: ServiceConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+    connector: Any = None,
+    inference_handler: InferenceHandler | None = None,
+) -> web.Application:
+    """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
+
+    The app owns the dispatcher it builds and closes it on cleanup.
+    ``inference_handler`` replaces the recipe runtime's handler for every
+    inference request; the caller owns it and releases it after the app stops.
+    An embedding application adds its middleware and routes to the returned
+    app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
+    """
+    record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,
         max_s=settings.inference_retry_max_s,
@@ -400,6 +417,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             tokens=settings.tokens,
             evaluation_tokens=evaluation_token,
             console_origins=settings.console_origins,
+            inference_handler=inference_handler,
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,

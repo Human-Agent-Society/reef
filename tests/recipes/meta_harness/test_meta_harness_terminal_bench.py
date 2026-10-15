@@ -15,8 +15,8 @@ import pytest
 from recipes.meta_harness.population import content_id
 from recipes.meta_harness.recipe import scenario_population_path
 from reef.harness import EpisodeResult
-from reef.harness.episodes.executor import SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.sandbox.process import SandboxExecutor
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/meta_harness/examples/terminal_bench"
 
@@ -190,7 +190,7 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
             raise OSError("commit failed")
 
         with monkeypatch.context() as patch:
-            patch.setattr(scenario.store.commit_log, "append", fail)
+            patch.setattr(scenario.store.commit_history, "append", fail)
             with pytest.raises(OSError, match="commit failed"):
                 driver.search(scenario, recipe, directory)
         assert scenario.trainer.state == before

@@ -504,14 +504,6 @@ def register_runtime_kind(cls: type[RuntimeFactory]) -> type[RuntimeFactory]:
     return cls
 
 
-def register_runtime_factory(factory: RuntimeFactory) -> RuntimeFactory:
-    """Register an external runtime factory (module-level convenience)."""
-    if not isinstance(factory, RuntimeFactory):
-        raise TypeError(f"a runtime factory registers a RuntimeFactory, got {type(factory).__name__}")
-    _register(factory)
-    return factory
-
-
 def runtime_kinds() -> tuple[str, ...]:
     return tuple(dict.fromkeys((*_BUILTIN_FACTORIES, *_runtime_kinds)))
 
@@ -633,7 +625,6 @@ class RuntimeConnectionConfig:
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
     train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
-    max_staleness: int = config_option(0, help="Maximum admitted training-version lag.")
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
@@ -645,8 +636,6 @@ class RuntimeConnectionConfig:
         ):
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"runtime.{name} must be a positive finite number")
-        if isinstance(self.max_staleness, bool) or self.max_staleness < 0:
-            raise ValueError("runtime.max_staleness must be a non-negative integer")
 
 
 @dataclass(frozen=True)

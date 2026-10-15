@@ -43,11 +43,11 @@ from reef.core.tasks import (
     TaskPlayResult,
     TaskValidationResult,
 )
-from reef.harness.episodes.e2b import E2BExecutor
-from reef.harness.episodes.executor import SandboxUnavailable
 from reef.record2task.generator.client import DuplicateTask, Generator, GeneratorError, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.designer import parse_harbor_reply
 from reef.record2task.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
+from reef.sandbox.e2b import E2BExecutor
+from reef.sandbox.process import SandboxUnavailable
 
 logger = logging.getLogger(__name__)
 

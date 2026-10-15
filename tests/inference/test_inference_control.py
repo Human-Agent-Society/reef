@@ -207,7 +207,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
 
 
 def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
-    from reef.inference.sglang.lock import ReefRolloutLock
+    from reef.runtime.publication import WeightUpdateLock
     from reef.runtime.recovery import InferenceControl, InferenceEngineGroup, InferenceMonitor, WeightUpdateConnection
 
     ray = pytest.importorskip("ray")
@@ -254,7 +254,7 @@ def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
 
         def replace(self):
             old = self.actor
-            self.actor = ReefRolloutLock.options(num_cpus=0).remote()
+            self.actor = ray.remote(WeightUpdateLock).options(num_cpus=0).remote()
             locks.append(self.actor)
             if old is not None:
                 ray.kill(old, no_restart=True)

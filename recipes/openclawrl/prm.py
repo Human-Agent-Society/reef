@@ -26,6 +26,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
+from reef.record2task.samples import flatten_content
+
 logger = logging.getLogger(__name__)
 
 _BOXED_RE = re.compile(r"\\boxed\{([-+]?\d)\}")
@@ -169,16 +171,6 @@ def collect_hint_candidates(votes: list[dict[str, Any]], max_cand: int = 3) -> l
                 hints.append(hint)
     hints.sort(key=len)
     return hints[:max_cand]
-
-
-def flatten_content(content: Any) -> str:
-    """The plain text of an OpenAI-style message content field."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"]
-        return " ".join(parts) if parts else ""
-    return str(content) if content is not None else ""
 
 
 def append_hint_to_messages(messages: list[dict], hint: str) -> list[dict]:

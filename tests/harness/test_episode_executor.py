@@ -12,14 +12,14 @@ import pytest
 
 import reef
 from reef.core.errors import ReefError
-from reef.harness.episodes.executor import (
+from reef.sandbox.config import build_executor
+from reef.sandbox.process import (
     EpisodeLaunchError,
     EpisodeTimeout,
     LocalExecutor,
     SandboxExecutor,
     SandboxLimits,
     SandboxUnavailable,
-    build_executor,
 )
 
 
@@ -52,7 +52,7 @@ def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
             [
                 "import sys",
                 "from pathlib import Path",
-                "from reef.harness.episodes.executor import LocalExecutor",
+                "from reef.sandbox.process import LocalExecutor",
                 f"root = Path({str(root)!r})",
                 f"outcome = LocalExecutor().launch([sys.executable, {str(reader)!r}], ",
                 "    root=root, workspace=root / 'workspace', env={}, timeout=10.0)",
@@ -123,7 +123,7 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailable, match="bubblewrap"):
         SandboxExecutor().preflight()
     with pytest.raises(ReefError, match="bubblewrap"):
@@ -138,12 +138,12 @@ def _probe_result(monkeypatch, returncode: int, stderr: str = "") -> list[list[s
         seen.append(list(argv))
         return subprocess.CompletedProcess(argv, returncode, "", stderr)
 
-    monkeypatch.setattr("reef.harness.episodes.executor.subprocess.run", run)
+    monkeypatch.setattr("reef.sandbox.process.subprocess.run", run)
     return seen
 
 
 def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailable, match=r"cannot nest a bubblewrap jail.*No permissions"):
         SandboxExecutor().preflight()
@@ -164,19 +164,19 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     def refuse(argv, **kwargs):
         raise OSError("boom")
 
-    monkeypatch.setattr("reef.harness.episodes.executor.subprocess.run", refuse)
+    monkeypatch.setattr("reef.sandbox.process.subprocess.run", refuse)
     with pytest.raises(SandboxUnavailable, match="cannot nest a bubblewrap jail on this host: boom"):
         SandboxExecutor().preflight()
 
 
 def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr("reef.harness.episodes.executor.os.environ", {"PATH": "/usr/bin"})
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.sandbox.process.os.environ", {"PATH": "/usr/bin"})
     root = tmp_path / "root"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
     sandbox = SandboxExecutor()
-    argv = sandbox._bwrap_argv([sys.executable, "-c", "pass"], root=root, workspace=workspace, env={"A": "b"})
+    argv = sandbox.bwrap_argv([sys.executable, "-c", "pass"], root=root, workspace=workspace, env={"A": "b"})
 
     assert argv[0] == "bwrap"
     assert "--unshare-net" in argv  # no egress hosts: network is denied
@@ -196,7 +196,7 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
 
 
 def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     root = tmp_path / "root"
     workspace = root / "workspace"
     state = root / "codex"
@@ -205,7 +205,7 @@ def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monke
     state.mkdir()
     config.write_text("model = 'm'\n")
 
-    argv = SandboxExecutor()._bwrap_argv(
+    argv = SandboxExecutor().bwrap_argv(
         ["true"],
         root=root,
         workspace=workspace,
@@ -224,16 +224,16 @@ def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monke
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     sandbox = SandboxExecutor(egress_hosts=("127.0.0.1:8000",))
-    argv = sandbox._bwrap_argv(["true"], root=tmp_path, workspace=workspace, env={})
+    argv = sandbox.bwrap_argv(["true"], root=tmp_path, workspace=workspace, env={})
     assert "--unshare-net" not in argv
 
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
-    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
         {
@@ -247,7 +247,7 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
 
 
 def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
-    from reef.harness.episodes.executor import ISOLATION_ENV
+    from reef.sandbox.process import ISOLATION_ENV
 
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     executor = build_executor(
@@ -255,7 +255,7 @@ def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path
         environ={"REMOTE_KEY": "deliberately-forwarded", "UNRELATED_SECRET": "must-not-leak"},
     )
     assert isinstance(executor, SandboxExecutor)
-    argv = executor._bwrap_argv(
+    argv = executor.bwrap_argv(
         ["true"], root=tmp_path, workspace=tmp_path / "workspace", env={ISOLATION_ENV: "forged"}
     )
     env = {argv[i + 1]: argv[i + 2] for i, token in enumerate(argv) if token == "--setenv"}

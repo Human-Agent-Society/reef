@@ -171,7 +171,7 @@ def activity_html(progress: StepProgress, now: float) -> str:
 def request_state(record: Mapping[str, object], progress: StepProgress | None, consumed: bool) -> str:
     """Read the backend phase or reserved batch; an unreserved request is queued."""
     if progress is not None and progress.request_id == record["agent_record_id"]:
-        return "evaluating" if progress.phase == "gating" else progress.phase
+        return progress.phase
     if consumed:
         return "running"
     return "queued"
@@ -356,7 +356,7 @@ def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
     kept = kept_answer(notes)
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
-        f'{status_span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
+        f'{status_span(str(review.get("result") or "unknown"))}</p>\n'
         + ("" if kept is None else f"<p>{escape(kept)}; the others are in the step record.</p>\n")
         + (
             (

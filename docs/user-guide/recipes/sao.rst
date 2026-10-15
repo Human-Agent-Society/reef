@@ -67,8 +67,8 @@ step; the policy's weights first move after the warmup.
 Configuration
 -------------
 
-SAO's pipeline has three stages: ``SAORecord2Record``, ``SAOTasks``, and
-``SAOBatches``. The deployment's ``pipeline`` section configures them. The
+SAO's pipeline has three stages: ``ExclusiveReportRecord2Record``,
+``SAOTasks``, and ``SAOBatches``. The deployment's ``pipeline`` section configures them. The
 record stage takes no config. Set the batch size in the batch stage's config:
 
 .. code:: yaml

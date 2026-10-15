@@ -95,9 +95,8 @@ executors:
 ```
 
 CPU requests do not enforce core limits on local workers. Ray uses CPU/GPU
-requests as per-worker scheduling reservations. The old `episode_workers`,
-`worker_executor` and `worker_resources` fields are deprecated; remove them
-when migrating to the new structure. Conflicting resource values are rejected.
+requests as per-worker scheduling reservations. Set workers and resources
+under `execution.evolution`.
 
 ## Keep a deployment running
 

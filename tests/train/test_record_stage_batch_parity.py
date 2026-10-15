@@ -38,6 +38,7 @@ from reef.core.plugins import NoSettings
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 from reef.record2record import (
+    ExclusiveReportRecord2Record,
     GroupDecision,
     JudgingRecord2Record,
     Record2Record,
@@ -48,12 +49,12 @@ from reef.record2record import (
 )
 from reef.record2task import JudgedTasks, Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.distill import DistillRecord2Record, DistillTasks
+from reef.record2task.distill import DistillTasks
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import BatchSettings, DistillBatches, Task2Batch
 from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.processor import TraceBatches, TraceRecord2Record, TraceTasks
+from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
@@ -61,7 +62,16 @@ GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_batch_goldens.json
 
 CYCLE = "cycle"
 RELOAD = "reload"
-Step = AgentRecord | str
+
+
+@dataclass(frozen=True)
+class Serve:
+    """The scenario serves ``runtime_load_id`` from this step on; the pipeline's staleness check measures against it."""
+
+    runtime_load_id: str
+
+
+Step = AgentRecord | Serve | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -136,6 +146,7 @@ class StreamRun:
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
     max_staleness: int = 0
+    serving_runtime_load_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
     high_water: tuple[int, int] | None = None
@@ -166,7 +177,9 @@ class StreamRun:
 
     def drain(self, trainer: Trainer) -> None:
         """Commit every batch the trainer can reserve now."""
-        while (batch := trainer.reserve_training_batch()) is not None:
+        while (
+            batch := trainer.reserve_training_batch(serving_runtime_load_id=self.serving_runtime_load_id)
+        ) is not None:
             execution = trainer.execute_reserved_step(len(self.commits))
             if execution.result is None:
                 raise AssertionError(f"batch {batch.batch_id} produced no result")
@@ -190,6 +203,9 @@ class StreamRun:
             for step in steps:
                 if isinstance(step, AgentRecord):
                     self.records.append(step)
+                elif isinstance(step, Serve):
+                    self.serving_runtime_load_id = step.runtime_load_id
+                    trainer.pipeline.observe_serving_runtime_load_id(step.runtime_load_id)
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -343,9 +359,11 @@ SLOT_GROUP_STAGES = PipelineSpec(
 ORDERED_MIX_STAGES = PipelineSpec(
     record2record=OrderedMixRecord2Record, record2task=AssembledTasks, task2batch=SlotBatches
 )
-DISTILL_STAGES = PipelineSpec(record2record=DistillRecord2Record, record2task=DistillTasks, task2batch=DistillBatches)
+DISTILL_STAGES = PipelineSpec(
+    record2record=ExclusiveReportRecord2Record, record2task=DistillTasks, task2batch=DistillBatches
+)
 #: The harness-evolution pipeline of reported traces.
-TRACE_STAGES = PipelineSpec(record2record=TraceRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
+TRACE_STAGES = PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
 
 
 @dataclass(frozen=True)
@@ -445,7 +463,7 @@ class ToyJudgingRecord2Record(JudgingRecord2Record):
         cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]
     ) -> ToyJudgingRecord2Record:
         NoSettings.parse(config, plugin_class=cls)
-        return cls(context, ToyJudging(), ImmediateWorker())
+        return cls(ToyJudging(), ImmediateWorker())
 
 
 #: Trains the judged records of ``ToyJudging``.
@@ -679,8 +697,11 @@ def sdpo_steps() -> list[Step]:
 
 def computed_steps() -> list[Step]:
     return [
+        Serve("e:1"),
         turn("a", version="e:1"),
+        Serve("e:2"),
         turn("b", version="e:2", completes="a"),
+        Serve("e:3"),
         turn("c", version="e:3", completes="b"),
         turn("bad-d", version="e:3", completes="c"),
         turn("e", version="e:3", completes="bad-d"),

@@ -18,11 +18,11 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, _remove_episode_root, run_episode
 from reef.harness.episodes.trajectory import (
+    ClaudeSessionReader,
+    CodexSessionReader,
+    DeepseekSessionReader,
+    HermesSessionReader,
     TrajectoryError,
-    read_claude_session,
-    read_codex_session,
-    read_deepseek_session,
-    read_hermes_session,
     read_opencode_session,
     read_pi_session,
     reader_for,
@@ -355,16 +355,16 @@ def test_claude_reader_reads_nested_sessions_in_path_order(tmp_path: Path) -> No
     first.parent.mkdir(parents=True)
     first.write_text('{"type": "user"}\n')
     second.write_text('{"type": "assistant"}\n')
-    assert [event["type"] for event in read_claude_session(tmp_path)] == ["user", "assistant"]
+    assert [event["type"] for event in ClaudeSessionReader()(tmp_path)] == ["user", "assistant"]
 
 
 def test_claude_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
     session = tmp_path / "session.jsonl"
     session.write_text('{"type": "user"}\n{"type": "assistant"\n')  # crash mid-write
-    assert [event["type"] for event in read_claude_session(tmp_path)] == ["user"]
+    assert [event["type"] for event in ClaudeSessionReader()(tmp_path)] == ["user"]
     session.write_text('{"type": "user"\n{"type": "assistant"}\n')  # torn in the middle: corruption
     with pytest.raises(TrajectoryError, match="corrupt event at line 1"):
-        read_claude_session(tmp_path)
+        ClaudeSessionReader()(tmp_path)
 
 
 def test_claude_format_resolves_through_reader_for() -> None:
@@ -378,7 +378,7 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     second.parent.mkdir(parents=True)
     first.write_text('{"type": "session_meta"}\n')
     second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
-    assert [event["type"] for event in read_codex_session(tmp_path)] == ["session_meta", "event_msg"]
+    assert [event["type"] for event in CodexSessionReader()(tmp_path)] == ["session_meta", "event_msg"]
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
 
 
@@ -410,7 +410,7 @@ def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str 
     events.append({"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": answer}})
     session = tmp_path / "rollout.jsonl"
     session.write_text("".join(json.dumps(event) + "\n" for event in events))
-    trajectory = read_codex_session(tmp_path)
+    trajectory = CodexSessionReader()(tmp_path)
     expected_reply = None if answer is None else f"Output:\n{answer}"
     assert final_assistant_text(trajectory) == expected_reply
     result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
@@ -426,10 +426,10 @@ def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_p
     second.parent.mkdir(parents=True)
     first.write_text('{"type": "session", "version": 0}\n{"type": "turn/start", "seq": 0}\n')
     second.write_text('{"type": "session", "version": 0}\n{"type": "turn/end", "seq": 0\n')  # crash mid-write
-    assert [event["type"] for event in read_deepseek_session(tmp_path)] == ["session", "turn/start", "session"]
+    assert [event["type"] for event in DeepseekSessionReader()(tmp_path)] == ["session", "turn/start", "session"]
     second.write_text('{"type": "session"\n{"type": "turn/end", "seq": 0}\n')  # torn in the middle: corruption
     with pytest.raises(TrajectoryError, match=r"deepseek session .* corrupt event at line 1"):
-        read_deepseek_session(tmp_path)
+        DeepseekSessionReader()(tmp_path)
     assert reader_for("deepseek-session-jsonl").format == "deepseek-session-jsonl"
 
 
@@ -448,7 +448,7 @@ def test_deepseek_reader_lifts_each_events_data_so_the_final_assistant_text_is_f
         + json.dumps({"type": "assistant/message", "seq": 1, "time": 2, "data": {"turn": 1, "message": message}})
         + "\n"
     )
-    events = read_deepseek_session(tmp_path)
+    events = DeepseekSessionReader()(tmp_path)
     assert events[1] == {"type": "turn/start", "seq": 0, "time": 1, "turn": 1}
     assert events[2]["message"] == message and "data" not in events[2]
     assert final_assistant_text(events) == "The output:\n\nreef-ok"
@@ -465,16 +465,16 @@ def test_hermes_reader_emits_a_session_event_then_one_event_per_message(tmp_path
         ],
     }
     (tmp_path / "session_s1.json").write_text(json.dumps(snapshot))
-    events = read_hermes_session(tmp_path)
+    events = HermesSessionReader()(tmp_path)
     assert [event["type"] for event in events] == ["session", "message", "message", "message"]
     assert events[0] == {"type": "session", "session_id": "s1", "model": "m"}
     assert events[2]["tool_calls"] == [{"id": "c1"}] and events[3]["tool_name"] == "terminal"
     (tmp_path / "session_s2.json").write_text("{not json")
     with pytest.raises(TrajectoryError, match="not valid JSON"):
-        read_hermes_session(tmp_path)
+        HermesSessionReader()(tmp_path)
     (tmp_path / "session_s2.json").write_text(json.dumps({"session_id": "s2"}))
     with pytest.raises(TrajectoryError, match="messages list"):
-        read_hermes_session(tmp_path)
+        HermesSessionReader()(tmp_path)
     assert reader_for("hermes-session-json").format == "hermes-session-json"
 
 

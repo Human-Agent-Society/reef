@@ -6,6 +6,7 @@ from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.publication import BackendWeightPublisher
 from reef.runtime.scheduler import TrainingCoordinator
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
 
 
@@ -27,7 +28,7 @@ class FixtureInferenceBackend(SGLangInferenceBackend):
 
 
 def build_slime_coordinator(actor_group, inference, **kwargs) -> TrainingCoordinator:
-    training = SlimeTrainingBackend(actor_group, **kwargs)
+    training = SlimeTrainingBackend(actor_group, **{"args": SlimeArguments(), **kwargs})
     training.context.runtime_load_id = training.current_runtime_load_id()
     receiver = FixtureInferenceBackend(RayExecutor.from_workers([inference]))
     with patch("reef.runtime.scheduler.BackendWeightPublisher", FixtureWeightPublisher):

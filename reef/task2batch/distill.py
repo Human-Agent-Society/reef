@@ -13,7 +13,7 @@ from reef.task2batch.base import BatchSettings, Task2Batch
 
 
 class DistillBatches(Task2Batch):
-    """Batch distillation tasks as they come. A recipe's subclass sets ``batch_label``, its batches' name."""
+    """Batch tasks as they come, ``batch_size`` record sets to a batch. A subclass sets ``batch_label``, its batches' name."""
 
     batch_label = "teacher"
 

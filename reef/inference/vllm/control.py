@@ -6,110 +6,18 @@ to travel directly between training workers and inference engines.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
-
-from reef.inference.vllm.config import CONTROL_TIMEOUT_S, VLLMConfig
-from reef.runtime.executor import Executor, ExecutorConfig
-from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.inference.engine_control import EngineControl, EngineExecutor
+from reef.inference.vllm.config import VLLMConfig
 
 
-class VLLMExecutor(DelegatingExecutor):
-    """One control rank manages the vLLM engine group.
+class VLLMExecutor(EngineExecutor):
+    """One control rank manages the vLLM engine group."""
 
-    The worker lives in the inference control actor; engine processes are Ray
-    actors allocated from supplied reservations.
-    """
-
-    def _init_executor(self) -> None:
+    def create_worker(self) -> object:
         from reef.inference.vllm.worker import VLLMWorker
 
-        self._worker = VLLMWorker(**dict(self.config.options))
-        self._rpc = UniProcExecutor.from_workers([self._worker], owned=True)
-
-    def check_health(self, timeout: float | None = None) -> None:
-        self._rpc.rpc(0, "check_health", timeout=timeout)
+        return VLLMWorker(**dict(self.config.options))
 
 
-class VLLMControl:
-    """Own the selected serving executor inside Reef's inference control actor.
-
-    Every method forwards one control operation to the serving worker; only
-    :meth:`prepare_training_connection` adds policy of its own.
-    """
-
-    def __init__(self, config: VLLMConfig, pg: Any) -> None:
-        self._serving = Executor.create(
-            ExecutorConfig(
-                backend=config.executor,
-                options={**config.executor_options, "config": config, "pg": pg},
-            )
-        )
-        self._config = config
-        self._closed = False
-
-    def _call(self, method: str, *args: Any) -> Any:
-        return self._serving.rpc(0, method, args=args, timeout=CONTROL_TIMEOUT_S)
-
-    def check_health(self) -> None:
-        self._serving.check_health(timeout=30)
-
-    def inference_url(self) -> Any:
-        return self._call("inference_url")
-
-    def get_runtime_load_ids(self) -> Any:
-        return self._call("get_runtime_load_ids")
-
-    def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> Any:
-        return self._call("load_adapter_from_disk", lora_name, lora_path, runtime_load_id)
-
-    def pause_generation_for_update(self) -> Any:
-        return self._call("pause_generation_for_update")
-
-    def continue_generation_after_update(self) -> Any:
-        return self._call("continue_generation_after_update")
-
-    def terminate_updatable_engines(self) -> Any:
-        return self._call("terminate_updatable_engines")
-
-    def get_updatable_engines_and_lock(self) -> Any:
-        return self._call("get_updatable_engines_and_lock")
-
-    def offload(self, tags: Sequence[str] | None = None) -> Any:
-        return self._call("offload", tags)
-
-    def onload(self, tags: Sequence[str] | None = None) -> Any:
-        return self._call("onload", tags)
-
-    def onload_weights(self) -> Any:
-        return self._call("onload_weights")
-
-    def onload_kv(self) -> Any:
-        return self._call("onload_kv")
-
-    def prepare_training_connection(self) -> None:
-        """Fence serving and release shared memory before training workers exist."""
-        self._call("prepare_training_connection")
-        if self._config.offload:
-            # Every trainer attachment needs the whole allocation. The engine
-            # skips regions already released by an earlier attachment attempt.
-            self.offload()
-
-    def recover_updatable_engines(self) -> Any:
-        return self._call("recover_updatable_engines")
-
-    def clear_updatable_num_new_engines(self) -> Any:
-        return self._call("clear_updatable_num_new_engines")
-
-    def health_monitoring_pause(self) -> Any:
-        return self._call("health_monitoring_pause")
-
-    def health_monitoring_resume(self) -> Any:
-        return self._call("health_monitoring_resume")
-
-    def shutdown(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._serving.shutdown()
+class VLLMControl(EngineControl[VLLMConfig]):
+    """Own the vLLM serving executor inside Reef's inference control actor."""

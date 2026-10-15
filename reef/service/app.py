@@ -23,6 +23,15 @@ _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
 #: its whole context: Claude Code with a dozen MCP servers and a few hundred skills sends several MiB, which the
 #: default answered with 413 and the agent reported as a request too large.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
+
+
+def get_dispatcher(app: web.Application) -> Dispatcher:
+    """The dispatcher that a Reef app serves; extension routes read scenario state through it.
+
+    Raises ``KeyError`` for an app that ``create_app`` did not build.
+    """
+    return app[REQUEST_SERVICE_KEY].dispatcher
 
 
 async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, stopped: asyncio.Event) -> None:
@@ -59,13 +68,12 @@ def create_app(
     evaluation routes only (see ``create_authentication_middleware``).
     """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
-    request_service_key = web.AppKey("reef_request_service", RequestService)
     app = web.Application(
         middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors],
         client_max_size=MAX_REQUEST_BYTES,
     )
     configure_browser_access(app, console_origins)
-    app[request_service_key] = request_service
+    app[REQUEST_SERVICE_KEY] = request_service
     register_routes(
         app,
         request_service=request_service,
@@ -98,7 +106,7 @@ def create_app(
                         continue
                     writer.close()
                     break
-                await asyncio.to_thread(app[request_service_key].dispatcher.open_local_cycles)
+                await asyncio.to_thread(app[REQUEST_SERVICE_KEY].dispatcher.open_local_cycles)
 
             # on_startup runs before the site listens: wait for the socket, off the startup path.
             task = asyncio.create_task(once_listening())
@@ -114,10 +122,10 @@ def create_app(
 
         async def stop_local_cycles(app: web.Application) -> None:
             # The listening socket is closed by now: a harness cycle's calls through Reef fail from here on.
-            app[request_service_key].dispatcher.stop_local_cycles()
+            app[REQUEST_SERVICE_KEY].dispatcher.stop_local_cycles()
 
         async def cleanup(app: web.Application) -> None:
-            await asyncio.to_thread(app[request_service_key].dispatcher.close)
+            await asyncio.to_thread(app[REQUEST_SERVICE_KEY].dispatcher.close)
 
         app.on_shutdown.append(stop_local_cycles)
         app.on_cleanup.append(cleanup)
@@ -128,4 +136,5 @@ __all__ = [
     "InferenceRetryPolicy",
     "RequestService",
     "create_app",
+    "get_dispatcher",
 ]

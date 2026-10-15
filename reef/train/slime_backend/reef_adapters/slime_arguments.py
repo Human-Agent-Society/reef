@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from collections.abc import Sequence
 
+from reef.train.algos.registry import loss_family_refs
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import LOSS_FAMILIES
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
+from reef.train.slime_backend.reef_adapters.preflight import validate_advantage_computation
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, configure_score_centering
 
 REEF_MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.model_provider.provide_actor_model"
+REEF_BEFORE_TRAIN_STEP_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.apply_learning_rate_schedule"
 
 
 def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -160,6 +165,13 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         args.reef_chained_megatron_init_path = previous_init
         args.custom_megatron_init_path = REEF_MEGATRON_INIT_PATH
 
+    # Every optimizer step passes Slime's before-step hook, which sets the rate
+    # of a learning-rate schedule a recipe selected (worker_hooks).
+    previous_before_step = args.custom_megatron_before_train_step_hook_path
+    if previous_before_step != REEF_BEFORE_TRAIN_STEP_HOOK_PATH:
+        args.reef_chained_before_train_step_hook_path = previous_before_step
+        args.custom_megatron_before_train_step_hook_path = REEF_BEFORE_TRAIN_STEP_HOOK_PATH
+
     if args.megatron_lora_rank:
         previous_provider = args.custom_model_provider_path
         if previous_provider != REEF_MODEL_PROVIDER_PATH:
@@ -192,14 +204,60 @@ def configure_reef_loss_args(args: SlimeArguments) -> None:
         # pg primitive: the worker swaps loss.compute_cispo_loss for the
         # function behind custom_pg_loss_function_path (worker_hooks), so no
         # Slime source patch is needed. The routing value is adapter-owned;
-        # families only declare the lane.
+        # families only declare the lane. The configured estimator is kept for
+        # a job of another family.
+        if args.reef_configured_advantage_estimator is None:
+            args.reef_configured_advantage_estimator = args.advantage_estimator
         args.advantage_estimator = "cispo"
 
 
+def loss_family_job_args(args: SlimeArguments, spec: SlimeAlgorithm) -> SlimeArguments:
+    """The workers' arguments for a job of ``spec``, a loss family they did not start with.
+
+    ``args`` are the arguments the workers started with. The family brings
+    its loss type, its advantage routing, its wire keys and its default driver
+    options; every other option keeps its startup value, and the family is
+    validated against it. A family that needs driver options, or configures
+    the critic (which starts with the workers), must be the startup family.
+    """
+    source = f"loss family {spec.loss_family!r} selected for a training job"
+    if spec.requires_driver_options:
+        raise RuntimeError(
+            f"{source} requires driver options, which only the startup family parses; "
+            "make it the recipe's training_spec() objective"
+        )
+    if (
+        type(spec).configure_critic_args is not SlimeAlgorithm.configure_critic_args
+        or spec.critic_value_head_zero_init
+    ):
+        raise RuntimeError(
+            f"{source} configures the critic, which starts with the workers; make it the recipe's "
+            "training_spec() objective"
+        )
+    job_args = copy.copy(args)
+    job_args.loss_family_ref = loss_family_refs().get(spec.loss_family)
+    job_args.loss_type = spec.loss_type
+    if args.reef_configured_advantage_estimator is not None:
+        job_args.advantage_estimator = args.reef_configured_advantage_estimator
+    # Slime's pre-train advantage pass is the family's: the families that keep
+    # it need it, the others would have it overwrite their external signals.
+    job_args.compute_advantages_and_returns = spec.allows_slime_advantage_computation
+    spec.apply_driver_options(job_args, None)
+    configure_reef_loss_args(job_args)
+    spec.validate_backend_args(job_args)
+    try:
+        validate_advantage_computation(job_args, spec)
+    except ValueError as exc:
+        raise RuntimeError(f"{source}: {exc}") from exc
+    return job_args
+
+
 __all__ = [
+    "REEF_BEFORE_TRAIN_STEP_HOOK_PATH",
     "REEF_MEGATRON_INIT_PATH",
     "REEF_MODEL_PROVIDER_PATH",
     "add_reef_slime_arguments",
     "configure_reef_loss_args",
     "finalize_reef_slime_args",
+    "loss_family_job_args",
 ]

@@ -39,7 +39,7 @@ class Scorer(EpisodeScorer):
 
 
 def make_pool(backend):
-    selection, requirements = evaluation_selection(Scorer(), 2, ExecutorSettings(backend))
+    selection, requirements = evaluation_selection(Scorer(), ExecutorSettings(backend, workers=2))
     return EvaluationWorkerPool(selection, requirements, WorkerSpec(StatefulWorker))
 
 
@@ -121,8 +121,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         tasks=("one",),
         binary=str(binary),
         models=ModelBinding(base_url="http://unused", model="unused", api_key="dummy"),
-        episode_workers=workers,
-        worker_executor=ExecutorSettings(executor_backend),
+        worker_executor=ExecutorSettings(executor_backend, workers=workers),
     )
     records = SQLiteRecordStore()
     trainer = Trainer(

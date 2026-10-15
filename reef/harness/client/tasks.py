@@ -284,10 +284,6 @@ class TaskPlayer:
         """Play one task directory and report its episode when the verifier scored it."""
         return asyncio.run(self.play_async(task_path))
 
-    def play_all(self, task_paths: Iterable[Path]) -> tuple[TaskPlay, ...]:
-        """Play task directories one after another; every episode reported before the next starts."""
-        return tuple(self.play(path) for path in task_paths)
-
     def play_concurrently(self, task_paths: Iterable[Path], *, concurrency: int) -> tuple[TaskPlay, ...]:
         """Play task directories with up to ``concurrency`` episodes in flight; results in the given order."""
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:

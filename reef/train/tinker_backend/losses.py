@@ -82,6 +82,10 @@ class TinkerLoss(ABC):
     loss_fn = "importance_sampling"
     needs_base_logprobs = False
 
+    def check_kl_coef(self, kl_coef: float) -> None:
+        """Raise ``ValueError`` if this family cannot train with ``kl_coef``; any coefficient is accepted by default."""
+        return
+
     @abstractmethod
     def inputs(
         self, rows: Sequence[TokenRow], base_logprobs: Sequence[Sequence[float]], *, kl_coef: float
@@ -91,11 +95,13 @@ class TinkerLoss(ABC):
 class ImportanceSamplingLoss(TinkerLoss):
     """The trajectory advantage on every response token the loss mask selects."""
 
+    def check_kl_coef(self, kl_coef: float) -> None:
+        if kl_coef:
+            raise ValueError("importance_sampling does not implement a KL penalty; set kl-coef to 0")
+
     def inputs(
         self, rows: Sequence[TokenRow], base_logprobs: Sequence[Sequence[float]], *, kl_coef: float
     ) -> list[dict[str, list[Any]]]:
-        if kl_coef:
-            raise ValueError("importance_sampling does not implement a KL penalty; select a method loss family")
         return [row.inputs([row.advantage * mask for mask in row.mask]) for row in rows]
 
 

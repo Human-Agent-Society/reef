@@ -284,9 +284,7 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
             seed=request_entries("pi"),
             runtime=runtime(),
         )
-        dispatcher = Dispatcher(
-            built, factory, agent_record_dir=agent_record_dir, scenario_storage=SQLiteScenarioStorage(agent_record_dir)
-        )
+        dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(agent_record_dir))
         try:
             scenario = dispatcher.get_or_create_scenario("upgrade")
             assert scenario is not None

@@ -37,12 +37,12 @@ from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendEvaluateMixin
 from reef.evaluation.harness import EpisodeScorer
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
+from reef.sandbox.process import EpisodeExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectoryItem

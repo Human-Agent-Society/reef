@@ -26,6 +26,7 @@ from pathlib import Path
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
+from reef.sandbox.process import SandboxProgram
 
 #: Where per-adapter install prefixes live, matching the ``PREFIX`` default the
 #: served install script bakes in; ``REEF_HARNESS_PREFIX`` moves the root, and
@@ -81,6 +82,33 @@ def resolve_binary(descriptor: AdapterDescriptor, *, prefix: Path | None = None)
             f"install the harness binary yourself and set evolution.binary to its path"
         )
     return str(binary)
+
+
+class AdapterProgram(SandboxProgram):
+    """An adapter's harness binary as the program an executor runs.
+
+    ``prefix`` overrides the adapter's install prefix (:func:`install_prefix`).
+    """
+
+    def __init__(self, descriptor: AdapterDescriptor, *, prefix: Path | None = None) -> None:
+        self.descriptor = descriptor
+        self.prefix = prefix
+        install = descriptor.install
+        self.name = descriptor.name
+        self.binary = descriptor.binary
+        self.self_isolating = descriptor.self_isolating
+        self.npm_package = (
+            f"{install.package}@{install.version}" if install is not None and install.kind == "npm" else ""
+        )
+        self.version = "" if install is None else install.version
+
+    def host_binary(self) -> str:
+        return resolve_binary(self.descriptor, prefix=self.prefix)
+
+    def host_install_dir(self) -> Path | None:
+        if self.descriptor.install is None:
+            return None
+        return self.prefix if self.prefix is not None else install_prefix(self.descriptor)
 
 
 def version_probe_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
@@ -205,6 +233,7 @@ __all__ = [
     "DEFAULT_PREFIX_ROOT",
     "PIN_FILE",
     "PREFIX_ENV",
+    "AdapterProgram",
     "VendorInstallError",
     "install_prefix",
     "resolve_binary",

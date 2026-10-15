@@ -8,28 +8,30 @@ from unittest.mock import Mock
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.e2b import E2BExecutor, E2BSession, protected_command, remote_root, unpack
-from reef.harness.episodes.executor import EpisodeLaunchError, SandboxUnavailable, build_executor
 from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.sandbox.config import build_executor
+from reef.sandbox.e2b import E2BExecutor, E2BSession, protected_command, remote_root, unpack
+from reef.sandbox.process import EpisodeLaunchError, SandboxUnavailable
 
 
-def test_factory_resolves_remote_binary_and_only_explicit_environment(monkeypatch):
+def test_factory_reads_only_explicit_environment_and_binds_the_remote_binary(monkeypatch):
     checked = []
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: checked.append(self))
     executor = build_executor(
         {
             "executor": "e2b",
-            "adapter": "pi",
-            "binary": "/opt/agent/pi",
             "sandbox": {"e2b_api_key_env": "TEST_SANDBOX_KEY", "env_from": ["MODEL_SETTING"], "forward_ports": [9000]},
         },
         environ={"TEST_SANDBOX_KEY": "test-key", "MODEL_SETTING": "enabled", "PRIVATE_HOST_VALUE": "hidden"},
     )
     assert isinstance(executor, E2BExecutor)
-    assert executor.binary == "/opt/agent/pi" and executor.npm_package.endswith("@0.84.2")
     assert executor.env == {"MODEL_SETTING": "enabled"} and executor.forward_ports == (9000,)
     assert checked == [executor]
     assert "test-key" not in repr(executor)
+    bound, binary = executor.for_program(AdapterProgram(get_adapter("pi")), binary="/opt/agent/pi")
+    assert isinstance(bound, E2BExecutor)
+    assert binary == bound.binary == "/opt/agent/pi" and bound.npm_package.endswith("@0.84.2")
 
 
 @pytest.mark.parametrize(
@@ -51,11 +53,11 @@ def test_unsupported_or_invalid_settings_fail_before_allocation(section):
 
 def test_non_npm_agents_need_a_template_and_container_agents_keep_their_own_execution():
     with pytest.raises(SandboxUnavailable, match="explicit e2b_template"):
-        E2BExecutor(api_key="test-key").for_adapter(get_adapter("native"))
-    executor = E2BExecutor(api_key="test-key", template="custom").for_adapter(get_adapter("native"))
-    assert executor.binary == "reef-native"
+        E2BExecutor(api_key="test-key").for_program(AdapterProgram(get_adapter("native")))
+    _, binary = E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("native")))
+    assert binary == "reef-native"
     with pytest.raises(SandboxUnavailable, match="own containers"):
-        E2BExecutor(api_key="test-key", template="custom").for_adapter(get_adapter("terminus"))
+        E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("terminus")))
 
 
 def test_preflight_checks_remote_readiness_once_and_always_closes(monkeypatch):
@@ -151,7 +153,7 @@ def test_session_preserves_script_driver_commands(tmp_path, monkeypatch):
     pytest.importorskip("e2b")
     sandbox = Mock()
     sandbox.commands.run.return_value.wait.return_value = SimpleNamespace(exit_code=0, stdout="ok", stderr="")
-    session = E2BSession(sandbox, binary="pi")
+    session = E2BSession(sandbox)
     monkeypatch.setattr(session, "push", lambda root: None)
     monkeypatch.setattr(session, "pull", lambda root: None)
     try:
@@ -162,11 +164,26 @@ def test_session_preserves_script_driver_commands(tmp_path, monkeypatch):
         session.close()
 
 
+def test_session_applies_the_deployment_environment_over_the_callers(tmp_path, monkeypatch):
+    pytest.importorskip("e2b")
+    sandbox = Mock()
+    sandbox.commands.run.return_value.wait.return_value = SimpleNamespace(exit_code=0, stdout="ok", stderr="")
+    session = E2BSession(sandbox, env={"SETTING": "deployment"})
+    monkeypatch.setattr(session, "push", lambda root: None)
+    monkeypatch.setattr(session, "pull", lambda root: None)
+    try:
+        session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={"SETTING": "caller", "OTHER": "x"}, timeout=10)
+        envs = sandbox.commands.run.call_args.kwargs["envs"]
+        assert envs["SETTING"] == "deployment" and envs["OTHER"] == "x"
+    finally:
+        session.close()
+
+
 def test_ordinary_episode_reads_remote_trajectory_and_residue_and_closes(monkeypatch, tmp_path):
     pytest.importorskip("e2b")
     sandbox = Mock()
     sandbox.commands.run.return_value.wait.return_value = SimpleNamespace(exit_code=0, stdout="answer", stderr="")
-    session = E2BSession(sandbox, binary="pi")
+    session = E2BSession(sandbox)
     monkeypatch.setattr(session, "push", lambda root: None)
 
     def pull(root):
@@ -176,6 +193,7 @@ def test_ordinary_episode_reads_remote_trajectory_and_residue_and_closes(monkeyp
         (root / "unexpected.txt").write_text("residue")
 
     monkeypatch.setattr(session, "pull", pull)
+    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
     monkeypatch.setattr(E2BExecutor, "open", lambda self: session)
     result = run_episode(
         get_adapter("pi"),

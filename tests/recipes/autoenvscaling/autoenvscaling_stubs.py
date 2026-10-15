@@ -35,10 +35,9 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
 from reef.core.tasks import HarborTask, TaskGenerationRequest, TaskPlayResult
-from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.e2b import E2BExecutor, E2BSession
-from reef.harness.episodes.executor import EpisodeLaunchError, ProcessOutcome
 from reef.record2task.generator import GeneratorError, WrittenTask
+from reef.sandbox.e2b import E2BExecutor, E2BSession
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, ProcessOutcome, SandboxProgram
 
 
 def stand_in_e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,7 +77,6 @@ class ScriptedSession(E2BSession):
     def __init__(self, events: list[dict[str, object]], *, stop: threading.Event | None = None) -> None:
         self.events = events
         self.stop = stop
-        self.binary = "pi"
         self.is_closed = threading.Event()
 
     def launch(
@@ -113,8 +111,8 @@ class ScriptedExecutor(E2BExecutor):
 
     session: ScriptedSession | None = None
 
-    def for_adapter(self, descriptor: AdapterDescriptor, *, binary: str | None = None) -> E2BExecutor:
-        return self
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+        return self, program.binary
 
     def open(self) -> E2BSession:
         if self.session is None:

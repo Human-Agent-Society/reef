@@ -56,6 +56,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
+| `reef/sandbox/` | Shared execution and isolation through Harbor environments, file transfer, and process/session cleanup |
 | `reef/record2record/` | The record-to-record stage: which records Reef uses and in what order (report grouping, judging, eligibility checks, selection order) |
 | `reef/background_jobs.py` | A worker that runs asynchronous jobs, such as judge calls, off the trainer thread |
 | `reef/record2task/` | The record-to-task stage: one record set into tasks (`Record2Task`), and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |

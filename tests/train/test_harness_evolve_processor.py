@@ -15,8 +15,8 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.pipeline_context import PipelineContext
 from reef.recipe.cordis import CordisRecipe
-from reef.record2record import InferenceRecord2Record
-from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceRecord2Record, TraceTasks
+from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
+from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceTasks
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import TrainingBatch
 
@@ -60,7 +60,7 @@ def reports_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingP
     """Harness traces from reported scores: the default stages, built directly."""
     return TrainingPipeline(
         context,
-        record2record=TraceRecord2Record(context),
+        record2record=ReportRecord2Record(context, ReportGrouping()),
         record2task=TraceTasks(),
         task2batch=TraceBatches(context, batch_size),
     )
@@ -83,7 +83,7 @@ def _processor() -> TrainingPipeline:
 def test_the_default_stages_batch_reports_and_the_inference_stages_batch_records() -> None:
     reported = harness_stages(3).build(PipelineContext("s"))
     assert (type(reported.record2record), type(reported.record2task), type(reported.task2batch)) == (
-        TraceRecord2Record,
+        ReportRecord2Record,
         TraceTasks,
         TraceBatches,
     )

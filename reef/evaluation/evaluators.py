@@ -170,14 +170,10 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, Selecti
         return cls(candidate_backend)
 
 
-# Compatibility aliases for existing imports.
-RegressionGateMixin = RegressionCheckMixin
-
 __all__ = [
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
     "RegressionCheckMixin",
-    "RegressionGateMixin",
     "SelectionPlugin",
 ]

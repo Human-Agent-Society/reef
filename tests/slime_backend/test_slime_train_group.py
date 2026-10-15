@@ -6,7 +6,6 @@ import pytest
 from slime.ray import actor_group
 
 from reef.runtime.executor import ExecutorFuture, resolve
-from reef.train.slime_backend.reef_adapters import ray_train_groups
 from reef.train.slime_backend.reef_adapters.executors.ray import SlimeRayExecutor
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 
@@ -47,7 +46,7 @@ def ray_group(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(actor_group.ray, "get", lambda value, timeout=None: value)
     monkeypatch.setattr(actor_group.ray, "kill", lambda actor, *, no_restart: killed.append((actor, no_restart)))
     monkeypatch.setattr(actor_group.time, "sleep", lambda duration: None)
-    group = ray_train_groups.ReefRayTrainGroup(
+    group = SlimeTrainGroup(
         args=SimpleNamespace(update_weight_mode="full", update_weight_transport="nccl"),
         num_nodes=1,
         num_gpus_per_node=2,
@@ -63,7 +62,6 @@ def ray_group(monkeypatch: pytest.MonkeyPatch):
 def test_bridge_facing_train_group_methods_fan_out(ray_group) -> None:
     group, workers, *_ = ray_group
 
-    assert ray_train_groups.ReefRayTrainGroup is SlimeTrainGroup
     assert isinstance(group.executor, SlimeRayExecutor)
     assert group.set_runtime_load_id_for_update("incarnation:5") == ["prepare-0", "prepare-1"]
     assert workers[0].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]

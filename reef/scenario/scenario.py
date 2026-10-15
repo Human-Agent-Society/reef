@@ -19,7 +19,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter, SettledTrainingResultError, StaleTrainingResultError
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
@@ -68,6 +68,7 @@ class Scenario:
         self._surface = binding.surface
         self._store = store
         self._closed = False
+        #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.surface)
         self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._committer = ScenarioCommitter(
@@ -123,11 +124,6 @@ class Scenario:
     def store(self) -> ScenarioStore:
         """The scenario's record and commit storage session."""
         return self._store
-
-    @property
-    def component_trainers(self) -> tuple[ComponentTrainer, ...]:
-        """Every trainer of this scenario with the component it evolves, in recipe order."""
-        return self.trainers
 
     @property
     def trainer(self) -> Trainer:
@@ -217,15 +213,25 @@ class Scenario:
         a trainer at a time, as the dispatcher's cycle lock does.
         """
         trainer = self.trainer_for(component)
-        with self._committer.lock if len(self.component_trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+        with self._committer.lock if len(self.trainers) == 1 else nullcontext():
+            return trainer.run_once(
+                self.scenario_step,
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
+            )
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
             return self.trainer_for(component).reserve_training_batch(
-                base_release_id=self.current_artifact_ref().release_id
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
             )
+
+    def serving_runtime_load_id(self) -> str | None:
+        """Return the runtime load ID that serves the committed release, or None when it is unknown."""
+        artifact = Artifact(self.current_artifact_ref(), self.repository)
+        return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
@@ -233,8 +239,7 @@ class Scenario:
 
     def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
         """Drop the reserved batch and persist its consumption."""
-        with self._committer.lock:
-            self._committer.reject_pending(component, metrics)
+        self._committer.reject_pending(component, metrics)
 
     def retry_pending(self, component: str | None = None, *, keep_candidate: bool = False) -> None:
         """Keep the reserved batch, and with ``keep_candidate`` its candidate, for another try against the served release."""
@@ -281,10 +286,6 @@ class Scenario:
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer, read from the log without waiting on a commit."""
         return self._committer.last_record_for(component)
-
-    def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
-        """Metrics of the training step that published ``release_id``, if logged."""
-        return self._committer.metrics_for_version(release_id)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         return self._committer.releases()
@@ -355,13 +356,6 @@ class Scenario:
                     bound.trainer.close()
             finally:
                 self._store.close()
-
-    def to_metadata(self) -> dict[str, object]:
-        return scenario_metadata_for(
-            name=self.name,
-            base_artifact=self.repository.base_artifact,
-            scenario_step=self.scenario_step,
-        )
 
 
 def validate_component_trainers(

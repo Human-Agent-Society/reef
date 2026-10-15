@@ -10,7 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from reef.artifact import Artifact, ArtifactConflict, ArtifactSourceError, GitLFSRepositoryBackend
+from reef.artifact import (
+    Artifact,
+    ArtifactConflict,
+    ArtifactSourceError,
+    GitLFSRepositoryBackend,
+    GitLFSRepositoryBackendFactory,
+    RepositoryBackendContext,
+)
+from reef.core.plugins import PluginConfigError
 
 
 def run_git(*args: str, cwd: Path | None = None) -> str:
@@ -106,6 +114,48 @@ def test_local_repository_base_carries_the_bootstrap_files_and_an_existing_base_
     kept = later.materialize(later.resolve_release()).local_path
     assert kept is not None
     assert (kept / "pi-agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
+
+
+@pytest.mark.integration
+def test_configured_factory_seeds_the_base_from_its_context(tmp_path: Path, fake_git_lfs: None) -> None:
+    context = RepositoryBackendContext(
+        work_dir=tmp_path / "work",
+        cache_dir=tmp_path / "cache",
+        bootstrap_files={"agent/AGENTS.md": "seed rules\n"},
+    )
+    factory = GitLFSRepositoryBackendFactory.from_config(
+        {"repository": str(tmp_path / "artifacts.git")}, context=context
+    )
+
+    backend = factory("math")
+    tree = backend.materialize(backend.resolve_release()).local_path
+    assert tree is not None
+    assert (tree / "agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
+    assert factory.list_registrations() == ()
+    backend.fork()
+    assert factory.list_registrations() == ("math",)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("repository", ["https://git.example/repository", "git@example:repository"])
+def test_configured_factory_keeps_a_remote_location(repository: str, tmp_path: Path, fake_git_lfs: None) -> None:
+    context = RepositoryBackendContext(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+
+    factory = GitLFSRepositoryBackendFactory.from_config({"repository": repository}, context=context)
+
+    assert factory._repository == repository
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [({}, "repository is required"), ({"repository": " "}, "non-empty"), ({"repository": "a", "url": "b"}, "url")],
+)
+def test_configured_factory_refuses_an_invalid_config(config: dict[str, str], message: str, tmp_path: Path) -> None:
+    context = RepositoryBackendContext(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+
+    with pytest.raises(PluginConfigError, match=message):
+        GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    assert not (tmp_path / "work").exists()
 
 
 @pytest.mark.integration

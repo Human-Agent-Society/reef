@@ -155,6 +155,7 @@ class CompositeRecipe(Recipe):
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
         # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
+        # A component's config refuses the key as an unknown field.
         cls.refuse_checkpoint_cadence(config, "recipe")
         for component in raw:
             if component in RESERVED_COMPONENT_NAMES:
@@ -168,7 +169,6 @@ class CompositeRecipe(Recipe):
         components: dict[str, Recipe] = {}
         for component, section in raw.items():
             settings = component_recipe_config(str(component), section)
-            cls.refuse_checkpoint_cadence(settings["data"], f"components.{component}.config")
             settings["model"] = dict(config.get("model", {}))
             if configured_mode is not None and configured_training_mode(settings) is None:
                 # The composite's mode is every component's mode: a component sets its own only to disagree.

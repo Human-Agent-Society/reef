@@ -390,14 +390,11 @@ def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_what_it_prop
     assert "The step failed during its evaluation" in version and "before evaluation" not in version
 
 
-@pytest.mark.parametrize("review_key", ["result", "verdict"])
-def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_review_left_uncovered(
-    review_key,
-) -> None:
+def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_review_left_uncovered() -> None:
     notes = {
         "design": "one rules entry",
         "failure": "model call failed after 60.0 s (max_tokens=16384): timeout",
-        "review": {review_key: "partial", "covered": ["the trigger"], "uncovered": ["a way to turn it off"]},
+        "review": {"result": "partial", "covered": ["the trigger"], "uncovered": ["a way to turn it off"]},
     }
     skipped = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
     page = build_request_page(_record(), [CREATION, skipped], now=1_100.0)

@@ -338,7 +338,8 @@ def test_concurrent_plays_each_get_their_own_proxy_and_report(reef: StandInReef,
 def test_two_plays_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
-    first, second = player(reef, tmp_path, lab).play_all([task_path, task_path])
+    task_player = player(reef, tmp_path, lab)
+    first, second = task_player.play(task_path), task_player.play(task_path)
     assert first.episode_id != second.episode_id and lab.calls[0]["key"] != lab.calls[1]["key"]
     assert [report["body"]["references"] for report in reef.reports] == [["rec-1", "rec-2"], ["rec-3", "rec-4"]]
 

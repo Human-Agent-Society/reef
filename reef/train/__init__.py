@@ -2,7 +2,7 @@
 
 One package, mirroring how a well-scoped training subsystem is usually
 organized: a coordinator (:class:`Trainer`) that turns raw records into
-reserved, typed batches (:class:`TrainingPipeline` and ``processors/``), and one
+reserved, typed batches (:class:`TrainingPipeline` and its three stages), and one
 :class:`CandidateBackend` lifecycle. Harness evolution implements it directly;
 Weight recipes map their batches through ``RuntimeCandidateBackend`` and delegate
 coordination of separate training and inference runtimes to ``RuntimeScheduler``.

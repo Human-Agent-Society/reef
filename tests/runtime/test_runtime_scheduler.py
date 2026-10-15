@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from reef.core.batches import TrainingBatch
-from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -25,10 +24,9 @@ from reef.train.algos import StepScheduling
 class CheckpointTrainer(TrainingRuntime):
     """An exporter with its own journal and no receiver dependency."""
 
-    def __init__(self, *, colocate=False, concurrent=False, journal=True, max_staleness=0):
+    def __init__(self, *, colocate=False, concurrent=False, journal=True):
         self.journal = {"status": "IDLE", "colocate": colocate} if journal else None
         self.concurrent = concurrent
-        self.staleness = max_staleness
         self.failure = None
         self.calls = []
 
@@ -36,17 +34,13 @@ class CheckpointTrainer(TrainingRuntime):
     def concurrent_training_scenarios(self):
         return self.concurrent
 
-    @property
-    def max_staleness(self):
-        return self.staleness
-
     def training_job_status(self):
         return self.journal
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
-        self.calls.append(("prepare", serving_runtime_load_id))
+        self.calls.append(("prepare", parent_runtime_load_id))
         return PreparedTrainingStep("train", algorithm_state, {}, {"scenario_step": scenario_step})
 
     def train_candidate(self, payload):
@@ -62,7 +56,7 @@ class CheckpointTrainer(TrainingRuntime):
             current_runtime_load_id=None,
         )
 
-    def reject_candidate(self, candidate, decision):
+    def reject_candidate(self, candidate):
         self.reject_training_job(candidate.training_job_id)
 
     def reject_training_job(self, training_job_id):
@@ -225,10 +219,9 @@ def test_rejection_must_finish_before_colocated_inference_reopens():
     inference = WeightReceiver()
     scheduler = RuntimeScheduler(training, inference)
     candidate = scheduler.train_candidate({})
-    decision = SelectionDecision(False, "test", "failed evaluation", EvaluationResult("test", "1", {}))
     training.failure = TimeoutError("rejection result unknown")
     with pytest.raises(TimeoutError, match="rejection result unknown"):
-        scheduler.reject_candidate(candidate, decision)
+        scheduler.reject_candidate(candidate)
     assert not inference.inference_admission_status["open"]
     staged_journal(training, state="REJECTING")
     training.failure = None
@@ -239,15 +232,15 @@ def test_rejection_must_finish_before_colocated_inference_reopens():
     assert training.calls[-1] == ("reject", "job-1")
 
 
-@pytest.mark.parametrize("max_staleness,expected", [(0, "engine:0"), (1, "engine:1")])
-def test_preparation_passes_only_the_required_serving_version_value(max_staleness, expected):
-    training = CheckpointTrainer(max_staleness=max_staleness)
+def test_preparation_passes_the_published_version_that_the_job_trains_from():
+    training = CheckpointTrainer()
     inference = WeightReceiver()
     scheduler = RuntimeScheduler(training, inference)
+    # The engine loaded engine:1, but Reef has published only engine:0.
     inference.loaded = "engine:1"
     prepared = scheduler.prepare_training_step(TrainingBatch("batch-1"), "test", {}, StepScheduling(), 0)
     assert prepared.payload == {"scenario_step": 0}
-    assert training.calls == [("prepare", expected)]
+    assert training.calls == [("prepare", "engine:0")]
     assert not hasattr(training, "inference_runtime")
     assert not hasattr(inference, "training_runtime")
 

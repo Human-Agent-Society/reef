@@ -1,33 +1,10 @@
 """Terminus adapter quirks: constructor knobs, skill frontmatter, one context module.
 
-Terminus 2 takes its behavior from constructor arguments rather than a config
-file it discovers, so ``terminus/config.json`` is a flat object whose keys must
-each name a real Terminus 2 argument. An unknown key is a defect in the tree,
-and failing at render is what keeps a gated change meaning what it says instead
-of silently dropping a knob.
-
 Skills carry the ``name`` and ``description`` frontmatter the instruction
 builder reads. ``process_skill`` and ``process_command`` add it
 when an evolved node ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
 renders under the second root, and Harbor lists those skills beside the
 others, with nothing that marks them as commands.
-
-Every model call stays on Reef's model binding. The binding writes
-``model_name``, ``api_base`` and ``llm_kwargs`` with the key, renders after
-the tree and wins every key it writes. The key is a credential, which a tree
-cannot hold because admission refuses an inline credential, so those knobs
-pass only beside it, and ``llm_kwargs`` only with the keys the binding
-writes. Terminus 2 passes ``llm_call_kwargs`` to litellm on every call, over
-the binding's values, so a key there that litellm reads as the endpoint, the
-provider, a credential, the model, a fallback model or a logging callback
-that sends the call elsewhere is refused. litellm sends a key it does not
-read, and ``extra_body``, in the request body to the bound endpoint, so
-neither may name a model (``model``, or OpenRouter's fallback ``models``).
-
-These checks cover the config the tree renders. Reef's proxy forwards the
-``model`` and ``models`` a request sends as they are, so a request that other
-code builds with the rendered key, such as a tool the model runs, can still
-name another model.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around
@@ -37,68 +14,16 @@ task container alone does not isolate evolved Python in the outer runner.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
-from typing import Any
 
 from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
-from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
-
-_CONFIG = "terminus/config.json"
-
-#: Terminus 2 constructor arguments a tree may set. Verified against harbor
-#: 0.20.0, which reef-eval 0.1.1 resolves; a bump should re-check the signature.
-_ALLOWED_KNOBS = {
-    "enable_summarize",
-    "interleaved_thinking",
-    "llm_call_kwargs",
-    "max_thinking_tokens",
-    "max_turns",
-    "parser_name",
-    "proactive_summarization_threshold",
-    "reasoning_effort",
-    "temperature",
-}
-#: Set by Reef's model binding, which renders after the tree and therefore
-#: wins the merge. Admitted only beside the binding's key, in llm_kwargs.
-_BINDING_KNOBS = {"api_base", "llm_kwargs", "model_name"}
-BINDING_LLM_KWARGS = frozenset({"api_key", "custom_llm_provider"})
-#: litellm call arguments (read from litellm 1.102.1) that choose the endpoint, the provider, a credential, the model or a
-#: fallback model, or add a logging callback that sends the call to another host. litellm sends an argument it does
-#: not read, such as OpenRouter's fallback ``models``, in the request body.
-MODEL_ROUTE_KWARGS = re.compile(
-    r"^(?:api_base|api_key|api_version|azure|base_url|callbacks|client|client_id|client_secret"
-    r"|context_window_fallback_dict|custom_llm_provider|deployment_id|failure_callback|fallbacks"
-    r"|litellm_credential_name|mock_response|mock_timeout|model|model_alias_map|model_list|models|region_name"
-    r"|success_callback|tenant_id|use_litellm_proxy)$"
-    r"|^(?:arize|aws|azure|dd|gcs|humanloop|langfuse|langsmith|newrelic|posthog|s3|vertex|wandb|watsonx|weave)_"
-    r"|^(?:adaptive|auto|complexity|quality)_router_"
-)
-#: Request body fields that name the model: ``model`` replaces the bound one, and OpenRouter reads ``models`` as
-#: fallback models.
-BODY_MODEL_KEYS = frozenset({"model", "models"})
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 
 
 class TerminusAdapterRenderer(AdapterRenderer):
-    @staticmethod
-    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        unknown = sorted(set(config) - _ALLOWED_KNOBS - _BINDING_KNOBS)
-        if unknown:
-            raise RenderError(f"terminus config sets keys that are not Terminus 2 arguments: {', '.join(unknown)}")
-        call_kwargs = config.get("llm_call_kwargs")
-        if call_kwargs is not None and not isinstance(call_kwargs, dict):
-            raise RenderError("terminus config llm_call_kwargs must be an object")
-        body = (call_kwargs or {}).get("extra_body")
-        if body is not None and not isinstance(body, dict):
-            raise RenderError("terminus config llm_call_kwargs extra_body must be an object")
-        turns = config.get("max_turns")
-        if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
-            raise RenderError("terminus config max_turns must be a positive integer")
-        return config
-
     @staticmethod
     def process_skill(path: str, text: str) -> str:
         return with_skill_frontmatter(path, text)
@@ -107,24 +32,6 @@ class TerminusAdapterRenderer(AdapterRenderer):
     def process_command(path: str, text: str) -> str:
         # A command is a skill under the second root, so it needs the same frontmatter.
         return with_skill_frontmatter(path, text)
-
-    @staticmethod
-    def check_model_route(
-        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
-    ) -> None:
-        config = configs[_CONFIG]
-        llm_kwargs = config.get("llm_kwargs")
-        refusal = "Reef's model binding chooses the endpoint, the credential and the model"
-        if isinstance(llm_kwargs, dict) and set(llm_kwargs) - BINDING_LLM_KWARGS:
-            extra = ", ".join(sorted(set(llm_kwargs) - BINDING_LLM_KWARGS))
-            raise RenderError(f"terminus config must not set llm_kwargs {extra}: {refusal}")
-        call_kwargs = config.get("llm_call_kwargs") or {}
-        routed = sorted(key for key in call_kwargs if MODEL_ROUTE_KWARGS.search(key))
-        if routed:
-            raise RenderError(f"terminus config must not set llm_call_kwargs {', '.join(routed)}: {refusal}")
-        named = sorted(set(call_kwargs.get("extra_body") or {}) & BODY_MODEL_KEYS)
-        if named:
-            raise RenderError(f"terminus config must not set llm_call_kwargs extra_body {', '.join(named)}: {refusal}")
 
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:

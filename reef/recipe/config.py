@@ -99,10 +99,6 @@ def recipe_config_from_file_layout(loaded: Any) -> dict[str, Any]:
     if not isinstance(loaded, Mapping):
         raise RecipeConfigError("recipe config must be a YAML object")
     config = dict(loaded)
-    if "service" in config or "services" in config:
-        raise RecipeConfigError("service/services are not accepted; use reef settings and automatic assembly")
-    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
-        raise RecipeConfigError("execution.services is not accepted; configure component resources instead")
     resolved = recipe_config_from_section(config.get("recipe"), "recipe")
     for section in ("execution", "executors", "pipeline"):
         if section in config:

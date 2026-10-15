@@ -58,7 +58,6 @@ and the training side branches from the checkpoint Reef last committed,
 which ``state-dir`` remembers across restarts. Backend-neutral step scheduling retains comparison sets, explicit
 batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
 ``training.options.batch-size`` supplies the configured optimizer batch size.
-Only exact-version samples are admitted: ``max_staleness`` must be zero.
 
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``
@@ -79,9 +78,18 @@ the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
 
+Each job trains the Tinker loss of the objective that its recipe selected
+(`Switch methods within a run
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__).
+Tinker preparation needs one advantage per trajectory, so a supervised or
+distillation objective fails before training.
+``kl-coef`` applies to every job. When it is not zero, a job whose loss has no
+KL penalty, such as ``importance_sampling``, also fails before training.
+
 ``lora-rank``, ``seed``, and ``learning-rate`` configure adapter initialization
 and Adam updates. Other Adam settings currently use the pinned SDK's defaults
 (beta1 0.9, beta2 0.95, epsilon 1e-12, zero weight decay and gradient clipping).
+``learning-rate`` applies until a recipe selects a learning-rate schedule.
 ``training.timeout-s`` bounds SDK futures and configures
 transport timeouts; ``inference.timeout-s`` bounds sampling. These timeouts do
 not cancel a remote update that the service has already accepted.
@@ -102,7 +110,9 @@ it cannot accidentally apply the uncertain gradient a second time to that model.
 This favors recovery correctness over session reuse and training throughput.
 
 Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
-schema version, base model, LoRA rank, training-state URI, and sampler URI. It
+schema version, base model, LoRA rank, training-state URI, and sampler URI.
+After a recipe selects a learning-rate schedule, it also records the schedule's
+progress. It
 contains references, not portable weight tensors. Restore and rollback require
 continued access to both remote checkpoints in the originating account/project.
 Local disk retention does not remove remote files. Use Tinker's checkpoint

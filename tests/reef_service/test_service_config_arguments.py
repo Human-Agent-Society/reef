@@ -276,3 +276,29 @@ def test_invalid_cli_setting_fails_before_download_or_spawn(tmp_path, monkeypatc
     assert "reef.port" in error
     assert "credential-like-invalid-port" not in error
     assert "Traceback" not in error
+
+
+def test_scenario_limits_and_idle_unload_are_reef_settings():
+    settings = service_config_from_mapping(
+        {"reef": {"recipe": "recipe", "scenario_idle_unload_s": 600, "max_loaded_scenarios": 4, "max_scenarios": 100}}
+    )
+    assert (settings.scenario_idle_unload_s, settings.max_loaded_scenarios, settings.max_scenarios) == (600, 4, 100)
+    assert settings.scenario_admission is None
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"scenario_idle_unload_s": 0}, "scenario_idle_unload_s must be positive"),
+        ({"max_loaded_scenarios": 0}, "max_loaded_scenarios must be positive"),
+        ({"max_scenarios": -1}, "max_scenarios must be positive"),
+        (
+            {"scenario_admission": "reef.scenario.admission:ScenarioLimits", "max_scenarios": 3},
+            "configure the built-in admission",
+        ),
+        ({"scenario_admission": "reef.storage.sqlite:SQLiteScenarioStorage"}, "must name a class that inherits"),
+    ],
+)
+def test_invalid_scenario_admission_settings_are_refused(values, message):
+    with pytest.raises(ValueError, match=message):
+        service_config_from_mapping({"reef": {"recipe": "recipe", **values}})

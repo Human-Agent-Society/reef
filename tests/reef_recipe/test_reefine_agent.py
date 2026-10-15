@@ -16,8 +16,6 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.e2b import E2BSession, pack
-from reef.harness.episodes.executor import EpisodeTimeout, LocalExecutor, ProcessOutcome
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
@@ -25,6 +23,8 @@ from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutatio
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
+from reef.sandbox.e2b import E2BSession, pack
+from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
 
@@ -432,10 +432,10 @@ def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) ->
 
 @pytest.mark.unit
 def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(tmp_path) -> None:
-    from reef.harness.episodes.executor import SandboxExecutor
+    from reef.sandbox.process import SandboxExecutor
 
     executor = SandboxExecutor(network="isolated", forward_ports=(4123,))
-    argv = executor._bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
+    argv = executor.bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
     separator = argv.index("--")
     assert argv[:separator] == [
         "pasta",
@@ -452,15 +452,20 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
         "none",
     ]
     assert argv[separator + 1] == "bwrap" and "--unshare-net" not in argv
-    assert "--unshare-net" in SandboxExecutor()._bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path, env={})
+    assert "--unshare-net" in SandboxExecutor().bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path, env={})
+    # A run's session adds its ports to the isolated network's; the default network already reaches the host.
+    session = executor.open_session(forward_ports=(4124,), timeout_s=60)
+    assert isinstance(session, SandboxExecutor) and session.forward_ports == (4123, 4124)
+    assert executor.open_session(forward_ports=(4123,), timeout_s=60) is executor
+    assert SandboxExecutor().open_session(forward_ports=(4124,), timeout_s=60) == SandboxExecutor()
 
 
 @pytest.mark.unit
 def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
-    from reef.harness.episodes.e2b import E2BExecutor
-    from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
     from reef.recipe.cordis import proposer_agent_settings
     from reef.recipe.errors import RecipeConfigError
+    from reef.sandbox.e2b import E2BExecutor, deployment_owner
+    from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
 
     assert proposer_agent_settings(None, {}) == (None, 1800.0, 300.0)
     executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})
@@ -475,6 +480,9 @@ def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
     remote, timeout_s, _ = proposer_agent_settings({"sandbox": "e2b", "timeout_s": 900}, {"E2B_API_KEY": "e2b-env"})
     assert isinstance(remote, E2BExecutor) and remote.api_key == "e2b-env" and remote.timeout_s == 900.0
     assert remote.template == "" and "e2b-env" not in repr(remote)
+    # The deployment's own state directory names its sandboxes, so a later start can stop the ones a stopped run
+    # left.
+    assert remote.owner == deployment_owner(Path(".reef/proposals"))
     configured = proposer_agent_settings(
         {"sandbox": "e2b", "e2b_api_key": "e2b-cfg", "e2b_template": "mine"}, {"E2B_API_KEY": "e2b-env"}
     )[0]

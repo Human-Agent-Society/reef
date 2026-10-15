@@ -16,7 +16,7 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
@@ -70,12 +70,23 @@ class OpaqueStorage(ScenarioStorage):
         self._fail_recovery = fail_recovery
         self.sessions: list[OpaqueStore] = []
         self.events: list[tuple[str, str]] = []
-        self.prune_calls: list[tuple[float, int]] = []
+        self.prune_calls: list[int] = []
         self.close_count = 0
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> OpaqueStorage:
+        return cls(directory)
 
     @property
     def durable(self) -> bool:
         return self._inner.durable
+
+    def read_settings(self, scenario: str) -> ScenarioSettings:
+        return self._inner.read_settings(scenario)
+
+    def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
+        self.events.append(("write_settings", scenario))
+        self._inner.write_settings(scenario, settings)
 
     def open(self, scenario: str) -> ScenarioStore:
         store = OpaqueStore(scenario, self._inner.open(scenario), self.events, fail_recovery=self._fail_recovery)
@@ -87,9 +98,9 @@ class OpaqueStorage(ScenarioStorage):
         self._inner.archive(scenario)
         return (f"archive://{scenario}",)
 
-    def prune(self, *, days: float, max_bytes: int) -> int:
-        self.prune_calls.append((days, max_bytes))
-        return self._inner.prune(days=days, max_bytes=max_bytes)
+    def prune(self, *, max_bytes: int) -> int:
+        self.prune_calls.append(max_bytes)
+        return self._inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         self.close_count += 1
@@ -193,32 +204,26 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
 
 def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_path: Path) -> None:
     factory = OpaqueStorage(tmp_path / "private-store")
-    model_directory = tmp_path / "model-settings"
-    dispatcher = Dispatcher(
-        Recipe(), backend_factory(tmp_path), agent_record_dir=model_directory, scenario_storage=factory
-    )
+    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=factory)
     try:
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
         assert math is not None and code is not None
-        dispatcher.configure_scenario_model("math", None)
-        model_path = next(model_directory.glob("*-model.json"))
-        model_content = model_path.read_bytes()
+        dispatcher.set_training_mode("math", "auto")
+        assert ("write_settings", "math") in factory.events
+        assert factory.read_settings("math") == ScenarioSettings(training_mode="auto")
         math.records.append(trace("first"))
         code.records.append(trace("other", "code"))
-        retention = RecordRetention(days=7, max_bytes=1)
+        retention = RecordRetention(max_bytes=1)
         assert dispatcher.prune_record_archives(retention) == 2
-        assert factory.prune_calls == [(retention.days, retention.max_bytes)]
+        assert factory.prune_calls == [retention.max_bytes]
         assert dispatcher.read_record("math", "first") is None
         assert dispatcher.read_record("code", "other") is None
 
         math.records.append(trace("archived"))
         result = dispatcher.delete_scenario("math")
-        assert "archive://math" in result["archived"]
-        assert not model_path.exists()
-        [archived_model] = (model_directory / "archived").glob("*/*-model.json")
-        assert archived_model.read_bytes() == model_content
-        assert str(archived_model) in result["archived"]
+        assert result["archived"] == ["archive://math"]
+        assert factory.read_settings("math") == ScenarioSettings()
         assert factory.events.index(("close", "math")) < factory.events.index(("archive", "math"))
         assert dispatcher.prune_record_archives(retention) == 1
         code.records.append(trace("survivor", "code"))
@@ -242,7 +247,7 @@ def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
             dispatcher.get_or_create_scenario("math")
-        assert not dispatcher.has_loaded("math")
+        assert dispatcher._registry.get_optional("math") is None
         assert len(factory.sessions) == 1
         assert factory.sessions[0].close_count == 1
     finally:

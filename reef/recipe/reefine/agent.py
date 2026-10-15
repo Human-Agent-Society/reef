@@ -31,13 +31,10 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef.core.prompts import untrusted_text
-from reef.harness.episodes.e2b import E2BExecutor, E2BSession
-from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.requests import REQUESTS_SKILL_ID, request_entries
 from reef.harness.episodes.trajectory import reader_for
@@ -47,6 +44,8 @@ from reef.harness.tree.render import render_composition
 from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.recipe.reefine.multimodal import MultimodalProvider
+from reef.sandbox.environment import download_directory, execute
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
 from reef.train.types import TrajectoryItem
@@ -260,14 +259,14 @@ def launch_pi(
     session_env["HOME"] = str(root)
     # The harness's own binary first, so a nested `pi -p` finds the pinned one.
     session_env["PATH"] = os.pathsep.join([str(Path(host.binary).absolute().parent), os.environ.get("PATH", "")])
-    binary = (executor.binary or host.descriptor.binary) if isinstance(executor, E2BSession) else host.binary
-    argv = [binary, *(token.replace("{prompt}", prompt) for token in host.descriptor.argv)]
+    argv = [host.binary, *(token.replace("{prompt}", prompt) for token in host.descriptor.argv)]
     if script is not None:
         (root / "trial-script.json").write_text(json.dumps(script), encoding="utf-8")
         driver = root / "trial-driver.mjs"
         shutil.copyfile(TRIAL_DRIVER, driver)
         argv = ["node", str(driver)]
-    outcome = executor.launch(
+    outcome = execute(
+        executor,
         argv,
         root=root,
         workspace=workspace,
@@ -316,8 +315,8 @@ class AgentRun(WorkspaceTools):
         self.workspace = workspace
         self.served = served
         self.gateway: AgentGateway | None = None
-        #: The E2B sandbox the agent and its trials run in, when the host's executor is one.
-        self.session: E2BSession | None = None
+        #: The session the agent and its trials run in, once the agent starts.
+        self.session: EpisodeExecutor | None = None
         #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
         #: pull replaces the workspace directory, so one call at a time reads it.
         self.workspace_lock = threading.Lock()
@@ -357,22 +356,15 @@ class AgentRun(WorkspaceTools):
                 (target / name).unlink(missing_ok=True)
 
     def executor(self) -> EpisodeExecutor:
-        """The run's sandbox session, or the host's executor with the gateway's port forwarded into an isolated
-        network."""
-        if self.session is not None:
-            return self.session
-        executor = self.host.executor
-        if isinstance(executor, SandboxExecutor) and executor.network == "isolated" and self.gateway is not None:
-            return replace(executor, forward_ports=(self.gateway.port,))
-        return executor
+        """The run's session, which reaches the gateway; the host's executor before the agent starts."""
+        return self.host.executor if self.session is None else self.session
 
     def admitted(self) -> tuple[list[Mutation], list[dict[str, Any]] | None, list[str], str | None]:
         """The workspace's mutations, the entries admission turns them into (``None`` when it refuses), what could
         not be read, and the refusal."""
         with self.workspace_lock:
-            if self.session is not None:
-                # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
-                self.session.pull(self.workspace.parent, self.workspace.name)
+            # The agent may edit a copy off the Reef host; the check reads that copy as it stands now.
+            download_directory(self.executor(), self.workspace.parent, self.workspace.name)
             mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
             self.keep_workspace()
         admitted, refusal = admit_mutations(self.entries, mutations, self.host.descriptor)
@@ -574,7 +566,7 @@ def answer_with_agent(
                 failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
             )
             env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}
-            run.session = open_session(host, gateway.port)
+            run.session = host.executor.open_session(forward_ports=(gateway.port,), timeout_s=host.timeout_s)
             run.deadline = time.monotonic() + host.timeout_s
             env["REEF_PROPOSER_DEADLINE_MS"] = str(int((time.time() + host.timeout_s) * 1000))
             env["REEF_PROPOSER_FINISH_SECONDS"] = str(run.finish_seconds)
@@ -636,21 +628,6 @@ def answer_with_agent(
 def candidate_checksum(entries: Sequence[Mapping[str, object]]) -> str:
     """Identify exactly the candidate whose check or trial produced a result."""
     return hashlib.sha256(json.dumps(entries, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-
-
-def open_session(host: AgentHost, port: int) -> E2BSession | None:
-    """An E2B sandbox for one agent run, the gateway's port reachable inside it; ``None`` for any other executor.
-
-    Without a configured template the sandbox runs the harness's pinned binary, built into a template of its own
-    on first use."""
-    executor = host.executor
-    if not isinstance(executor, E2BExecutor):
-        return None
-    executor = executor.for_adapter(host.descriptor)
-    host.calls.note("proposer", f"starting an E2B sandbox from the template {executor.template}")
-    session = replace(executor, forward_ports=(port,), timeout_s=host.timeout_s).open()
-    host.calls.note("proposer", "the E2B sandbox is up and reaches the gateway through its tunnel")
-    return session
 
 
 def read_answer(

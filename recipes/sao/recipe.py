@@ -4,29 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Any
 
 from recipes.sao.processor import SAOBatches, SAOTasks
-from reef.core.plugins import NoSettings
 from reef.core.reports import ReportBase, ScoredRolloutReport
-from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.record2record import ReportGrouping, ReportRecord2Record
+from reef.record2record import ExclusiveReportRecord2Record
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
-
-
-class SAORecord2Record(ReportRecord2Record):
-    """SAO's record stage: every rollout trains by itself, and a terminal report owns its sources. No config."""
-
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, ReportGrouping(), exclusive_sources=True)
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -45,7 +31,8 @@ class SAORecipe(WeightTrainingRecipe):
     (``reef.inference_handler_factory``); reef never re-tokenizes a rollout to
     reconstruct them.
 
-    The stages are ``SAORecord2Record``, ``SAOTasks``, and ``SAOBatches``.
+    The stages are ``ExclusiveReportRecord2Record`` (every rollout trains by
+    itself), ``SAOTasks``, and ``SAOBatches``.
     The deployment sets ``batch_size`` in ``pipeline.task2batch.config``
     (default 128). It must equal the Slime driver's ``--global-batch-size``:
     each rollout sample is its own DP unit.
@@ -71,7 +58,7 @@ class SAORecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SAORecord2Record, record2task=SAOTasks, task2batch=SAOBatches)
+        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=SAOTasks, task2batch=SAOBatches)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

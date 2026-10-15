@@ -10,6 +10,7 @@ import asyncio
 from collections.abc import Mapping
 from typing import Any
 
+from reef.runtime.deployment import RuntimeConfigError, RuntimeConnectionConfig, RuntimeFactory
 from reef.runtime.executor.connection import CoordinatorClient, training_job_status
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -25,6 +26,9 @@ from reef.runtime.interfaces import (
 class ExecutorInferenceRuntime(InferenceRuntime):
     """Own request/serving state; borrow the deployment's control connection."""
 
+    #: The handler used when the caller passes no ``inference_handler_factory``.
+    default_inference_handler: type[InferenceHandler] | None = None
+
     def __init__(
         self,
         *,
@@ -35,6 +39,7 @@ class ExecutorInferenceRuntime(InferenceRuntime):
         inference_handler_factory: type[InferenceHandler] | None = None,
         inference_handler_config: Mapping[str, Any] | None = None,
     ) -> None:
+        inference_handler_factory = inference_handler_factory or self.default_inference_handler
         if not isinstance(inference_handler_factory, type) or not issubclass(
             inference_handler_factory, InferenceHandler
         ):
@@ -137,6 +142,41 @@ class ExecutorInferenceRuntime(InferenceRuntime):
 
     def shutdown(self) -> None:
         self.pause_admission()
+
+
+class EngineRuntimeFactory(RuntimeFactory):
+    """Connect a Reef-launched engine's receiver without constructing a trainer."""
+
+    #: The engine name in error messages.
+    engine_name: str
+    runtime_type: type[ExecutorInferenceRuntime]
+
+    def config_type(self) -> type:
+        return RuntimeConnectionConfig
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        injected = {key: config[key] for key in ("control", "inference_handler_factory") if key in config}
+        parsed = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
+        return {**parsed, **injected}
+
+    def __call__(
+        self,
+        config: Mapping[str, Any],
+        model_path: str,
+        recipe_config: Mapping[str, Any],
+        environ: Mapping[str, str],
+    ) -> InferenceRuntime:
+        control = config.get("control")
+        if not isinstance(control, CoordinatorClient):
+            raise RuntimeConfigError(f"the {self.engine_name} runtime requires a Reef coordinator client")
+        return self.runtime_type(
+            control=control,
+            model_path=model_path,
+            inference_url=config.get("inference_url"),
+            inference_timeout_s=config.get("inference_timeout_s", 300.0),
+            inference_handler_factory=config.get("inference_handler_factory"),
+            inference_handler_config=config.get("inference_handler_config"),
+        )
 
 
 def _serving_available(status: Mapping[str, Any]) -> bool:

@@ -18,7 +18,9 @@ A recipe binds ``WeightTrainingSpec(objective=..., scheduling=...)``.
 ``WeightTrainingSpec.loss_family`` derives the family from that objective;
 ``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
 ``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
-The bridge still rejects a payload whose ``loss`` differs from its boot family.
+The workers start with that objective's family. A job that selects another
+objective trains that objective's family on the same workers (see
+`Per-job families`_).
 
 Layout
 ------
@@ -150,6 +152,36 @@ row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 (thin families on the distillation base below).
+
+Per-job families
+----------------
+
+A job can select an objective of another family (`Switch methods within a run
+<write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep their
+startup flags. The family brings its ``--loss-type``, objective hooks,
+advantage routing, wire keys, and default driver options. Before the family's
+first job starts, the bridge validates the family against the startup flags.
+Only the actor workers switch; the critic keeps the startup family. A ``self``
+distillation teacher copies the actor's weights at the family's first job, and
+Reef does not checkpoint that copy.
+
+The bridge refuses a family that:
+
+- needs driver options;
+- configures the critic, as SAO does;
+- is a second distillation family;
+- declares a wire key with a dtype that another family of the run declares
+  differently;
+- fails its own validation against the startup flags.
+
+A learning-rate schedule sets the rate of each actor optimizer step through
+Slime's before-train-step hook. Reef runs any
+``--custom-megatron-before-train-step-hook-path`` first. Megatron's scheduler
+keeps its configured curve, so a checkpoint still loads under the startup
+flags. The bridge records each scenario's schedule progress in
+``reef_learning_rate_schedules.json`` beside the job marker, with each
+checkpoint. It refuses to start when that file records progress after the
+loaded checkpoint. It refuses a schedule when the run uses ``--decoupled-lr``.
 
 The distillation base
 ---------------------

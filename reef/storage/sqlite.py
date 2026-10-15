@@ -10,9 +10,10 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from threading import RLock
+from typing import Any, Self
 
 from sqlalchemy import REAL, URL, Column, Index, Integer, MetaData, Table, Text, create_engine, inspect
 from sqlalchemy.engine import Connection
@@ -20,10 +21,11 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
-from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
-from reef.storage.migrations import migrate_record_storage
+from reef.core.plugins import NoSettings
+from reef.storage.commit_log import CommitHistoryScenarioStore, CommitLog
+from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordRetention
-from reef.storage.scenario import ScenarioStorage
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
 _METADATA = MetaData()
@@ -75,9 +77,16 @@ RECORD_EVICTION = Table(
     Column("last_sequence", Integer, nullable=False),
 )
 Index("agent_record_capacity", _AGENT_RECORD.c.created_at, _AGENT_RECORD.c.sequence)
+# One database file holds one scenario, so its settings need no scenario column.
+_SCENARIO_SETTING = Table(
+    "scenario_setting",
+    _METADATA,
+    Column("name", Text, primary_key=True),
+    Column("value_json", Text, nullable=False),
+)
 logger = logging.getLogger(__name__)
 
-_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION)
+_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
 
 
 class SQLiteRecordStore(SQLRecordStore):
@@ -172,7 +181,7 @@ class SQLiteRecordStore(SQLRecordStore):
                     index.create(self._connection, checkfirst=True)
 
     @contextmanager
-    def _transaction(self, scenario: str, *, write: bool) -> Iterator[Connection]:
+    def _transaction(self, *, write: bool) -> Iterator[Connection]:
         with self._lock, self._connection.begin():
             # The driver's legacy mode does not begin a transaction for SELECT.
             # Writes also lock before reading retry state across connections.
@@ -301,20 +310,53 @@ class SQLiteRecordRetention:
 
 
 class SQLiteScenarioStorage(ScenarioStorage):
-    """Open existing hashed SQLite and JSONL paths and manage their lifecycle."""
+    """Open existing hashed SQLite and JSONL paths and manage their lifecycle.
+
+    Each scenario has one database file for its records and settings and one
+    JSONL commit log. Without a directory, all state is in memory. Records and
+    commits then last for one session, and settings last for the storage.
+    """
 
     def __init__(self, directory: Path | None = None) -> None:
         self._directory = None if directory is None else Path(directory)
         self._lock = RLock()
         self._closed = False
+        self._memory_settings: dict[str, ScenarioSettings] = {}
         if self._directory is not None:
             self._directory.mkdir(parents=True, exist_ok=True)
+            self._import_model_config_files(self._directory)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(directory)
 
     @property
     def durable(self) -> bool:
         return self._directory is not None
 
-    def open(self, scenario: str) -> CommitLogScenarioStore:
+    def read_settings(self, scenario: str) -> ScenarioSettings:
+        with self._lock:
+            self._ensure_open()
+            key = self._scenario_key(scenario)
+            if self._directory is None:
+                return self._memory_settings.get(scenario, ScenarioSettings())
+            database = self._directory / f"{key}.sqlite3"
+            if not database.exists():
+                return ScenarioSettings()
+            with closing(SQLiteRecordStore(database)) as records:
+                return records.read_settings()
+
+    def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
+        with self._lock:
+            self._ensure_open()
+            key = self._scenario_key(scenario)
+            if self._directory is None:
+                self._memory_settings[scenario] = settings
+                return
+            self._write_database_settings(self._directory / f"{key}.sqlite3", settings)
+
+    def open(self, scenario: str) -> CommitHistoryScenarioStore:
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
@@ -322,7 +364,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
             commit_log = None if self._directory is None else CommitLog(self._directory / f"{key}.commits.jsonl")
             records = SQLiteRecordStore(database)
             try:
-                return CommitLogScenarioStore(scenario, records, commit_log)
+                return CommitHistoryScenarioStore(scenario, records, commit_log)
             except BaseException:
                 records.close()
                 raise
@@ -332,6 +374,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
             self._ensure_open()
             paths = self.state_paths(scenario)
             if self._directory is None:
+                self._memory_settings.pop(scenario, None)
                 return ()
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
@@ -344,10 +387,10 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     moved.append(str(target))
             return tuple(moved)
 
-    def prune(self, *, days: float, max_bytes: int) -> int:
+    def prune(self, *, max_bytes: int) -> int:
         with self._lock:
             self._ensure_open()
-            retention = RecordRetention(days, max_bytes)
+            retention = RecordRetention(max_bytes=max_bytes)
             return 0 if self._directory is None else SQLiteRecordRetention(retention).prune(self._directory)
 
     def state_paths(self, scenario: str) -> tuple[Path, ...]:
@@ -366,9 +409,35 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._closed = True
 
+    @staticmethod
+    def _import_model_config_files(directory: Path) -> None:
+        """Move model configuration files of older versions into their scenario databases."""
+        imported = []
+        for key, (value, path) in legacy_model_configs(directory).items():
+            # Older versions stored no other setting, so the import replaces all settings.
+            SQLiteScenarioStorage._write_database_settings(
+                directory / f"{key}.sqlite3", ScenarioSettings(model_config=value)
+            )
+            imported.append(path)
+        for location in archive_imported_files(directory, imported):
+            logger.info("Imported a model configuration into its scenario database; the file moved to %s", location)
+
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("scenario storage is closed")
+
+    @staticmethod
+    def _write_database_settings(database: Path, settings: ScenarioSettings) -> None:
+        """Write settings into a scenario database and keep its files owner-only.
+
+        A model configuration can hold an upstream credential. Thus the database
+        and its WAL files get the owner-only mode of the old model file.
+        """
+        with closing(SQLiteRecordStore(database)) as records:
+            records.write_settings(settings)
+        for path in (database, database.with_name(f"{database.name}-wal"), database.with_name(f"{database.name}-shm")):
+            if path.exists():
+                path.chmod(0o600)
 
     @staticmethod
     def _scenario_key(scenario: str) -> str:

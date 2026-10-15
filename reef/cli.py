@@ -3,14 +3,12 @@
 Usage:
   reef serve --inference.upstream-url URL --inference.upstream-model MODEL  # connect a provider
   reef serve -c path/to/stack.yaml             # start a configured stack
-  reef connect                               # link an existing runtime to the console
 
 `reef serve` starts local inference or a provider deployment without YAML, or reads
-a config's `services` list and starts its processes in dependency order.
-Run `reef serve --help` for config options.
+a config's components and assembles their processes. Run `reef serve --help` for
+config options; the configuration reference documents the layout.
 
-Deployment stacks use the `services` layout documented in the configuration
-reference. Named recipe YAML is deployment data, not library data: point
+Named recipe YAML is deployment data, not library data: point
 ``REEF_RECIPE_CONFIG_DIR`` at your own directory.
 """
 
@@ -18,7 +16,7 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"serve", "connect"}
+_COMMANDS = {"serve"}
 
 
 def _help_text():
@@ -26,7 +24,6 @@ def _help_text():
 usage: reef <command> [options]
 
   serve  Start inference, connect a provider, or run a configured stack
-  connect  Connect an existing Reef runtime to the API platform
 
   -c CONFIG   Optional config file; omitted means configuration-free startup
   --version   Print the installed reef version
@@ -35,7 +32,6 @@ Examples:
   reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
   reef serve -c path/to/local-sglang.yaml
   reef serve -c path/to/external-provider.yaml
-  reef connect
 """
 
 
@@ -63,12 +59,6 @@ def main(argv=None):
         print(f"reef: unknown command '{cmd}'\n", file=sys.stderr)
         print(_help_text(), file=sys.stderr)
         sys.exit(2)
-
-    if cmd == "connect":
-        from reef.service.connector import main as _connect_main
-
-        _connect_main(rest)
-        return
 
     from reef.service.deploy import DeployConfigError, DeployStartupError
     from reef.service.deploy import main as _serve_main

@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.config import config_arguments
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
-from reef.recipe.config_fields import recipe_config_fields
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe
 from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
@@ -42,7 +42,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
         "reef-pi-extension-api",
     ]
     assert config == original
-    assert "training_mode" in recipe_config_fields(ReefineRecipe)
+    assert "training_mode" in {argument.name for argument in config_arguments(ReefineRecipe)}
 
 
 def test_evolution_overrides_and_training_fields_remain_available() -> None:

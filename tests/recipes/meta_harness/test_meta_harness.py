@@ -27,7 +27,7 @@ from reef.harness.tree.mutations import Mutation
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.commit_log import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -473,7 +473,6 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario_name = "../general-meta-harness"
@@ -514,8 +513,8 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     from harbor.models.trial.config import TrialConfig
     from harbor.utils.import_path import import_class
 
-    from reef.harness.episodes.executor import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
     from reef.harness.runners.terminus import runner
+    from reef.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = (*SEED, {"id": "agent", "name": "code_extension", "config": {"name": "agent", "code": code}})
@@ -604,7 +603,6 @@ def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Pa
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
@@ -635,7 +633,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     records = tmp_path / "records"
-    dispatcher = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
+    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
     mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
     try:
         scenario = dispatcher.get_or_create_scenario("commit-failure")
@@ -653,8 +651,8 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
         assert isinstance(backend, MetaHarnessBackend)
         with pytest.raises(RuntimeError, match="no active step"):
             _ = backend._population_store.active
-        assert isinstance(scenario.store, CommitLogScenarioStore)
-        commit_log = scenario.store.commit_log
+        assert isinstance(scenario.store, CommitHistoryScenarioStore)
+        commit_log = scenario.store.commit_history
         assert commit_log is not None
         monkeypatch.setattr(commit_log, "append", lambda record: (_ for _ in ()).throw(RuntimeError("offline")))
         with pytest.raises(RuntimeError, match="offline"):
@@ -666,7 +664,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     # A stale/corrupt mirror is never loaded as search state.  Recovery gets
     # the prior durable commit and rewrites the mirror from that value.
     mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
+    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
     try:
         recovered = restarted.get_or_create_scenario("commit-failure")
         assert recovered is not None
@@ -688,7 +686,6 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
@@ -709,8 +706,8 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         if failure == "publication":
             monkeypatch.setattr(scenario.repository, "publish", fail)
         elif failure == "commit":
-            assert isinstance(scenario.store, CommitLogScenarioStore)
-            monkeypatch.setattr(scenario.store.commit_log, "append", fail)
+            assert isinstance(scenario.store, CommitHistoryScenarioStore)
+            monkeypatch.setattr(scenario.store.commit_history, "append", fail)
         else:
             monkeypatch.setattr(scenario._committer, "_activate", fail)
         with pytest.raises(RuntimeError, match="unavailable"):

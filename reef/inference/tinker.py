@@ -208,10 +208,6 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def model_path(self) -> str:
         return self._model
 
-    @property
-    def pending_training_job_id(self) -> str | None:
-        return self._pending
-
     def serving_runtime_load_id(self) -> str:
         with self._lock:
             return self._version

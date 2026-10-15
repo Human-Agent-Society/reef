@@ -24,12 +24,6 @@ Who merges depends on the author:
 - A pull request from an external contributor is merged by one of the code
   owners who approved it.
 
-The `remind reviewers of idle pull requests` workflow runs every three days. It
-posts one comment on a fixed tracking issue listing ready pull requests without
-activity for three days and mentions whoever the next step waits on: the
-requested reviewers, the author when changes are requested or no reviewer is
-requested, or the merging person after approval.
-
 ## Roles
 
 ### Maintainer
@@ -293,8 +287,7 @@ permissions and branch protections.
 When a pull request is waiting on the author, the reviewer should identify the
 remaining work and leave a clear prompt before closing it. When it is waiting on
 review, the requested code owner should review it or ask the area's backup owner
-to take over. The reminder described in [Review routing](#review-routing)
-lists pull requests in either state.
+to take over.
 
 The stale workflow marks a non-draft pull request after 60 days without
 activity and closes it after another 21 days. Drafts and work labeled `KIV`,

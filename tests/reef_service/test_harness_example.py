@@ -847,16 +847,12 @@ def test_the_builtin_grades_the_health_task_and_the_tutorial_keeps_its_own_answe
 
 
 @pytest.mark.parametrize("filename", ["serve.yaml", "serve-native.yaml", "deployment.yaml"])
-@pytest.mark.parametrize("selector", ["role", "worker"])
-def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypatch, tmp_path, filename, selector):
+def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypatch, tmp_path, filename):
     materializer = _method(monkeypatch, "materialize_recipe")
     monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1]))
     config = yaml.safe_load((EXAMPLE_DIR / "configs" / filename).read_text())
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2, "resources": {"cpus_per_worker": 2}}}
     config["execution"] = {"evolution": "cpu-pool"}
-    if selector == "worker":
-        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
-        config["execution"]["evolution"] = "uni"  # The explicit worker profile must win.
     serve = tmp_path / "serve.yaml"
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
@@ -874,7 +870,6 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
         runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
     )
     assert recipe.worker_executor.backend == "mp"
-    assert recipe.episode_workers == 2
     assert recipe.worker_executor.workers == 2
     assert recipe.worker_executor.resources.cpus_per_worker == 2
 

@@ -35,6 +35,7 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import PassThroughRecord2Record, Record2Record, TaskStatus
+from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2task import NoTasks, Record2Task
 from reef.task2batch import NoBatches, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch
@@ -224,7 +225,7 @@ class TrainingPipeline:
         held_set_limit = self.batch_size * MANUAL_HELD_BATCHES if training_mode == "manual" else None
         self.context = replace(self.context, training_mode=training_mode, held_set_limit=held_set_limit)
         self.record2record.context_changed(self.context)
-        self.forget_sets(self.record2record.take_ended())
+        self.forget_ended_sets()
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits when it is wider than this recipe's own."""
@@ -265,16 +266,20 @@ class TrainingPipeline:
             raise ValueError(f"training request {request_id!r} is reserved; release its batch first")
         if request_id not in self.training_requests:
             raise ValueError(f"unknown training request {request_id!r}")
+        self.consume_request(request_id)
+        return frozenset({request_id})
+
+    def consume_request(self, request_id: str) -> None:
+        """Take a queued instruction out of the queue; a replay of its record no longer queues it."""
         self.training_requests.pop(request_id)
         self.failed_requests.pop(request_id, None)
         self.consumed_requests.add(request_id)
-        return frozenset({request_id})
 
     # ------------------------------------------------------------- records
 
-    def forget_sets(self, set_ids: frozenset[Hashable]) -> None:
-        """Forget the tasks of sets that the stage ended."""
-        for set_id in set_ids:
+    def forget_ended_sets(self) -> None:
+        """Forget the tasks of the sets that the record stage ended since the last call."""
+        for set_id in self.record2record.take_ended():
             self.tasks.pop(set_id, None)
 
     def make_formed_tasks(self) -> None:
@@ -283,8 +288,8 @@ class TrainingPipeline:
             result = self.record2task.make_tasks(record_set)
             if result.status is TaskStatus.READY:
                 self.tasks[record_set.set_id] = result.tasks
-            self.record2record.settle(record_set, result.status, result.runtime_load_id)
-        self.forget_sets(self.record2record.take_ended())
+            self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
+        self.forget_ended_sets()
 
     def ingest(self, item: AgentRecord) -> None:
         """Read one record. Training instructions stay here; every other record goes through the record stage."""
@@ -297,6 +302,10 @@ class TrainingPipeline:
             return
         self.record2record.ingest(item)
         self.make_formed_tasks()
+
+    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
+        """Give the record stage the runtime load ID that serves the scenario now, for its staleness check."""
+        self.record2record.observe_serving_runtime_load_id(runtime_load_id)
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -311,6 +320,8 @@ class TrainingPipeline:
         self.make_formed_tasks()
         if self.pending is not None:
             return True
+        self.record2record.drop_stale_sets(self.context.max_staleness)
+        self.forget_ended_sets()
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
@@ -354,13 +365,10 @@ class TrainingPipeline:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         consumed_sets = self.record2record.pool.consume_reserved()
         consumed = self.record2record.consume(consumed_sets, trained=trained)
-        self.forget_sets(self.record2record.take_ended())
+        self.forget_ended_sets()
         if self.pending.request is not None:
-            request_id = self.pending.request.id
-            self.training_requests.pop(request_id)
-            self.failed_requests.pop(request_id, None)
-            self.consumed_requests.add(request_id)
-            consumed = consumed | {request_id}
+            self.consume_request(self.pending.request.id)
+            consumed = consumed | {self.pending.request.id}
         self.pending = None
         return consumed
 
@@ -398,7 +406,6 @@ class TrainingPipeline:
             "buffered_requests": self.buffered_requests(),
             **self.record2record.operational_metrics(),
             **self.record2task.operational_metrics(),
-            **self.task2batch.operational_metrics(),
         }
 
     def status(self) -> Mapping[str, Any]:
@@ -414,10 +421,10 @@ class TrainingPipeline:
         state: dict[str, Any] = {"ready_units": len(self.record2record.pool), "batch_size": self.batch_size}
         if self.supported_training_modes & {"manual", "hybrid"}:
             state["buffered_requests"] = self.buffered_requests()
-        return {**state, **self.record2record.status(), **self.record2task.status(), **self.task2batch.status()}
+        return {**state, **self.record2record.status(), **self.record2task.status()}
 
     def close(self) -> None:
-        """Close the three stages; safe to call more than once.
+        """Close the record and task stages; safe to call more than once.
 
         After ``close`` returns, no background worker of a stage may touch
         shared state or deliver further results.
@@ -425,7 +432,4 @@ class TrainingPipeline:
         try:
             self.record2record.close()
         finally:
-            try:
-                self.record2task.close()
-            finally:
-                self.task2batch.close()
+            self.record2task.close()

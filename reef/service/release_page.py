@@ -428,7 +428,7 @@ def _review(metrics: Mapping[str, Any]) -> str:
         return ""
     parts = []
     if isinstance(review, Mapping):
-        review_result = status_span(str(review.get("result", review.get("verdict")) or "unknown"))
+        review_result = status_span(str(review.get("result") or "unknown"))
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
         kept = kept_answer(notes)
         if kept is not None:
@@ -493,11 +493,10 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     )
     numbers = []
     for field in RESULT_FIELDS:
-        legacy_field = "gate_sides" if field == "evaluation_sides" else field
         if unscored and field == "candidate_score":
             continue
-        if field in metrics or legacy_field in metrics:
-            value = metrics.get(field, metrics.get(legacy_field))
+        if field in metrics:
+            value = metrics[field]
             if isinstance(value, Sequence) and not isinstance(value, str):
                 shown = ", ".join(_strings(value))
             else:
@@ -779,15 +778,10 @@ def build_release_page(
     )
 
 
-# Compatibility aliases for existing imports.
-VERDICT_FIELDS = RESULT_FIELDS
-verdict_of = result_of
-
 __all__ = [
     "DECLINED_WORDS",
     "RESULT_FIELDS",
     "RESULT_LABELS",
-    "VERDICT_FIELDS",
     "before_release_id",
     "build_release_page",
     "build_running_step_page",
@@ -797,5 +791,4 @@ __all__ = [
     "result_of",
     "served_step",
     "step_href",
-    "verdict_of",
 ]

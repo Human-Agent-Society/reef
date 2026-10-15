@@ -13,24 +13,18 @@ from reef.core.records_types import AgentRecord
 class RecordSet(ABC):
     """Records that are used together, such as one record, a report with its inferences, or a ready group.
 
-    A stage forms record sets, and its pool holds, orders, and checks them.
-    The pool, the selection policies, and the eligibility checks read only
-    these fields:
+    A stage forms record sets, and its pool holds and orders them. The pool
+    and the selection policies read only these fields:
 
     * ``set_id`` identifies the set in the pool.
     * ``arrival_index`` tells when the stage received the set. A group
       uses the index of its oldest member.
     * ``group_key`` names the group of a set that is a group.
-    * ``runtime_load_id`` is the runtime load ID that produced the set's training data, if known.
-    * ``source_index`` tells when the source record of the set arrived, if it
-      differs from ``arrival_index``.
     """
 
     set_id: Hashable
     arrival_index: int
     group_key: Hashable | None = None
-    runtime_load_id: str | None = None
-    source_index: int | None = None
 
     @abstractmethod
     def record_ids(self) -> tuple[str, ...]:

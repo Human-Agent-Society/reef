@@ -10,7 +10,6 @@ import argparse
 import logging
 import os
 import re
-import shlex
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -26,29 +25,10 @@ from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resol
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
 
 
-def load_args_file(path: str | Path) -> list[str]:
-    """Read shell-like Slime arguments without executing a shell.
-
-    Environment variables are expanded first, ``#`` comments are supported,
-    and quoted values remain one token. Reef derives missing architecture
-    flags from ``--hf-checkpoint`` before the runtime parses them, so an args
-    file — when used — only carries deployment choices.
-    """
-    args_path = Path(path)
-    try:
-        contents = args_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"cannot read SLIME_ARGS_FILE {args_path}: {exc}") from exc
-    try:
-        return shlex.split(os.path.expandvars(contents), comments=True)
-    except ValueError as exc:
-        raise RuntimeError(f"cannot parse SLIME_ARGS_FILE {args_path}: {exc}") from exc
-
-
 def _parse_slime_args(arguments: Sequence[str]):
-    """Parse prepared file-first/direct-last arguments through Slime."""
+    """Parse prepared arguments through Slime."""
     if not arguments:
-        raise RuntimeError("no Slime arguments: set SLIME_ARGS_FILE or pass flags on the driver command")
+        raise RuntimeError("no Slime arguments: configure training options in the deployment config")
 
     from reef.train.slime_backend.reef_adapters.megatron.hf_arguments import add_hf_architecture_arguments
 
@@ -203,17 +183,12 @@ def _job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]
     return {"env_vars": {"PYTHONPATH": pythonpath}}
 
 
-def create_training_plan(
-    config: Mapping[str, Any], direct_args: Sequence[str] = (), *, loss_family: str
-) -> TrainingDeploymentPlan:
+def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
     ray_address = os.environ.get("RAY_ADDRESS", "").strip()
     if not ray_address:
         raise RuntimeError("RAY_ADDRESS is required")
-    args_file = os.environ.get("SLIME_ARGS_FILE", "").strip() or None
     namespace = os.environ.get("REEF_RAY_NAMESPACE", DEFAULT_NAMESPACE)
     actor_name = os.environ.get("REEF_RAY_ACTOR_NAME", DEFAULT_ACTOR_NAME)
-    if config.get("reef", {}).get("inference_num_gpus") is not None and (args_file or direct_args):
-        raise RuntimeError("managed drivers read resolved configuration; pass options through reef serve")
     recipe = config_value(config, "reef", "recipe", expand=False)
     if not loss_family:
         raise RuntimeError(f"reef.recipe {recipe!r} declares no training loss family")
@@ -221,12 +196,7 @@ def create_training_plan(
         spec = resolve_loss_family(loss_family)
     except UnknownLossFamilyError as exc:
         raise RuntimeError(f"reef.recipe {recipe!r} declares unsupported loss family {loss_family!r}: {exc}") from exc
-    combined_args = [
-        *driver_arguments(config, loss_family=loss_family),
-        *(load_args_file(args_file) if args_file else []),
-        *direct_args,
-    ]
-    retention, remaining_args = _retention_options(combined_args)
+    retention, remaining_args = _retention_options(driver_arguments(config, loss_family=loss_family))
     loss_family_config, slime_args = spec.parse_driver_options(remaining_args)
     args = _parse_slime_args(slime_args)
     _configure_executors(args, config, slime_args)

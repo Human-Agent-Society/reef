@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -29,23 +28,9 @@ from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
-from reef.evaluation.harness import (
-    EpisodeScorer,
-    FloorPlugin,
-    ScoreComparisonPlugin,
-    evaluation_selection,
-    legacy_worker_settings,
-)
+from reef.evaluation.harness import EpisodeScorer, FloorPlugin, ScoreComparisonPlugin, evaluation_selection
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
-from reef.harness.episodes.executor import (
-    EpisodeExecutor,
-    LocalExecutor,
-    SandboxExecutor,
-    SandboxUnavailable,
-    build_executor,
-)
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
@@ -55,13 +40,17 @@ from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
+from reef.record2record import ReportRecord2Record
+from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
+from reef.sandbox.config import build_executor
+from reef.sandbox.e2b import E2BExecutor, deployment_owner
+from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import CordisBackend
-from reef.train.cordis_backend.processor import TraceBatches, TraceRecord2Record, TraceTasks
+from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
 from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
@@ -74,7 +63,9 @@ _SELECTION_PLUGINS: dict[str, type[SelectionPlugin]] = {
 }
 
 
-def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[EpisodeExecutor | None, float, float]:
+def proposer_agent_settings(
+    section: Any, environ: Mapping[str, str], *, proposals_dir: Path = Path(".reef/proposals")
+) -> tuple[EpisodeExecutor | None, float, float]:
     """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
@@ -82,10 +73,11 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
     ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
     ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
     first use) that reaches the gateway through a tunnel and nothing else of the
-    host; ``sandbox: none`` runs it unisolated with the service's privileges, and must
-    be chosen. Left empty (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is
-    jailed where the host can, and off (the text proposer answers requests)
-    where it cannot.
+    host, and carries the deployment that ``proposals_dir`` names, so a later
+    start stops the sandboxes a stopped run left; ``sandbox: none`` runs it
+    unisolated with the service's privileges, and must be chosen. Left empty
+    (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is jailed where the host
+    can, and off (the text proposer answers requests) where it cannot.
     """
     if section is None:
         return None, 1800.0, 300.0
@@ -110,7 +102,7 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
                 {key: section[key] for key in ("e2b_api_key", "e2b_api_key_env", "e2b_template") if key in section},
                 environ,
             )
-            remote = replace(remote, timeout_s=timeouts[0])
+            remote = replace(remote, timeout_s=timeouts[0], owner=deployment_owner(proposals_dir))
             remote.preflight()
         except SandboxUnavailable as exc:
             raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
@@ -216,7 +208,7 @@ class CordisRecipe(Recipe):
     refuses more).
 
     Worker placement/count/resources live under ``execution.evolution``, not
-    the business configuration. Legacy ``episode_workers`` remains an alias.
+    the business configuration.
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
@@ -283,13 +275,11 @@ class CordisRecipe(Recipe):
     #: merged onto the release served now, evaluated again, or refused and proposed again.
     on_stale: StaleResultPolicy = "merge"
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
-    episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.
     proposals_dir: str = ".reef/proposals"
     max_pending_proposals: int = 8
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
-    worker_gpus: float | None = None
     #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
     agent_executor: EpisodeExecutor | None = None
     agent_timeout_s: float = 1800.0
@@ -309,7 +299,7 @@ class CordisRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=TraceRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
+        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
 
     @property
     def harness_adapter(self) -> str | None:
@@ -323,10 +313,7 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires an EpisodeScorer")
         if not self.tasks:
             raise ValueError("harness evolution requires tasks")
-        settings = legacy_worker_settings(self.worker_executor, self.episode_workers, self.worker_gpus)
-        _, requirements = evaluation_selection(self.score_episode, None, settings)
-        object.__setattr__(self, "worker_executor", settings)
-        object.__setattr__(self, "episode_workers", requirements.workers)
+        evaluation_selection(self.score_episode, self.worker_executor)
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
@@ -466,8 +453,6 @@ class CordisRecipe(Recipe):
             else:
                 raise RecipeConfigError("evolution.seed entries must be entry option mappings or dotted references")
         seed = entries
-        if "acceptance" in evolution:
-            raise RecipeConfigError("evolution.acceptance was removed; configure evolution.selection")
         selection_setting = evolution.get("selection", "score_comparison")
         selection = _selection_reference(selection_setting)
         if budgets["min_win_margin"]:
@@ -542,15 +527,6 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(str(exc)) from exc
         if "served" in models:
             raise RecipeConfigError("evolution.models may not name a model 'served'; that is the model under test")
-        # A ``${VAR}`` interpolation arrives as text, so a digit string counts.
-        raw_workers = evolution.get("episode_workers")
-        if isinstance(raw_workers, str) and raw_workers.strip().isdigit():
-            raw_workers = int(raw_workers)
-        if "episode_workers" in evolution and (
-            isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1
-        ):
-            raise RecipeConfigError("evolution.episode_workers must be a positive integer")
-        episode_workers = raw_workers
         proposals_dir = evolution.get("proposals_dir", cls.proposals_dir)
         if not isinstance(proposals_dir, str) or not proposals_dir.strip():
             raise RecipeConfigError("evolution.proposals_dir must be a non-empty path")
@@ -561,32 +537,8 @@ class CordisRecipe(Recipe):
         if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         try:
-            role_settings = role_executor_settings(settings, "evolution")
-            if "worker_executor" in evolution and (
-                role_settings.workers is not None or role_settings.resources != WorkerResources()
-            ):
-                raise ValueError(
-                    "remove deprecated evolution.worker_executor when execution.evolution defines workers/resources"
-                )
-            worker_executor = (
-                executor_settings(settings, evolution["worker_executor"])
-                if "worker_executor" in evolution
-                else role_settings
-            )
-            resources = evolution.get("worker_resources", {})
-            if not isinstance(resources, Mapping) or set(resources) - {"num_gpus"}:
-                raise ValueError("evolution.worker_resources accepts only num_gpus")
-            worker_gpus = resources.get("num_gpus")
-            if any(key in evolution for key in ("episode_workers", "worker_executor", "worker_resources")):
-                warnings.warn(
-                    "evolution.episode_workers/worker_executor/worker_resources are deprecated; "
-                    "use execution.evolution.backend/workers/resources",
-                    DeprecationWarning,
-                    stacklevel=3,
-                )
-            worker_executor = legacy_worker_settings(worker_executor, episode_workers, worker_gpus)
+            worker_executor = role_executor_settings(settings, "evolution")
             scorer = EpisodeScorer.from_setting(evolution.get("evaluate"), setting="evolution.evaluate")
-            evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
             propose = Proposer.from_setting(evolution.get("propose"), setting="evolution.propose")
             promote = (
                 Promoter.from_setting(evolution["promote"], setting="evolution.promote")
@@ -596,12 +548,8 @@ class CordisRecipe(Recipe):
         except (TypeError, ValueError) as exc:
             raise RecipeConfigError(str(exc)) from exc
         agent_executor, agent_timeout_s, agent_trial_timeout_s = proposer_agent_settings(
-            evolution.get("proposer_agent"), values
+            evolution.get("proposer_agent"), values, proposals_dir=Path(proposals_dir.strip())
         )
-        if isinstance(agent_executor, E2BExecutor):
-            # The deployment's own state directory names its sandboxes, so its first sandbox can stop the ones a
-            # previous run left, which a stop mid run never closed.
-            agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
         return {
             **super()._recipe_kwargs(settings, values),
             "agent_executor": agent_executor,
@@ -613,7 +561,6 @@ class CordisRecipe(Recipe):
             "promote": promote,
             "score_episode": scorer,
             "worker_executor": worker_executor,
-            "worker_gpus": worker_gpus,
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
             "binary": binary,
@@ -635,7 +582,6 @@ class CordisRecipe(Recipe):
             "models": models,
             "model_metadata": model_metadata,
             "selection": selection,
-            "episode_workers": episode_workers,
             "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 

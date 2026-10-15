@@ -717,10 +717,7 @@ def test_a_trial_that_fails_admission_or_load_is_refused_and_rolled_back(tmp_pat
     assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None] * 5
 
 
-@pytest.mark.parametrize("results_view", ["results", "verdicts"])
-def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(
-    tmp_path: Path, reef: _FakeReef, results_view: str
-) -> None:
+def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(tmp_path: Path, reef: _FakeReef) -> None:
     reef.release("r0", [_tool("shout")])
     rejected = [
         {"step": 2, "mutations": [{"op": "create", "id": "x", "options": {"name": "skill"}}], "reason": "lost"}
@@ -728,7 +725,7 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(
     reef.release("r1", [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)], parent="r0", rejected=rejected)
     reef.replies = [
         _reply(tool_calls=[_call("harness_inspect", {"what": what}, f"c-{what}")])
-        for what in ("tree", "graph", results_view, "status", "nope")
+        for what in ("tree", "graph", "results", "status", "nope")
     ]
     reef.replies.append(_reply("looked"))
     with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
@@ -748,7 +745,6 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(
     seen = json.loads(results["content"])
     assert [row["release_id"] for row in seen["releases"]] == ["r1", "r0"]
     assert seen["releases"][0]["evaluation"] == {"wins": 1, "rejected": rejected} and seen["head"] == "r1"
-    assert seen["releases"][0]["gate"] == seen["releases"][0]["evaluation"]
     assert seen["rejected"] == rejected
     assert json.loads(status["content"]) == {
         "release_id": "r1",

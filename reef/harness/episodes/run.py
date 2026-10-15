@@ -32,14 +32,9 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.executor import (
-    EpisodeExecutor,
-    EpisodeLaunchError,
-    EpisodeTimeout,
-    LocalExecutor,
-    SandboxExecutor,
-)
 from reef.harness.episodes.trajectory import reader_for
+from reef.sandbox.environment import execute
+from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor
 
 
 class EpisodeError(ReefError):
@@ -135,10 +130,10 @@ def run_episode(
     descriptor's argv template. ``executor`` decides how the process runs
     (the default local subprocess, or a sandbox); the rendered files,
     relocation environment, trajectory read, and residue collection are the
-    same for every executor. Only the local executor keeps the descriptor's
-    ``host_env`` from the service and, on macOS, makes the root of an adapter
-    with ``is_root_bind_mounted`` under ``~/.reef/episodes`` rather than the
-    temp directory. The episode root is removed before this returns, success
+    same for every executor. Only an executor that runs on the Reef host
+    keeps the descriptor's ``host_env`` from the service and, on macOS, makes
+    the root of an adapter with ``is_root_bind_mounted`` under
+    ``~/.reef/episodes`` rather than the temp directory. The episode root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
@@ -152,16 +147,16 @@ def run_episode(
             descriptor.validate_execution(files, executor)
         except EpisodeLaunchError as exc:
             raise EpisodeError(str(exc)) from exc
-    elif descriptor.self_isolating and isinstance(executor, SandboxExecutor):
+    elif descriptor.self_isolating and not executor.runs_on_host:
         raise EpisodeError(
-            f"adapter {descriptor.name!r} isolates episodes in its own container and cannot run under "
-            "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
+            f"adapter {descriptor.name!r} isolates episodes in its own container, which runs only on the Reef "
+            "host; use evolution.executor: local and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
     # Docker on macOS runs in a VM that shares the home directory with the host, and colima does not share the temp
     # directory, so a root the binary bind-mounts from lives under the home there. Linux Docker shares every path,
-    # and a sandbox or a remote executor runs no local container.
-    if descriptor.is_root_bind_mounted and isinstance(executor, LocalExecutor) and sys.platform == "darwin":
+    # and an executor off the Reef host runs no local container.
+    if descriptor.is_root_bind_mounted and executor.runs_on_host and sys.platform == "darwin":
         parent = Path.home() / ".reef" / "episodes"
         try:
             parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +191,7 @@ def run_episode(
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
         env.setdefault("HOME", str(root))
-        if isinstance(executor, LocalExecutor):
+        if executor.runs_on_host:
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
             # its explicit env_from.
             for key, default in descriptor.host_env.items():
@@ -205,7 +200,8 @@ def run_episode(
                     env[key] = value
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
-            outcome = executor.launch(
+            outcome = execute(
+                executor,
                 argv,
                 root=root,
                 workspace=workspace,

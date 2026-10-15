@@ -10,7 +10,6 @@ from reef.runtime.interfaces import AdapterEngine
 from reef.runtime.publication import (
     AdapterCapacityExhausted,
     AdapterEvictionFailed,
-    AdapterNotActive,
     AdapterResidencyError,
     AdapterResidencyManager,
 )
@@ -48,13 +47,20 @@ def engine() -> FakeEngine:
     return FakeEngine()
 
 
+def current(manager: AdapterResidencyManager, scenario: str) -> str | None:
+    """The runtime load ID ``scenario`` serves, as the status block reports it."""
+    block = manager.status()["scenarios"].get(scenario)
+    if block is None or block["current"] is None:
+        return None
+    return block["current"]["runtime_load_id"]
+
+
 def test_activation_loads_then_advances_the_scenario_current(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager(capacity=4)
     name = manager.activate("a", "v1", engine, payload="bytes-of-v1")
     assert name == adapter_name("a", "v1")
     assert engine.loaded == [name] and engine.payloads == ["bytes-of-v1"]
-    current = manager.current("a")
-    assert current is not None and current.runtime_load_id == "v1" and current.current and current.protected
+    assert current(manager, "a") == "v1" and manager.status()["protected"] == 1
 
 
 def test_two_scenarios_with_the_same_revision_label_do_not_collide(engine: FakeEngine) -> None:
@@ -63,8 +69,8 @@ def test_two_scenarios_with_the_same_revision_label_do_not_collide(engine: FakeE
     b = manager.activate("b", "v1", engine)
     assert a != b
     assert engine.resident == {a, b}
-    assert manager.resolve("a", "v1").name == a
-    assert manager.resolve("b", "v1").name == b
+    scenarios = manager.status()["scenarios"]
+    assert scenarios["a"]["current"]["adapter"] == a and scenarios["b"]["current"]["adapter"] == b
 
 
 def test_load_failure_leaves_the_incumbent_active_and_no_phantom_slot(engine: FakeEngine) -> None:
@@ -73,8 +79,8 @@ def test_load_failure_leaves_the_incumbent_active_and_no_phantom_slot(engine: Fa
     engine.fail_load.add(adapter_name("a", "v2"))
     with pytest.raises(AdapterResidencyError, match="could not load"):
         manager.activate("a", "v2", engine)
-    assert manager.current("a").runtime_load_id == "v1"
-    assert [entry.runtime_load_id for entry in manager.resident()] == ["v1"]
+    assert current(manager, "a") == "v1"
+    assert manager.status()["scenarios"]["a"]["resident"] == ["v1"]
     assert manager.status()["counters"]["load_failures"] == 1
 
 
@@ -86,8 +92,8 @@ def test_eviction_is_oldest_unprotected_first_across_scenarios(engine: FakeEngin
     # Full. Activating b2 must evict a1 (oldest unprotected), never b1 or a2.
     manager.activate("b", "b2", engine)
     assert engine.unloaded == [adapter_name("a", "a1")]
-    assert manager.current("a").runtime_load_id == "a2"
-    assert manager.current("b").runtime_load_id == "b2"
+    assert current(manager, "a") == "a2"
+    assert current(manager, "b") == "b2"
     assert manager.status()["counters"]["evictions"] == 1
 
 
@@ -98,8 +104,8 @@ def test_capacity_exhaustion_fails_closed_when_every_slot_is_protected(engine: F
     with pytest.raises(AdapterCapacityExhausted, match="exhausted"):
         manager.activate("c", "c1", engine)
     assert engine.unloaded == []
-    assert manager.current("c") is None
-    assert manager.current("a").runtime_load_id == "a1" and manager.current("b").runtime_load_id == "b1"
+    assert current(manager, "c") is None
+    assert current(manager, "a") == "a1" and current(manager, "b") == "b1"
     assert manager.status()["counters"]["capacity_rejections"] == 1
 
 
@@ -112,25 +118,10 @@ def test_supersede_lets_a_paused_scenario_evict_its_own_current_revision(engine:
         manager.activate("a", "a2", engine)
     manager.activate("a", "a2", engine, supersede=True)
     assert engine.unloaded == [adapter_name("a", "a1")]
-    assert manager.current("a").runtime_load_id == "a2" and manager.current("b").runtime_load_id == "b1"
+    assert current(manager, "a") == "a2" and current(manager, "b") == "b1"
     # A peer's current revision is still never the victim.
     with pytest.raises(AdapterCapacityExhausted):
         manager.activate("c", "c1", engine, supersede=True)
-
-
-def test_supersede_does_not_override_a_pin_or_an_in_flight_lease(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=1)
-    manager.activate("a", "a1", engine)
-    manager.pin("a", "a1")
-    with pytest.raises(AdapterCapacityExhausted):
-        manager.activate("a", "a2", engine, supersede=True)
-    manager.unpin("a", "a1")
-    lease = manager.lease("a", "a1")
-    with pytest.raises(AdapterCapacityExhausted):
-        manager.activate("a", "a2", engine, supersede=True)
-    lease.release()
-    manager.activate("a", "a2", engine, supersede=True)
-    assert engine.unloaded == [adapter_name("a", "a1")]
 
 
 def test_make_room_then_register_accounts_for_an_out_of_band_load(engine: FakeEngine) -> None:
@@ -140,12 +131,12 @@ def test_make_room_then_register_accounts_for_an_out_of_band_load(engine: FakeEn
     manager.activate("b", "b1", engine)
     manager.make_room("a", engine, supersede=True)
     assert engine.unloaded == [adapter_name("a", "a1")]
-    assert manager.current("a") is None
+    assert current(manager, "a") is None
     name = manager.register("a", "a2")
     assert name == adapter_name("a", "a2")
     assert engine.loaded == [adapter_name("a", "a1"), adapter_name("b", "b1")], "register loads nothing"
-    assert manager.current("a").runtime_load_id == "a2"
-    assert manager.resolve("a", "a2").name == name
+    assert current(manager, "a") == "a2"
+    assert manager.status()["scenarios"]["a"]["current"]["adapter"] == name
     status = manager.status()
     assert status["resident"] == 2 and status["counters"]["loads"] == 3
     # Registering the resident revision again is idempotent.
@@ -157,7 +148,7 @@ def test_make_room_refuses_when_every_slot_is_protected(engine: FakeEngine) -> N
     manager.activate("a", "a1", engine)
     with pytest.raises(AdapterCapacityExhausted):
         manager.make_room("b", engine, supersede=True)
-    assert engine.unloaded == [] and manager.current("a").runtime_load_id == "a1"
+    assert engine.unloaded == [] and current(manager, "a") == "a1"
 
 
 def test_register_reclaims_a_leaked_slot_the_engine_reloaded(engine: FakeEngine) -> None:
@@ -170,7 +161,7 @@ def test_register_reclaims_a_leaked_slot_the_engine_reloaded(engine: FakeEngine)
     assert manager.status()["leaked"] == 1
     # The trainer republished a1 in place (its transport upserts by name).
     manager.register("a", "a1")
-    assert manager.status()["leaked"] == 0 and manager.current("a").runtime_load_id == "a1"
+    assert manager.status()["leaked"] == 0 and current(manager, "a") == "a1"
     assert manager.status()["recent_actions"][-1]["action"] == "reclaimed"
 
 
@@ -179,42 +170,6 @@ def test_register_beyond_capacity_is_counted_not_hidden(engine: FakeEngine) -> N
     manager.activate("a", "a1", engine)
     manager.register("b", "b1")
     assert manager.status()["resident"] == 2
-
-
-def test_pinned_revisions_survive_eviction(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=2)
-    manager.activate("a", "a1", engine)
-    manager.pin("a", "a1")
-    manager.activate("a", "a2", engine)
-    with pytest.raises(AdapterCapacityExhausted):
-        manager.activate("a", "a3", engine)
-    manager.unpin("a", "a1")
-    manager.activate("a", "a3", engine)
-    assert engine.unloaded == [adapter_name("a", "a1")]
-
-
-def test_in_flight_requests_protect_a_superseded_revision(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=2)
-    manager.activate("a", "a1", engine)
-    lease = manager.lease("a", "a1")
-    manager.activate("a", "a2", engine)
-    with pytest.raises(AdapterCapacityExhausted):
-        manager.activate("a", "a3", engine)
-    lease.release()
-    lease.release()  # idempotent
-    manager.activate("a", "a3", engine)
-    assert engine.unloaded == [adapter_name("a", "a1")]
-
-
-def test_lease_fails_closed_for_a_revision_that_is_not_active(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=2)
-    with pytest.raises(AdapterNotActive, match="no active adapter"):
-        manager.lease("a", "a1")
-    manager.activate("a", "a1", engine)
-    with pytest.raises(AdapterNotActive, match="not the requested"):
-        manager.lease("a", "a0")
-    with pytest.raises(AdapterNotActive):
-        manager.lease("b", "a1")
 
 
 def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeEngine) -> None:
@@ -227,7 +182,7 @@ def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeE
     status = manager.status()
     assert status["leaked"] == 1 and status["resident"] == 2
     assert status["counters"]["unload_failures"] == 1
-    assert manager.current("a").runtime_load_id == "a2"
+    assert current(manager, "a") == "a2"
     # Once the engine lets go, the leaked slot is reclaimed before any live one.
     engine.fail_unload.clear()
     manager.activate("a", "a3", engine)
@@ -246,17 +201,6 @@ def test_a_failed_eviction_carries_the_engine_failure_as_its_cause(engine: FakeE
     assert isinstance(excinfo.value.__cause__, RuntimeError)
 
 
-def test_alias_routes_a_republished_version_through_the_resident_adapter(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=1)
-    name = manager.activate("a", "a1", engine)
-    assert manager.alias("a", "rollback-1") == name
-    assert manager.resolve("a", "rollback-1").name == name
-    assert manager.lease("a", "a1").adapter_name == name
-    assert engine.loaded == [name]
-    with pytest.raises(AdapterNotActive):
-        manager.alias("b", "x")
-
-
 def test_reactivating_the_resident_revision_is_idempotent(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager(capacity=1)
     manager.activate("a", "a1", engine)
@@ -270,19 +214,9 @@ def test_reconcile_drops_lost_adapters_and_unloads_strays(engine: FakeEngine) ->
     lost = manager.activate("b", "b1", engine)
     dropped = manager.reconcile([kept, "reef-adapter-stale.v0"], engine)
     assert dropped == (lost,)
-    assert manager.current("b") is None
-    assert manager.current("a").name == kept
+    assert current(manager, "b") is None
+    assert manager.status()["scenarios"]["a"]["current"]["adapter"] == kept
     assert "reef-adapter-stale.v0" in engine.unloaded
-    with pytest.raises(AdapterNotActive):
-        manager.lease("b", "b1")
-
-
-def test_release_scenario_makes_its_adapter_evictable(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=1)
-    manager.activate("a", "a1", engine)
-    manager.release_scenario("a")
-    manager.activate("b", "b1", engine)
-    assert engine.unloaded == [adapter_name("a", "a1")]
 
 
 def test_unbounded_manager_never_evicts(engine: FakeEngine) -> None:
@@ -349,13 +283,13 @@ def test_ambiguous_load_timeout_is_cleaned_up_and_the_retry_succeeds() -> None:
         manager.activate("a", "v2", engine)
     # Deterministic outcome: Reef counts no slot, and the engine was told to
     # drop the name, so neither side holds v2 after the ambiguous attempt.
-    assert manager.current("a").runtime_load_id == "v1"
+    assert current(manager, "a") == "v1"
     assert name not in engine.resident
     counters = manager.status()["counters"]
     assert counters["load_failures"] == 1 and counters["load_cleanups"] == 1
     engine.ambiguous.clear()
     assert manager.activate("a", "v2", engine) == name
-    assert manager.current("a").runtime_load_id == "v2" and name in engine.resident
+    assert current(manager, "a") == "v2" and name in engine.resident
     assert [entry["action"] for entry in manager.status()["recent_actions"]] == ["load_failed", "load_cleanup"]
 
 
@@ -393,7 +327,7 @@ def test_capacity_rejection_names_the_slot_count_the_engine_needs(engine: FakeEn
     assert "--max-loaded-loras" in message
     # Nothing was touched, so the claim the message makes is true.
     assert engine.unloaded == []
-    assert manager.current("a").runtime_load_id == "a1"
+    assert current(manager, "a") == "a1"
 
 
 def test_a_refused_eviction_is_distinguishable_from_a_plain_rejection(engine: FakeEngine) -> None:

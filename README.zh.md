@@ -27,6 +27,7 @@ harness，包括提示词、规则和技能。
 
 **🚀 [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
 🗺️ [路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
+🗓️ [Office Hours](https://github.com/Human-Agent-Society/reef/issues/818) |
 📣 [发布文章](https://x.com/ao_qu18465/status/2094867930081337730) |
 💬 [加入 Discord](https://discord.gg/5y8e5f937k) |
 📱 [加入微信群](docs/community/wechat.md)**
@@ -205,7 +206,7 @@ reef serve --recipe reefine \
 使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
 `REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，不启用认证（启动前设置 `REEF_TOKEN` 即要求该 token），状态保存在
-`.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。
+`.reef/reefine/`。
 需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
 
 在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
