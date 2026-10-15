@@ -180,6 +180,7 @@ Optional:
 
   ``REEF_TOKEN``  bearer token for the reef service (if auth is enabled); unset, the wrapper
                   uses the token the install wrote into the tree's model binding
+  ``REEF_TENANT_ID``  local tenant identifier; unset, the wrapper uses the tenant saved by the install
 
 The env file, ``<install root>/.reef-harness-env`` beside the release file,
 holds the values the person gave ``setup`` for ``env`` items: ``NAME=VALUE``
@@ -833,7 +834,7 @@ class CaptureProxyServer(ThreadingHTTPServer):
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
-    Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
+    Forwards to ``upstream`` with the scenario, tenant and token, tags every
     call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
     and hands the release id an answer names to ``observer``."""
 
@@ -843,6 +844,7 @@ class CaptureProxy:
         scenario: str,
         token: str | None = None,
         *,
+        tenant_id: str | None = None,
         tags: Mapping[str, str] | None = None,
         observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
@@ -853,6 +855,8 @@ class CaptureProxy:
         fixed: dict[str, str] = {"x-reef-scenario": scenario}
         if token:
             fixed["authorization"] = f"Bearer {token}"
+        if tenant_id:
+            fixed["x-reef-tenant"] = tenant_id
         self._config = ServeConfig(upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS)
         #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = _Tags(self._config, fixed)
@@ -938,7 +942,7 @@ def wrapper_directory(install_root: Path) -> Path:
 
 def read_install_record(compose_dir: str) -> dict[str, Any] | None:
     """What the install script recorded for this install root: ``install_root``, ``service_url`` (the address the
-    script was served from), ``release_file`` (the checksum of the release file without its check offs), ``files``
+    script was served from), optional ``tenant_id``, ``release_file`` (the checksum without its check offs), ``files``
     (each file it wrote, relative to the root, with its sha256) and ``settings`` (for a JSON file the binary writes
     too, its ``preference_keys`` and the ``checked_values`` of every other key). None when no install recorded one.
 
@@ -954,6 +958,29 @@ def read_install_record(compose_dir: str) -> dict[str, Any] | None:
     if not isinstance(record, dict) or record.get("install_root") != str(install_root):
         return None
     return record
+
+
+def reef_tenant_id(compose_dir: str | None = None) -> str | None:
+    """Return the numeric tenant as header text, honoring the shell override."""
+    selected = os.environ.get("REEF_TENANT_ID", "").strip()
+    if selected:
+        value: object = selected
+    else:
+        directory = compose_dir if compose_dir is not None else os.environ.get("REEF_HARNESS_COMPOSE", "")
+        if not directory:
+            return None
+        value = (read_install_record(directory) or {}).get("tenant_id")
+        if value is None:
+            return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        tenant_id = value
+    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,18}", value.strip()):
+        tenant_id = int(value.strip())
+    else:
+        raise ValueError("tenant_id must be a positive integer; reinstall or set REEF_TENANT_ID after ID migration")
+    if not 1 <= tenant_id <= 2**63 - 1:
+        raise ValueError("tenant_id must fit a positive signed 64-bit integer")
+    return str(tenant_id)
 
 
 def recorded_install_files(record: Mapping[str, Any]) -> dict[str, str]:
@@ -1302,7 +1329,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     # Every call carries the session as a tag, so the spool and the agent records name the session an ask refers to.
     tags = {"session": str(uuid.uuid4()), **({"release": release} if release else {})}
     token = _reef_token(adapter, compose_dir)
-    proxy = CaptureProxy(upstream, scenario, token, tags=tags)
+    tenant_id = reef_tenant_id(compose_dir)
+    proxy = CaptureProxy(upstream, scenario, token, tenant_id=tenant_id, tags=tags)
     try:
         proxy.start()
     except WrapperError as exc:
@@ -1370,6 +1398,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
+    if tenant_id:
+        env["REEF_TENANT_ID"] = tenant_id
     # The session tag every call of this run carries, so a request filed from inside the session names it.
     env["REEF_HARNESS_SESSION"] = tags["session"]
     # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
@@ -1467,6 +1497,9 @@ def _reef_headers(scenario: str, token: str | None) -> dict[str, str]:
     headers = {"Content-Type": "application/json", "x-reef-scenario": scenario}
     if token:
         headers["authorization"] = f"Bearer {token}"
+    tenant_id = reef_tenant_id()
+    if tenant_id:
+        headers["x-reef-tenant"] = tenant_id
     return headers
 
 
@@ -1966,7 +1999,7 @@ def harness(
         later = (
             "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
         )
-        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or {later}")
+        print(f"reef-{adapter}: request accepted; add --wait to follow it, or {later}")
         return 0
     return report_request(
         scenario, adapter, compose_dir, upstream, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s

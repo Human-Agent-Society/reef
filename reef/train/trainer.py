@@ -286,6 +286,11 @@ class Trainer:
         with self._lock:
             return None if self._pending is None else self._pending.batch
 
+    def has_unread_records(self) -> bool:
+        """Whether accepted records still need processing before an idle decision."""
+        with self._lock:
+            return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+
     def batch_ready(self) -> bool:
         """Whether a reserved or buildable batch is waiting on the training thread."""
         with self._lock:

@@ -9,6 +9,9 @@ The modules follow these responsibilities:
   scenario archival coordination. It caches concrete ``runtime.model_config.ModelConfig``
   instances and calls ``storage.model_config`` functions for private JSON files.
   Recipes and the factory receive only the current scenario's configuration.
+- ``scheduling`` owns tenant quota and queued lifecycle metadata through an
+  injected storage interface; ``admission`` admits ready instances and persists control
+  operations for recovery. Neither owns a second collection of Scenario instances.
 - ``factory`` registers the base artifact, validates release selectors,
   opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.

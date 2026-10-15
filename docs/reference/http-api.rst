@@ -24,6 +24,11 @@ To put the release routes into practice, follow the `agent harness tutorial
 Routes
 ------
 
+The table describes the Reef service API, except entries marked
+scheduler-only, which use the separate scheduler URL. Opt-in tenant
+scheduling changes scenario creation, listing, and deletion responses as
+described under `Tenant scheduler API`_.
+
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | Route                                                                            | Response                                          |
 +==================================================================================+===================================================+
@@ -65,6 +70,16 @@ Routes
 |                                                                                  | adapter                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario_id}``                                            | scheduler-only: admission state by numeric ID     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario_id}/wake``                                      | scheduler-only: wake for a retained instruction   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/cancel``                                                  | scheduler-only: cancel or delete an admission     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scheduler/status``                                                   | scheduler-only: tenant quota and service directory|
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/services/register``                                                 | scheduler-only: register a running service        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -154,6 +169,181 @@ B. If these conditions hold, its calls tagged with A are recorded against A;
 an untagged call or a call tagged with an unknown release is recorded against B.
 This tag is separate from ``x-reef-release-id``, which binds a scenario to its
 starting release.
+
+Tenant scheduler API
+--------------------
+
+When tenant scheduling is enabled, clients use two HTTP base URLs: the
+scheduler for admission and quota, and the selected Reef service for inference,
+harnesses, records, and training. See the `multi-tenant workflow
+<../user-guide/multi-tenant-scheduling.rst>`__ for a complete example and the
+`configuration reference <configuration.rst#tenant-scheduling>`__ for setup.
+
+Send ``x-reef-tenant: <tenant_id>`` on scheduler scenario and quota requests,
+and on scenario-bound requests to a scheduling-enabled service. This ID selects ownership
+and quota; it does not authenticate the tenant. Use the endpoint's configured
+Bearer token separately. Tenant, service, and scenario IDs are positive signed
+64-bit integers. JSON bodies use numeric IDs; headers and URL parameters use
+their decimal text. Scenario names contain 1–128 letters, digits, dots,
+underscores, or hyphens, starting with a letter or digit.
+
+Routes at the scheduler URL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Route
+     - Result
+   * - ``POST /reef/services/register``
+     - Register a service; HTTP 200 with its directory entry and availability.
+       Requires the scheduler token when configured; no tenant header.
+   * - ``POST /reef/scenarios``
+     - Request admission; HTTP 201 when admitted, otherwise HTTP 202.
+   * - ``GET /reef/scenarios``
+     - ``{"scenarios": [...]}`` containing this tenant's nonterminal admissions;
+       optionally filter with ``?service_id=<id>``.
+   * - ``GET /reef/scenarios/{scenario_id}``
+     - One admission by its numeric ID, including terminal states.
+   * - ``POST /reef/scenarios/{scenario_id}/wake``
+     - Service wake notification; HTTP 200 when admitted, otherwise HTTP 202.
+       Application clients submit their instruction through ``POST /reef/train``.
+   * - ``POST /reef/scenarios/cancel``
+     - Cancel or delete the selected scenario; HTTP 200 when terminal,
+       otherwise HTTP 202 while cleanup is pending.
+   * - ``GET /reef/scheduler/status``
+     - Global allocation totals, this tenant's quota and usage, its active
+       admissions, and the registered service directory.
+
+The creation body requires ``recipe``, ``service_name``, and ``scenario_name``.
+Provide the tenant in ``x-reef-tenant`` or ``tenant_id`` in this body; if both
+are supplied, they must agree. Optional ``release_id`` selects the starting
+release. Optional ``model`` uses the `scenario model settings`_ contract.
+The recipe must exactly match the named service's registered recipe.
+
+.. code:: json
+
+   {
+     "tenant_id": 11,
+     "recipe": "reef.recipe.cordis:CordisRecipe",
+     "service_name": "harness-dev",
+     "scenario_name": "my-harness"
+   }
+
+Create, detail, and cancel return ``scenario_id``, ``tenant_id``,
+``service_id``, ``service_name``, ``service_url``, ``recipe``, ``scenario_name``,
+``state``, ``generation``, ``execution_units``, ``created_at``, ``idle_since``, and
+``reason``. Timestamps are Unix seconds; ``idle_since`` is null unless the service has
+observed continuous idleness. ``reason`` is null when there is no
+reported failure or service error. Scenario IDs remain distinct across
+lifecycles and services. Repeat creation with identical parameters to obtain
+the existing active lifecycle. Conflicting parameters return HTTP 409.
+
+States are ``queued``, ``starting``, ``admitted``, ``reclaim_pending``, ``sleep``,
+``cleanup_pending``, ``deleted``, and ``failed``. Only ``admitted`` permits
+normal scenario use. Starting allocates execution units; actual resource
+release must be confirmed before they become available again. Idle recycling
+passes through ``reclaim_pending`` into ``sleep`` after resource closure is
+confirmed. A new ``POST /reef/train`` instruction wakes that same scenario at
+the tenant queue tail. Sleeping scenarios hold no execution units and do not
+resume automatically. Only ``deleted`` and ``failed`` are terminal. Do not treat HTTP
+202 or a transport timeout as successful admission or completed cleanup.
+
+The service wake notification requires the tenant header and a body containing
+``service_id``, ``generation`` and ``agent_record_id``. Before requeueing a
+sleeping scenario, the scheduler verifies through its control connection that
+the owning service has retained that instruction. The notification contains
+no instruction body and does not create a scenario.
+
+Cancellation requires the tenant header and body
+``{"service_name":"harness-dev","scenario_name":"my-harness"}``.
+It acts on that name's latest lifecycle. Detail reads and cancellation reject
+another tenant's scenario with HTTP 403. Cancelling a queued scenario that has
+never started does not construct an instance. Previously started scenarios
+require final service cleanup; any units still allocated remain charged until
+release is confirmed. Cleanup of an already reclaimed scenario does not
+allocate its execution units again.
+
+Status returns ``global_budget``, ``global_allocated``, ``tenant_id``,
+``allocated``, ``used``, ``available``, ``scenarios``, and ``services``.
+``allocated`` is zero before the tenant's first accepted request and after its
+last lifecycle is cleaned up. ``used`` counts charged scenario units across
+all services. ``available`` is ``allocated - used``. Global allocation counts
+fixed tenant quotas, not the instantaneous sum of running workers. Service
+directory entries include ``standard_execution_units``, ``available``, and
+``reason`` so callers can inspect a configuration or connection problem.
+
+The scheduler's ``GET /healthz`` returns HTTP 503 if shutdown has begun or
+its background coordination task has failed. A coordination failure stops
+new admissions and is reported in logs; the process must be recovered before
+its queues can advance. An empty directory or an unavailable service alone
+does not make the scheduler unhealthy.
+
+Relevant errors are HTTP 400 for malformed input, 403 for owner mismatch, 404
+for an unknown admission, 409 for recipe or creation-parameter conflicts, 422
+for an unconfigured tenant or a scenario exceeding its total quota, 429 when
+the global budget cannot admit a new tenant, and 503 for an unknown or
+unavailable service or an unavailable scheduler.
+
+Service registration
+~~~~~~~~~~~~~~~~~~~~
+
+Scheduling-enabled services call ``POST /reef/services/register`` in the
+background during startup and periodically while running. This allows the
+scheduler to start with an empty directory and restores control connections
+after a scheduler restart. Operators normally configure the service
+connection instead of calling this endpoint manually.
+
+The body requires numeric ``service_id`` and ``standard_execution_units``,
+plus ``service_name``, ``service_url``, ``recipe``, and ``control_token``. Optional
+``config_revision`` is an operator-supplied version label, defaulting to an
+empty string. ``control_token`` supplies the credential for the service's
+private control endpoint. It is neither returned nor saved in the directory YAML. Use the
+scheduler's configured Bearer token to authenticate this request, without a
+tenant header.
+
+The response contains ``service_id``, ``service_name``, ``service_url``,
+``recipe``, ``standard_execution_units``, ``config_revision``, and
+``available``. Identical registration is idempotent and can refresh the
+control connection. A successful response does not by itself mean that the
+service is ready: the scheduler verifies its identity and recipe estimate
+before marking it available. Inspect ``GET /reef/scheduler/status`` for the
+directory entry's availability and any reported reason.
+
+Service names and IDs must be unique. Conflicting identity, recipe cost, or
+an existing scenario's saved service binding returns HTTP 409. A malformed
+field returns HTTP 400; a missing or invalid scheduler credential returns
+HTTP 401; a scheduler shutting down returns HTTP 503. Re-registration cannot
+silently move an existing scenario to a different URL, recipe, cost, or
+configuration revision. Registration updates the running directory; normal
+shutdown saves its latest snapshot to the startup YAML.
+
+Routes at the Reef service URL
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+With scheduling enabled, the existing service ``POST /reef/scenarios`` keeps
+its ``name`` body field, optional ``release_id``, and optional ``model``.
+The service supplies its own service and recipe identity, requires the tenant
+header, and returns the admission response above with HTTP 201 or 202.
+``GET /reef/scenarios`` and ``GET /reef/status`` return only that tenant's
+nonterminal admissions on this service. ``DELETE /reef/scenarios/{scenario}``
+delegates to cancellation and returns HTTP 200 or 202.
+
+Other scenario-bound service routes require admission and owner agreement.
+Eligible implicit creation routes and harness install also pass through the
+scheduler. If their admission request is pending, they return HTTP 409 with
+admission information. A scenario already starting or awaiting cleanup also
+returns HTTP 409 and cannot yet serve the request.
+``/reef/train`` and evaluation routes never create a scenario. Install saves
+the tenant for subsequent wrapper requests, with ``REEF_TENANT_ID`` available
+as a local override. Browser page URLs issued by the service carry the tenant
+ID as a query parameter because ordinary navigation cannot supply a header.
+
+``POST /reef/scheduler/control`` is a private service route for scheduler
+lifecycle operations. It requires the service's dedicated control token and
+is not a client admission endpoint. Deployments without ``scheduling`` retain
+their existing routes, response bodies, and tenant-free client behavior.
 
 Scenario model settings
 -----------------------
@@ -302,6 +492,23 @@ originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
 requires no inference receipts or score.
+
+With tenant scheduling enabled, a sleeping scenario's first new instruction
+is durably accepted before the same scenario is queued again. HTTP 202
+returns the usual ``agent_record_id``, ``scenario``, ``request_type`` and
+``page_path`` while admission is pending. Read the scheduler scenario detail
+for its admission state. A scheduler
+outage leaves that instruction retained for background retry. Use the request
+progress endpoint or page to wait; a queued/starting scenario is not ready for
+additional new instructions and returns HTTP 409. Reclaiming scenarios also
+return 409, and unknown scenarios return 404. An identical retry with the same
+``agent_record_id`` returns its accepted request; changed content conflicts.
+Requests to an admitted scenario keep the existing response and do not requeue.
+
+Request progress and pages remain readable without loading an execution
+instance while a scenario is waiting or asleep. Deleting a scenario cancels
+its retained instruction. A later scenario with the same name has a different
+ID and cannot receive the old instruction.
 
 A request may also carry ``requires``: what the change needs from the
 person's machine, at most 8 ``{name, kind, check, prompt}`` items, default

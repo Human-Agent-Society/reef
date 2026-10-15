@@ -8,10 +8,16 @@ from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.scheduling import tenant_from_headers
 
 
 def register_scenario_routes(app: web.Application, *, request_service: RequestService) -> None:
     async def list_scenarios(request: web.Request) -> web.Response:
+        if request_service.scheduler_client is not None:
+            result = await asyncio.to_thread(
+                request_service.scheduler_client.list_scenario_admissions, tenant_from_headers(request.headers)
+            )
+            return web.json_response(result)
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
 
     async def create_scenario(request: web.Request) -> web.Response:
@@ -27,6 +33,16 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         name = name.strip()
         if release_id is not None:
             release_id = release_id.strip()
+        if request_service.scheduler_client is not None:
+            result = await asyncio.to_thread(
+                request_service.scheduler_client.submit,
+                tenant_from_headers(request.headers),
+                name,
+                release_id=release_id,
+                model=payload.get("model"),
+                has_model="model" in payload,
+            )
+            return web.json_response(result, status=201 if result["state"] == "admitted" else 202)
         created = not request_service.dispatcher.has_scenario(name)
         scenario: Scenario | None
         if "model" in payload:
@@ -76,6 +92,13 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:
+        if request_service.scheduler_client is not None:
+            result = await asyncio.to_thread(
+                request_service.scheduler_client.delete,
+                tenant_from_headers(request.headers),
+                request.match_info["scenario"],
+            )
+            return web.json_response(result, status=200 if result["state"] in {"deleted", "failed"} else 202)
         result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
         return web.json_response(result)
 

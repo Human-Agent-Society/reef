@@ -33,6 +33,12 @@ from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
+from reef.service.scheduling import (
+    SchedulerResponseError,
+    SchedulerUnavailable,
+    ServiceSchedulerClient,
+    tenant_from_headers,
+)
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
@@ -177,8 +183,15 @@ class InferenceRetryTimeout(ReefError):
 
 
 class RequestService:
-    def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
+    def __init__(
+        self,
+        dispatcher: Dispatcher,
+        *,
+        retry_policy: InferenceRetryPolicy | None = None,
+        scheduler_client: ServiceSchedulerClient | None = None,
+    ) -> None:
         self._dispatcher = dispatcher
+        self.scheduler_client = scheduler_client
         self._retry_policy = retry_policy or InferenceRetryPolicy()
         # The harness head of a scenario with several components, by scenario step and served release: it is
         # read on every inference answer and changes only when a commit lands.
@@ -187,6 +200,27 @@ class RequestService:
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
+
+    def retry_pending_training(self) -> None:
+        """Notify the scheduler only for instructions that this service has durably accepted."""
+        client = self.scheduler_client
+        admissions = self._dispatcher.scenario_admissions
+        if client is None or admissions is None:
+            return
+        for operation in admissions.pending_wakes():
+            pending = operation.pending_training
+            if pending is None:
+                continue
+            try:
+                client.wake(
+                    operation.scenario_id, operation.tenant_id, pending.generation, pending.item.agent_record_id
+                )
+            except (SchedulerUnavailable, SchedulerResponseError):
+                logger.warning(
+                    "scenario %d wake is unconfirmed; retained instruction will retry", operation.scenario_id
+                )
+            except ValueError:
+                logger.error("scenario %d wake response is invalid; instruction retained", operation.scenario_id)
 
     def accept(
         self,
@@ -199,7 +233,12 @@ class RequestService:
         if request_type is RequestType.INFERENCE:
             raise ValueError("inference requests must use infer()")
         parsed = parse_request_headers(headers, request_type)
-        return self._accept(parsed, payload, agent_record_id=agent_record_id)
+        return self._accept(
+            parsed,
+            payload,
+            agent_record_id=agent_record_id,
+            tenant_id=None if self.scheduler_client is None else tenant_from_headers(headers),
+        )
 
     def import_record(self, headers: Mapping[str, str], body: Mapping[str, object]) -> AgentRecord:
         """Persist an existing inference or report through ordinary admission.
@@ -212,6 +251,13 @@ class RequestService:
 
     def import_records(self, headers: Mapping[str, str], body: Mapping[str, object]) -> tuple[AgentRecord, ...]:
         """Import a bounded, atomic batch using the existing record contract."""
+        parsed, items = self.prepare_import_records(headers, body)
+        return self._dispatcher.accept_records(items, release_id=parsed.release_id)
+
+    def prepare_import_records(
+        self, headers: Mapping[str, str], body: Mapping[str, object]
+    ) -> tuple[RequestHeaders, tuple[AgentRecord, ...]]:
+        """Validate the whole batch without allocating a scenario or storing any records."""
         records = body.get("records")
         if body.keys() != {"records"} or not isinstance(records, list) or not 1 <= len(records) <= 1000:
             raise ValueError("body must contain only 'records', an array of 1 to 1000 record objects")
@@ -221,7 +267,7 @@ class RequestService:
                 raise ValueError("each record must be an object")
             parsed, item = self.prepare_import_record(headers, record)
             items.append(item)
-        return self._dispatcher.accept_records(items, release_id=parsed.release_id)
+        return parsed, tuple(items)
 
     def prepare_import_record(
         self, headers: Mapping[str, str], body: Mapping[str, object]
@@ -957,6 +1003,23 @@ class RequestService:
         unknown id, or one that is not a training instruction, raises
         ArtifactNotFound naming it.
         """
+        cold = self.cold_request(headers, record_id)
+        if cold is not None:
+            cold_record, cold_rows, status = cold
+            if status == "failed":
+                request_status = "failed"
+            elif status in {"deleted", "cleanup_pending"}:
+                request_status = "cancelled"
+            else:
+                request_status = "queued"
+            adapter = self._dispatcher.recipe.harness_adapter
+            return build_request_page(
+                cold_record,
+                cold_rows,
+                link_query=link_query,
+                request_status=request_status,
+                adapter="pi" if adapter is None else adapter,
+            )
         scenario = self._file_scenario(headers)
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
@@ -987,6 +1050,28 @@ class RequestService:
         An unknown id, or one that is not a training instruction, raises
         ArtifactNotFound naming it.
         """
+        cold = self.cold_request(headers, record_id)
+        if cold is not None:
+            cold_record, cold_rows, status = cold
+            step = settled_step(cold_rows, record_id)
+            cancelled = status in {"deleted", "failed", "cleanup_pending"}
+            if step is not None:
+                state = result_of(cold_rows[step], cold_rows)
+            elif cancelled:
+                state = "failed" if status == "failed" else "cancelled"
+            else:
+                state = "queued"
+            return {
+                "request_id": cold_record["agent_record_id"],
+                "settled": step is not None or cancelled,
+                "step": step,
+                "state": state,
+                "meaning": "Waiting for scenario admission" if state == "queued" else STATE_WORDS.get(state),
+                "started_at": None,
+                "episodes_total": None,
+                "step_record": None,
+                "activity": [],
+            }
         scenario = self._file_scenario(headers)
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
@@ -1024,6 +1109,38 @@ class RequestService:
             # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
+
+    def cold_request(
+        self, headers: Mapping[str, str], record_id: str
+    ) -> tuple[dict[str, object], list[dict[str, object]], str] | None:
+        """Read a request's durable data while no execution instance is admitted."""
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        snapshot = self._dispatcher.scheduled_request_snapshot(parsed.scenario, record_id)
+        if snapshot is None:
+            status = self._dispatcher.scheduled_scenario_status(parsed.scenario)
+            if status is not None and status.state != "admitted":
+                raise ArtifactNotFound(f"scenario {parsed.scenario!r} has no harness request {record_id!r}")
+            return None
+        item, commits, status = snapshot
+        record: dict[str, object] = {
+            "agent_record_id": item.agent_record_id,
+            "request_type": item.request_type.value,
+            "created_at": item.created_at,
+            "payload": dict(item.payload),
+        }
+        rows: list[dict[str, object]] = [{"operation": "creation", "metrics": {}}]
+        rows.extend(
+            {
+                "step": commit.step,
+                "release_id": commit.artifact_ref.release_id,
+                "operation": commit.operation,
+                "pending": commit.pending,
+                "recorded_at": commit.recorded_at,
+                "metrics": commit.metrics or {},
+            }
+            for commit in commits
+        )
+        return record, rows, status.state
 
     def harness_install_script(
         self,
@@ -1063,6 +1180,9 @@ class RequestService:
             release_id=manifest["release_id"],
             content_id=manifest["content_id"],
             scenario=scenario.name,
+            tenant_id=(
+                tenant_from_headers(headers) if any(name.lower() == "x-reef-tenant" for name in headers) else None
+            ),
             binding_files=binding_files,
             # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
             service_url=install_service_url(headers) if binding_files else None,
@@ -1174,6 +1294,7 @@ class RequestService:
         *,
         agent_record_id: str | None = None,
         artifact_ref: ArtifactRef | None = None,
+        tenant_id: int | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
         normalized_payload = _with_tags(normalized_payload, parsed)
@@ -1185,6 +1306,14 @@ class RequestService:
             references=references,
             artifact_ref=artifact_ref,
         )
+        if parsed.request_type is RequestType.TRAIN and self.scheduler_client is not None:
+            status = self._dispatcher.scheduled_scenario_status(parsed.scenario)
+            if status is not None and status.state != "admitted":
+                if tenant_id is None:
+                    raise ValueError("scheduled training requires a tenant ID")
+                retained = self._dispatcher.stage_scheduled_training(item, tenant_id)
+                self.retry_pending_training()
+                return retained
         try:
             return self._dispatcher.accept_record(
                 item,

@@ -235,7 +235,14 @@ KNOBS = (
     "TEST_NO_MODEL",
 )
 #: The environment the extension reads beyond the three it needs; each case sets what it needs and the rest stays unset.
-SETTINGS = ("PI_OFFLINE", "REEF_TOKEN", "REEF_HARNESS_WATCH_MS", "REEF_HARNESS_FETCH_MS", "REEF_HARNESS_WRAPPER")
+SETTINGS = (
+    "PI_OFFLINE",
+    "REEF_TOKEN",
+    "REEF_TENANT_ID",
+    "REEF_HARNESS_WATCH_MS",
+    "REEF_HARNESS_FETCH_MS",
+    "REEF_HARNESS_WRAPPER",
+)
 
 
 def _run(tmp_path: Path, agent_dir: Path, **env: str) -> dict[str, Any]:
@@ -406,6 +413,18 @@ def test_the_command_needs_no_capture_proxy_or_models_file(tmp_path: Path) -> No
     assert out["error"] is None
     assert len(_fetches(out)) == 1
     assert _notices(out)[0]["message"] == ACCEPTED_NOTICE
+
+
+def test_the_command_sends_the_tenant_as_a_header(tmp_path: Path) -> None:
+    out = _ask(
+        tmp_path,
+        _install_root(tmp_path),
+        {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
+        REEF_TENANT_ID="11",
+    )
+    (request,) = _fetches(out)
+    assert request["headers"]["x-reef-tenant"] == "11"
+    assert "tenant_id" not in request["body"]
 
 
 def test_the_command_surfaces_auto_mode_refusal(tmp_path: Path) -> None:

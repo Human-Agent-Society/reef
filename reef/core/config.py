@@ -211,7 +211,7 @@ def config_arguments(settings_type: type, *, prefix: tuple[str, ...] = ("reef",)
         kind = kinds.get(get_origin(annotation) or annotation)
         if kind == "strings" and get_args(annotation) != (str, Ellipsis):
             kind = None
-        if kind == "object" and get_args(annotation) not in ((), (str, Any)):
+        if kind == "object" and get_args(annotation) not in ((), (str, Any), (str, int)):
             kind = None
         if kind is None:
             raise TypeError(f"unsupported config field type: {field.name}")

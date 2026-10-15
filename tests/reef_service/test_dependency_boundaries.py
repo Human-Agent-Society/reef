@@ -171,7 +171,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
-            for contract in ("reef.storage.records", "reef.storage.scenario")
+            for contract in ("reef.storage.records", "reef.storage.scenario", "reef.storage.admissions")
         )
         for target in _imports_of(imported, "reef.storage")
     )
@@ -220,6 +220,8 @@ def test_only_registry_imports_private_model_file_operations() -> None:
             _imports_of(imported, "reef.storage.records")
             + _imports_of(imported, "reef.storage.scenario")
             + _imports_of(imported, "reef.storage.commits")
+            + _imports_of(imported, "reef.storage.scheduling")
+            + _imports_of(imported, "reef.storage.admissions")
         )
         if path.name == "registry.py":
             assert all(

@@ -328,6 +328,16 @@ class CompositeRecipe(Recipe):
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         return tuple(path for recipe in self.components.values() for path in recipe.scenario_state_dirs(scenario))
 
+    def scenario_execution_units(self) -> int | None:
+        """Sum local harness workers; weight-training compositions are outside this scheduler."""
+        if any(isinstance(recipe, WeightTrainingRecipe) for recipe in self.components.values()):
+            return None
+        requirements = [recipe.scenario_execution_units() for recipe in self.components.values()]
+        total = sum(value for value in requirements if value is not None)
+        if total:
+            return total
+        return None
+
     def serving_status(self) -> Mapping[str, Any] | None:
         statuses = {component: recipe.serving_status() for component, recipe in self.components.items()}
         status = {component: value for component, value in statuses.items() if value is not None}

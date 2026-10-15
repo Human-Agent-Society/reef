@@ -391,6 +391,44 @@ class _Dispatchers:
             dispatcher.close()
 
 
+def test_scenario_close_retries_only_failed_trainers_and_closes_the_other_components(
+    dispatchers: _Dispatchers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher, _ = dispatchers.open()
+    scenario = _scenario(dispatcher)
+    first, second = (bound.trainer for bound in scenario.component_trainers)
+    first_close = first.close
+    second_close = second.close
+    store_close = scenario.store.close
+    attempts = {"first": 0, "second": 0, "store": 0}
+
+    def close_first() -> None:
+        attempts["first"] += 1
+        if attempts["first"] == 1:
+            raise RuntimeError("first trainer close failed")
+        first_close()
+
+    def close_second() -> None:
+        attempts["second"] += 1
+        second_close()
+
+    def close_store() -> None:
+        attempts["store"] += 1
+        store_close()
+
+    monkeypatch.setattr(first, "close", close_first)
+    monkeypatch.setattr(second, "close", close_second)
+    monkeypatch.setattr(scenario.store, "close", close_store)
+    with pytest.raises(RuntimeError, match="first trainer close failed"):
+        scenario.close()
+    assert attempts == {"first": 1, "second": 1, "store": 1}
+    assert not scenario._closed
+    scenario.close()
+    scenario.close()
+    assert attempts == {"first": 2, "second": 1, "store": 1}
+    assert scenario._closed
+
+
 @pytest.fixture
 def dispatchers(tmp_path: Path) -> Iterator[_Dispatchers]:
     opened = _Dispatchers(tmp_path)

@@ -67,6 +67,8 @@ class Scenario:
         self._store = store
         self._closed = False
         self.trainers = validate_component_trainers(trainers, binding.surface)
+        self.pending_close_trainers = tuple(bound.trainer for bound in self.trainers)
+        self.store_closed = False
         self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._committer = ScenarioCommitter(
             name=name,
@@ -341,18 +343,32 @@ class Scenario:
         The dispatcher calls this on shutdown and when a durable reload
         replaces the instance — the one guarantee processors with background
         workers rely on (see :meth:`DataProcessor.close`). Safe to call more
-        than once; the trainers close first so no processor thread can touch
-        the record store after it closes.
+        than once. Every call attempts the remaining trainers, then storage;
+        successful closes are not repeated, and failed resources remain owned
+        until a later call closes them successfully.
         """
         with self._committer.lock:
             if self._closed:
                 return
+            remaining: list[Trainer] = []
+            errors: list[BaseException] = []
+            for trainer in self.pending_close_trainers:
+                try:
+                    trainer.close()
+                except BaseException as exc:
+                    remaining.append(trainer)
+                    errors.append(exc)
+            self.pending_close_trainers = tuple(remaining)
+            if not self.store_closed:
+                try:
+                    self._store.close()
+                except BaseException as exc:
+                    errors.append(exc)
+                else:
+                    self.store_closed = True
+            if errors:
+                raise errors[0]
             self._closed = True
-            try:
-                for bound in self.trainers:
-                    bound.trainer.close()
-            finally:
-                self._store.close()
 
     def to_metadata(self) -> dict[str, object]:
         return scenario_metadata_for(

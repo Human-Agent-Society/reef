@@ -45,7 +45,7 @@ from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scen
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
 from reef.surface.files import REPOSITORY_FILES
-from reef.train.trainer import ComponentTrainer
+from reef.train.trainer import ComponentTrainer, Trainer
 
 
 def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
@@ -64,6 +64,43 @@ class RecoveredTrainerState:
     algorithm_state: Mapping[str, Any] | None
     high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
+
+
+@dataclass
+class ScenarioConstructionCleanup:
+    """Retain only resources whose failed construction has not successfully closed them."""
+
+    trainers: tuple[Trainer, ...]
+    store: ScenarioStore | None
+
+    def close(self) -> None:
+        remaining: list[Trainer] = []
+        errors: list[BaseException] = []
+        for trainer in self.trainers:
+            try:
+                trainer.close()
+            except BaseException as exc:
+                remaining.append(trainer)
+                errors.append(exc)
+        self.trainers = tuple(remaining)
+        if self.store is not None:
+            try:
+                self.store.close()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                self.store = None
+        if errors:
+            raise errors[0]
+
+
+class ScenarioConstructionCleanupError(ReefError):
+    """Construction failed and its remaining resources must be closed before releasing ownership."""
+
+    def __init__(self, scenario: str, resources: ScenarioConstructionCleanup, cause: BaseException) -> None:
+        super().__init__(f"scenario {scenario!r} construction failed and resource cleanup is incomplete")
+        self.resources = resources
+        self.creation_error = cause
 
 
 def recovered_trainer_states(
@@ -417,15 +454,14 @@ class ScenarioFactory:
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()
             return scenario
-        except BaseException:
-            if scenario is not None:
-                scenario.close()
-            else:
-                try:
-                    for bound in trainers:
-                        bound.trainer.close()
-                finally:
-                    store.close()
+        except BaseException as creation_error:
+            # A partial Scenario owns exactly these trainers and its store. Retain failed
+            # closes explicitly: the instance may never reach the registry's loaded table.
+            cleanup = ScenarioConstructionCleanup(tuple(bound.trainer for bound in trainers), store)
+            try:
+                cleanup.close()
+            except BaseException as cleanup_error:
+                raise ScenarioConstructionCleanupError(name, cleanup, creation_error) from cleanup_error
             raise
 
     def _artifact_selector_matches(

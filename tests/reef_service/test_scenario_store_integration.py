@@ -292,17 +292,21 @@ def test_trainer_teardown_failure_still_closes_store_and_storage(tmp_path: Path,
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
     original_close = scenario.trainer.close
+    close_attempts: list[bool] = []
 
     def fail_close() -> None:
+        close_attempts.append(True)
         original_close()
-        factory.events.append(("close_trainer", "math"))
-        raise RuntimeError("injected trainer close failure")
+        if len(close_attempts) == 1:
+            factory.events.append(("close_trainer", "math"))
+            raise RuntimeError("injected trainer close failure")
 
     monkeypatch.setattr(scenario.trainer, "close", fail_close)
     with pytest.raises(RuntimeError, match="injected trainer close failure"):
         dispatcher.close()
     dispatcher.close()
     scenario.close()
+    assert len(close_attempts) == 2
     assert factory.sessions[0].close_count == 1
     assert factory.close_count == 1
     assert factory.events[-3:] == [("close_trainer", "math"), ("close", "math"), ("close_storage", "")]

@@ -120,7 +120,7 @@ function publishedTree(row) {
 
 // Move the served head to a release held back from it, so the update installs that tree and later sessions are
 // offered the same version. Answers the new head's id, or null when reef refused or could not be reached.
-async function promoteRelease(serviceUrl, scenario, token, releaseId) {
+async function promoteRelease(serviceUrl, scenario, token, releaseId, tenantId) {
   let response;
   try {
     response = await fetch(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
@@ -129,6 +129,7 @@ async function promoteRelease(serviceUrl, scenario, token, releaseId) {
         "x-reef-scenario": scenario,
         "content-type": "application/json",
         ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(tenantId ? { "x-reef-tenant": tenantId } : {}),
       },
       body: JSON.stringify({ release_id: releaseId }),
     });
@@ -164,11 +165,13 @@ export default function versionCheck(pi) {
     const pinned = releaseInfo.release_id;
     let response;
     const token = process.env.REEF_TOKEN;
+    const tenantId = process.env.REEF_TENANT_ID;
     try {
       response = await fetch(`${serviceUrl}/reef/harness/releases`, {
         headers: {
           "x-reef-scenario": scenario,
           ...(token ? { authorization: `Bearer ${token}` } : {}),
+          ...(tenantId ? { "x-reef-tenant": tenantId } : {}),
         },
       });
     } catch {
@@ -226,6 +229,7 @@ export default function versionCheck(pi) {
     const instruction =
       `curl -fsS -H 'x-reef-scenario: ${scenario}' ` +
       (token ? '-H "Authorization: Bearer $REEF_TOKEN" ' : "") +
+      (tenantId ? '-H "x-reef-tenant: $REEF_TENANT_ID" ' : "") +
       // The installer takes the destination as its first argument; without
       // it a reinstall lands in ~/reef-harness/<scenario>, not this tree.
       `'${serviceUrl}/reef/harness/install?adapter=pi' | bash -s -- '${destDir}'`;
@@ -249,7 +253,7 @@ export default function versionCheck(pi) {
     let installed = head.release_id;
     if (head.pending) {
       ctx.ui.notify(`Serving release ${id8}...`, "info");
-      const promoted = await promoteRelease(serviceUrl, scenario, token, head.release_id);
+      const promoted = await promoteRelease(serviceUrl, scenario, token, head.release_id, tenantId);
       if (!promoted) {
         ctx.ui.notify(`Reef harness update failed: reef refused to serve release ${id8}.`, "error");
         return;
@@ -268,12 +272,14 @@ export default function versionCheck(pi) {
             "-c",
             'set -o pipefail\nargs=(-fsS -H "x-reef-scenario: $1")\n' +
               'if [[ -n "$3" ]]; then args+=(-H "Authorization: Bearer $3"); fi\n' +
+              'if [[ -n "$5" ]]; then args+=(-H "x-reef-tenant: $5"); fi\n' +
               'curl "${args[@]}" "$2/reef/harness/install?adapter=pi" | bash -s -- "$4"',
             "reef-harness-update",
             scenario,
             serviceUrl,
             token || "",
             destDir,
+            tenantId || "",
           ]);
     } catch (error) {
       ctx.ui.notify(`Reef harness update failed: ${error instanceof Error ? error.message : String(error)}`, "error");

@@ -88,6 +88,7 @@ The public layout groups fields by their owner:
 * ``training``: backend selection, bridge startup/request timeouts, Ray connection and native Slime ``options``.
 * ``storage``: artifact repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
+* ``scheduling``: optional connection to the tenant scheduler for local harness scenarios.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
 
 Version 2 contains no process definitions. ``service`` and ``services`` are
@@ -1053,6 +1054,276 @@ Read by the weight-training stack. See `Evolve your model
 
 Slime fills architecture flags such as layer counts and hidden sizes from
 ``inference.model-path``. Do not put them in the config.
+
+Tenant scheduling
+-----------------
+
+Tenant scheduling is opt-in for local harness recipes with a static execution
+estimate. Run one authoritative scheduler separately from the Reef services it
+controls. Start the scheduler with an empty service directory, then start
+services that register their own connection and recipe information. The
+scheduler does not launch services. Follow `Share local harness services across tenants
+<../user-guide/multi-tenant-scheduling.rst>`__ for client requests.
+
+Service connection
+~~~~~~~~~~~~~~~~~~
+
+Add this section to each service's existing ``schema-version: 2`` deployment
+file. Keep its recipe, inference connection, and other required configuration:
+
+.. code:: yaml
+
+   scheduling:
+     scheduler_url: http://127.0.0.1:8902
+     service_id: 1
+     service_name: harness-dev
+     service_url: http://127.0.0.1:8900
+     token: ${REEF_SCHEDULER_TOKEN}
+     control_token: ${REEF_HARNESS_DEV_CONTROL_TOKEN}
+
+.. config::
+
+   scheduling.scheduler_url | unset | scheduler HTTP base URL; absent disables tenant admission
+   scheduling.service_id | stable positive integer, required when scheduling is enabled
+   scheduling.service_name | unique user-facing name, required when scheduling is enabled
+   scheduling.service_url | derived from reef.served_url or the listening address | this service's HTTP base URL as reachable from the scheduler; override when its reachable address differs
+   scheduling.config_revision | empty string | optional operator-supplied configuration revision included in the service registration
+   scheduling.token | unset | Bearer token for this service's requests to the scheduler, if the scheduler requires one
+   scheduling.control_token | required secret for the scheduler's private lifecycle requests to this service
+   scheduling.tenant_id_map | empty mapping | explicit legacy string-to-numeric tenant mapping for existing local admission files
+
+During startup, the service begins registering its identity, URL, resolved
+recipe estimate, and control token with the scheduler in the background. It repeats
+registration every five seconds, retrying connection failures and restoring
+its control connection after a scheduler restart. Registration does not block
+the service's HTTP listener. The scheduler verifies the service before making
+it available for admission. Authentication and registration conflicts stop
+automatic registration and are logged; correct the configuration and restart
+the service.
+
+When deriving the URL from a wildcard listening address such as ``0.0.0.0``,
+Reef uses a loopback address. Set ``scheduling.service_url`` to a reachable
+address when the scheduler runs on another host.
+
+Each service name maps to one service ID. The recipe identifier is the exact
+``recipe.implementation`` value. Multiple services may use the same recipe,
+with distinct IDs, names, endpoints, and independent service state. Keep their
+existing storage, work, cache, and run directories separate. Neither
+``execution.evolution.workers`` nor the ``scheduling`` section imposes a
+service-wide capacity limit.
+
+The control token protects ``POST /reef/scheduler/control``; give it only to the
+operator and scheduler. Ordinary clients use ``reef.token`` at the service and
+the scheduler's API token at the scheduler. These tokens do not establish a
+tenant identity mapping. Local callers supply ``x-reef-tenant`` explicitly.
+Create scenarios through the admission API when scheduling is enabled;
+unowned preloaded scenarios cannot bypass admission.
+
+Scheduler configuration
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The scheduler takes a separate, writable YAML file containing its policy and
+last saved service directory. This is not a versioned deployment file. First
+save the following as ``scheduler.yaml``; no service information is needed:
+
+.. code:: yaml
+
+   database: .reef/scheduler.sqlite
+   token_env: REEF_SCHEDULER_TOKEN
+   max_logical_thread_percentage: 70
+   tenant_quotas:
+     11: 6
+     12: 6
+     13: 6
+   idle_ttl_seconds: null
+
+Set ``REEF_SCHEDULER_TOKEN`` in the scheduler's environment and use that same
+token in each service's ``scheduling.token``. Start the scheduler first:
+
+.. code:: bash
+
+   python -m reef.service.scheduler --config scheduler.yaml
+
+The default bind address is ``127.0.0.1:8902``; override it with ``--host`` and
+``--port``. Then start each service with ``reef serve -c service.yaml``, using
+its own existing deployment file with the connection settings above.
+``reef serve`` does not start the scheduler automatically. The directory is
+empty until services register; a healthy empty scheduler can accept registrations.
+
+.. config::
+
+   database | required SQLite path; preserve it across restarts
+   max_logical_thread_percentage | 70 | maximum percentage of host logical threads used to calculate the global execution budget; greater than 0 and at most 100
+   tenant_quotas | required nonempty mapping of tenant IDs to positive integer quotas; each quota must fit the global budget
+   recipe_execution_units | empty mapping | recipe identifiers to positive integer units per scenario; learned from service registration when absent
+   token_env | unset | name of an environment variable holding the scheduler API token; omit to disable scheduler API authentication
+   services | empty list | saved service directory; entries contain service_id, service_name, recipe, service_url, and standard_execution_units
+   services[].config_revision | empty string | optional operator-supplied configuration revision; not a file path or computed checksum
+   services[].control_token_env | unset | optional environment variable holding this service's control token, for restoring a control connection before re-registration
+   idle_ttl_seconds | null | positive idle duration before execution resources are reclaimed and the scenario sleeps until a new evolve; null disables recycling
+   tenant_id_map | empty mapping | explicit one-to-one mapping of every persisted legacy tenant ID to a positive integer
+   service_id_map | empty mapping | explicit one-to-one mapping of every persisted legacy service ID to a positive integer
+
+At startup, the scheduler reads the host's logical thread count with
+``os.cpu_count()`` and computes
+``global_execution_units = floor(logical_thread_count * max_logical_thread_percentage / 100)``.
+For example, 32 logical threads at the default 70 percent give 22 execution
+units. Fractional percentages are accepted. The budget stays fixed until the
+next restart; this setting controls admission accounting, not CPU affinity or
+an operating-system CPU limit. It does not account for memory, GPU capacity,
+CPU affinity masks, or container CPU quotas.
+
+Startup fails if the logical thread count is unavailable, the computed budget
+is below one unit, or a configured tenant quota exceeds that budget. It also
+fails if restored tenant allocations exceed the newly computed budget; existing
+records are retained. Legacy YAML ``global_execution_units`` values are ignored
+with a warning. Remove that key and use ``max_logical_thread_percentage``.
+
+The ``*_env`` fields name environment variables, not token values; named
+variables must exist and be nonempty. Service endpoints must be HTTP(S) URLs
+without embedded credentials, query strings, or fragments. Tenant and service
+IDs are positive signed 64-bit integers. Service and scenario names contain
+1–128 letters, digits, dots, underscores, or hyphens and start with a letter
+or digit.
+
+The scheduler learns a recipe's cost from its first registration. Later
+services using that recipe must report the same estimate; a conflicting
+registration is rejected. An explicitly configured ``recipe_execution_units``
+entry must also match. For Cordis it is the resolved per-scenario evaluation
+worker count; the deployment's
+``execution.evolution.workers`` can set that count. Compatible composite
+recipes sum their local harness components. A weight-training recipe or one
+without a static estimate cannot enable scheduling. A mismatched service
+remains unavailable for admission; clients cannot override the estimate.
+The service directory reports this per-scenario estimate as
+``standard_execution_units``. Every scenario on that service has that cost.
+
+Idle recycling requires durable scenario and admission storage on each service.
+With ``idle_ttl_seconds`` configured, services that cannot safely preserve
+scenario progress across recycling remain unavailable for new admission.
+The service confirms actual idleness before release. Long-running evaluation
+is not idle merely because no new event arrived. There is no queue expiry.
+
+Configured but inactive tenants consume no budget. On a host with 18 logical
+threads, the example computes a twelve-unit budget, so at most two tenants
+hold six-unit quotas concurrently. With a two-unit recipe, each can admit three
+scenarios across registered services. The third tenant's first valid request
+receives HTTP 429 while the global budget is allocated. A tenant already
+admitted queues additional scenarios when its own quota is occupied.
+
+Saving and restoring the service directory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The running scheduler keeps the latest service directory in memory. On normal
+shutdown it stops new registrations and admissions, drains in-flight control
+operations, and atomically replaces the same ``--config`` YAML with its latest
+directory and recipe costs. Base settings such as the database path, logical
+thread percentage, tenant quotas, and token environment variable names are retained.
+The computed global budget is not saved; the next startup derives it again
+from the current host. YAML comments and formatting are not preserved. Keep
+this file writable and do not edit it while the scheduler is running.
+
+For example, after the first Cordis service registers with two evaluation
+workers per scenario, a normal shutdown saves a configuration like this:
+
+.. code:: yaml
+
+   database: .reef/scheduler.sqlite
+   token_env: REEF_SCHEDULER_TOKEN
+   max_logical_thread_percentage: 70
+   tenant_quotas:
+     11: 6
+     12: 6
+     13: 6
+   idle_ttl_seconds: null
+   recipe_execution_units:
+     reef.recipe.cordis:CordisRecipe: 2
+   services:
+     - service_id: 1
+       service_name: harness-dev
+       recipe: reef.recipe.cordis:CordisRecipe
+       service_url: http://127.0.0.1:8900
+       standard_execution_units: 2
+       config_revision: ""
+
+Raw control tokens are never written into this snapshot. A service supplies
+its token again through periodic registration after restart. Existing
+``control_token_env`` references are retained and may restore the connection
+immediately; their environment variables must be present in the scheduler
+process. If a service registers a different control token, the old environment
+reference is removed from the next snapshot; that service must re-register
+after restart. Legacy directory entries without ``standard_execution_units`` can
+still use the matching ``recipe_execution_units`` value. A restored entry is
+unavailable until the scheduler verifies the service; a saved entry does not
+assert that the service is currently online.
+
+Directory changes are saved only on normal shutdown. A crash or forced exit
+can lose registrations since the last snapshot. SQLite retains tenant
+allocations, scenario records, IDs, and queue order independently; records
+whose service is missing wait for matching re-registration and keep any
+allocated units. The scheduler does not delete these records to recover an
+empty directory. A failed snapshot write leaves the previous YAML intact and
+is reported as a shutdown error.
+
+Run only one scheduler authority for a database. Preserve both the YAML and
+SQLite files, use the same working directory for relative paths, and retain
+service state. Active quotas and persisted service bindings must agree after
+restart; a changed service URL, recipe, cost, or revision cannot silently
+replace an existing scenario's binding. Pending creation and cleanup are
+checked against the service before admission resumes. Storage retention
+remains independent: these settings do not impose tenant disk quotas or
+change inference and model-weight scheduling.
+
+Migrating earlier scheduler state
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Earlier scheduler databases and local admission files used string IDs. Stop
+the scheduler and services, preserve their existing state, and configure an
+explicit mapping when upgrading. For example, a database containing tenant
+``alice`` and service ``harness-dev-01`` needs these scheduler settings:
+
+.. code:: yaml
+
+   tenant_id_map:
+     alice: 11
+   service_id_map:
+     harness-dev-01: 1
+
+Update ``tenant_quotas`` and service entries to use those numeric IDs, replace
+``endpoint`` with ``service_url``, and replace ``config_ref`` with
+``config_revision`` if set. Keep the actual URL, recipe, cost, and revision
+unchanged during migration: active bindings are checked against their old
+registration fingerprint. Remove ``queue_ttl_seconds``; it is no longer an
+accepted setting, even when null.
+
+Each service with existing local assignments needs the same tenant mapping
+inside its deployment's ``scheduling`` section:
+
+.. code:: yaml
+
+   scheduling:
+     scheduler_url: http://127.0.0.1:8902
+     service_id: 1
+     service_name: harness-dev
+     service_url: http://127.0.0.1:8900
+     token: ${REEF_SCHEDULER_TOKEN}
+     control_token: ${REEF_HARNESS_DEV_CONTROL_TOKEN}
+     tenant_id_map:
+       alice: 11
+
+Mappings must cover historical as well as active IDs and must not collapse
+distinct IDs onto one value. Missing mappings, collisions, or changed active
+bindings fail migration without replacing the database. Reinstall clients or
+set their numeric ``REEF_TENANT_ID`` explicitly; clients do not guess a numeric
+ID from a former string label. An already pending cleanup from the earlier
+version completes as final deletion, even if idle expiry originally requested
+it: its remote archival may already have happened. Newly observed idleness
+uses the new recycling behavior.
+
+Scheduler SQLite schema 3 migrates previously reclaimed queued scenarios to
+``sleep`` while preserving first-start FIFO entries. Update the scheduler and
+its services together and preserve their databases and control records. Older
+scheduler binaries reject schema 3; use an upgrade backup for rollback.
 
 The ``evaluation`` section
 --------------------------

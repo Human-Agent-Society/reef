@@ -174,9 +174,9 @@ console.log(JSON.stringify(events));
         assert execution["command"] == "bash"
         assert "/reef/harness/install?adapter=pi" in execution["args"][1]
         assert "bash -s --" in execution["args"][1]
-        # scenario, serviceUrl, token, destDir: destDir defaults to agentDir/..
-        assert execution["args"][-4:-1] == ["code-repair", "http://reef:8900", ""]
-        assert execution["args"][-1].endswith("pi-agent/..") or "/" in execution["args"][-1]
+        # The destination and optional tenant follow the service and token.
+        assert execution["args"][-5:-2] == ["code-repair", "http://reef:8900", ""]
+        assert execution["args"][-2].endswith("pi-agent/..") or "/" in execution["args"][-2]
         assert events[3]["message"] == "Installed release v2. Type /reload to load it now."
 
 
@@ -219,6 +219,7 @@ versionCheck({
 const confirms = JSON.parse(process.env.TEST_CONFIRM || "[]");
 const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
 globalThis.fetch = async (url, init = {}) => {
+  if (process.env.TEST_CAPTURE_HEADERS === "1") events.push({ kind: "headers", url, headers: init.headers });
   if ((init.method || "GET") === "POST") {
     events.push({ kind: "fetch", method: "POST", url, body: init.body ? JSON.parse(init.body) : null });
     const answer = JSON.parse(process.env.TEST_PROMOTE || '{"ok": true, "release_id": "promoted"}');
@@ -269,11 +270,34 @@ console.log(JSON.stringify(events));
         "TEST_INPUT",
         "TEST_EXEC",
         "TEST_PROMOTE",
+        "TEST_CAPTURE_HEADERS",
+        "REEF_TENANT_ID",
     ):
         if name not in env:
             full_env.pop(name, None)
     completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=full_env)
     return json.loads(completed.stdout), completed.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_notice_keeps_the_tenant_for_catalog_promotion_and_install(tmp_path: Path) -> None:
+    events, _ = _notice(
+        tmp_path,
+        [{"release_id": "v1"}, {"release_id": "v2", "pending": True}],
+        {"release_id": "v1"},
+        REEF_TENANT_ID="11",
+        TEST_CHOOSE_UPDATE="1",
+        TEST_CAPTURE_HEADERS="1",
+    )
+    requests = [event for event in events if event["kind"] == "headers"]
+    assert [request["url"] for request in requests] == [
+        "http://reef:8900/reef/harness/releases",
+        "http://reef:8900/reef/scenarios/code-repair/promote",
+    ]
+    assert all(request["headers"]["x-reef-tenant"] == "11" for request in requests)
+    execution = next(event for event in events if event["kind"] == "exec")
+    assert execution["args"][-1] == "11"
+    assert "x-reef-tenant: $5" in execution["args"][1]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

@@ -672,6 +672,7 @@ def _install_fixture(
     scenario: str = "",
     binding_files: dict[str, str] | None = None,
     is_token_expected: bool = False,
+    tenant_id: int | None = None,
 ) -> tuple[Path, Path, Path, dict]:
     """A rendered script, a PATH shim dir, and an install prefix.
 
@@ -689,6 +690,7 @@ def _install_fixture(
             scenario=scenario,
             binding_files=binding_files,
             is_token_expected=is_token_expected,
+            tenant_id=tenant_id,
         )
     )
     prefix = tmp_path / "prefix"
@@ -794,6 +796,25 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     models = json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))
     assert models["providers"]["reef"]["apiKey"] == NO_TOKEN_API_KEY
     assert _extract_reef_token("pi", dest / "pi-agent") is None
+
+
+@pytest.mark.unit
+def test_install_preserves_the_local_tenant_outside_the_published_tree(tmp_path, monkeypatch) -> None:
+    from reef.harness.client.wrapper import read_install_record, reef_tenant_id
+
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", tenant_id=11
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    monkeypatch.setenv("HOME", env["HOME"])
+    monkeypatch.delenv("REEF_TENANT_ID", raising=False)
+    compose = str(dest / "pi-agent")
+    assert read_install_record(compose)["tenant_id"] == 11
+    assert reef_tenant_id(compose) == "11"
+    assert (dest / "pi-agent/AGENTS.md").read_text() == HOSTILE_FILES["pi-agent/AGENTS.md"]
+    monkeypatch.setenv("REEF_TENANT_ID", "12")
+    assert reef_tenant_id(compose) == "12"
 
 
 @pytest.mark.unit

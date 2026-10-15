@@ -24,7 +24,8 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.scenario.factory import ScenarioFactory
+from reef.scenario.admission import ScenarioAdmissions
+from reef.scenario.factory import ScenarioConstructionCleanup, ScenarioConstructionCleanupError, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
 from reef.storage.scenario import ScenarioStorage
@@ -64,8 +65,10 @@ class ScenarioRegistry:
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
+        admissions: ScenarioAdmissions | None = None,
     ) -> None:
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
+        self.admissions = admissions
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
         self._scenario_factory = ScenarioFactory(
@@ -85,6 +88,7 @@ class ScenarioRegistry:
         # The mode a person selected per scenario; a reload in this process applies it again, a restart does not.
         self._training_modes: dict[str, str] = {}
         self._preload_errors: dict[str, str] = {}
+        self.failed_constructions: dict[str, list[ScenarioConstructionCleanup]] = {}
         self.replaced_closer: ReplacedScenarioCloser = CloseReplacedAtOnce()
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
@@ -182,6 +186,8 @@ class ScenarioRegistry:
         waits for the episode in flight, and an episode of a deleted
         scenario must not bring the scenario back.
         """
+        if self.admissions is not None:
+            self.admissions.require(scenario)
         current = self.get_optional(scenario)
         if current is not None:
             self._scenario_factory.validate_existing(current, release_id)
@@ -236,9 +242,17 @@ class ScenarioRegistry:
             return current
 
     def configure_model(
-        self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
+        self,
+        scenario: str,
+        value: object,
+        *,
+        create: bool = False,
+        release_id: str | None = None,
+        starting_id: int | None = None,
     ) -> Scenario:
         with self.lock_for(scenario):
+            if self.admissions is not None:
+                self.admissions.require(scenario, starting_id=starting_id)
             exists = self.has(scenario)
             if not create and not exists:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
@@ -249,7 +263,76 @@ class ScenarioRegistry:
                 current = self._model_config(scenario)
                 write_model_config(self._agent_record_dir, scenario, value)
                 current.runtime = candidate.runtime
-            return self._resolve(scenario, release_id)
+            return self._resolve(scenario, release_id, starting_id=starting_id)
+
+    def start_scheduled(
+        self,
+        scenario: str,
+        scenario_id: int,
+        release_id: str | None = None,
+        *,
+        model: object = None,
+        has_model: bool = False,
+    ) -> Scenario:
+        """Resolve the lifecycle whose construction the scheduler explicitly approved."""
+        if self.admissions is None:
+            raise ValueError("scheduled construction requires an admission table")
+        assignment = self.admissions.require(scenario, starting_id=scenario_id)
+        if has_model and not self.has(scenario):
+            candidate = ModelConfig.from_value(model)
+            self._recipe.with_model_config(candidate)
+            model_config = self._model_config(scenario)
+            write_model_config(self._agent_record_dir, scenario, model)
+            model_config.runtime = candidate.runtime
+        # The dispatcher's lifecycle operation serializes construction. Other callers
+        # cannot resolve a starting assignment, so slow construction needs no registry lock.
+        current = self._resolve(scenario, release_id, starting_id=scenario_id)
+        if assignment.training_mode is not None:
+            if current.training_mode != assignment.training_mode:
+                current.set_training_mode(assignment.training_mode)
+            with self._lock:
+                self._training_modes[scenario] = assignment.training_mode
+        return current
+
+    def validate_scheduled_model(self, value: object) -> None:
+        """Validate private queued creation settings without storing or constructing anything."""
+        candidate = ModelConfig.from_value(value)
+        self._recipe.with_model_config(candidate)
+
+    def load_scenario(self, scenario: str, release_id: str | None) -> Scenario:
+        """Construct an instance and retain any resources its failure could not close."""
+        self.close_failed_constructions(scenario)
+        try:
+            return self._scenario_factory.load_or_create(
+                scenario, release_id, model_config=self._model_config(scenario)
+            )
+        except ScenarioConstructionCleanupError as exc:
+            with self._lock:
+                self.failed_constructions.setdefault(scenario, []).append(exc.resources)
+            raise
+
+    def close_failed_constructions(self, scenario: str | None = None) -> None:
+        """Retry failed construction teardown without holding the registry state lock."""
+        with self._lock:
+            pending = [
+                (name, resources)
+                for name, instances in self.failed_constructions.items()
+                if scenario is None or name == scenario
+                for resources in instances
+            ]
+        errors: list[BaseException] = []
+        for name, resources in pending:
+            try:
+                resources.close()
+            except BaseException as exc:
+                errors.append(exc)
+            else:
+                with self._lock:
+                    self.failed_constructions[name].remove(resources)
+                    if not self.failed_constructions[name]:
+                        self.failed_constructions.pop(name)
+        if errors:
+            raise errors[0]
 
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure.
@@ -258,9 +341,9 @@ class ScenarioRegistry:
         instance goes to the registry's closer (see ``set_replaced_closer``).
         """
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(
-                scenario, None, model_config=self._model_config(scenario)
-            )
+            if self.admissions is not None:
+                self.admissions.require(scenario)
+            recovered = self.load_scenario(scenario, None)
             with self._lock:
                 training_mode = self._training_modes.get(scenario)
             if training_mode is not None and recovered.training_mode != training_mode:
@@ -327,15 +410,17 @@ class ScenarioRegistry:
         self,
         scenario: str,
         release_id: str | None,
+        *,
+        starting_id: int | None = None,
     ) -> Scenario:
+        if self.admissions is not None:
+            self.admissions.require(scenario, starting_id=starting_id)
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
             self._scenario_factory.validate_existing(current, release_id)
             return current
-        current = self._scenario_factory.load_or_create(
-            scenario, release_id, model_config=self._model_config(scenario)
-        )
+        current = self.load_scenario(scenario, release_id)
         training_runtime = current.training_runtime
         with self._lock:
             shared_runtime = training_runtime is not None and training_runtime.concurrent_training_scenarios

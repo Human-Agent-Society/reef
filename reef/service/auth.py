@@ -40,6 +40,7 @@ PAGE_KEY_CONTEXT = b"reef-page\n"
 
 #: Where the middleware keeps the digest of the service token a request presented, for ``page_query``.
 TOKEN_DIGEST = web.RequestKey("reef_token_digest", bytes)
+EVALUATION_AUTHENTICATED = web.RequestKey("reef_evaluation_authenticated", bool)
 
 
 def page_key_for_digest(digest: bytes, scenario: str) -> str:
@@ -61,7 +62,9 @@ def page_query(request: web.Request, scenario: str) -> str:
     token, that scenario's page key, so a browser opens the page without the headers."""
     digest = request.get(TOKEN_DIGEST)
     key = {} if digest is None else {"key": page_key_for_digest(digest, scenario)}
-    return urlencode({"scenario": scenario, **key})
+    tenant = request.headers.get("x-reef-tenant") or request.query.get("tenant_id")
+    ownership = {} if not tenant else {"tenant_id": tenant}
+    return urlencode({"scenario": scenario, **ownership, **key})
 
 
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
@@ -73,7 +76,10 @@ EVALUATION_ROUTES = re.compile(r"^/reef/scenarios/[^/]+(/components/[^/]+)?/eval
 
 
 def create_authentication_middleware(
-    tokens: str | Iterable[str] | None, *, evaluation_tokens: str | Iterable[str] | None = None
+    tokens: str | Iterable[str] | None,
+    *,
+    evaluation_tokens: str | Iterable[str] | None = None,
+    control_token: str | None = None,
 ):
     """Bearer-token authentication against the accepted token set.
 
@@ -157,16 +163,34 @@ def create_authentication_middleware(
             # A service token, not an evaluation one: the routes that hand out page links derive their key from it.
             request[TOKEN_DIGEST] = presented
         if request.method == "POST" and EVALUATION_ROUTES.match(request.rel_url.raw_path):
+            evaluation_matched = False
             for digest in evaluation_accepted:
-                matched |= secrets.compare_digest(presented, digest)
+                evaluation_matched |= secrets.compare_digest(presented, digest)
+            if evaluation_matched:
+                request[EVALUATION_AUTHENTICATED] = True
+            matched |= evaluation_matched
         return matched
 
     @web.middleware
     async def authenticate(request: web.Request, handler):
+        if request.path == "/reef/scheduler/control":
+            presented = _presented(request)
+            if (
+                control_token is None
+                or presented is None
+                or not secrets.compare_digest(_digest(presented), _digest(control_token))
+            ):
+                raise web.HTTPUnauthorized(text="invalid scheduler control token")
+            return await handler(request)
         # /healthz stays reachable without credentials: liveness probes (the
         # bundled configs' ready checks, orchestrators) cannot authenticate.
-        if accepted and request.path != "/healthz" and not _authorized(request):
-            raise web.HTTPUnauthorized(text="invalid service token")
+        if request.path != "/healthz":
+            if accepted:
+                if not _authorized(request):
+                    raise web.HTTPUnauthorized(text="invalid service token")
+            elif evaluation_accepted and EVALUATION_ROUTES.match(request.rel_url.raw_path):
+                # Recognize internal evaluation even when public service authentication is disabled.
+                _authorized(request)
         return await handler(request)
 
     return authenticate

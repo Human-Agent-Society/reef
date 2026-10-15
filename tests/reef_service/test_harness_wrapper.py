@@ -30,6 +30,7 @@ from reef.harness.client.wrapper import (
     harness,
     main,
     next_commands,
+    reef_tenant_id,
     report,
     result_line,
     run_agent,
@@ -1622,6 +1623,8 @@ def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(captures), "REEF_HARNESS_COMPOSE": compose, **extra}
     if "REEF_TOKEN" not in extra:
         env.pop("REEF_TOKEN", None)
+    if "REEF_TENANT_ID" not in extra:
+        env.pop("REEF_TENANT_ID", None)
     return env
 
 
@@ -1667,7 +1670,38 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     # The link to the request's page follows, with the scenario and the shell's token as query parameters.
     link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={PAGE_KEY}"
     assert out[-2] == f"reef-pi: watch it here: {link}"
-    assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /versions later"
+    assert out[-1] == "reef-pi: request accepted; add --wait to follow it, or check /versions later"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["alice", "0", "-1", "1.5", "9223372036854775808"])
+def test_invalid_tenant_override_fails_before_sending_a_request(monkeypatch, value: str) -> None:
+    monkeypatch.setenv("REEF_TENANT_ID", value)
+    with pytest.raises(ValueError, match="tenant_id"):
+        reef_tenant_id()
+
+
+@pytest.mark.unit
+def test_tenant_context_reaches_the_proxy_agent_and_training_request(tmp_path) -> None:
+    reef = _FakeReef({"agent_record_id": "q-tenant", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path, reef.port)
+    observed = tmp_path / "tenant.txt"
+    with binary.open("a") as handle:
+        handle.write(f"\nPath({str(observed)!r}).write_text(os.environ['REEF_TENANT_ID'])\n")
+    try:
+        with patch.dict(os.environ, _ask_env(captures, compose, REEF_TENANT_ID="11"), clear=True):
+            with pytest.raises(SystemExit) as exit_result:
+                run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+            assert exit_result.value.code == 0
+            harness("ask-scenario", "pi", compose, "add a check")
+            report("ask-scenario", "pi", 1.0, "works")
+    finally:
+        reef.close()
+    assert observed.read_text() == "11"
+    assert {request["path"] for request in reef.seen} == {"/v1/chat/completions", "/reef/train", "/reef/report"}
+    assert all(request["headers"]["x-reef-tenant"] == "11" for request in reef.seen)
+    assert all("tenant_id" not in request["body"] for request in reef.seen)
 
 
 @pytest.mark.unit
@@ -1683,6 +1717,7 @@ def test_harness_without_spooled_receipts_submits_training(tmp_path, capsys) -> 
     assert request["body"]["text"] == "read papers first"
     assert request["body"]["release_id"] == "rel-3"
     assert request["headers"]["authorization"] == "Bearer dummy"  # no REEF_TOKEN in the shell: models.json's apiKey
+    assert "x-reef-tenant" not in request["headers"]
     out = capsys.readouterr().out
     assert "reef-pi: training request q-2 accepted" in out
     uuid.UUID(request["body"]["session"])
@@ -2155,7 +2190,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     assert out[-3:] == [
         "reef-pi: training request q-1 accepted",
         f"reef-pi: watch it here: {link}",
-        "reef-pi: reef is running the step; add --wait to stay here, or check /versions later",
+        "reef-pi: request accepted; add --wait to follow it, or check /versions later",
     ]
 
 
@@ -2304,9 +2339,7 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
         assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.05, poll_s=0.01) == 2
     reef.close()
     out = capsys.readouterr().out.splitlines()
-    assert (
-        out[2] == "reef-claude: reef is running the step; add --wait to stay here, or run reef-claude wait q-1 later"
-    )
+    assert out[2] == "reef-claude: request accepted; add --wait to follow it, or run reef-claude wait q-1 later"
     assert out[3:] == [
         "reef-claude: reef is running the step; waiting up to 0.05 s for its result",
         "reef-claude: no result yet for 'request q-1' after 0.05 s; reef-claude wait q-1 waits again",

@@ -16,4 +16,7 @@ supplies SQLite connections, schema upgrades, and file retention. ``postgres``
 supplies PostgreSQL tables, a shared connection pool, and SQL retention. ``commit_log``
 implements JSONL commits over any record store. ``sqlite`` and ``postgres``
 also assemble their scenario storage services. Database-specific code stays here.
+
+``scheduling`` defines tenant admission values and its persistence interface;
+``sqlite_scheduling`` implements that interface independently of record storage.
 """

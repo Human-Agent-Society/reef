@@ -16,7 +16,19 @@ from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotF
 from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import ReefError, ScenarioBusy, UnknownScenario
 from reef.runtime.interfaces import UpstreamStatusError
+from reef.scenario.scheduling import (
+    AdmissionConflict,
+    AdmissionNotFound,
+    GlobalQuotaExceeded,
+    RequestTenantMismatch,
+    ScenarioRequirementExceedsQuota,
+    ScenarioTenantMismatch,
+    SchedulerNotAcceptingRequests,
+    ServiceUnavailable,
+    UnknownTenant,
+)
 from reef.service.request_service import InferenceRetryTimeout
+from reef.service.scheduling import SchedulerResponseError, SchedulerUnavailable
 from reef.storage.records import RecordConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
@@ -24,6 +36,16 @@ logger = logging.getLogger(__name__)
 
 #: Ordered most-specific first; the first isinstance match wins.
 ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
+    (AdmissionNotFound, web.HTTPNotFound),
+    (AdmissionConflict, web.HTTPConflict),
+    (ScenarioTenantMismatch, web.HTTPForbidden),
+    (RequestTenantMismatch, web.HTTPForbidden),
+    (UnknownTenant, web.HTTPUnprocessableEntity),
+    (ScenarioRequirementExceedsQuota, web.HTTPUnprocessableEntity),
+    (GlobalQuotaExceeded, web.HTTPTooManyRequests),
+    (SchedulerNotAcceptingRequests, web.HTTPServiceUnavailable),
+    (ServiceUnavailable, web.HTTPServiceUnavailable),
+    (SchedulerUnavailable, web.HTTPServiceUnavailable),
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
     (ScenarioBusy, web.HTTPConflict),
@@ -70,6 +92,8 @@ def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
 
 def translate_error(exc: Exception) -> web.HTTPError | None:
     """The HTTP error for a domain exception, or None when it is not mapped."""
+    if isinstance(exc, SchedulerResponseError):
+        return _UPSTREAM_CLIENT_ERRORS.get(exc.status, web.HTTPServiceUnavailable)(text=str(exc))
     if isinstance(exc, UpstreamStatusError):  # before the table: status is dynamic
         return _translate_upstream(exc)
     for error_type, http_error in ERROR_STATUS_TABLE:

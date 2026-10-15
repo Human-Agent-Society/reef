@@ -516,7 +516,11 @@ def prune_lines(kept: Sequence[str]) -> list[str]:
 
 
 def install_record_lines(
-    wrapper_name: str, written: Sequence[str], preference_keys_by_path: Mapping[str, Sequence[str]]
+    wrapper_name: str,
+    written: Sequence[str],
+    preference_keys_by_path: Mapping[str, Sequence[str]],
+    *,
+    tenant_id: int | None = None,
 ) -> list[str]:
     """Record what this install wrote in ``$WRAPPER_DIR.json``, where ``reef-<adapter>`` reads it before a session.
 
@@ -548,6 +552,7 @@ def install_record_lines(
         "    checked_values = {key: value for key, value in installed_settings.items() if key not in preference_keys}",
         '    settings[relative] = {"preference_keys": preference_keys, "checked_values": checked_values}',
         'record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files, "settings": settings}',
+        *([f"record['tenant_id'] = {tenant_id!r}"] if tenant_id is not None else []),
         'text = json.dumps(record, indent=2) + "\\n"',
         "try:",
         '    with open(record_path, encoding="utf-8") as handle:',
@@ -717,6 +722,7 @@ def render_install_script(
     fallback_release_id: str | None = None,
     service_url: str | None = None,
     is_token_expected: bool = False,
+    tenant_id: int | None = None,
 ) -> str:
     """The complete install script for one adapter and one served manifest.
 
@@ -737,7 +743,9 @@ def render_install_script(
     machine with nothing set up, and records the list in the release file it
     writes. ``service_url`` is the address the script was served from; the
     install record keeps it, so the wrapper reaches Reef there even after a
-    session changed the binding. Raises ``DescriptorError`` when the descriptor declares no
+    session changed the binding. ``tenant_id`` is saved beside it for the wrapper's
+    requests to Reef; it never becomes part of the published composition.
+    Raises ``DescriptorError`` when the descriptor declares no
     install section and ``ValueError`` when a composition path is absolute
     or escapes the destination through a ``..`` part, the same rule the
     stdlib client pull applies to served paths, or when an item of
@@ -888,7 +896,7 @@ def render_install_script(
         "",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
         *_binding_lines(bindings, is_token_expected),
-        *install_record_lines(wrapper_name, recorded, preference_keys_by_path),
+        *install_record_lines(wrapper_name, recorded, preference_keys_by_path, tenant_id=tenant_id),
         "",
         'echo "reef: done"',
         f'echo "run:     $HOME/.local/bin/{_double_quoted(wrapper_name)}"',

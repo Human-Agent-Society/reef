@@ -397,7 +397,12 @@ export default function requests(pi) {
 
   const reefHeaders = () => {
     const token = process.env.REEF_TOKEN;
-    return { "x-reef-scenario": scenario, ...(token ? { authorization: `Bearer ${token}` } : {}) };
+    const tenantId = process.env.REEF_TENANT_ID;
+    return {
+      "x-reef-scenario": scenario,
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(tenantId ? { "x-reef-tenant": tenantId } : {}),
+    };
   };
 
   // A page a browser opens: the page_path the service answers a filing and each catalog row with, whose query

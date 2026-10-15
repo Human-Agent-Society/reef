@@ -17,6 +17,7 @@ from typing import Any
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.service.scheduling import validate_endpoint
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
@@ -176,6 +177,44 @@ class ServiceConfig:
         public_path=("reef", "allow_implicit_scenario_creation"),
         help="Allow requests to create scenarios implicitly.",
     )
+    scheduler_url: str | None = config_option(
+        None,
+        public_path=("scheduling", "scheduler_url"),
+        help="Authoritative tenant scheduler URL; unset disables admission.",
+    )
+    scheduler_service_id: int | None = config_option(
+        None, public_path=("scheduling", "service_id"), help="Stable ID registered for this service."
+    )
+    scheduler_service_url: str | None = config_option(
+        None,
+        public_path=("scheduling", "service_url"),
+        help="Service URL reachable by the scheduler; defaults to reef.served_url or the bind address.",
+    )
+    scheduler_config_revision: str = config_option(
+        "",
+        public_path=("scheduling", "config_revision"),
+        help="Operator-supplied version label for the registered service configuration.",
+    )
+    scheduler_tenant_id_map: Mapping[str, int] = field(
+        default_factory=dict,
+        metadata=config_metadata(
+            "Explicit mapping from legacy tenant names to numeric IDs during admission migration.",
+            public_path=("scheduling", "tenant_id_map"),
+        ),
+    )
+    scheduler_service_name: str | None = config_option(
+        None, public_path=("scheduling", "service_name"), help="Unique user-facing name of this service."
+    )
+    scheduler_token: str | None = field(
+        default=None,
+        repr=False,
+        metadata=config_metadata("Scheduler API token.", public_path=("scheduling", "token")),
+    )
+    scheduler_control_token: str | None = field(
+        default=None,
+        repr=False,
+        metadata=config_metadata("Private scheduler control token.", public_path=("scheduling", "control_token")),
+    )
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
     wandb_config: Mapping[str, Any] = field(
@@ -209,6 +248,40 @@ class ServiceConfig:
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.scheduler_url is not None:
+            if not self.scheduler_service_id or not self.scheduler_service_name or not self.scheduler_control_token:
+                raise ValueError("scheduling requires scheduler_url, service_id, service_name, and control_token")
+        elif any(
+            (
+                self.scheduler_service_id,
+                self.scheduler_service_name,
+                self.scheduler_token,
+                self.scheduler_control_token,
+                self.scheduler_service_url,
+                self.scheduler_config_revision,
+            )
+        ):
+            raise ValueError("scheduler settings require scheduling.scheduler_url")
+        if self.scheduler_service_url is not None:
+            validate_endpoint(self.scheduler_service_url)
+        if not isinstance(self.scheduler_config_revision, str):
+            raise ValueError("scheduling.config_revision must be a string")
+        if self.scheduler_service_id is not None and (
+            isinstance(self.scheduler_service_id, bool)
+            or not isinstance(self.scheduler_service_id, int)
+            or not 1 <= self.scheduler_service_id <= 2**63 - 1
+        ):
+            raise ValueError("scheduling.service_id must be a positive integer")
+        if not isinstance(self.scheduler_tenant_id_map, Mapping) or any(
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 2**63 - 1
+            for key, value in self.scheduler_tenant_id_map.items()
+        ):
+            raise ValueError("scheduling.tenant_id_map must map legacy strings to positive integers")
+        if len(set(self.scheduler_tenant_id_map.values())) != len(self.scheduler_tenant_id_map):
+            raise ValueError("scheduling.tenant_id_map cannot merge legacy tenants")
         RecordRetention(self.agent_record_retention_days, self.agent_record_retention_max_bytes)
         if self.record_backend not in {"sqlite", "postgres"}:
             raise ValueError("reef.record_backend must be sqlite or postgres")

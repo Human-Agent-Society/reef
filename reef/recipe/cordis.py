@@ -328,6 +328,12 @@ class CordisRecipe(Recipe):
     name: str = field(default="harness_evolve", kw_only=True)
     scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
 
+    def scenario_execution_units(self) -> int:
+        """Reserve the resolved evaluation worker count for this scenario's lifetime."""
+        if self.episode_workers is None:
+            raise RecipeConfigError("evaluation worker count was not resolved")
+        return self.episode_workers
+
     def with_model_config(self, config: ModelConfig) -> CordisRecipe:
         super().with_model_config(config)
         return replace(self, scenario_model=config)

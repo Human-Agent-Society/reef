@@ -94,6 +94,14 @@ class Recipe:
         """Directories that belong to one scenario alone, archived when the scenario is deleted; none by default."""
         return ()
 
+    def scenario_execution_units(self) -> int | None:
+        """Static evaluation worker slots for local harness admission, when supported.
+
+        Recipes that do not implement local harness evolution are outside the
+        tenant scheduler's initial scope and return None.
+        """
+        return None
+
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
     training_mode: str = config_field("auto")
 

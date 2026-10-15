@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -38,8 +38,11 @@ from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.runtime.recovery import marker_in_flight
+from reef.scenario.admission import ScenarioAdmissionError, ScenarioAdmissions, ScenarioControlResult
 from reef.scenario.registry import ReplacedScenarioCloser, ScenarioRegistry
 from reef.scenario.scenario import Scenario, SettledTrainingResultError, StaleTrainingResultError
+from reef.storage.admissions import ScenarioAdmissionStore
+from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.train.backend import CandidateBackend
@@ -52,6 +55,15 @@ logger = logging.getLogger(__name__)
 class _LocalBackendWorkerState:
     ready: Event
     thread: Thread
+
+
+@dataclass
+class ScheduledScenarioCleanup:
+    """Retain teardown ownership until every worker and instance has closed."""
+
+    instances: tuple[Scenario, ...]
+    workers: tuple[_LocalBackendWorkerState, ...]
+    reclaim: bool
 
 
 @dataclass
@@ -151,6 +163,20 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
+def validate_training_record(item: AgentRecord, training_mode: str | None, accepts_training: bool) -> None:
+    """Check the same instruction contract before warm ingestion or durable cold acceptance."""
+    if training_mode not in ("manual", "hybrid"):
+        raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+    if not accepts_training:
+        raise ValueError("explicit training requests require a training backend")
+    request = TrainingRequest.from_dict(item.payload)
+    if item.references:
+        raise ValueError("training instructions do not reference inference receipts")
+    refusal = training_request_refusal(request.text, request.requires)
+    if refusal is not None:
+        raise ValueError(refusal)
+
+
 class ReplacedAfterItsCycle(ReplacedScenarioCloser):
     """The dispatcher's closer: a replaced instance a local cycle still runs on closes when that cycle ends."""
 
@@ -201,6 +227,8 @@ class Dispatcher:
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
         hold_local_cycles: bool = False,
+        require_scenario_admission: bool = False,
+        scenario_admission_store: ScenarioAdmissionStore | None = None,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`, for a service whose recipe
         calls this same service, which does not answer yet while the dispatcher starts."""
@@ -208,6 +236,18 @@ class Dispatcher:
         self._storage = scenario_storage
         self._record_retention_lock = Lock()
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        self.scenario_admissions: ScenarioAdmissions | None
+        if require_scenario_admission:
+            if scenario_admission_store is None:
+                raise ValueError("scheduled scenarios require an explicit scenario_admission_store")
+            self.scenario_admissions = ScenarioAdmissions(scenario_admission_store)
+        else:
+            self.scenario_admissions = None
+        self.allow_implicit_creation = allow_implicit_creation
+        self.scheduled_lock = Lock()
+        self.scheduled_operations: dict[str, Event] = {}
+        # Keep resources owned until closure and its durable acknowledgement both succeed.
+        self.scheduled_cleanups: dict[str, ScheduledScenarioCleanup] = {}
         self._registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -216,6 +256,7 @@ class Dispatcher:
             scenario_storage=scenario_storage,
             allow_implicit_creation=allow_implicit_creation,
             experiment_tracker=self._experiment_tracker,
+            admissions=self.scenario_admissions,
         )
         self._registry.set_training_scenario_callback(self._start_training)
         self._registry.set_replaced_closer(ReplacedAfterItsCycle(self))
@@ -224,7 +265,7 @@ class Dispatcher:
         self._lifecycle = _LifecycleState()
         if not hold_local_cycles:
             self._lifecycle.local_cycles_open.set()
-        if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
+        if self.scenario_admissions is None and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self._lifecycle.preload_thread = Thread(
                 target=self._preload_scenarios,
                 args=(backend_factory.list_registrations(),),
@@ -250,6 +291,315 @@ class Dispatcher:
         return self._recipe
 
     # -- Scenario API (delegates to registry) ----------------------------
+
+    @property
+    def supports_idle_reclaim(self) -> bool:
+        """Whether released instances can recover their records and assignment after restart."""
+        return (
+            self._storage.durable and self.scenario_admissions is not None and self.scenario_admissions.storage.durable
+        )
+
+    def scheduled_scenario_idle(self, scenario_name: str) -> bool:
+        """Check under the cycle and registry locks that a scenario is waiting for new input."""
+        current = self._registry.get_optional(scenario_name)
+        if current is None or not self.supports_idle_reclaim or not self.local_cycles_run():
+            return False
+        if current.is_job_reserved or self.training_job_in_flight(scenario_name):
+            return False
+        runtime = current.runtime
+        if runtime is not None and not runtime.inference_admission_status.get("open", True):
+            return False
+        with self._training.lock:
+            blocked = (
+                scenario_name in self._training.deferred_reloads
+                or any(name == scenario_name for name, _ in self._training.stood_aside)
+                or any(name == scenario_name for name, _ in self._training.errors)
+            )
+        if blocked or self._training.turn_waiting.is_set() or self._training.storage_status is not None:
+            return False
+        return all(
+            bound.trainer.pending_batch is None
+            and (bound.trainer.candidate_backend is None or not bound.trainer.has_unread_records())
+            and not bound.trainer.batch_ready()
+            and not bound.trainer.processor.derivation_pending()
+            and not bound.trainer.instruction_failures()
+            for bound in current.component_trainers
+        )
+
+    def scheduled_scenario_status(self, scenario_name: str) -> ScenarioControlResult | None:
+        """Observe continuous idle time without constructing instances or treating reads as activity."""
+        admissions = self.scenario_admissions
+        if admissions is None:
+            return None
+        if admissions.get(scenario_name) is None:
+            return admissions.status(scenario_name)
+        cycle_lock = self.local_cycle_lock(scenario_name)
+        if not cycle_lock.acquire(blocking=False):
+            return admissions.observe_idle(scenario_name, False)
+        try:
+            with self._registry.lock_for(scenario_name):
+                return admissions.observe_idle(scenario_name, self.scheduled_scenario_idle(scenario_name))
+        finally:
+            cycle_lock.release()
+
+    @contextmanager
+    def scheduled_operation(self, scenario_name: str) -> Iterator[None]:
+        """Allow one control operation per name without accumulating blocked HTTP threads."""
+        with self.scheduled_lock:
+            if self._lifecycle.closed.is_set():
+                raise ScenarioAdmissionError("the service is stopping")
+            if scenario_name in self.scheduled_operations:
+                raise ScenarioBusy(f"scenario {scenario_name!r} has a lifecycle operation in progress")
+            completed = Event()
+            self.scheduled_operations[scenario_name] = completed
+        try:
+            yield
+        finally:
+            with self.scheduled_lock:
+                self.scheduled_operations.pop(scenario_name)
+                completed.set()
+
+    def start_scheduled_scenario(
+        self,
+        scenario_id: int,
+        tenant_id: int,
+        scenario_name: str,
+        *,
+        generation: int = 1,
+        release_id: str | None = None,
+        model: object = None,
+        has_model: bool = False,
+    ) -> ScenarioControlResult:
+        """Construct a scheduler-approved lifecycle; repeated control messages return its current state."""
+        admissions = self.scenario_admissions
+        if admissions is None:
+            raise ScenarioAdmissionError("scenario scheduling is disabled for this service")
+        with self.scheduled_operation(scenario_name):
+            previous = admissions.get_operation(scenario_name)
+            if (previous is None or (previous.operation == "cleanup" and previous.complete)) and self._registry.has(
+                scenario_name
+            ):
+                raise ScenarioAdmissionError(
+                    "existing scenario registration requires explicit scheduler ownership migration"
+                )
+            current = admissions.begin(scenario_id, tenant_id, scenario_name, generation)
+            if current.operation != "start" or admissions.get(scenario_name) is not None:
+                return admissions.require_result(scenario_name)
+            try:
+                # A resumed logical scenario keeps its registered base and committed head;
+                # resolving the original moving selector again could reject or rewind it.
+                selected_release = None if previous is not None and self._registry.has(scenario_name) else release_id
+                scenario = self._registry.start_scheduled(
+                    scenario_name, scenario_id, selected_release, model=model, has_model=has_model
+                )
+                if current.pending_training is not None:
+                    pending = current.pending_training.item
+                    self.validate_record(scenario, pending, {})
+                    scenario.records.append_result(pending)
+                    admissions.finish_training_delivery(scenario_name, pending.agent_record_id)
+                result = admissions.admit(
+                    scenario_name,
+                    scenario_id,
+                    training_mode=scenario.training_mode,
+                    accepts_training=any(
+                        bound.trainer.candidate_backend is not None for bound in scenario.component_trainers
+                    ),
+                )
+                self._wake_training(scenario)
+            except Exception as exc:
+                # The factory closes construction resources. Keep the owned registration
+                # until explicit cleanup archives it and acknowledges quota release.
+                return admissions.fail_start(
+                    scenario_name, scenario_id, f"scenario startup failed ({type(exc).__name__})"
+                )
+            return result
+
+    def stage_scheduled_training(self, item: AgentRecord, tenant_id: int) -> AgentRecord:
+        """Retain one instruction without creating a scenario or allocating workers."""
+        admissions = self.scenario_admissions
+        if admissions is None or item.request_type is not RequestType.TRAIN:
+            raise ScenarioAdmissionError("cold training requires scheduler admission enforcement")
+        with self.scheduled_operation(item.scenario):
+            operation = admissions.get_operation(item.scenario)
+            if operation is None or operation.tenant_id != tenant_id:
+                raise ScenarioAdmissionError("scenario has no matching scheduler assignment")
+            if operation.operation == "cleanup":
+                raise ScenarioAdmissionError("scenario is awaiting cleanup or already deleted")
+            with closing(self._storage.open(item.scenario)) as store:
+                existing = store.records.existing_receipt(item)
+                if existing is not None:
+                    return existing
+            validate_training_record(item, operation.training_mode, operation.accepts_training)
+            return admissions.stage_training(item, tenant_id)
+
+    def scheduled_request_snapshot(
+        self, scenario_name: str, record_id: str
+    ) -> tuple[AgentRecord, tuple[CommitRecord, ...], ScenarioControlResult] | None:
+        """Read a retained request and its history without loading a sleeping instance."""
+        admissions = self.scenario_admissions
+        if admissions is None:
+            return None
+        with self._registry.lock_for(scenario_name):
+            operation = admissions.get_operation(scenario_name)
+            if operation is None or admissions.get(scenario_name) is not None:
+                return None
+            if operation.operation == "cleanup":
+                pending = operation.pending_training
+                if pending is not None and pending.item.agent_record_id == record_id:
+                    return pending.item, (), admissions.require_result(scenario_name)
+                return None
+            with closing(self._storage.open(scenario_name)) as store:
+                pending = operation.pending_training
+                if pending is not None and pending.item.agent_record_id == record_id:
+                    item = pending.item
+                else:
+                    retained = store.records.get_for_audit(scenario_name, record_id)
+                    if retained is None or retained.item.request_type is not RequestType.TRAIN:
+                        return None
+                    item = retained.item
+                return item, store.history(), admissions.require_result(scenario_name)
+
+    def validate_scheduled_model(self, value: object) -> None:
+        """Validate private creation settings without opening a scenario or persisting credentials."""
+        self._registry.validate_scheduled_model(value)
+
+    def cleanup_scheduled_scenario(
+        self,
+        scenario_id: int,
+        scenario_name: str,
+        *,
+        generation: int = 1,
+        tenant_id: int | None = None,
+    ) -> ScenarioControlResult:
+        """Delete the logical scenario only after all local execution has stopped."""
+        return self.release_scheduled_scenario(scenario_id, scenario_name, generation=generation, tenant_id=tenant_id)
+
+    def reclaim_scheduled_scenario(
+        self,
+        scenario_id: int,
+        scenario_name: str,
+        *,
+        generation: int,
+        tenant_id: int,
+        inactive_before: float,
+    ) -> ScenarioControlResult:
+        """Release idle execution resources while preserving the same scenario for later admission."""
+        return self.release_scheduled_scenario(
+            scenario_id,
+            scenario_name,
+            generation=generation,
+            tenant_id=tenant_id,
+            reclaim=True,
+            inactive_before=inactive_before,
+        )
+
+    def release_scheduled_scenario(
+        self,
+        scenario_id: int,
+        scenario_name: str,
+        *,
+        generation: int,
+        tenant_id: int | None,
+        reclaim: bool = False,
+        inactive_before: float | None = None,
+    ) -> ScenarioControlResult:
+        """Keep cleanup ownership until resource closure and the durable acknowledgement succeed."""
+        admissions = self.scenario_admissions
+        if admissions is None:
+            raise ScenarioAdmissionError("scenario scheduling is disabled for this service")
+        with self.scheduled_operation(scenario_name):
+            operation = admissions.get_operation(scenario_name)
+            if operation is None or (
+                operation.operation == "cleanup" and operation.complete and scenario_id > operation.scenario_id
+            ):
+                if reclaim or tenant_id is None or self._registry.has(scenario_name):
+                    raise ScenarioAdmissionError(
+                        "missing scheduler assignment; refusing to clean an unassigned scenario"
+                    )
+                admissions.begin(scenario_id, tenant_id, scenario_name, generation)
+            operation = admissions.advance_control(scenario_name, scenario_id, tenant_id, generation)
+            if operation.complete and (
+                operation.operation == "cleanup" or (reclaim and operation.operation == "reclaim")
+            ):
+                return admissions.require_result(scenario_name)
+            if reclaim and operation.operation == "cleanup":
+                return admissions.require_result(scenario_name)
+            if reclaim and not self.supports_idle_reclaim:
+                raise ScenarioAdmissionError("idle reclamation requires durable record and assignment storage")
+            cycle_lock = self.local_cycle_lock(scenario_name)
+            if not cycle_lock.acquire(blocking=False):
+                if reclaim:
+                    observed = admissions.observe_idle(scenario_name, False)
+                    if observed is not None:
+                        return observed
+                raise ScenarioBusy(f"cannot delete scenario {scenario_name!r} while its local cycle is running")
+            try:
+                with self._registry.lock_for(scenario_name):
+                    loaded = self._registry.get_optional(scenario_name)
+                    if reclaim:
+                        if admissions.get(scenario_name) is not None:
+                            admissions.observe_idle(scenario_name, self.scheduled_scenario_idle(scenario_name))
+                        elif operation.operation == "start" and loaded is not None:
+                            return admissions.require_result(scenario_name)
+                    elif (loaded is not None and loaded.is_job_reserved) or self.training_job_in_flight(scenario_name):
+                        raise ScenarioBusy(f"cannot delete scenario {scenario_name!r} while its training job is out")
+                    if not admissions.begin_cleanup(
+                        scenario_name,
+                        scenario_id,
+                        inactive_before,
+                        reclaim=reclaim,
+                        training_mode=None if loaded is None else loaded.training_mode,
+                    ):
+                        return admissions.require_result(scenario_name)
+                    if scenario_name not in self.scheduled_cleanups:
+                        dropped = self._registry.remove(scenario_name)
+                        workers = self._stop_local_backend_worker(scenario_name)
+                        with self._training.lock:
+                            replaced = self._training.replaced.pop(scenario_name, [])
+                        instances = tuple(replaced) if dropped is None else (dropped, *replaced)
+                        self.scheduled_cleanups[scenario_name] = ScheduledScenarioCleanup(instances, workers, reclaim)
+                    elif not reclaim:
+                        self.scheduled_cleanups[scenario_name].reclaim = False
+            finally:
+                cycle_lock.release()
+            cleanup = self.scheduled_cleanups[scenario_name]
+            try:
+                # Joining outside the registry/cycle locks lets finishing workers observe their removal.
+                for worker in cleanup.workers:
+                    worker.thread.join()
+                self._registry.close_failed_constructions(scenario_name)
+                for instance in cleanup.instances:
+                    if not cleanup.reclaim:
+                        for bound in instance.component_trainers:
+                            backend = bound.trainer.candidate_backend
+                            if backend is not None:
+                                backend.retire_scenario(scenario_name)
+                    instance.close()
+                if not cleanup.reclaim:
+                    with self._record_retention_lock:
+                        self._archive_scenario_state(scenario_name)
+                        self._registry.archive_registration(scenario_name)
+                    self._publication.forget(scenario_name)
+                self._record_training_error(scenario_name, None, source=None)
+                with self._training.lock:
+                    self._training.failure_counts.pop(scenario_name, None)
+                    self._training.deferred_reloads.discard(scenario_name)
+                    self._training.local_cycle_locks.pop(scenario_name, None)
+                result = admissions.finish_cleanup(scenario_name, scenario_id)
+            except Exception as exc:
+                return admissions.finish_cleanup(
+                    scenario_name,
+                    scenario_id,
+                    error=f"scenario resource cleanup failed ({type(exc).__name__})",
+                )
+            self.scheduled_cleanups.pop(scenario_name)
+            self._registry.forget_lock(scenario_name)
+            return result
+
+    def record_scenario_activity(self, scenario_name: str) -> None:
+        """Refresh execution activity without contacting the scheduler in a commit path."""
+        if self.scenario_admissions is not None:
+            self.scenario_admissions.touch(scenario_name)
 
     def has_scenario(self, scenario: str) -> bool:
         return self._registry.has(scenario)
@@ -282,6 +632,8 @@ class Dispatcher:
     def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
             current = self._registry.set_training_mode(scenario, training_mode)
+            if self.scenario_admissions is not None:
+                self.scenario_admissions.set_training_mode(scenario, current.training_mode)
             self._wake_training(current)
             return {"scenario": scenario, "training_mode": current.training_mode}
 
@@ -311,6 +663,8 @@ class Dispatcher:
         beside themselves, and the repository registration is archived so
         the name is free. Artifacts other scenarios share stay.
         """
+        if self.scenario_admissions is not None:
+            raise ScenarioAdmissionError("scheduled scenarios must be deleted through scheduler cleanup")
         if "/" in scenario or scenario in ("", ".", ".."):
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         with self._record_retention_lock, self._registry.lock_for(scenario):
@@ -338,6 +692,7 @@ class Dispatcher:
                         backend.retire_scenario(scenario)
                 dropped.close()
             self.close_replaced_instances(scenario)
+            self._registry.close_failed_constructions(scenario)
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
@@ -517,6 +872,7 @@ class Dispatcher:
                 current.operations.increment(metric)
             if any(result.inserted for result in appended):
                 self.process_accepted_records(current)
+            self.record_scenario_activity(scenario)
             return tuple(result.item for result in appended)
 
     def validate_record(
@@ -526,16 +882,11 @@ class Dispatcher:
             if item.request_type is RequestType.TRAIN:
                 if (existing := current.records.existing_receipt(item)) is not None:
                     return existing
-                if current.training_mode == "auto":
-                    raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-                if all(bound.trainer.candidate_backend is None for bound in current.component_trainers):
-                    raise ValueError("explicit training requests require a training backend")
-                request = TrainingRequest.from_dict(item.payload)
-                if item.references:
-                    raise ValueError("training instructions do not reference inference receipts")
-                refusal = training_request_refusal(request.text, request.requires)
-                if refusal is not None:
-                    raise ValueError(refusal)
+                validate_training_record(
+                    item,
+                    current.training_mode,
+                    any(bound.trainer.candidate_backend is not None for bound in current.component_trainers),
+                )
             # Schema enforcement: reject a malformed report before it is durably
             # appended, so the producer's POST fails with the violation naming
             # the broken field instead of the record dying silently at training
@@ -573,6 +924,7 @@ class Dispatcher:
 
     def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
         if (existing := self.validate_record(current, item, {})) is not None:
+            self.record_scenario_activity(current.name)
             current.operations.increment("ingest/duplicates_total")
             return existing
         try:
@@ -582,6 +934,7 @@ class Dispatcher:
             current.operations.increment("ingest/rejected_conflict_total")
             raise
         stored = appended.item
+        self.record_scenario_activity(current.name)
         if not appended.inserted:
             current.operations.increment("ingest/duplicates_total")
             return stored
@@ -623,6 +976,7 @@ class Dispatcher:
             logger.exception("experiment tracker failed to prepare correlation metadata")
 
         value = current.commit(tracked_result, component=component)
+        self.record_scenario_activity(scenario)
         self._publication.record(scenario, value)
         settled = current.settled_sibling_record
         if settled is not None:
@@ -702,6 +1056,8 @@ class Dispatcher:
     # -- Preload ---------------------------------------------------------
 
     def _preload_scenarios(self, scenarios: tuple[str, ...]) -> None:
+        if self.scenario_admissions is not None:
+            return
         # Preload failures land in their own training_status field: a scenario
         # that cannot be re-loaded at boot is a different failure domain from
         # a training step that cannot commit.
@@ -765,11 +1121,15 @@ class Dispatcher:
     def _start_local_backend_worker(self, scenario: str, component: str | None = None) -> None:
         if self._lifecycle.closed.is_set():
             return
+        if self.scenario_admissions is not None:
+            self.scenario_admissions.require(scenario)
         key = (scenario, component)
         with self._training.lock:
             if self._lifecycle.closed.is_set():
                 # Closed while this caller got here: close() joins only the workers registered before it.
                 return
+            if self.scenario_admissions is not None:
+                self.scenario_admissions.require(scenario)
             worker = self._training.local_workers.get(key)
             if worker is None:
                 ready = Event()
@@ -785,10 +1145,14 @@ class Dispatcher:
                 )
                 worker = _LocalBackendWorkerState(ready=ready, thread=thread)
                 self._training.local_workers[key] = worker
-                thread.start()
+                try:
+                    thread.start()
+                except RuntimeError:
+                    self._training.local_workers.pop(key)
+                    raise
         worker.ready.set()
 
-    def _stop_local_backend_worker(self, scenario: str) -> None:
+    def _stop_local_backend_worker(self, scenario: str) -> tuple[_LocalBackendWorkerState, ...]:
         """Let the scenario's worker threads run out: each re-checks its registration after every wake."""
         with self._training.lock:
             keys = [key for key in self._training.local_workers if key[0] == scenario]
@@ -799,6 +1163,7 @@ class Dispatcher:
                 self._training.stood_aside.discard(key)
         for worker in workers:
             worker.ready.set()
+        return tuple(workers)
 
     def local_cycle_lock(self, scenario: str) -> Lock:
         with self._training.lock:
@@ -1008,6 +1373,7 @@ class Dispatcher:
             if self.reload_deferred(scenario, current):
                 # The rebuilt instance holds this worker's rows unread: look again on it.
                 return True
+            self.record_scenario_activity(scenario)
             try:
                 result = current.prepare_training_step(component)
             except Exception as exc:
@@ -1522,10 +1888,16 @@ class Dispatcher:
         """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
+        if self.scenario_admissions is not None:
+            self.scenario_admissions.stop()
         self.stop_local_cycles()
         with self._training.lock:
             # Under the lock a worker registers under, so none starts after the list below is taken.
             self._lifecycle.closed.set()
+        with self.scheduled_lock:
+            operations = tuple(self.scheduled_operations.values())
+        for operation in operations:
+            operation.wait()
         self._training.ready.set()
         with self._training.lock:
             local_workers = tuple(self._training.local_workers.values())
@@ -1544,7 +1916,8 @@ class Dispatcher:
         with self._training.lock:
             replaced = [instance for instances in self._training.replaced.values() for instance in instances]
             self._training.replaced.clear()
-        for scenario in (*replaced, *self._registry.loaded_scenarios()):
+        pending_cleanup = [instance for cleanup in self.scheduled_cleanups.values() for instance in cleanup.instances]
+        for scenario in (*replaced, *pending_cleanup, *self._registry.loaded_scenarios()):
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
@@ -1552,6 +1925,10 @@ class Dispatcher:
                 scenario.close()
             except BaseException as exc:
                 errors.append(exc)
+        try:
+            self._registry.close_failed_constructions()
+        except BaseException as exc:
+            errors.append(exc)
         try:
             self._storage.close()
         except BaseException as exc:

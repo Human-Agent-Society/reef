@@ -31,6 +31,8 @@ from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
+from reef.service.scheduling import ServiceSchedulingConfig, integer_value
+from reef.storage.json_admissions import JSONScenarioAdmissionStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -341,6 +343,15 @@ def build_dispatcher(
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
             hold_local_cycles=hold_local_cycles and calls_service,
+            require_scenario_admission=settings.scheduler_url is not None,
+            scenario_admission_store=(
+                JSONScenarioAdmissionStore(
+                    Path(settings.agent_record_dir) / "scheduler-assignments",
+                    tenant_id_map=settings.scheduler_tenant_id_map,
+                )
+                if settings.scheduler_url is not None
+                else None
+            ),
         )
     except BaseException:
         if scenario_storage is not None:
@@ -367,7 +378,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
     # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token; a restart issues a new one with the recipe it rebuilds.
-    evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    evaluation_token = secrets.token_urlsafe(32) if settings.tokens or settings.scheduler_url is not None else None
     dispatcher = build_dispatcher(
         settings,
         environ=environ,
@@ -378,6 +389,26 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
+        scheduling = None
+        if settings.scheduler_url is not None:
+            execution_units = dispatcher.recipe.scenario_execution_units()
+            if execution_units is None:
+                raise ValueError("tenant scheduling requires a local harness recipe with a static worker estimate")
+            scheduling = ServiceSchedulingConfig(
+                scheduler_url=settings.scheduler_url,
+                service_id=integer_value({"service_id": settings.scheduler_service_id}, "service_id"),
+                service_name=_require_non_empty(settings.scheduler_service_name, "scheduling.service_name"),
+                recipe=settings.recipe,
+                standard_execution_units=execution_units,
+                control_token=_require_non_empty(settings.scheduler_control_token, "scheduling.control_token"),
+                scheduler_token=settings.scheduler_token,
+                service_url=(
+                    settings.scheduler_service_url
+                    or settings.served_url
+                    or default_served_url(settings.host, settings.port)
+                ),
+                config_revision=settings.scheduler_config_revision,
+            )
         return create_app(
             dispatcher,
             tokens=settings.tokens,
@@ -387,6 +418,8 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            scheduling=scheduling,
+            staged_model_config_directory=Path(settings.agent_record_dir) / "scheduler-models",
         )
     except BaseException:
         with suppress(Exception):

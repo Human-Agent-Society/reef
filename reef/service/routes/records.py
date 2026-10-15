@@ -71,6 +71,9 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 # A training request has a page; its link carries a page key in place of the token.
                 record = quote(item.agent_record_id, safe="")
                 answer["page_path"] = f"/reef/harness/requests/{record}/page?{page_query(request, item.scenario)}"
+                status = request_service.dispatcher.scheduled_scenario_status(item.scenario)
+                if status is not None and status.state != "admitted":
+                    return web.json_response(answer, status=202)
             return web.json_response(answer)
 
         return accept

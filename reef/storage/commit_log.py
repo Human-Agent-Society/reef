@@ -339,8 +339,8 @@ class CommitLogScenarioStore(ScenarioStore):
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
             self._records.close()
+            self._closed = True
 
     def _ensure_open(self) -> None:
         if self._closed:

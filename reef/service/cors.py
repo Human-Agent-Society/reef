@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 _METHODS = frozenset({"GET", "POST", "DELETE"})
-_HEADERS = frozenset({"authorization", "content-type", "x-reef-scenario"})
+_HEADERS = frozenset({"authorization", "content-type", "x-reef-scenario", "x-reef-tenant"})
 _EXPOSE = "x-reef-agent-record-id, x-reef-release-id, x-reef-artifact-version"
 
 

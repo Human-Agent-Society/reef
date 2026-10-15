@@ -109,6 +109,7 @@ STATE_WORDS = {
     "evaluating": "the evaluation is running the candidate through its episodes",
     "running": "the step holds the request and reports no phase; its row follows",
     "settling": "the step that consumed the request is committing its row",
+    "cancelled": "the scenario was deleted before this request could run",
 }
 
 
@@ -268,8 +269,10 @@ def result_html(
     metrics = metrics if isinstance(metrics, Mapping) else {}
     selection_result = result_of(row, rows)
     parts = [
-        f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
-        f"<p>{escape(meaning(selection_result, row, metrics, adapter))}</p></div>",
+        (
+            f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
+            f"<p>{escape(meaning(selection_result, row, metrics, adapter))}</p></div>"
+        ),
         '<dl class="fact-list">',
         f"<div><dt>Version</dt><dd>v{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
@@ -396,6 +399,7 @@ def build_request_page(
     link_query: Mapping[str, str] | None = None,
     now: float | None = None,
     adapter: str = "pi",
+    request_status: str | None = None,
 ) -> str:
     """The page for the request stored as ``record``, against the catalog ``rows`` oldest first.
 
@@ -411,7 +415,13 @@ def build_request_page(
     now = time.time() if now is None else now
     step = settled_step(rows, record_id)
     state = result_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
-    head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
+    if step is None and request_status is not None:
+        state = request_status
+    head = (
+        ""
+        if step is not None or state in {"cancelled", "failed"}
+        else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
+    )
     if step is None:
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
         if progress is not None and progress.request_id == record_id:

@@ -109,6 +109,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "evaluation",
         "generator",
         "observability",
+        "scheduling",
     }
     extra = set(pending) - known_sections
     if extra:
