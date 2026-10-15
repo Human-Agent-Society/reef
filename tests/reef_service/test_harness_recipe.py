@@ -30,6 +30,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.mutations import admit_mutations
 from reef.inference.http import InferenceProxyRuntime
+from reef.observability import UsageEvent, UsageReporter, UsageReporting
 from reef.recipe import RecipeConfigError
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
@@ -1538,6 +1539,37 @@ def test_model_call_budget_caps_the_proposer(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="model call budget of 3"):
         run_backend_step(b, batch(), b.initial_state())
     assert calls["n"] == 3
+
+
+def test_a_backend_reports_proposer_usage_only_once_the_factory_binds_its_scenario(tmp_path: Path) -> None:
+    class Reporter(UsageReporter):
+        def __init__(self) -> None:
+            self.events: list[UsageEvent] = []
+
+        def report_usage(self, event: UsageEvent) -> None:
+            self.events.append(event)
+
+    def ask_once(nodes, samples, models):
+        models.served.chat([{"role": "user", "content": "hi"}])
+
+    reporter = Reporter()
+    reporting = UsageReporting(reporter)
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(ask_once),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=ModelBindings(served=_ChatBinding()),
+        binary=str(make_binary(tmp_path)),
+    )
+    assert b.prepare_step(batch(), b.initial_state(), 6).outcome == "skip"
+    b.report_usage_to(reporting, scenario="alice-coding")
+    assert b.prepare_step(batch(), b.initial_state(), 7).outcome == "skip"
+    reporting.close()
+
+    assert [(e.scenario, e.source, e.step, e.model, e.outcome) for e in reporter.events] == [
+        ("alice-coding", "proposer", 7, MODEL.model, "succeeded")
+    ]
 
 
 def test_settle_records_what_the_gate_ran_against(tmp_path: Path) -> None:

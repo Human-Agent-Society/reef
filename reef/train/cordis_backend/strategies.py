@@ -19,6 +19,7 @@ from reef.core.plugins import ConfiguredPlugin
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.tree.mutations import Mutation
+from reef.observability.usage import ModelUsage
 from reef.sandbox.process import EpisodeExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TrajectoryItem
@@ -64,6 +65,15 @@ class ProposerCalls(ABC):
     def note(self, kind: str, text: str, *, failed: bool = False) -> None:
         """Add one line to the step's live activity: ``kind`` is what acted (``model``, ``agent``, ``check``,
         ``trial``, ``provider``, ``proposer``), ``text`` what it did, ``failed`` when that went wrong."""
+
+    def report_model_usage(self, usage: ModelUsage, *, model: str, elapsed_seconds: float, outcome: str) -> None:
+        """Report one model call's measured usage as the step's ``proposer`` usage; the default reports nothing.
+
+        ``outcome`` is ``succeeded``, ``failed`` or ``cancelled``. The caller
+        reports only a call it sent to a provider, not one through this Reef's
+        evaluation route, which reports that call itself.
+        """
+        return
 
 
 @dataclass(frozen=True)

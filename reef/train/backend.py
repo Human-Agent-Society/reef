@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.observability.usage import UsageReporting
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
@@ -128,6 +129,15 @@ class CandidateBackend(CandidateEvaluator, ABC):
         and the engine keeps the scenario's adapter until it is evicted or
         the group restarts.
         """
+
+    def report_usage_to(self, usage_reporting: UsageReporting, *, scenario: str) -> None:
+        """Send the measured usage of this backend's work for ``scenario`` to ``usage_reporting``.
+
+        The scenario factory calls this once, after it builds the trainer.
+        The default reports nothing; a backend that makes model calls or runs
+        other measured work overrides this.
+        """
+        return
 
     def close(self) -> None:
         """Release resources owned by this backend; safe to call repeatedly."""

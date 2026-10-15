@@ -7,6 +7,7 @@ from typing import Any
 
 from reef.observability.base import ExperimentTracker, NullExperimentTracker
 from reef.observability.tracing import TracingConfig
+from reef.observability.usage import UsageConfig, UsageReporting
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
 from reef.storage.observer import RecordObserver
 
@@ -41,4 +42,9 @@ def build_record_observer(tracing: object, *, environ: Mapping[str, str] | None 
     return OpenTelemetryRecordObserver(config)
 
 
-__all__ = ["build_experiment_tracker", "build_record_observer"]
+def build_usage_reporting(usage: object) -> UsageReporting:
+    """The usage reporting for ``observability.usage``; off when the section names no reporter."""
+    return UsageReporting.from_config(UsageConfig.from_mapping(usage))
+
+
+__all__ = ["build_experiment_tracker", "build_record_observer", "build_usage_reporting"]

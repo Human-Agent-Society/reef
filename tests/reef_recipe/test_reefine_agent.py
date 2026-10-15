@@ -16,8 +16,9 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.tree.mutations import Mutation
+from reef.observability import UsageEvent, UsageReporter, UsageReporting
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
@@ -189,6 +190,43 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
         assert status == 429 and b"budget" in body
     finally:
         gateway.stop()
+
+
+class CapturingUsageReporter(UsageReporter):
+    def __init__(self) -> None:
+        self.events: list[UsageEvent] = []
+
+    def report_usage(self, event: UsageEvent) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.unit
+def test_each_proposer_call_reports_usage_once_and_the_evaluation_route_reports_its_own(upstream) -> None:
+    reporter = CapturingUsageReporter()
+    reporting = UsageReporting(reporter)
+    calls = _StepCalls(0, [], usage_reporting=reporting, scenario="alice-coding", step=4)
+    direct = ModelBinding(base_url=upstream.url, model="served-model")
+    routed = replace(direct, model="routed-model", evaluation_route=True)
+    gone = ModelBinding(base_url="http://127.0.0.1:9", model="gone-model", timeout_s=5)
+    models = _budgeted_bindings(ModelBindings(served=direct, named={"routed": routed, "gone": gone}), calls)
+    models.served.chat([{"role": "user", "content": "hi"}])
+    models["routed"].chat([{"role": "user", "content": "hi"}])
+    with pytest.raises(ModelBindingError):
+        models["gone"].complete({"messages": []})
+    gateway = AgentGateway(direct, calls, NoTools(), provider_of(upstream))
+    gateway.start()
+    try:
+        assert post(f"{gateway.base_url}/v1/chat/completions", {"stream": True, "messages": []})[0] == 200
+        assert post(f"{gateway.base_url}/v1/audio/speech", {"model": "real/tts", "input": "hi"})[0] == 200
+    finally:
+        gateway.stop()
+    reporting.close()
+
+    measured = [(e.model, e.outcome, e.input_tokens, e.output_tokens) for e in reporter.events]
+    assert measured[:2] == [("served-model", "succeeded", 7, 3), ("gone-model", "failed", None, None)]
+    # The gateway reports after it answers the agent, so its two events may arrive in either order.
+    assert sorted(measured[2:]) == [("real/tts", "succeeded", None, None), ("served-model", "succeeded", None, None)]
+    assert {(e.source, e.scenario, e.step) for e in reporter.events} == {("proposer", "alice-coding", 4)}
 
 
 @pytest.mark.unit

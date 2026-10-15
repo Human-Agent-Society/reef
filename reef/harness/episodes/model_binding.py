@@ -131,6 +131,9 @@ class ModelBinding:
     #: the default leaves room for both. A harness that sets none of its own picks a smaller one (pi takes 16384).
     max_output_tokens: int = 32000
     metadata: ModelMetadata | None = None
+    #: True when ``base_url`` is this Reef's own evaluation route. The route reports the usage of each call
+    #: it serves, so a caller that reports usage skips the calls it sends to this binding.
+    evaluation_route: bool = False
 
     def __post_init__(self) -> None:
         if not self.base_url:

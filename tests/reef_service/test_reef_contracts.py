@@ -19,9 +19,10 @@ from reef.artifact import (
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import HttpInferenceHandler, content_identity_headers
+from reef.observability import UsageEvent, UsageReporter, UsageReporting
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface, create_weight_surface
@@ -850,6 +851,133 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
     import asyncio
 
     asyncio.run(run())
+
+
+class CapturingUsageReporter(UsageReporter):
+    def __init__(self) -> None:
+        self.events: list[UsageEvent] = []
+
+    def report_usage(self, event: UsageEvent) -> None:
+        self.events.append(event)
+
+
+def usage_dispatcher(tmp_path, reporter: UsageReporter) -> Dispatcher:
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    return Dispatcher(
+        Recipe(checkpoint_strategy=EveryNVersions(1)),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "local",
+        usage_reporting=UsageReporting(reporter),
+        scenario_storage=SQLiteScenarioStorage(),
+    )
+
+
+@pytest.mark.unit
+def test_every_inference_attempt_reports_its_usage_once(tmp_path) -> None:
+    """An aborted attempt, its retry, an evaluation call and a failed call are four operations, four events."""
+
+    async def run() -> list[UsageEvent]:
+        answers = [
+            {"id": "gen-1", "choices": [{"finish_reason": "abort"}], "usage": {"prompt_tokens": 5}},
+            {
+                "id": "gen-2",
+                "model": "provider/model",
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "cost": 0.25},
+            },
+            {"id": "gen-3", "choices": [{"message": {"content": "eval"}}], "usage": {"completion_tokens": 1}},
+        ]
+
+        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+            del artifact, path, payload
+            if not answers:
+                raise ConnectionError("upstream is down")
+            return answers.pop(0)
+
+        reporter = CapturingUsageReporter()
+        dispatcher = usage_dispatcher(tmp_path, reporter)
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
+        await client.start_server()
+        try:
+            body = {"model": "requested", "messages": [{"role": "user", "content": "secret prompt"}]}
+            served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
+            assert served.status == 200
+            evaluated = await client.post("/reef/scenarios/chat/evaluation/v1/chat/completions", json=body)
+            assert evaluated.status == 200
+            failed = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
+            assert failed.status >= 500
+        finally:
+            await client.close()
+            dispatcher.close()
+        return reporter.events
+
+    import asyncio
+
+    events = asyncio.run(run())
+    assert [
+        (e.source, e.outcome, e.provider_request_id, e.model, e.input_tokens, e.output_tokens, e.provider_cost)
+        for e in events
+    ] == [
+        ("inference", "cancelled", "gen-1", "requested", 5, None, None),
+        ("inference", "succeeded", "gen-2", "provider/model", 5, 2, 0.25),
+        ("evaluation", "succeeded", "gen-3", "requested", None, 1, None),
+        ("inference", "failed", None, "requested", None, None, None),
+    ]
+    assert len({e.operation_id for e in events}) == len({e.event_id for e in events}) == 4
+    assert all(e.scenario == "chat" and e.elapsed_seconds is not None for e in events)
+    assert "secret prompt" not in json.dumps([e.to_dict() for e in events])
+
+
+class StreamingUsageHandler(InferenceHandler):
+    """Streams one Chat Completions answer whose last chunk carries the usage."""
+
+    async def inference(self, artifact, path, payload):
+        raise AssertionError("streamed requests use inference_stream")
+
+    async def inference_stream(self, artifact, path, payload):
+        frames = [
+            {"id": "chatcmpl-1", "model": "m", "choices": [{"delta": {"content": "hi"}}]},
+            {"id": "chatcmpl-1", "choices": [], "usage": {"prompt_tokens": 4, "completion_tokens": 1}},
+        ]
+
+        async def chunks():
+            for frame in frames:
+                yield f"data: {json.dumps(frame)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return InferenceStream(status=200, headers={"Content-Type": "text/event-stream"}, chunks=chunks())
+
+
+@pytest.mark.unit
+def test_a_streamed_inference_reports_the_usage_its_stream_carried(tmp_path) -> None:
+    async def run() -> list[UsageEvent]:
+        reporter = CapturingUsageReporter()
+        dispatcher = usage_dispatcher(tmp_path, reporter)
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=StreamingUsageHandler())))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "chat"},
+                json={"model": "m", "stream": True, "messages": []},
+            )
+            assert response.status == 200 and b"[DONE]" in await response.read()
+        finally:
+            await client.close()
+            dispatcher.close()
+        return reporter.events
+
+    import asyncio
+
+    (event,) = asyncio.run(run())
+    assert (event.source, event.outcome, event.provider_request_id, event.input_tokens, event.output_tokens) == (
+        "inference",
+        "succeeded",
+        "chatcmpl-1",
+        4,
+        1,
+    )
 
 
 @pytest.mark.unit

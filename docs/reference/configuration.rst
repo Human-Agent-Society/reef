@@ -1393,6 +1393,10 @@ The following names are relative to ``operations/``:
    * - ``runtime/weight_sync/*``
      - Runtime-scheduler weight activation/update calls, including resumed
        transfers. This covers the call's full duration, not only network time.
+   * - ``usage_reporting/*``
+     - `Usage reporting <#usage-reporting>`__ totals of the whole process, the
+       same in every scenario: ``reported_total``, ``failed_total``,
+       ``dropped_total``, and ``queued``.
 
 All operation families expose ``started_total``, ``active`` (in-flight count),
 ``elapsed_seconds`` (age of the oldest active call, zero when idle),
@@ -1507,3 +1511,83 @@ therefore sees the scenario's traffic; point tracing only at one trusted with
 it. Export failures are reported in the service log and never
 fail record acceptance or a commit; the exporter batches spans in a background
 thread and flushes them during graceful shutdown.
+
+Usage reporting
+---------------
+
+Usage reporting sends one event for each measured resource operation of a
+scenario, such as one model call, to a reporter that you select. Use it to
+collect a scenario's usage in a log or an external system, including work that
+does not produce a commit. Reporting is off by default.
+
+.. code:: yaml
+
+   observability:
+     usage:
+       reporter:
+         module: reef.observability.usage:JsonLogUsageReporter
+         config:
+           path: /var/log/reef/usage.jsonl  # optional; stderr when unset
+       max_queued_events: 1000             # optional
+
+``reporter`` names a ``UsageReporter`` plugin as ``package.module:ClassName``,
+or as a mapping with ``module`` and ``config``. A plugin implements
+``report_usage(event)`` and, optionally, ``close()``. The built-in
+``JsonLogUsageReporter`` writes one JSON object per line. Each event looks like
+this:
+
+.. code:: json
+
+   {"elapsed_seconds":14.2,"event_id":"usage-0f3c...","finished_at":1791800000.0,
+    "input_tokens":18234,"model":"example-model","operation_id":"9a1e...",
+    "outcome":"succeeded","output_tokens":912,"provider_cost":0.0071,
+    "provider_request_id":"gen-789","scenario":"alice-coding","source":"proposer","step":12}
+
+Each event has these fields. Reef leaves out a measurement that the operation
+did not report; it never reports an unknown value as zero.
+
+* ``event_id``: the report. A reporter that sends an event again keeps it, so
+  a receiver can drop duplicates.
+* ``operation_id``: the operation. Each attempt of a retried operation is a
+  new operation with a new ID.
+* ``scenario``, ``source`` and ``outcome``: the scenario, the kind of work, and
+  how the operation ended: ``succeeded``, ``failed``, or ``cancelled`` (stopped
+  before it finished, for example a handler abort that Reef retries).
+* ``step``: the scenario's committed step when the operation started.
+* ``finished_at`` and ``elapsed_seconds``: when the operation ended, in Unix
+  seconds, and its wall-clock duration.
+* ``model``, ``provider_request_id``, ``input_tokens`` and ``output_tokens``:
+  the model and request ID, and the token counts that the provider reported,
+  from JSON responses and from streamed SSE events.
+* ``provider_cost`` and ``currency``: the cost exactly as the provider returned
+  it, for example OpenRouter's ``usage.cost``. Reef does not calculate prices.
+  When the provider returns no currency, ``currency`` is absent.
+
+Events contain identifiers and measurements only. They do not contain prompts,
+completions, or credentials.
+
+These sources report usage now:
+
+* ``inference``: every attempt of a served inference call, streamed or not.
+* ``evaluation``: every call through Reef's evaluation route. A proposer call
+  to the served model of a composed recipe goes through this route, so it is
+  reported here once, not also as ``proposer``.
+* ``proposer``: every model call of a harness evolution step's proposer,
+  including the calls and provider calls of an agent proposer's gateway.
+
+``judge``, ``generator``, ``sandbox`` and ``training`` are reserved and report
+nothing yet. Evaluation calls that do not go through Reef's evaluation route
+are not reported yet.
+
+Reef calls the reporter on a background thread, so a reporter never delays or
+fails a request or a training step. While ``max_queued_events`` events wait,
+Reef drops a new event. Reef also loses an event when the reporter raises.
+Reef counts each loss and writes it to the service log at most once a minute.
+The ``usage_reporting/*`` counters in the `operational metrics
+<#operational-metrics>`__ show these totals. At shutdown, Reef gives the queued
+events to the reporter and then closes it.
+
+Reports can be lost or duplicated, and they arrive after the work is done.
+Thus they are not a billing record, and they cannot enforce a prepaid limit. A
+system that charges for usage must also keep its own provider-call records and
+compare them with the provider's records.

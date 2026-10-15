@@ -56,6 +56,7 @@ from reef.harness.tree.nodes import (
     secret_shaped,
 )
 from reef.harness.tree.render import render_composition, tree_files
+from reef.observability.usage import ModelUsage, UsageEvent, UsageReporting
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor
@@ -177,15 +178,27 @@ class _StepCalls(ProposerCalls):
     """One step's model-call budget, record and live activity, shared by the budgeted bindings and an agent's gateway.
 
     A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``; the activity is what the
-    request page shows while the step runs, read from another thread through :meth:`activity`.
+    request page shows while the step runs, read from another thread through :meth:`activity`. With
+    ``usage_reporting`` and ``scenario``, every model call is also reported as ``proposer`` usage of ``step``.
     """
 
-    def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        cap: int,
+        record: list[dict[str, Any]],
+        *,
+        usage_reporting: UsageReporting | None = None,
+        scenario: str | None = None,
+        step: int | None = None,
+    ) -> None:
         self._cap = cap
         self._spent = 0
         self._record = record
         self._activity: deque[dict[str, Any]] = deque(maxlen=MAX_ACTIVITY)
         self._lock = threading.Lock()
+        self.usage_reporting = usage_reporting
+        self.scenario = scenario
+        self.step = step
 
     def spend(self) -> None:
         if self._cap and self._spent >= self._cap:
@@ -194,6 +207,21 @@ class _StepCalls(ProposerCalls):
 
     def record(self, entry: Mapping[str, Any]) -> None:
         self._record.append(dict(entry))
+
+    def report_model_usage(self, usage: ModelUsage, *, model: str, elapsed_seconds: float, outcome: str) -> None:
+        if self.usage_reporting is None or self.scenario is None:
+            return
+        self.usage_reporting.report(
+            UsageEvent.for_model_call(
+                usage,
+                scenario=self.scenario,
+                source="proposer",
+                outcome=outcome,
+                elapsed_seconds=elapsed_seconds,
+                model=model,
+                step=self.step,
+            )
+        )
 
     def note(self, kind: str, text: str, *, failed: bool = False) -> None:
         line: dict[str, Any] = {"at": time.time(), "kind": kind, "text": " ".join(text.split())[:300]}
@@ -232,6 +260,7 @@ class _BudgetedBinding(ModelBinding):
             api=inner.api,
             timeout_s=inner.timeout_s,
             metadata=inner.metadata,
+            evaluation_route=isinstance(inner, ModelBinding) and inner.evaluation_route,
         )
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_calls", calls)
@@ -248,26 +277,32 @@ class _BudgetedBinding(ModelBinding):
             object.__setattr__(self._inner, "_last_usage", None)
             object.__setattr__(self._inner, "_last_response", None)
         started = time.monotonic()
+        outcome = "cancelled"
         try:
             reply = self._inner.chat(messages, **kwargs)
         except BaseException as exc:
             # The failed call is the step's decision too: the record keeps it before the error propagates.
             entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
+            if isinstance(exc, Exception):
+                outcome = "failed"
             raise
         else:
             entry["reply"] = clip_record_text(reply) if isinstance(reply, str) else _bounded(reply)
+            outcome = "succeeded"
             return reply
         finally:
             # A provider may spend its budget on reasoning and return no final text; retain that response on error too.
             response = self._inner.last_response() if isinstance(self._inner, ModelBinding) else None
             if response is not None:
                 entry["response"] = _bounded(response)
-            entry["seconds"] = round(time.monotonic() - started, 3)
+            elapsed_seconds = time.monotonic() - started
+            entry["seconds"] = round(elapsed_seconds, 3)
             usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
             if usage is not None:
                 entry["usage"] = usage
             self._calls.record(entry)
             self._note_answer(entry)
+            self.report_call_usage(response, elapsed_seconds=elapsed_seconds, outcome=outcome)
 
     def last_response(self) -> dict[str, Any] | None:
         """The provider response of the latest call, as the wrapped binding kept it."""
@@ -301,19 +336,33 @@ class _BudgetedBinding(ModelBinding):
         try:
             response = self._inner.complete(body, **kwargs)
         except BaseException as exc:
+            elapsed_seconds = time.monotonic() - started
             entry["error"] = clip_record_text(f"{type(exc).__name__}: {exc}")
-            entry["seconds"] = round(time.monotonic() - started, 3)
+            entry["seconds"] = round(elapsed_seconds, 3)
             self._calls.record(entry)
             self._note_answer(entry)
+            self.report_call_usage(
+                None, elapsed_seconds=elapsed_seconds, outcome="failed" if isinstance(exc, Exception) else "cancelled"
+            )
             raise
+        elapsed_seconds = time.monotonic() - started
         entry["response"] = _bounded(response)
-        entry["seconds"] = round(time.monotonic() - started, 3)
+        entry["seconds"] = round(elapsed_seconds, 3)
         usage = usage_of(response)
         if usage is not None:
             entry["usage"] = usage
         self._calls.record(entry)
         self._note_answer(entry)
+        self.report_call_usage(response, elapsed_seconds=elapsed_seconds, outcome="succeeded")
         return response
+
+    def report_call_usage(self, response: Mapping[str, Any] | None, *, elapsed_seconds: float, outcome: str) -> None:
+        """Report the call's usage, unless the binding is this Reef's evaluation route, which reports it itself."""
+        if self.evaluation_route:
+            return
+        self._calls.report_model_usage(
+            ModelUsage.from_response(response), model=self.model, elapsed_seconds=elapsed_seconds, outcome=outcome
+        )
 
 
 def _proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
@@ -438,6 +487,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if on_stale not in STALE_RESULT_POLICIES:
             raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         self.on_stale = on_stale
+        # The scenario factory binds both with report_usage_to; until then the proposer's calls report nothing.
+        self.usage_reporting: UsageReporting | None = None
+        self.usage_scenario: str | None = None
         # Proposals a settlement already filed; a step evaluated again settles once.
         self.settled_proposals: set[str] = set()
         self._forbid_residue = forbid_residue
@@ -621,6 +673,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         return TrainStepResult(
             {**state, "entries": entries}, {"shipped_content_update": {"entries": stale}}, artifact=artifact
         )
+
+    def report_usage_to(self, usage_reporting: UsageReporting, *, scenario: str) -> None:
+        """Report the usage of the proposer's model calls, one ``proposer`` event per call."""
+        self.usage_reporting = usage_reporting
+        self.usage_scenario = scenario
 
     @property
     def step_progress(self) -> StepProgress | None:
@@ -821,7 +878,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 self._write_record(step_dir, RECORD_MUTATIONS_FILE, [])
                 return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
         else:
-            calls = _StepCalls(self._max_model_calls_per_step, record)
+            calls = _StepCalls(
+                self._max_model_calls_per_step,
+                record,
+                usage_reporting=self.usage_reporting,
+                scenario=self.usage_scenario,
+                step=scenario_step,
+            )
             self._step_calls = calls
             models = _budgeted_bindings(self._models, calls)
             agent_host = None

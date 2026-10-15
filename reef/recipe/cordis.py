@@ -626,7 +626,9 @@ class CordisRecipe(Recipe):
         component = self.served_endpoint.component
         if component is not None:
             route += f"/components/{quote(component, safe='')}"
-        return replace(binding, base_url=f"{route}/evaluation", api_key=self.served_endpoint.token)
+        return replace(
+            binding, base_url=f"{route}/evaluation", api_key=self.served_endpoint.token, evaluation_route=True
+        )
 
     def default_model_bindings(self, scenario: str | None = None) -> ModelBindings:
         return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))

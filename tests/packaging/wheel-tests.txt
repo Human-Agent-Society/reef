@@ -53,6 +53,7 @@ tests/inference/test_sglang_chat_capture.py
 tests/inference/test_vllm_chat_capture.py
 tests/inference/test_vllm_connector.py
 tests/observability/test_record_tracing.py
+tests/observability/test_usage_reporting.py
 tests/observability/test_wandb_tracking.py
 tests/recipes/coral/test_coral_processor.py
 tests/recipes/coral/test_coral_recipe.py

@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, usage_of
+from reef.observability.usage import ModelUsage
 from reef.recipe.reefine.multimodal import MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
@@ -203,6 +204,7 @@ class AgentGateway:
         url = f"{self._served.base_url.rstrip('/')}{route}"
         started = time.monotonic()
         status, body, _ = relay(client, url, headers, payload, timeout_s=self._served.timeout_s)
+        elapsed_seconds = time.monotonic() - started
         text = body.decode("utf-8", errors="replace")
         entry: dict[str, Any] = {
             "source": "agent",
@@ -212,12 +214,20 @@ class AgentGateway:
             "messages": len(payload.get("messages") or payload.get("input") or []),
             "last_message": (payload.get("messages") or [None])[-1],
             "reply": reply_text(text),
-            "seconds": round(time.monotonic() - started, 3),
+            "seconds": round(elapsed_seconds, 3),
         }
         usage = sse_usage(text)
         if usage is not None:
             entry["usage"] = usage
         self._calls.record(entry)
+        # A served model behind this Reef's evaluation route is reported by the route.
+        if not self._served.evaluation_route:
+            self._calls.report_model_usage(
+                ModelUsage.from_text(text),
+                model=self._served.model,
+                elapsed_seconds=elapsed_seconds,
+                outcome="succeeded" if status < 400 else "failed",
+            )
         # What the agent decided this turn, for the request page: each tool it called, else what it said.
         if status >= 400:
             self._calls.note(
@@ -259,12 +269,20 @@ class AgentGateway:
         url = f"{self._provider.base_url}{upstream_path}"
         started = time.monotonic()
         status, body, _ = relay(client, url, headers, payload, timeout_s=300.0)
+        elapsed_seconds = time.monotonic() - started
         call: dict[str, Any] = {"path": route, "model": payload.get("model"), "status": status}
         if status >= 400:
             call["error"] = body.decode("utf-8", errors="replace")[:MAX_ERROR_CHARS]
         with self._lock:
             self._provider_calls.append(call)
-        seconds = round(time.monotonic() - started, 3)
+        model = payload.get("model")
+        self._calls.report_model_usage(
+            ModelUsage.from_text(body.decode("utf-8", errors="replace")),
+            model=model if isinstance(model, str) else "",
+            elapsed_seconds=elapsed_seconds,
+            outcome="succeeded" if status < 400 else "failed",
+        )
+        seconds = round(elapsed_seconds, 3)
         # The step record keeps what was asked of the provider and how it answered, never the media itself.
         self._calls.record({"source": "agent", **call, "seconds": seconds})
         outcome = f"{status}" if status < 400 else f"{status}: {call['error'][:160]}"

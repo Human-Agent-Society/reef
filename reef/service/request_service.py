@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -27,6 +28,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
+from reef.observability.usage import ModelUsage, UsageEvent
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
@@ -119,6 +121,8 @@ def normalize_request_payload(
 class PendingInference:
     item: AgentRecord
     release_id: str | None
+    #: When the handler was asked for the stream, for the call's usage report.
+    started_monotonic_seconds: float
     admission: InferenceAdmissionHandle | None = None
     lease: InferenceLease | None = None
     deferred_prepared: PreparedInference | None = None
@@ -284,11 +288,16 @@ class RequestService:
                     if remaining_budget <= 0:
                         raise InferenceRetryTimeout(timeout_error)
                     started = loop.time()
+                    answered: dict[str, Any] | None = None
+                    outcome = "failed"
                     try:
                         response = await asyncio.wait_for(
                             prepared.handler.inference(prepared.served, path, payload),
                             timeout=remaining_budget,
                         )
+                    except asyncio.CancelledError:
+                        outcome = "cancelled"
+                        raise
                     except TimeoutError as exc:
                         logger.warning(
                             "inference for scenario %r timed out after %d attempt(s) at artifact %r",
@@ -297,8 +306,21 @@ class RequestService:
                             prepared.artifact.ref.release_id,
                         )
                         raise InferenceRetryTimeout(timeout_error) from exc
+                    else:
+                        answered = response
+                        # A handler abort stopped the generation; the attempt is retried as a new operation.
+                        outcome = "cancelled" if _inference_aborted(response) else "succeeded"
                     finally:
-                        remaining_budget -= loop.time() - started
+                        elapsed_seconds = loop.time() - started
+                        remaining_budget -= elapsed_seconds
+                        self.report_inference_usage(
+                            prepared.parsed.scenario,
+                            payload,
+                            answered,
+                            elapsed_seconds=elapsed_seconds,
+                            outcome=outcome,
+                            record=record,
+                        )
                     interrupted = _inference_aborted(response)
                     if not interrupted:
                         # A completed response with invalid runtime-load-ID information is a
@@ -361,6 +383,7 @@ class RequestService:
             )
             admission = prepared.admission
             lease = prepared.lease
+            started_monotonic_seconds = time.monotonic()
             try:
                 stream = await prepared.handler.inference_stream(prepared.served, path, payload)
                 record_response = stream.record_response
@@ -382,7 +405,15 @@ class RequestService:
                     raise RuntimeLoadMismatch(
                         "durable streaming inference requires an atomic record_response with serving runtime load IDs"
                     )
-            except BaseException:
+            except BaseException as exc:
+                self.report_inference_usage(
+                    prepared.parsed.scenario,
+                    payload,
+                    None,
+                    elapsed_seconds=time.monotonic() - started_monotonic_seconds,
+                    outcome="failed" if isinstance(exc, Exception) else "cancelled",
+                    record=record,
+                )
                 try:
                     if "stream" in locals():
                         await stream.close()
@@ -402,6 +433,7 @@ class RequestService:
                     artifact_ref=prepared.record_ref,
                 ),
                 release_id=prepared.parsed.release_id,
+                started_monotonic_seconds=started_monotonic_seconds,
                 measurement=measurement,
                 admission=admission,
                 lease=lease,
@@ -436,6 +468,21 @@ class RequestService:
         return await relay.relay(path, payload)
 
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
+        delivery = response.get("stream_delivery", response)
+        if isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error"):
+            outcome = "succeeded"
+        elif isinstance(delivery, Mapping) and delivery.get("error"):
+            outcome = "failed"
+        else:
+            outcome = "cancelled"
+        self.report_inference_usage(
+            pending.item.scenario,
+            pending.item.payload,
+            response,
+            elapsed_seconds=time.monotonic() - pending.started_monotonic_seconds,
+            outcome=outcome,
+            record=pending.record,
+        )
         succeeded = False
         try:
             payload = dict(pending.item.payload)
@@ -463,10 +510,7 @@ class RequestService:
             stored = (
                 item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
             )
-            delivery = response.get("stream_delivery", response)
-            succeeded = (
-                isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
-            )
+            succeeded = outcome == "succeeded"
             return stored
         except Exception as exc:
             if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
@@ -486,6 +530,37 @@ class RequestService:
             finally:
                 if pending.admission is not None:
                     pending.admission.release()
+
+    def report_inference_usage(
+        self,
+        scenario: str,
+        payload: Mapping[str, Any],
+        response: Mapping[str, Any] | None,
+        *,
+        elapsed_seconds: float,
+        outcome: str,
+        record: bool,
+    ) -> None:
+        """Report one provider call of an inference attempt: ``inference``, or ``evaluation`` for an evaluation call.
+
+        Every attempt is its own operation, including one a handler aborted
+        and Reef retried. A failed attempt without a response reports its
+        elapsed time only.
+        """
+        usage_reporting = self._dispatcher.usage_reporting
+        if not usage_reporting.enabled:
+            return
+        model = payload.get("model")
+        usage_reporting.report(
+            UsageEvent.for_model_call(
+                ModelUsage.from_response(response),
+                scenario=scenario,
+                source="inference" if record else "evaluation",
+                outcome=outcome,
+                elapsed_seconds=elapsed_seconds,
+                model=model if isinstance(model, str) else None,
+            )
+        )
 
     async def inference_operations(self, headers: Mapping[str, str], *, record: bool = True) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""

@@ -20,7 +20,7 @@ from typing import Any
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.observability import build_experiment_tracker, build_record_observer
+from reef.observability import UsageReporting, build_experiment_tracker, build_record_observer, build_usage_reporting
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.composite import CompositeRecipe
@@ -318,6 +318,7 @@ def build_dispatcher(
         recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
+    usage_reporting: UsageReporting | None = None
     try:
         record_directory = Path(settings.agent_record_dir)
         if settings.record_backend == "postgres":
@@ -351,6 +352,7 @@ def build_dispatcher(
             model=settings.model_path,
             training_config=settings.training_settings,
         )
+        usage_reporting = build_usage_reporting(settings.usage_config)
         return Dispatcher(
             recipe,
             backend_factory,
@@ -358,6 +360,7 @@ def build_dispatcher(
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
+            usage_reporting=usage_reporting,
             hold_local_cycles=hold_local_cycles and calls_service,
             scenario_idle_unload_seconds=settings.scenario_idle_unload_s,
             scenario_admission=(
@@ -376,6 +379,8 @@ def build_dispatcher(
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
+        if usage_reporting is not None:
+            usage_reporting.close()
         raise
 
 

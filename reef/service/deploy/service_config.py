@@ -15,6 +15,7 @@ from functools import lru_cache
 from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.observability.usage import UsageConfig
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
@@ -223,6 +224,11 @@ class ServiceConfig:
         default_factory=dict,
         metadata=config_metadata("Record tracing settings as a JSON/YAML object.", path=("observability", "tracing")),
     )
+    #: Usage reporting settings, sourced from ``observability.usage``.
+    usage_config: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Usage reporting settings as a JSON/YAML object.", path=("observability", "usage")),
+    )
     training_settings: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
@@ -270,6 +276,7 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        UsageConfig.from_mapping(self.usage_config)
         if self.record_backend == "postgres":
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
                 raise ValueError("reef.record_database_url is required for the postgres backend")
@@ -309,6 +316,7 @@ def service_owned_keys() -> frozenset[str]:
         "pipeline_settings",
         "tracing_config",
         "training_settings",
+        "usage_config",
         "wandb_config",
     }
     return frozenset(

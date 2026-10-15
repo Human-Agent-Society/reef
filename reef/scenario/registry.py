@@ -27,7 +27,7 @@ from reef.artifact.repository import (
 )
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.inference.model_config import ModelConfig
-from reef.observability import ExperimentTracker, NullExperimentTracker
+from reef.observability import ExperimentTracker, NullExperimentTracker, UsageReporting
 from reef.recipe.base import Recipe
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ScenarioFactory
@@ -87,6 +87,7 @@ class ScenarioRegistry:
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        usage_reporting: UsageReporting | None = None,
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
     ) -> None:
@@ -98,6 +99,7 @@ class ScenarioRegistry:
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
+            usage_reporting=usage_reporting if usage_reporting is not None else UsageReporting(),
         )
         self._backend_factory = backend_factory
         self._recipe = recipe

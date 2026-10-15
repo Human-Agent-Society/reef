@@ -36,7 +36,7 @@ from reef.core.components import (
 )
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
-from reef.observability import ExperimentTracker
+from reef.observability import ExperimentTracker, UsageReporting
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario.binding import ScenarioBinding
@@ -120,12 +120,14 @@ class ScenarioFactory:
         *,
         local_artifact_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
+        usage_reporting: UsageReporting,
         scenario_storage: ScenarioStorage,
     ) -> None:
         self._recipe = recipe
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
+        self.usage_reporting = usage_reporting
         self._storage = scenario_storage
 
     def has_registration(self, scenario: str) -> bool:
@@ -371,6 +373,9 @@ class ScenarioFactory:
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
                 raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+            for bound in trainers:
+                if bound.trainer.candidate_backend is not None:
+                    bound.trainer.candidate_backend.report_usage_to(self.usage_reporting, scenario=name)
             if len(trainers) > 1 and not store.durable:
                 raise ReefError(
                     f"scenario {name!r} runs a trainer per component: each recovers from its own commits, "
