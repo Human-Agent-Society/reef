@@ -247,17 +247,22 @@ def token_importance_weights(
     return log_ratio.to(torch.promote_types(log_ratio.dtype, torch.float32)).exp().clamp(max=cap)
 
 
-def sampled_reverse_kl(student_log_prob: torch.Tensor, teacher_log_prob: torch.Tensor) -> torch.Tensor:
+def sampled_reverse_kl(
+    student_log_prob: torch.Tensor, teacher_log_prob: torch.Tensor, *, advantage_clip: float = 0.0
+) -> torch.Tensor:
     """KL(student || teacher) estimated at the sampled token, with the score-function gradient.
 
     ``student_log_prob`` and ``teacher_log_prob`` are ``[R]`` log-probs of the
-    tokens the student sampled. The estimate is ``log p(y) - log t(y)``; its
-    gradient is that gap, held fixed, times the gradient of ``log p(y)``, the
-    unbiased estimator of the gradient of the expectation over the student's
-    samples (the on-policy distillation loss of tinker-cookbook).
+    tokens the student sampled. The estimate is ``log p(y) - log t(y)``.
+    Without clipping, its gradient is that gap, held fixed, times the gradient
+    of ``log p(y)``: the unbiased estimator of the expected loss gradient
+    (the on-policy distillation loss of tinker-cookbook).
+    A positive ``advantage_clip`` bounds the gradient's log-prob difference
+    symmetrically. The returned value retains the unclipped KL estimate.
     """
     gap = (student_log_prob - teacher_log_prob).detach()
-    return gap + gap * (student_log_prob - student_log_prob.detach())
+    gradient_gap = gap.clamp(min=-advantage_clip, max=advantage_clip) if advantage_clip > 0 else gap
+    return gap + gradient_gap * (student_log_prob - student_log_prob.detach())
 
 
 def sequence_importance_weight(
@@ -346,7 +351,13 @@ def _topk_divergences(
             student_rows, torch.cat([ids, sampled], dim=-1), tp_group, tp_world, tp_rank
         )
         if settings.divergence == "reverse" and settings.top_k_distribution == "renormalized":
-            per_sample.append(sampled_reverse_kl(student_at[:, -1], teacher_at_sampled.to(device=device).float()))
+            per_sample.append(
+                sampled_reverse_kl(
+                    student_at[:, -1],
+                    teacher_at_sampled.to(device=device).float(),
+                    advantage_clip=settings.advantage_clip,
+                )
+            )
         else:
             per_sample.append(
                 restricted_divergence(
@@ -469,12 +480,18 @@ def distill_loss(
         loss = loss + 0 * logits.sum()
     if centering_settings is not None:
         # sampled_reverse_kl's value is log p(y) - log teacher(y). Negate
-        # and detach it before IS weighting to get the OPD advantage.
+        # and apply the gradient's bound before IS weighting for the same advantage.
+        centering_advantages = [-sample.detach() for sample in per_sample_divergence]
+        if settings.advantage_clip > 0:
+            centering_advantages = [
+                advantage.clamp(min=-settings.advantage_clip, max=settings.advantage_clip)
+                for advantage in centering_advantages
+            ]
         centering_batch = {
             **batch,
             "advantages": [
-                -sample.detach() * float(sample_weight)
-                for sample, sample_weight in zip(per_sample_divergence, sample_weights, strict=True)
+                advantage * float(sample_weight)
+                for advantage, sample_weight in zip(centering_advantages, sample_weights, strict=True)
             ],
         }
         correction, centering_metrics = score_centering_term(

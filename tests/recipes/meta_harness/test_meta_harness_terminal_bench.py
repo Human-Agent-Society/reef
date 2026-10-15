@@ -190,7 +190,7 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
             raise OSError("commit failed")
 
         with monkeypatch.context() as patch:
-            patch.setattr(scenario.store.commit_log, "append", fail)
+            patch.setattr(scenario.store.commit_history, "append", fail)
             with pytest.raises(OSError, match="commit failed"):
                 driver.search(scenario, recipe, directory)
         assert scenario.trainer.state == before

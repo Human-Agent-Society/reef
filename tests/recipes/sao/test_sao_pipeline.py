@@ -658,7 +658,6 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
             SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
             backend,
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=agent_dir,
             scenario_storage=SQLiteScenarioStorage(agent_dir),
         )
 

@@ -142,7 +142,6 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     agent_record_dir = tmp_path / "agent-record"
     first = build_default_dispatcher(
         backend_factory=backend,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     record = AgentRecord.create(
@@ -156,7 +155,6 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
 
     second = build_default_dispatcher(
         backend_factory=backend,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
@@ -170,7 +168,6 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     agent_record_dir = tmp_path / "agent-record"
     first = build_default_dispatcher(
         backend_factory=backend,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     first.accept_record(
@@ -187,7 +184,6 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
 
     second = build_default_dispatcher(
         backend_factory=backend,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     recovered = second.get_or_create_scenario("math")

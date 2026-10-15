@@ -32,11 +32,6 @@ packages.
 
 from reef.pipeline_context import PipelineContext
 from reef.task2batch import Task2Batch
-
-# Registers the ``mlx`` runtime kind. The module imports no MLX at module
-# scope, so this costs a CUDA deployment nothing; reef.runtime cannot do the
-# import itself without pointing runtime back at train.
-from reef.train import mlx_backend as _mlx_backend  # noqa: F401
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer

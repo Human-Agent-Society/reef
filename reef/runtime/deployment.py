@@ -481,6 +481,7 @@ _BUILTIN_FACTORIES = {
     "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "mlx": "reef.train.mlx_backend.runtime:MLXRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",

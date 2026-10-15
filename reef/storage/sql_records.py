@@ -31,11 +31,12 @@ from reef.storage.records import (
     RecordStore,
     StoredRecord,
 )
+from reef.storage.scenario import ScenarioSettings
 
 
 @dataclass(frozen=True)
 class RecordTables:
-    """Tables for record bodies, retry hashes, consumption, and capacity losses.
+    """Tables for record bodies, retry hashes, consumption, capacity losses, and scenario settings.
 
     The adapter owns schema types, constraints, indexes, and migrations. Table
     columns retain the names consumed by SQLRecordStore; backend-specific
@@ -46,6 +47,7 @@ class RecordTables:
     consumed: Table
     consumption: Table
     eviction: Table
+    settings: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
     def condition(self, table: Table) -> ColumnElement[bool]:
@@ -205,7 +207,7 @@ class SQLRecordStore(RecordStore):
         self._live_records: WeakValueDictionary[str, AgentRecord] = WeakValueDictionary()
 
     @abstractmethod
-    def _transaction(self, scenario: str, *, write: bool) -> AbstractContextManager[Connection]:
+    def _transaction(self, *, write: bool) -> AbstractContextManager[Connection]:
         """Supply one connection with the isolation and local serialization needed.
 
         Multi-query receipt reads must observe a consistent state. Write scopes
@@ -306,7 +308,7 @@ class SQLRecordStore(RecordStore):
         This lookup never appends data or changes its receipt.
         """
         encoded = self._encode(item)
-        with self._transaction(item.scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             consumed = (
                 connection.execute(
                     select(self._tables.consumed.c.content_sha256).where(
@@ -346,7 +348,7 @@ class SQLRecordStore(RecordStore):
         scenario = items[0].scenario
         if any(item.scenario != scenario for item in items):
             raise ValueError("a record batch must belong to one scenario")
-        with self._transaction(scenario, write=True) as connection:
+        with self._transaction(write=True) as connection:
             return tuple(self.append_in_transaction(connection, item) for item in items)
 
     def append_in_transaction(self, connection: Connection, item: AgentRecord) -> AppendResult:
@@ -438,7 +440,7 @@ class SQLRecordStore(RecordStore):
 
     def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         """Read a record still visible to training, scoped to its scenario."""
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             row = (
                 connection.execute(
                     select(self._tables.records).where(
@@ -475,7 +477,7 @@ class SQLRecordStore(RecordStore):
             .limit(limit)
             .offset(offset)
         )
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             rows = connection.execute(statement).mappings().all()
         return tuple(self._decode(row) for row in rows)
 
@@ -491,7 +493,7 @@ class SQLRecordStore(RecordStore):
             raise ValueError("after_sequence must be non-negative")
         if limit <= 0:
             raise ValueError("limit must be positive")
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             rows = (
                 connection.execute(
                     select(self._tables.records)
@@ -523,12 +525,12 @@ class SQLRecordStore(RecordStore):
         )
         if request_type is not None:
             statement = statement.where(self._tables.records.c.request_type == request_type.value)
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             return int(connection.execute(statement).scalar_one())
 
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             row = (
                 connection.execute(
                     select(self._tables.records).where(
@@ -562,7 +564,7 @@ class SQLRecordStore(RecordStore):
         )
         if request_type is not None:
             statement = statement.where(self._tables.records.c.request_type == request_type.value)
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             rows = (
                 connection.execute(statement.order_by(self._tables.records.c.sequence).limit(limit)).mappings().all()
             )
@@ -586,7 +588,7 @@ class SQLRecordStore(RecordStore):
         consumed_ids_json = self._json(sorted(agent_record_ids))
         metadata_json = self._json(dict(metadata))
         table = self._tables.consumption
-        with self._transaction(scenario, write=True) as connection:
+        with self._transaction(write=True) as connection:
             self._insert(
                 connection,
                 table,
@@ -614,7 +616,7 @@ class SQLRecordStore(RecordStore):
 
     def loss(self, scenario: str) -> RecordLoss:
         table = self._tables.eviction
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             row = (
                 connection.execute(select(table).where(self._tables.condition(table), table.c.scenario == scenario))
                 .mappings()
@@ -626,9 +628,34 @@ class SQLRecordStore(RecordStore):
             *(int(row[name]) for name in ("record_count", "body_bytes", "first_sequence", "last_sequence"))
         )
 
+    def read_settings(self) -> ScenarioSettings:
+        """The scenario settings kept with these records; defaults when none are stored."""
+        table = self._tables.settings
+        with self._transaction(write=False) as connection:
+            rows = connection.execute(select(table.c.name, table.c.value_json).where(self._tables.condition(table)))
+            values = {name: json.loads(value_json) for name, value_json in rows}
+        return ScenarioSettings(model_config=values.get("model_config"), training_mode=values.get("training_mode"))
+
+    def write_settings(self, settings: ScenarioSettings) -> None:
+        """Replace the stored settings in one transaction; a ``None`` setting is not stored."""
+        table = self._tables.settings
+        values = {
+            "model_config": None if settings.model_config is None else dict(settings.model_config),
+            "training_mode": settings.training_mode,
+        }
+        rows = [
+            {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}
+            for name, value in values.items()
+            if value is not None
+        ]
+        with self._transaction(write=True) as connection:
+            connection.execute(table.delete().where(self._tables.condition(table)))
+            if rows:
+                connection.execute(table.insert(), rows)
+
     def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
         """Read ordered consumption metadata for this scenario."""
-        with self._transaction(scenario, write=False) as connection:
+        with self._transaction(write=False) as connection:
             rows = (
                 connection.execute(
                     select(self._tables.consumption)

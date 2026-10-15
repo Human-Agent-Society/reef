@@ -165,6 +165,7 @@ def _dispatcher(
     api: str = "openai",
     adapter: str = "pi",
     model_metadata: dict[str, ModelMetadata] | None = None,
+    allow_implicit_creation: bool = True,
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -193,8 +194,8 @@ def _dispatcher(
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        allow_implicit_creation=allow_implicit_creation,
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -2573,6 +2574,24 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
 
 
 @pytest.mark.unit
+def test_install_route_creates_no_scenario_when_implicit_creation_is_off(tmp_path) -> None:
+    dispatcher = _dispatcher(tmp_path, (), allow_implicit_creation=False)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
+            assert response.status == 404
+            assert "POST /reef/scenarios" in await response.text()
+            assert dispatcher.list_scenarios() == ()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exists(tmp_path) -> None:
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
@@ -2580,7 +2599,6 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=None,
         scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("weights-only")

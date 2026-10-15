@@ -47,7 +47,9 @@ results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
+  2026-09-16-mlx-session-ttl/    the session TTL comparison on MLX
 serve.yaml                       Reef/Slime configuration and the recipe's PRM endpoint
+serve-mlx.yaml                   Reef/MLX configuration for one Apple Silicon Mac, with a hosted PRM
 docker-compose.yaml              Reef, PRM and student-model containers with separate GPUs
 run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
@@ -241,6 +243,33 @@ uv run --no-project --with matplotlib \
     --lab ~/reef-run/lab --csv results/<run>/learning_curve.csv --plot results/<run>/learning_curve.png
 ```
 
+## Run on Apple Silicon
+
+`serve-mlx.yaml` runs the same stream on one Apple Silicon Mac. The policy
+serves and trains in the Reef process on MLX, with no GPUs and no Docker
+stack for Reef. The PRM judge (`z-ai/glm-5.3`) is called through OpenRouter,
+so set `OPENROUTER_API_KEY`. The student model is a hosted model too: point
+`OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL` at it.
+
+```bash
+uv pip install -e ".[mlx]" -e ./third_party/reef-client
+reef serve -c recipes/openclawrl/examples/openclawrl/serve-mlx.yaml
+```
+
+Run `reef serve` on the host, not in a container. `run.sh` starts the GPU
+Compose stack, so it does not run this config. Use its other steps instead:
+build the student service image, then run its `reef-eval stream` command
+with `REEF_URL=http://<LAN address>:8904` and `REEF_TOKEN=reef-local`. The
+task containers reach the service over the machine's LAN address, so do not
+use localhost.
+
+Serving on a Mac is slower than on GPUs. Set
+`OPENCLAWRL_TURN_TIMEOUT_S` above its 600-second default, and keep
+`pipeline.record2record.config.session_ttl_s` at the 1800 that
+`serve-mlx.yaml` sets. [Train on Apple Silicon with
+MLX](../../../../docs/user-guide/mlx.rst) documents the backend, its options
+and the sizing measurements.
+
 ## Results
 
 ### GSM8K homework stream
@@ -270,6 +299,13 @@ A session passes when the agent's first solution reply already matches the stude
 The demo above replays two sessions from this run. In session 1 the student
 rejects a formatted reply, reef keeps the training going, and by session 16
 the first reply passes directly.
+
+### Session TTL on MLX
+
+`results/2026-09-16-mlx-session-ttl/` compares `session_ttl_s` 45 and 1800 on
+the MLX stream. With 45 seconds, about half the training pairs were lost.
+With 1800 seconds, none were lost, but neither run reached the adaptation
+criterion.
 
 ## Configuration ownership
 

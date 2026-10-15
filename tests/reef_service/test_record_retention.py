@@ -110,7 +110,7 @@ def test_service_config_defaults_to_twenty_gib_and_accepts_overrides():
 
 
 def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, monkeypatch, caplog):
-    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path, scenario_storage=SQLiteScenarioStorage(tmp_path))
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(tmp_path))
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     monkeypatch.setattr("reef.service.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
     original = dispatcher.prune_record_archives
@@ -154,7 +154,7 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
 
 
 def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch):
-    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path, scenario_storage=SQLiteScenarioStorage(tmp_path))
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(tmp_path))
     dispatcher.get_or_create_scenario("math")
     started, release, deleting = Event(), Event(), Event()
     original = SQLiteScenarioStorage.prune
@@ -210,11 +210,11 @@ def test_capacity_eviction_rolls_back_bodies_hashes_and_loss_totals(tmp_path):
     original = trace("original")
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         records.append(original)
-        with pytest.raises(RuntimeError, match="rollback"), records._transaction("math", write=True) as connection:
+        with pytest.raises(RuntimeError, match="rollback"), records._transaction(write=True) as connection:
             SQLRecordRetention(records._tables).evict(connection, [1])
             raise RuntimeError("rollback")
         assert records.get("math", "original") == original
         assert records.loss("math").record_count == 0
         assert not records.append_result(original).inserted
-        with records._transaction("math", write=False) as connection:
+        with records._transaction(write=False) as connection:
             assert connection.exec_driver_sql("SELECT count(*) FROM consumed_agent_record").scalar_one() == 0

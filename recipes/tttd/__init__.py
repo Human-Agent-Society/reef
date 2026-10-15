@@ -16,6 +16,8 @@ Everything Reef-side that decides what TTT-Discover trains lives here:
   stack.
 - ``tinker`` — the same objective on Tinker's built-in importance-sampling
   loss, imported only when that backend resolves the family.
+- ``mlx`` — the same objective on the MLX backend, imported only when that
+  backend resolves the family.
 """
 
 from recipes.tttd.objective import TttdObjective
@@ -26,6 +28,7 @@ from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("tttd", "recipes.tttd.slime:TttdAlgorithm")
 register_loss_family_ref("tttd", "recipes.tttd.tinker:TttdTinkerLoss", backend="tinker")
+register_loss_family_ref("tttd", "recipes.tttd.mlx:TttdMLXLoss", backend="mlx")
 
 __all__ = [
     "TTTDBatches",

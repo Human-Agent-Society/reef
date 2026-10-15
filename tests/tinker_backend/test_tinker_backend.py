@@ -506,7 +506,6 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
             PolicyRecipe(value.training, runtime=value.inference),
             factory,
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=tmp_path / "records",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         )
 

@@ -351,7 +351,7 @@ callers remain compatible with existing adapters.
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
-bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
+bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
 ``SQLiteScenarioStorage`` inherit those bases, respectively.
 
 .. code:: python
@@ -365,21 +365,22 @@ bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
    dispatcher = Dispatcher(
        recipe,
        repository_backend_factory,
-       agent_record_dir=Path(".reef/agent-record"),
        scenario_storage=storage,
    )
 
 ``Dispatcher`` requires ``scenario_storage`` and passes it to scenario
 creation. It never selects or imports a record storage implementation. The
 ``build_default_dispatcher`` convenience helper also requires this argument.
-Deployment assembly chooses SQLite or PostgreSQL from ``reef.record_backend``;
-embedded callers supply their chosen storage service explicitly. For ephemeral records
-and commits, pass ``SQLiteScenarioStorage()`` without a directory. Passing
-a directory preserves SQLite schemas, JSONL format, and scenario filenames.
+Deployment assembly builds the storage that ``storage.record_backend`` names:
+SQLite, PostgreSQL, or a ``ScenarioStorage`` plugin; embedded callers supply
+their chosen storage service explicitly. For ephemeral records, commits and
+settings, pass ``SQLiteScenarioStorage()`` without a directory. Passing a
+directory preserves SQLite schemas, JSONL format, and scenario filenames.
 
-With an explicit storage service, ``agent_record_dir`` independently selects the
-local directory for scenario model settings. Configure it to retain those
-settings across restarts even when records and commits use a remote adapter.
+The storage service keeps all per-scenario state. This includes the
+``ScenarioSettings`` of each scenario: the model configuration and the
+selected training mode. The scenario registry uses ``read_settings`` and
+``write_settings``. ``archive`` retires the settings with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
 ``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
@@ -393,10 +394,8 @@ The scenario registry caches one configuration object per scenario and passes
 it to the factory during creation and recovery. Recipes retain that object so
 new work observes updates while already resolved runtime snapshots remain
 unchanged. Use ``Dispatcher.configure_scenario_model`` to persist updates;
-it validates the value and recipe compatibility and writes the private JSON
-file before replacing the active runtime. ``reef.storage.model_config`` owns
-file reads, atomic writes, and archival. Existing file paths, JSON values,
-and owner-only permissions remain unchanged.
+it validates the value and recipe compatibility and writes the scenario
+settings through the storage service before replacing the active runtime.
 
 Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``records=...`` and ``commit_log=...`` arguments with one store opened by a
@@ -404,17 +403,44 @@ Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``Scenario`` does not choose a storage backend. Read committed history through
 ``scenario.store.history()`` and persistence capability through
 ``scenario.store.durable``; the former ``scenario.commit_log`` property has been
-removed. The concrete commit log store's ``commit_log`` is for backend diagnostics.
+removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostics.
 
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
-``reef.storage.scenario``, alongside ``ScenarioStoreConflict``. Concrete storage classes
-live under ``reef.storage``: ``commit_log.CommitLogScenarioStore`` accepts a
-``RecordStore`` and a JSONL ``CommitLog``; ``sqlite.SQLiteScenarioStorage`` and
-``postgres.PostgresScenarioStorage`` assemble their respective record backends.
-The scenario package depends only
-on storage contracts. Direct commit log callers now import ``CommitLog`` from
-``reef.storage.commit_log``; ``reef.scenario.commit_log`` is removed. The session
-contract is:
+``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
+Concrete storage classes live under ``reef.storage``:
+``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore`` and a
+``CommitHistory``, either the JSONL ``commit_log.CommitLog`` or the
+``postgres.PostgresCommitTable``; ``sqlite.SQLiteScenarioStorage`` and
+``postgres.PostgresScenarioStorage`` assemble their respective backends. The
+scenario package depends only on storage contracts. The storage contract is:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory)``
+     - Class method that builds the storage a deployment names in
+       ``storage.record_backend``. ``config`` is the plugin's own mapping;
+       ``directory`` is ``storage.agent_record_dir``.
+   * - ``durable``
+     - Whether new sessions and settings survive a process restart.
+   * - ``open(scenario)``
+     - Open an independently owned session (the ``ScenarioStore`` below).
+   * - ``read_settings(scenario)``
+     - The scenario's ``ScenarioSettings``; defaults for a scenario with none.
+   * - ``write_settings(scenario, settings)``
+     - Replace the settings durably. The caller serializes writers of one scenario.
+   * - ``archive(scenario)``
+     - Retire the scenario's records, commits and settings, so a recreated
+       scenario starts empty; return the archive locations.
+   * - ``prune(max_bytes=...)``
+     - Evict the oldest record bodies over the byte budget.
+   * - ``close()``
+     - Release shared resources; repeated calls are safe.
+
+The session contract is:
 
 .. list-table::
    :header-rows: 1
@@ -454,9 +480,12 @@ returns the original record, even after later steps have committed; only
 expected step, or a retry with conflicting content, raises
 ``ScenarioStoreConflict`` without advancing the store.
 
-The commit log adapter serializes its writers with a local POSIX file lock;
-direct writes through ``CommitLog`` bypass this store contract.
-The default adapter fsyncs the JSONL record as the durable commit point.
+``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
+``CommitLog`` uses a local POSIX file lock. Its fsynced JSONL line is the
+durable commit point. ``PostgresCommitTable`` holds an advisory lock in one
+transaction and inserts the commit row in that transaction. The commit is
+durable when the transaction ends. Direct writes through a ``CommitHistory``
+bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
 committed ``consumed_ids`` and separate skipped-batch receipts to rebuild
@@ -501,6 +530,9 @@ SQLite leaves it empty because each store owns a database. Custom SQL adapters
 must also supply ``RecordTables.eviction`` with scope/scenario keys and the
 ``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
 These totals are updated atomically with capacity deletion and retry hashes.
+``RecordTables.settings`` holds the store's settings as ``name`` and
+``value_json`` rows under the scope keys; ``SQLRecordStore.read_settings()`` and
+``write_settings(settings)`` read and replace them.
 
 .. code-block:: python
 
@@ -518,12 +550,15 @@ These totals are updated atomically with capacity deletion and retry hashes.
 The URL constructor owns its pool. To share a pool across sessions, construct
 ``PostgresRecordDatabase(url, schema=...)`` and pass that object instead of a URL;
 close sessions before closing the database. Both close operations are idempotent.
-``PostgresScenarioStorage(url, directory, schema=...)`` combines PostgreSQL
-records with ``CommitLogScenarioStore`` and local JSONL logs. Pass it through
+``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
+(the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
+the schema. It uses ``directory`` only to import the commit logs and model
+configuration files of earlier versions on start. Pass it through
 ``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
-selects this storage service with ``reef.record_backend: postgres``; see
-`operation settings <../user-guide/operate.rst>`__ for connection and storage setup.
+selects this storage service with ``storage.record_backend: postgres``; see
+`Choose the storage backend <../user-guide/operate.rst#choose-the-storage-backend>`__
+for connection and storage setup.
 
 Writes lock their store generation before allocating append sequences and hold
 the lock through commit. Reads use a consistent transaction snapshot. PostgreSQL

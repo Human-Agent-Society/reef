@@ -374,7 +374,6 @@ def _dispatcher(
         recipe,
         repository,
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=records,
         scenario_storage=SQLiteScenarioStorage(records),
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,

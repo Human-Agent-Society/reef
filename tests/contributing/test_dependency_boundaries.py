@@ -216,24 +216,17 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
             ), f"{module_name} imports {dependency}"
 
 
-def test_only_registry_imports_private_model_file_operations() -> None:
+def test_scenario_state_enters_only_through_injected_storage() -> None:
     for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        # The registry composes fixed local model files directly. Record and
-        # commit backends still enter through the injected ScenarioStorage.
+        # Records, commits and settings all enter through the injected ScenarioStorage.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
             _imports_of(imported, "reef.storage.records")
             + _imports_of(imported, "reef.storage.scenario")
             + _imports_of(imported, "reef.storage.commits")
         )
-        if path.name == "registry.py":
-            assert all(
-                target == "reef.storage.model_config" or target.startswith("reef.storage.model_config.")
-                for target in storage_imports
-            ), str(path.relative_to(REPO_ROOT))
-        else:
-            assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
+        assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
         for dependency in ("sqlite3", "sqlalchemy", "alembic"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
@@ -345,12 +338,12 @@ def test_slime_training_operations_import_does_not_load_megatron_stack() -> None
     )
 
 
-def test_model_config_and_file_operations_do_not_depend_on_scenario() -> None:
-    for module_name in ("reef.inference.model_config", "reef.storage.model_config"):
-        module = importlib.import_module(module_name)
-        imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
-        for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
-            assert _imports_of(imported, dependency) == [], module_name
+def test_model_config_does_not_depend_on_scenario() -> None:
+    module_name = "reef.inference.model_config"
+    module = importlib.import_module(module_name)
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
+    for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
+        assert _imports_of(imported, dependency) == [], module_name
 
 
 def test_reef_package_dependencies_are_acyclic() -> None:

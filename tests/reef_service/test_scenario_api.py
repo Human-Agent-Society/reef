@@ -9,6 +9,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import UnknownScenario
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
+from reef.scenario.admission import ScenarioLimits
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -20,7 +21,6 @@ def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher
         Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=None,
         allow_implicit_creation=allow_implicit_creation,
         scenario_storage=SQLiteScenarioStorage(None),
     )
@@ -118,7 +118,6 @@ def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
         Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=record_dir,
         scenario_storage=SQLiteScenarioStorage(record_dir),
     )
     assert value.get_or_create_scenario("delivery") is not None
@@ -148,6 +147,42 @@ def test_delete_scenario_over_http() -> None:
             assert await (await client.get("/reef/scenarios")).json() == {"scenarios": []}
             assert (await client.delete("/reef/scenarios/delivery")).status == 404
             assert (await client.get("/reef/scenarios/delivery/releases")).status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
+    bootstrap = tmp_path / "bootstrap"
+    bootstrap.mkdir()
+    dispatcher = Dispatcher(
+        Recipe(),
+        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        scenario_admission=ScenarioLimits(max_loaded_scenarios=1, max_scenarios=2),
+    )
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            assert (await client.post("/reef/scenarios", json={"name": "a"})).status == 201
+            busy = dispatcher.get_or_create_scenario("a")
+            assert busy is not None
+            measurement = busy.operations.start("serve/request")
+            full = await client.post("/reef/scenarios", json={"name": "b"})
+            assert full.status == 503
+            assert full.headers["Retry-After"] == "30"
+            measurement.finish(succeeded=True)
+            assert (await client.post("/reef/scenarios", json={"name": "b"})).status == 201
+            status = await (await client.get("/reef/status")).json()
+            assert status["loaded_scenarios"] == 1
+            refused = await client.post("/reef/scenarios", json={"name": "c"})
+            assert refused.status == 409
+            assert "reef.max_scenarios" in await refused.text()
         finally:
             await client.close()
 

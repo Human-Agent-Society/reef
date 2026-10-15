@@ -1,32 +1,23 @@
-"""MLX receiver reports the version its engine serves."""
+"""MLX's in-process handler reports the resident engine version."""
 
-from reef.runtime.interfaces import InferenceRuntime
-from reef.train.mlx_backend.inference import MLXInferenceBackend
+from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 
-class ResidentRuntime(InferenceRuntime):
-    def __init__(self) -> None:
-        super().__init__(base_url="mlx://local")
-        self.resident_version = "mlx-1"
-        self.mark_published()
+from tests.support.mlx_engine_stubs import FakeMLXEngine
 
-    def serving_runtime_load_id(self) -> str:
-        return self.resident_version
-
-    @property
-    def inference_handler(self) -> MLXInferenceBackend:
-        return MLXInferenceBackend(self)
+from reef.artifact.artifact import Artifact
+from reef.train.mlx_backend.serving import MLXServingRuntime
 
 
-def test_receiver_reports_resident_version_before_publication() -> None:
-    runtime = ResidentRuntime()
-    backend = MLXInferenceBackend(runtime)
-    assert backend.runtime_load_ids() == ("mlx-1",)
+def test_handler_reports_the_resident_version_in_the_completion_receipt(tmp_path: Path) -> None:
+    runtime = MLXServingRuntime(FakeMLXEngine())
 
-    runtime.resident_version = "mlx-2"
-    assert runtime.current_runtime_load_id() == "mlx-1"
-    assert backend.runtime_load_ids() == ("mlx-2",)
+    response = asyncio.run(
+        runtime.inference_handler.inference(
+            Artifact.local(Path(tmp_path)), "/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]}
+        )
+    )
 
-    runtime.mark_published()
-    assert runtime.current_runtime_load_id() == "mlx-2"
-    assert backend.runtime_load_ids() == ("mlx-2",)
+    assert response["choices"][0]["meta_info"]["runtime_load_id"] == runtime.serving_runtime_load_id()

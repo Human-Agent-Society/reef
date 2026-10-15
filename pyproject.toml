@@ -54,14 +54,11 @@ e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
 wandb = [
     "wandb>=0.29.0",
 ]
-# Apple Silicon serving and training (`reef.train.mlx_backend`). MLX wheels are
-# arm64 macOS builds, so this extra is only installable there; the adapter
-# package itself imports without them, and only the `mlx` runtime kind pulls
-# them in. Keep the pair pinned together: mlx-lm tracks mlx closely, and an
-# upstream API change is a capability change, not a silent behaviour change.
+# Apple Silicon serving and training (`reef.train.mlx_backend`), on arm64 macOS only.
+# Pin both packages, and bump them together: mlx-lm tracks mlx closely.
 mlx = [
-    "mlx>=0.32,<0.33",
-    "mlx-lm>=0.31,<0.32",
+    "mlx>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # Record tracing over OTLP/HTTP (observability.tracing); any OpenTelemetry-compatible backend receives it.
 opentelemetry = [

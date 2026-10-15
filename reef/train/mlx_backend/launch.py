@@ -1,9 +1,7 @@
-"""Selecting the MLX backend from a deployment.
+"""The ``training.backend: mlx`` deployment.
 
-`training.backend: mlx` resolves here. The base class does the work: it refuses
-the Ray, executor and inference-engine settings that an in-process integration
-has no use for, and parses this runtime's own options through its factory. What
-is left to declare is which runtime kind the deployment builds.
+The base class refuses Ray, executor and inference-engine settings, and
+parses ``training.options`` with the ``mlx`` runtime factory's settings type.
 """
 
 from __future__ import annotations
@@ -14,9 +12,7 @@ from reef.train.deployment import InProcessTrainingDeployment
 class MLXDeployment(InProcessTrainingDeployment):
     """Serve and train one LoRA adapter in the service process, on Apple Silicon."""
 
-    #: Resolved through the runtime registry; the factory imports MLX only when
-    #: it actually builds the runtime, so selecting another backend costs a
-    #: deployment nothing.
+    #: The runtime registry resolves this kind; the factory imports MLX only when it builds the runtime.
     runtime_type = "mlx"
     #: The engine loads the base model itself, from a local path or the Hub.
     requires_local_model = False

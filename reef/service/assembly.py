@@ -28,6 +28,7 @@ from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.deployment import RuntimeRegistry, runtime_pair
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
@@ -318,14 +319,19 @@ def build_dispatcher(
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     try:
+        record_directory = Path(settings.agent_record_dir)
         if settings.record_backend == "postgres":
             scenario_storage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
-                Path(settings.agent_record_dir),
+                record_directory,
                 schema=settings.record_database_schema,
             )
+        elif settings.record_backend == "sqlite":
+            scenario_storage = SQLiteScenarioStorage(record_directory)
         else:
-            scenario_storage = SQLiteScenarioStorage(Path(settings.agent_record_dir))
+            reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
+            storage_class = ScenarioStorage.referenced_class(reference)
+            scenario_storage = storage_class.from_config(reference.config, directory=record_directory)
         # Record tracing observes storage events; the storage closes the observer with itself.
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
@@ -349,11 +355,18 @@ def build_dispatcher(
             recipe,
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
-            agent_record_dir=Path(settings.agent_record_dir),
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
             hold_local_cycles=hold_local_cycles and calls_service,
+            scenario_idle_unload_seconds=settings.scenario_idle_unload_s,
+            scenario_admission=(
+                ScenarioLimits(
+                    max_loaded_scenarios=settings.max_loaded_scenarios, max_scenarios=settings.max_scenarios
+                )
+                if settings.scenario_admission is None
+                else ScenarioAdmission.from_setting(settings.scenario_admission, setting="reef.scenario_admission")
+            ),
         )
     except BaseException:
         if scenario_storage is not None:

@@ -654,7 +654,7 @@ def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
         dispatcher.close()
 
 
-def test_mode_selection_survives_a_reload_and_resets_on_restart(tmp_path):
+def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
     def propose(nodes, samples, models, *, requests=()):
         return None
 
@@ -673,13 +673,21 @@ def test_mode_selection_survives_a_reload_and_resets_on_restart(tmp_path):
         assert dispatcher.get_or_create_scenario("s").scenario_step == 1
     finally:
         dispatcher.close()
-    # A new process loads the committed state and starts from the recipe's configured mode.
+    # A new process loads the committed state and the stored mode.
     restarted = _dispatcher(tmp_path, _recipe(tmp_path, propose))
     try:
         loaded = restarted.get_or_create_scenario("s")
-        assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "auto"
+        assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "manual"
     finally:
         restarted.close()
+    # A recipe that no longer takes instructions keeps its default, so a person can still select a mode.
+    without_requests = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
+    try:
+        with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
+            assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
+        assert "keeps its default training mode" in caplog.text
+    finally:
+        without_requests.close()
 
 
 def _committed_row(dispatcher, text):

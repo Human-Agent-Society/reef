@@ -483,7 +483,6 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
@@ -543,7 +542,6 @@ def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
 

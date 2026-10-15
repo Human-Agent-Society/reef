@@ -35,7 +35,7 @@ def item(
 def test_read_transaction_keeps_one_snapshot_during_another_connection_commit(tmp_path):
     database = tmp_path / "records.sqlite3"
     with SQLiteRecordStore(database) as reader, SQLiteRecordStore(database) as writer:
-        with reader._transaction("math", write=False) as connection:
+        with reader._transaction(write=False) as connection:
             assert connection.exec_driver_sql("SELECT COUNT(*) FROM agent_record").scalar_one() == 0
             writer.append(item("first", "math"))
             assert connection.exec_driver_sql("SELECT COUNT(*) FROM agent_record").scalar_one() == 0

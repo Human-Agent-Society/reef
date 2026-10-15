@@ -1,21 +1,18 @@
-"""OpenAI-shaped chat inference executed in this process by MLX.
+"""OpenAI chat completions served in this process by the MLX engine.
 
-The response carries a private ``training`` block holding the exact token ids
-the engine sampled and their log-probabilities. That block is what makes a
-served exchange trainable: Reef never re-tokenizes decoded text to reconstruct
-policy tensors, so a rollout that was not captured token-natively at
-generation time can never become a policy sample.
-
-The public ``message`` is a presentation of the same sample: reasoning split
-off into ``reasoning_content`` and tool calls parsed into ``tool_calls`` in
-the syntax the model's own chat template asked for. The split reads the
-decoded text and never touches the tensors.
+A response carries a private ``training`` block with the exact token ids the
+engine sampled and their log probabilities, so a served exchange can become
+a training sample without tokenizing decoded text again. The public
+``message`` is the client's view of the same sample: reasoning moves to
+``reasoning_content`` and tool calls in the template's syntax become
+``tool_calls``. The split and the stream encoding are the ones the
+token-native chat facade in :mod:`reef.inference.chat` uses.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import math
 import threading
 import time
 import uuid
@@ -24,118 +21,118 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import ReefError
-from reef.runtime.interfaces import InferenceBackend, InferenceHandler, InferenceStream, UpstreamStatusError
-from reef.train.mlx_backend.assistant_message import (
-    THINK_OPEN,
+from reef.core.chat_protocol import (
+    ChatStreamRelay,
+    OpenAIChunkWriter,
+    ParsedToolCall,
     ReasoningStreamSplitter,
-    ToolCallParser,
-    ToolMarkerStreamHold,
-    split_assistant_message,
+    assistant_message,
+    held_suffix,
+    normalize_finish_reason,
+    positive_max_tokens,
+    stream_ids,
+)
+from reef.runtime.interfaces import InferenceHandler, InferenceStream, UpstreamStatusError
+from reef.surface.base import WeightRuntime
+from reef.train.mlx_backend.contracts import GenerationListener, ModelEngine, Rollout
+
+#: Request fields that would change sampling or the response, which the engine does not implement.
+UNSUPPORTED_REQUEST_FIELDS = (
+    "top_k",
+    "min_p",
+    "seed",
+    "stop",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
 )
 
 
-@dataclass(frozen=True)
-class ParsedToolCall:
-    """One call the parser recovered: what ``split_assistant_message`` reads."""
+class MLXToolCallParser:
+    """Find the tool calls in sampled text and parse each one with the engine's parser.
 
-    name: str
-    parameters: Any
-
-
-class MLXToolCallParser(ToolCallParser):
-    """mlx-lm's per-model tool parser behind the interface the message split reads.
-
-    mlx-lm chooses the parser from the chat template when it loads the
-    tokenizer (Qwen3.8's ``<tool_call>``-wrapped XML, Hermes-style JSON,
-    Mistral's ``[TOOL_CALLS]``, ...) and exposes the markers that bound a call
-    plus a ``parse_tool_call(text, tools)`` that coerces each argument by the
-    type its declared schema gives it. This adapter finds the bounded spans,
-    hands each to that function, and keeps the text outside them as the reply.
+    The engine's parser is the one mlx-lm chose for the chat template.
+    ``parse_stream_chunk`` shows streamed text up to the first call marker
+    and holds the rest; the stream's reconciliation sends the parsed calls.
     """
 
-    def __init__(self, tokenizer: Any, tools: Sequence[Mapping[str, Any]]) -> None:
-        self.tool_call_start: str = tokenizer.tool_call_start
-        self._tool_call_end: str = tokenizer.tool_call_end
-        self._parse = tokenizer.tool_parser
+    def __init__(self, engine: ModelEngine, markers: tuple[str, str], tools: Sequence[Mapping[str, Any]]) -> None:
+        self._engine = engine
+        self.tool_call_start, self._tool_call_end = markers
         self._tools = [dict(tool) for tool in tools]
+        self._buffer = ""
+        self._holding = False
 
     @classmethod
-    def for_tokenizer(cls, tokenizer: Any, tools: Sequence[Mapping[str, Any]] | None) -> MLXToolCallParser | None:
-        """The parser for this request, or ``None`` when nothing could be a call.
-
-        No declared toolset means the prompt stated no call syntax, so any
-        markup in the reply is text. A template mlx-lm found no parser for
-        leaves the reply as text too, rather than guessing at a syntax.
-        """
-        if not tools or not getattr(tokenizer, "has_tool_calling", False):
+    def for_request(cls, engine: ModelEngine, tools: Sequence[Mapping[str, Any]] | None) -> MLXToolCallParser | None:
+        """The parser for one request, or ``None`` when the request declares no tools or the template has no call syntax."""
+        markers = engine.tool_call_markers
+        if not tools or markers is None:
             return None
-        return cls(tokenizer, tools)
+        return cls(engine, markers, tools)
 
     def has_tool_call(self, text: str) -> bool:
         return self.tool_call_start in text
 
     def parse_non_stream(self, text: str) -> tuple[str, list[ParsedToolCall]]:
-        """The text outside every call, and the calls in order.
-
-        A call that opens and never closes is a sample that hit the token cap
-        mid-call; it raises, and the request fails so the agent retries a
-        rollout instead of reading half a call as a reply.
-        """
+        """The text outside every call, and the calls in order; raise ``ValueError`` for a call that never closes."""
         outside: list[str] = []
         calls: list[ParsedToolCall] = []
         cursor = 0
-        while True:
-            start = text.find(self.tool_call_start, cursor)
-            if start == -1:
-                outside.append(text[cursor:])
-                break
+        while (start := text.find(self.tool_call_start, cursor)) != -1:
             outside.append(text[cursor:start])
             body_start = start + len(self.tool_call_start)
             end = text.find(self._tool_call_end, body_start)
             if end == -1:
                 raise ValueError(f"a tool call opened with {self.tool_call_start!r} never closed")
-            parsed = self._parse(text[body_start:end].strip(), self._tools)
-            name = parsed.get("name") if isinstance(parsed, Mapping) else None
-            if not isinstance(name, str) or not name:
-                raise ValueError("a tool call names no function")
-            arguments = parsed.get("arguments", parsed.get("parameters"))
-            calls.append(ParsedToolCall(name=name, parameters={} if arguments is None else arguments))
+            calls.append(self._engine.parse_tool_call(text[body_start:end].strip(), self._tools))
             cursor = end + len(self._tool_call_end)
+        outside.append(text[cursor:])
         return "".join(outside).strip(), calls
 
+    def parse_stream_chunk(self, delta: str) -> tuple[str, list[ParsedToolCall]]:
+        """The streamed text that is safe to show: nothing from the first call marker on.
 
-def prompt_opens_reasoning(tokenizer: Any, prompt_tokens: Sequence[int]) -> bool:
-    """Whether this rendered prompt ends by opening the model's thinking block.
-
-    Decided per request rather than once per model: the same Qwen3 template
-    opens ``<think>`` by default and opens-and-closes it at once when a
-    request sets ``enable_thinking`` false, and the split has to know which
-    one produced the sample it is reading. The last few prompt tokens are
-    enough: the marker is the final thing the template writes.
-    """
-    tail = tokenizer.decode(list(prompt_tokens[-8:]))
-    return str(tail).rstrip().endswith(THINK_OPEN)
+        A tail that could still become the marker, and whitespace before it,
+        wait for the next delta.
+        """
+        if self._holding:
+            return "", []
+        self._buffer += delta
+        index = self._buffer.find(self.tool_call_start)
+        if index != -1:
+            self._holding = True
+            visible, self._buffer = self._buffer[:index].rstrip(), ""
+            return visible, []
+        cut = len(self._buffer) - held_suffix(self._buffer, self.tool_call_start)
+        while cut > 0 and self._buffer[cut - 1].isspace():
+            cut -= 1
+        visible, self._buffer = self._buffer[:cut], self._buffer[cut:]
+        return visible, []
 
 
 @dataclass(frozen=True)
-class _ChatRequest:
-    """One validated chat-completions request, buffered or streamed alike."""
+class ChatRequest:
+    """One validated chat-completions request, rendered to the engine's prompt tokens."""
 
-    messages: list[Any]
-    max_tokens: int | None
+    payload: Mapping[str, Any]
+    prompt_tokens: list[int]
+    opens_reasoning: bool
+    max_tokens: int
     temperature: float | None
-    template_kwargs: Mapping[str, Any] | None
-    tools: list[Any] | None
-    parser: MLXToolCallParser | None
+    tools: list[dict[str, Any]] | None
 
 
-class _LoopListener:
-    """The engine's ``GenerationListener`` for one stream, bridging its thread to the event loop."""
+class LoopListener(GenerationListener):
+    """Hand the pieces of one streamed generation from the engine thread to the event loop."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
         self._stop = threading.Event()
+        #: ``None`` marks the end of the generation.
         self.pieces: asyncio.Queue[str | None] = asyncio.Queue()
 
     def emit(self, piece: str) -> None:
@@ -148,346 +145,201 @@ class _LoopListener:
         self._stop.set()
 
 
-def _unsent(final: Any, emitted: str) -> str:
-    """What the canonical field still owes the wire, given what the stream showed of it."""
-    if not isinstance(final, str) or not final.startswith(emitted):
-        return ""
-    return final[len(emitted) :]
+class MLXInferenceHandler(InferenceHandler):
+    """Answer chat completions from the engine's live adapter.
 
-
-def _sse(event: Mapping[str, Any]) -> bytes:
-    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
-
-
-class MLXInferenceBackend(InferenceHandler, InferenceBackend):
-    """Answer chat completions from the runtime's resident MLX model.
-
-    Both halves of Reef's inference contract: it executes a request
-    (``InferenceHandler``) and it is the receiver Reef drives around a weight
-    change (``InferenceBackend``). A receiver that runs as a separate service
-    splits these; an in-process engine is one object.
+    ``runtime`` reports the version of the served weights. Requests take
+    the engine one at a time.
     """
 
-    def __init__(self, runtime: Any) -> None:
+    def __init__(self, engine: ModelEngine, runtime: WeightRuntime) -> None:
+        self._engine = engine
         self._runtime = runtime
-        # MLX evaluates on one process-wide stream, and training mutates the
-        # same parameters generation reads. Both completion paths — buffered and
-        # streamed — drive the engine as a single sequence, so this lock keeps
-        # the two from running against that stream at once. Concurrent requests
-        # serialize here rather than sharing a batch: mlx-lm cannot continuously
-        # batch the Qwen3.5 hybrid cache (splicing a fresh prompt into a live
-        # decode corrupts the mixed GatedDeltaNet/attention cache), so a shared
-        # batch bought corruption, not throughput.
         self._engine_lock = asyncio.Lock()
 
-    # -- #432's receiver contract.
-    #
-    # Reef drives a remote receiver through pause/drain/offload so it can share
-    # a device with other work and be recovered after a restart. This engine's
-    # weights are objects in the serving process: there is no endpoint to
-    # retarget, no device to hand back, and nothing that outlives the process.
-    # The no-ops below say that; the raisers say Reef is asking for something
-    # this receiver genuinely cannot do, rather than silently doing nothing.
-
-    def initialize_version(self, runtime_load_id: str) -> None:
-        """No-op: a version becomes servable when the runtime swaps the adapter."""
-
-    def inference_url(self) -> str:
-        """This receiver has no endpoint; requests arrive as calls, not HTTP."""
-        return "mlx://local"
-
-    def runtime_load_ids(self) -> Sequence[str]:
-        """The one adapter the engine currently serves, if any."""
-        current = self._runtime.serving_runtime_load_id()
-        return (current,) if isinstance(current, str) and current else ()
-
-    def pause(self) -> None:
-        """Stop admitting requests; in-flight generation drains on the lock."""
-        self._runtime._inference_admission.close(wait=True, timeout=self._runtime.inference_timeout_s)
-
-    def resume(self) -> None:
-        self._runtime._inference_admission.open()
-
-    def recover(self) -> None:
-        """No-op: nothing survives the process, so there is nothing to reattach."""
-
-    def abort(self) -> None:
-        """Stop admitting requests without waiting for in-flight generation."""
-        self._runtime._inference_admission.close(wait=False)
-
-    def offload(self, tags: tuple[str, ...] | None) -> None:
-        raise ReefError(
-            "the mlx receiver cannot offload: its weights are objects in the serving process, "
-            "not a device allocation Reef can hand back"
-        )
-
-    def onload_weights(self) -> None:
-        raise ReefError("the mlx receiver never offloads its weights, so there is nothing to onload")
-
-    def onload_kv(self) -> None:
-        raise ReefError("the mlx receiver never offloads its KV cache, so there is nothing to onload")
-
-    def unload_adapter(self, name: str) -> None:
-        raise ReefError(f"the mlx receiver serves one adapter for the life of the process; it cannot unload {name!r}")
-
-    async def inference(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("stream") is True:
-            # The buffered path answers with one JSON body. A caller that
-            # asked for a stream and got that would parse something that is
-            # not SSE; the service routes streams to ``inference_stream``.
             raise UpstreamStatusError("a streaming completion is served by inference_stream", status=400)
-        request = self._parse_request(path, payload)
-        prompt_tokens, opens_reasoning = await asyncio.to_thread(self._render, request)
-        rollout = await self._submit(prompt_tokens, request)
-        if not rollout.output_tokens:
-            # A completion with no response tokens can never be a policy
-            # sample: `policy_row_violation` rejects an empty loss mask, the
-            # processor marks the report terminally unusable, and a grid-based
-            # recipe would then wait forever for a slot that can never fill.
-            # Fail the request instead, so the caller retries a rollout.
-            raise UpstreamStatusError("the model produced no response tokens", status=502)
-        return self._response(payload, rollout, request.parser, force_reasoning=opens_reasoning)
-
-    async def _submit(self, prompt_tokens: Sequence[int], request: _ChatRequest) -> Any:
-        """Sample this request's rollout as a single sequence on the engine thread.
-
-        Held under ``_engine_lock`` so a buffered completion and a streamed one
-        never drive the one MLX stream at once; concurrent buffered requests
-        serialize through it in turn.
-        """
+        request = await self._request(path, payload)
         async with self._engine_lock:
-            engine = self._runtime.engine
-            return await asyncio.to_thread(
-                engine.generate,
-                prompt_tokens,
+            rollout = await asyncio.to_thread(
+                self._engine.generate,
+                request.prompt_tokens,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
             )
+        return self._response(request, rollout, self._tool_parser(request))
 
-    async def inference_stream(
-        self,
-        artifact: Artifact,
-        path: str,
-        payload: dict[str, Any],
-    ) -> InferenceStream:
-        """Serve one chat completion as OpenAI chunks while it is being sampled.
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+        """Stream one chat completion as OpenAI chunks while it is sampled.
 
-        The wire carries deltas as the engine settles them; the trainable
-        record is the same response the buffered path builds, attached as
-        ``record_response`` once the sample is complete and parsed, so the
-        service records exactly what a buffered request would have recorded.
+        The record is the response the buffered path builds, attached once
+        the sample is complete. Closing the stream early stops the generation.
         """
-        request = self._parse_request(path, payload)
-        holder: dict[str, InferenceStream] = {}
-        chunks = self._stream_chunks(payload, request, holder)
+        request = await self._request(path, payload)
+        chat_id, _, created = stream_ids()
+        writer = OpenAIChunkWriter(
+            {"id": chat_id, "object": "chat.completion.chunk", "created": created, "model": self._model(request)}
+        )
+        stream_parser = self._tool_parser(request)
+        relay = ChatStreamRelay(writer, stream_parser)
+        splitter = ReasoningStreamSplitter(
+            enabled=True,
+            force_reasoning=request.opens_reasoning,
+            tool_call_start=None if stream_parser is None else stream_parser.tool_call_start,
+        )
+
+        async def frames() -> AsyncGenerator[bytes, None]:
+            async with self._engine_lock:
+                listener = LoopListener(asyncio.get_running_loop())
+                generation = asyncio.ensure_future(
+                    asyncio.to_thread(
+                        self._engine.generate,
+                        request.prompt_tokens,
+                        max_tokens=request.max_tokens,
+                        temperature=request.temperature,
+                        listener=listener,
+                    )
+                )
+                generation.add_done_callback(lambda _: listener.pieces.put_nowait(None))
+                try:
+                    for frame in writer.start():
+                        yield frame
+                    while (piece := await listener.pieces.get()) is not None:
+                        for kind, value in splitter.feed(piece):
+                            for frame in relay.piece(kind, value):
+                                yield frame
+                    rollout = await generation
+                    for kind, value in splitter.finish():
+                        for frame in relay.piece(kind, value):
+                            yield frame
+                    # The canonical response parses the whole sample with a
+                    # fresh parser; the stream parser holds state.
+                    response = self._response(request, rollout, self._tool_parser(request))
+                    response["id"] = chat_id
+                    response["created"] = created
+                    closing = relay.reconcile(response["choices"][0]["message"])
+                    closing.extend(writer.finish(response, output_tokens=len(rollout.output_tokens)))
+                    stream.record_response = response
+                    for frame in closing:
+                        yield frame
+                finally:
+                    # Reached on completion, on failure and on an early close.
+                    # The engine lock opens only after the generation stops.
+                    listener.stop()
+                    if not generation.done():
+                        await asyncio.gather(generation, return_exceptions=True)
+
+        chunks = frames()
         stream = InferenceStream(
             status=200,
             headers={"Content-Type": "text/event-stream; charset=utf-8"},
             chunks=chunks,
-            # Closing the stream early must stop the engine, not just drop
-            # the bytes: the generator's cleanup cancels the generation and
-            # waits for it before the engine lock is released.
             close=chunks.aclose,
             record_response_pending=True,
         )
-        holder["stream"] = stream
         return stream
 
-    def _parse_request(self, path: str, payload: Mapping[str, Any]) -> _ChatRequest:
+    async def _request(self, path: str, payload: Mapping[str, Any]) -> ChatRequest:
+        """Validate a chat-completions request and render its prompt; raise a client error for a bad one."""
         if not path.rstrip("/").endswith("chat/completions"):
             raise UpstreamStatusError(f"the mlx backend serves chat completions, not {path!r}", status=404)
         messages = payload.get("messages")
-        if not isinstance(messages, list) or not messages:
-            raise UpstreamStatusError("chat completions require a non-empty messages list", status=400)
-        max_tokens = payload.get("max_completion_tokens", payload.get("max_tokens"))
+        if not isinstance(messages, list) or not messages or any(not isinstance(item, Mapping) for item in messages):
+            raise UpstreamStatusError("chat completions require a non-empty list of message objects", status=400)
+        for name in UNSUPPORTED_REQUEST_FIELDS:
+            if payload.get(name) not in (None, False):
+                raise UpstreamStatusError(f"the mlx backend does not support the request field {name!r}", status=400)
+        if payload.get("n", 1) != 1:
+            raise UpstreamStatusError("the mlx backend samples one choice per request; n must be 1", status=400)
+        top_p = payload.get("top_p")
+        if top_p is not None and top_p != self._engine.config.top_p:
+            raise UpstreamStatusError(
+                f"the mlx backend samples every request at training.options.top_p ({self._engine.config.top_p})",
+                status=400,
+            )
+        try:
+            max_tokens = positive_max_tokens(payload, {"max_tokens": self._engine.config.max_tokens}, "max_tokens")
+        except ValueError as exc:
+            raise UpstreamStatusError(str(exc), status=400) from exc
         temperature = payload.get("temperature")
-        # The field OpenAI-compatible servers use to steer a chat template —
-        # `enable_thinking` above all, which decides whether a reasoning
-        # model's `<think>` block becomes response tokens.
+        if temperature is not None and (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+            or temperature < 0
+        ):
+            raise UpstreamStatusError("temperature must be a finite non-negative number", status=400)
         template_kwargs = payload.get("chat_template_kwargs")
         if template_kwargs is not None and not isinstance(template_kwargs, Mapping):
             raise UpstreamStatusError("chat_template_kwargs must be an object", status=400)
-        # The toolset the caller declared. The chat template renders it into
-        # the prompt — the schemas and the call syntax the model is meant to
-        # answer in — so dropping it leaves the model inventing both.
         tools = payload.get("tools")
-        if tools is not None and not isinstance(tools, list):
-            raise UpstreamStatusError("tools must be an array", status=400)
-        # The same toolset decides how the reply is read back: the parser
-        # mlx-lm matched to the template turns the model's call markup into
-        # `tool_calls`. `tool_choice: none` declares the tools for context
-        # only, as the OpenAI dialect defines it.
-        parser = None if payload.get("tool_choice") == "none" else self._tool_call_parser(tools)
-        return _ChatRequest(
-            messages=messages,
-            max_tokens=None if max_tokens is None else int(max_tokens),
-            temperature=None if temperature is None else float(temperature),
-            template_kwargs=template_kwargs,
-            tools=tools,
-            parser=parser,
-        )
-
-    def _tool_call_parser(self, tools: list[Any] | None) -> MLXToolCallParser | None:
-        return MLXToolCallParser.for_tokenizer(self._runtime.engine.tokenizer, tools)
-
-    def _render(self, request: _ChatRequest) -> tuple[list[int], bool]:
-        engine = self._runtime.engine
-        prompt_tokens = engine.render_prompt(
-            request.messages, tools=request.tools, template_kwargs=request.template_kwargs
-        )
-        return prompt_tokens, prompt_opens_reasoning(engine.tokenizer, prompt_tokens)
-
-    async def _stream_chunks(
-        self,
-        payload: Mapping[str, Any],
-        request: _ChatRequest,
-        holder: Mapping[str, InferenceStream],
-    ) -> AsyncGenerator[bytes, None]:
-        common = {
-            "id": f"chatcmpl-{uuid.uuid4().hex}",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": str(payload.get("model") or self._runtime.engine.config.model_path),
-        }
-
-        def chunk(delta: Mapping[str, Any], *, finish_reason: str | None = None, **extra: Any) -> bytes:
-            return _sse(
-                {**common, "choices": [{"index": 0, "delta": dict(delta), "finish_reason": finish_reason, **extra}]}
-            )
-
-        async with self._engine_lock:
-            engine = self._runtime.engine
-            prompt_tokens, opens_reasoning = await asyncio.to_thread(self._render, request)
-            marker = None if request.parser is None else request.parser.tool_call_start
-            reasoning = ReasoningStreamSplitter(enabled=True, force_reasoning=opens_reasoning, tool_call_start=marker)
-            hold = ToolMarkerStreamHold(marker)
-            emitted_reasoning = ""
-            emitted_text = ""
-
-            # The engine thread hands each settled piece of text to the event
-            # loop; ``None`` marks the end of the generation, whatever ended it.
-            listener = _LoopListener(asyncio.get_running_loop())
-            pieces = listener.pieces
-            generation = asyncio.ensure_future(
-                asyncio.to_thread(
-                    engine.generate_stream,
-                    prompt_tokens,
-                    listener=listener,
-                    max_tokens=request.max_tokens,
-                    temperature=request.temperature,
-                )
-            )
-            generation.add_done_callback(lambda _: pieces.put_nowait(None))
-
-            def show(kind: str, value: str) -> bytes | None:
-                nonlocal emitted_reasoning, emitted_text
-                if kind == "thinking":
-                    emitted_reasoning += value
-                    return chunk({"reasoning_content": value})
-                visible = hold.feed(value)
-                if not visible:
-                    return None
-                emitted_text += visible
-                return chunk({"content": visible})
-
-            try:
-                yield chunk({"role": "assistant"})
-                while True:
-                    piece = await pieces.get()
-                    if piece is None:
-                        break
-                    for kind, value in reasoning.feed(piece):
-                        if (out := show(kind, value)) is not None:
-                            yield out
-                rollout = await generation
-                for kind, value in reasoning.finish():
-                    if (out := show(kind, value)) is not None:
-                        yield out
-                tail = hold.finish()
-                if tail:
-                    emitted_text += tail
-                    yield chunk({"content": tail})
-                if not rollout.output_tokens:
-                    raise UpstreamStatusError("the model produced no response tokens", status=502)
-
-                # The canonical message, parsed whole: what the record holds
-                # and what the wire is reconciled to. Whatever the stream has
-                # not shown yet — the held tool-call markup as `tool_calls`,
-                # a final piece of text — goes out now, before the terminal.
-                response = self._response(payload, rollout, request.parser, force_reasoning=opens_reasoning)
-                response["id"] = common["id"]
-                response["created"] = common["created"]
-                choice = response["choices"][0]
-                message = choice["message"]
-                if rest := _unsent(message.get("reasoning_content"), emitted_reasoning):
-                    yield chunk({"reasoning_content": rest})
-                if rest := _unsent(message.get("content"), emitted_text):
-                    yield chunk({"content": rest})
-                for index, call in enumerate(message.get("tool_calls") or []):
-                    yield chunk(
-                        {
-                            "tool_calls": [
-                                {
-                                    "index": index,
-                                    "id": call["id"],
-                                    "type": "function",
-                                    "function": dict(call["function"]),
-                                }
-                            ]
-                        }
-                    )
-                holder["stream"].record_response = response
-                terminal = {"finish_reason": choice["finish_reason"]}
-                if "meta_info" in choice:
-                    terminal["meta_info"] = choice["meta_info"]
-                yield chunk({}, **terminal)
-                yield b"data: [DONE]\n\n"
-            finally:
-                # Reached on completion, on failure, and when the consumer
-                # closes early. The engine is told to stop and waited for,
-                # so the lock never opens on a generation still running.
-                listener.stop()
-                if not generation.done():
-                    await asyncio.gather(generation, return_exceptions=True)
-
-    def _response(
-        self,
-        request: Mapping[str, Any],
-        rollout: Any,
-        parser: MLXToolCallParser | None,
-        *,
-        force_reasoning: bool,
-    ) -> dict[str, Any]:
-        runtime_load_id = self._runtime.serving_runtime_load_id()
-        prompt_tokens = list(rollout.prompt_tokens)
-        output_tokens = list(rollout.output_tokens)
+        if tools is not None and (not isinstance(tools, list) or any(not isinstance(tool, Mapping) for tool in tools)):
+            raise UpstreamStatusError("tools must be an array of objects", status=400)
         try:
-            message, called = split_assistant_message(
-                rollout.text,
-                parser,
-                force_reasoning=force_reasoning,
-                tool_call_start=None if parser is None else parser.tool_call_start,
-                parser_label="the mlx tool-call",
+            prompt_tokens = await asyncio.to_thread(
+                self._engine.render_prompt, messages, tools=tools, template_kwargs=template_kwargs
             )
         except ValueError as exc:
-            # Broken call markup is not a reply. Failing the request is what
-            # the SGLang path does too; the agent's request loop retries.
+            raise UpstreamStatusError(str(exc), status=400) from exc
+        return ChatRequest(
+            payload=payload,
+            prompt_tokens=prompt_tokens,
+            opens_reasoning=self._engine.opens_reasoning(prompt_tokens),
+            max_tokens=max_tokens,
+            temperature=None if temperature is None else float(temperature),
+            # ``tool_choice: none`` declares the tools for context only.
+            tools=None if tools is None or payload.get("tool_choice") == "none" else [dict(tool) for tool in tools],
+        )
+
+    def _tool_parser(self, request: ChatRequest) -> MLXToolCallParser | None:
+        return MLXToolCallParser.for_request(self._engine, request.tools)
+
+    def _model(self, request: ChatRequest) -> str:
+        return str(request.payload.get("model") or self._engine.model_path)
+
+    def _response(self, request: ChatRequest, rollout: Rollout, parser: MLXToolCallParser | None) -> dict[str, Any]:
+        """The OpenAI response with the training block; raise a server error for an unusable sample."""
+        if not rollout.output_tokens:
+            # A completion without response tokens can never become a policy
+            # sample; the caller retries the rollout.
+            raise UpstreamStatusError("the model produced no response tokens", status=502)
+        try:
+            message, called = assistant_message(
+                rollout.text,
+                parser,
+                force_reasoning=request.opens_reasoning,
+                tool_call_start=None if parser is None else parser.tool_call_start,
+            )
+        except ValueError as exc:
             raise UpstreamStatusError(str(exc), status=502) from exc
-        response: dict[str, Any] = {
+        runtime_load_id = self._runtime.serving_runtime_load_id()
+        prompt_tokens = list(request.prompt_tokens)
+        output_tokens = list(rollout.output_tokens)
+        training: dict[str, Any] = {
+            "tokens": [*prompt_tokens, *output_tokens],
+            # Every generated token is a policy action: a completion has no environment tokens.
+            "loss_mask": [1] * len(output_tokens),
+            "rollout_log_probs": list(rollout.rollout_log_probs),
+            "prompt_length": len(prompt_tokens),
+            "response_length": len(output_tokens),
+            "runtime_load_id": runtime_load_id,
+        }
+        if rollout.topk_indices:
+            training["topk_indices"] = [list(row) for row in rollout.topk_indices]
+            training["topk_log_probs"] = [list(row) for row in rollout.topk_log_probs]
+        return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": str(request.get("model") or self._runtime.engine.config.model_path),
+            "model": self._model(request),
             "choices": [
                 {
                     "index": 0,
                     "message": message,
-                    "finish_reason": "tool_calls" if called else rollout.finish_reason,
+                    "finish_reason": "tool_calls" if called else normalize_finish_reason(rollout.finish_reason),
+                    # The weight surface reads the engine's version from meta_info.
+                    "meta_info": {"runtime_load_id": runtime_load_id},
                 }
             ],
             "usage": {
@@ -495,35 +347,8 @@ class MLXInferenceBackend(InferenceHandler, InferenceBackend):
                 "completion_tokens": len(output_tokens),
                 "total_tokens": len(prompt_tokens) + len(output_tokens),
             },
-            "training": {
-                "tokens": [*prompt_tokens, *output_tokens],
-                # Every generated token is a policy action here: this backend
-                # runs single-turn completions with no environment tokens.
-                "loss_mask": [1] * len(output_tokens),
-                "rollout_log_probs": list(rollout.rollout_log_probs),
-                "prompt_length": len(prompt_tokens),
-                "response_length": len(output_tokens),
-                "runtime_load_id": runtime_load_id,
-                # Present only when the engine was asked to capture them. A
-                # distillation objective trains on the candidate set the
-                # policy actually considered, and nothing downstream can
-                # reconstruct it after generation.
-                **(
-                    {
-                        "topk_indices": [list(row) for row in rollout.topk_indices],
-                        "topk_log_probs": [list(row) for row in rollout.topk_log_probs],
-                    }
-                    if rollout.topk_indices
-                    else {}
-                ),
-            },
+            "training": training,
         }
-        if runtime_load_id is not None:
-            # Surface verification reads the engine-reported version from
-            # meta_info; without it a live-weight artifact cannot prove which
-            # weights answered.
-            response["choices"][0]["meta_info"] = {"runtime_load_id": runtime_load_id}
-        return response
 
 
-__all__ = ["MLXInferenceBackend", "MLXToolCallParser", "ParsedToolCall", "prompt_opens_reasoning"]
+__all__ = ["MLXInferenceHandler", "MLXToolCallParser"]

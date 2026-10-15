@@ -377,8 +377,8 @@ def test_the_pipeline_section_configures_the_stages() -> None:
         assert isinstance(built.task2batch, OpenClawRLBatches)
         judging = built.record2record.openclawrl_judging
         assert isinstance(judging.prm, PRMJudge)
-        assert judging.prm.generate_url == "http://prm:23001/generate"
-        assert judging.prm.timeout_s == 3600.0
+        assert judging.prm.transport.url == "http://prm:23001/generate"
+        assert judging.prm.transport.timeout_s == 3600.0
         assert judging.max_hint_candidates == 2
         assert judging.index.ttl_s == 60.0 and judging.index.max_sessions == 16
         assert isinstance(built.record2record.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"

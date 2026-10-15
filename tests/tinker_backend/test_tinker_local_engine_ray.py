@@ -264,7 +264,6 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
             ),
             InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=tmp_path / "records",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         )
         scenario_name = "erdos"

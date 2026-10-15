@@ -212,7 +212,6 @@ def start_dispatcher(tmp_path: Path):
             TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
             factory,
             local_artifact_dir=tmp_path / "staged",
-            agent_record_dir=tmp_path / "agent-record",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         )

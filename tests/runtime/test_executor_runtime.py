@@ -320,7 +320,6 @@ def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_pat
     dispatcher = Dispatcher(
         Recipe(**runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial),
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     dispatcher.get_or_create_scenario("math")
@@ -377,7 +376,6 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
     dispatcher = Dispatcher(
         Recipe(**runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial),
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario = dispatcher.get_or_create_scenario("math")

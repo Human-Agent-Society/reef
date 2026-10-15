@@ -151,6 +151,28 @@ def test_a_separate_teacher_needs_its_checkpoint() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf"), True])
+def test_advantage_clipping_rejects_invalid_bounds(value: float) -> None:
+    with pytest.raises(ValueError, match="advantage_clip"):
+        DistillSettings(divergence="reverse", top_k=1, advantage_clip=value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("divergence", "top_k", "distribution"),
+    [
+        ("forward", 1, "renormalized"),
+        ("jsd", 1, "renormalized"),
+        ("reverse", 0, "renormalized"),
+        ("reverse", 1, "tail"),
+    ],
+)
+def test_advantage_clipping_requires_sampled_reverse_kl(divergence: str, top_k: int, distribution: str) -> None:
+    with pytest.raises(ValueError, match="advantage_clip requires sampled reverse KL"):
+        DistillSettings(divergence=divergence, top_k=top_k, top_k_distribution=distribution, advantage_clip=1.0)
+
+
+@pytest.mark.unit
 def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per_rollout(toy_family) -> None:
     accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
 

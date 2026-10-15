@@ -221,7 +221,10 @@ model operations, checkpoint and tensor I/O.
 over a token-native generate route: it renders the prompt, builds the training
 record from a ``CapturedGeneration`` and streams protocol frames. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the control classes that SGLang and vLLM
+and builds its tool-call parser. ``core/chat_protocol.py`` holds the protocol
+helpers that this facade and the in-process MLX backend share: the
+assistant-message split, the streamed reasoning split and the SSE frame
+writers. ``inference/engine_control.py`` holds the control classes that SGLang and vLLM
 share: the coordinator backend, the inference service, the control actor and its
 default serving executor. ``inference/sglang/`` owns SGLang engine launch,
 capture and control independently of training; ``inference/vllm/`` owns vLLM capture,
@@ -254,9 +257,9 @@ The extension points those packages expose are in `Python API
   archival coordination. Recipes, scenarios, and the factory use the concrete
   ``ModelConfig`` in ``reef/inference/model_config.py``. The factory receives
   one configuration per creation or recovery; it owns no configuration cache.
-  The registry calls ``reef/storage/model_config.py`` functions directly for
-  the fixed local JSON files. This is its only storage implementation import:
-  records and commits still use an injected ``ScenarioStorage``.
+  The registry reads and writes each scenario's settings (model configuration
+  and training mode) through the injected ``ScenarioStorage``, like records and
+  commits; it imports no storage implementation.
   ``Dispatcher`` calls the storage service directly for retention and closes
   it after closing the loaded scenarios. It never imports or chooses a
   concrete record backend.
@@ -264,7 +267,7 @@ The extension points those packages expose are in `Python API
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
-  ``ScenarioStorage`` owns archival and retention.
+  ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or play them with an agent? Put it in ``reef/record2task/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
@@ -277,9 +280,11 @@ The extension points those packages expose are in `Python API
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
-  PostgreSQL tables, pooled transactions, and retention. ``commit_log.py`` owns
-  the JSONL ``CommitLog`` and ``CommitLogScenarioStore``, which accepts any
-  ``RecordStore``. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  PostgreSQL tables, the commit table, pooled transactions, and retention.
+  ``commit_log.py`` owns the ``CommitHistory`` base, the JSONL ``CommitLog``, and
+  ``CommitHistoryScenarioStore``, which accepts any ``RecordStore`` and
+  ``CommitHistory``. ``migrations.py`` holds one-time upgrades of older schemas
+  and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes? Put it in

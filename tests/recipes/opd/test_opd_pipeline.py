@@ -18,6 +18,7 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
+from reef.train.slime_backend.distill import settings_from_args
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
@@ -130,12 +131,19 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
         0.0,
     )
     assert (settings.divergence, settings.top_k, settings.importance_sampling_cap) == ("reverse", 1, 0.0)
+    assert settings.advantage_clip == 0.0
     args = SimpleNamespace()
     family.apply_driver_options(args, settings)
     assert args.distill_teacher_checkpoint == "/teacher"
     assert args.distill_divergence == "reverse"
     assert args.distill_top_k == 1
     assert args.distill_importance_sampling_cap == 0.0
+    assert args.distill_advantage_clip == 0.0
+    clipped, remaining = family.parse_driver_options(["--opd-teacher-checkpoint=/teacher", "--opd-advantage-clip=1.0"])
+    assert remaining == []
+    family.apply_driver_options(args, clipped)
+    assert args.distill_advantage_clip == 1.0
+    assert settings_from_args(args).advantage_clip == 1.0
     with pytest.raises(ValueError, match="teacher_checkpoint"):
         family.parse_driver_options([])
 

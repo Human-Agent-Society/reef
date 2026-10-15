@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Self
 
+from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
-from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +159,19 @@ class ObservedScenarioStorage(ScenarioStorage):
         self._inner = inner
         self._observer = observer
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> Self:
+        raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
+
     @property
     def durable(self) -> bool:
         return self._inner.durable
+
+    def read_settings(self, scenario: str) -> ScenarioSettings:
+        return self._inner.read_settings(scenario)
+
+    def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
+        self._inner.write_settings(scenario, settings)
 
     def open(self, scenario: str) -> ScenarioStore:
         return ObservedScenarioStore(self._inner.open(scenario), self._observer)

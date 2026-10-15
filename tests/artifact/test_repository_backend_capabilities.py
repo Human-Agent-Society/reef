@@ -106,7 +106,6 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
 
     dispatcher = build_default_dispatcher(
         backend_factory=lambda name: backend,
-        agent_record_dir=tmp_path / "records",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
@@ -143,7 +142,6 @@ def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(t
     for _ in range(2):
         dispatcher = build_default_dispatcher(
             backend_factory=lambda name: backend,
-            agent_record_dir=tmp_path / "records",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         )
         try:

@@ -1,20 +1,20 @@
-"""Apple Silicon training and serving on MLX, behind Reef's runtime contract.
+"""Apple Silicon serving and training on MLX, behind Reef's runtime contract.
 
-The package is importable without MLX installed: nothing here imports ``mlx``
-at module scope, and :class:`~reef.train.mlx_backend.runtime.MLXRuntimeFactory`
-pulls the engine in only when a deployment actually selects the ``mlx``
-runtime kind. That is what lets the wheel ship this adapter while keeping
-``mlx`` an optional extra.
+A deployment selects the backend with ``training.backend: mlx`` and sets
+its options under ``training.options``; see
+``recipes/openclawrl/examples/openclawrl/serve-mlx.yaml``::
 
-Selected from a deployment config with::
+    inference:
+      model-path: mlx-community/Qwen3.5-9B-MLX-4bit
+    training:
+      backend: mlx
+      options:
+        checkpoint_dir: work/mlx/checkpoints
 
-    reef:
-      runtime_type: mlx
-      runtime_config:
-        checkpoint_dir: work/checkpoints
-
-See ``reef/train/mlx_backend/runtime.py`` for the topology this models and
-what it deliberately does not do.
+Only ``engine``, ``training``, ``losses`` and ``gated_delta`` import MLX.
+``config`` declares the options, ``contracts`` the engine interface,
+``runtime`` and ``serving`` the two runtime halves, and ``inference`` the
+chat handler; these import without the optional ``mlx`` extra.
 """
 
 from reef.train.mlx_backend.runtime import MLXRuntime, MLXRuntimeFactory

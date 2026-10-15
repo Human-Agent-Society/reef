@@ -1,54 +1,45 @@
-"""OpenClaw-RL's candidate evaluation: a style probe under a regression check.
+"""OpenClaw-RL's candidate evaluation: a style probe with a regression check.
 
-Reef's default plugin is ``BackendAlwaysSelectPlugin``, which publishes every
-trained step.
-That is what lets OpenClaw-RL's stream keep its post-adaptation collapse: a few
-steps past adaptation the policy stops answering and loops on its tools, and
-because every step reaches serving the drift compounds instead of rolling back
-(the selection results show pre-adaptation rejects as style violations on
-healthy replies, post-adaptation rejects as empty "no-reply" turns).
+:class:`OpenClawRLCandidateEvaluation` decides whether Reef publishes a trained
+candidate. ``evaluate`` runs the candidate on a fixed set of GSM8K problems. It
+scores each reply with the benchmark's ``student_violations`` criterion and
+reports ``clean_rate``: the fraction of replies that are not empty and have no
+style violation. ``decide`` comes from
+:class:`~reef.evaluation.evaluators.RegressionCheckMixin`. It selects a candidate
+while ``clean_rate`` stays within ``regression_margin`` of the best selected
+score. Otherwise serving keeps the last selected weights.
 
-One plugin, :class:`OpenClawRLCandidateEvaluation`, does both halves. Its
-``evaluate`` is the OpenClaw-RL-specific probe — each candidate runs on a fixed,
-pinned set of GSM8K openings, and every reply is scored with the benchmark's own
-``student_violations`` criterion (a non-empty reply that shows its working in
-plain prose, no markdown), reporting a ``clean_rate``. Its ``decide`` comes from
-reef's generic :class:`~reef.evaluation.evaluators.RegressionCheckMixin`: select
-a candidate only while that rate has not regressed below the best seen — so the
-stream is free to climb during adaptation and, once it peaks, a step that makes
-the policy answer worse is held out of serving.
+The probe problems do not change during a run, so a change in the score comes
+from the candidate, not from the problems. Only the in-process MLX training
+runtime can probe an unpublished candidate.
 
-The probe set is pinned on purpose: a probe that resampled its problems would
-measure the problems, not the candidate.
-
-Wire it into a deployment's config:
+Configure the plugin in the deployment:
 
     evaluation:
       module: recipes.openclawrl.candidate_evaluator:OpenClawRLCandidateEvaluation
       config:
-        probe_size: 8            # pinned GSM8K openings to probe
-        max_tokens: 320          # per-probe generation budget
-        regression_margin: 0.17  # tolerated dip below the running best
+        probe_size: 8            # probe problems, 1 to 10
+        max_tokens: 320          # generation budget for one probe reply
+        regression_margin: 0.17  # allowed drop below the best selected clean_rate
 
-``max_tokens`` has to leave room for a reply the size a session elicits, or the
-probe scores truncation instead of style: a model that opens with a preamble
-runs out of budget before the arithmetic and fails the shown-work check on
-length alone. ``regression_margin`` should be read against ``probe_size`` — one
-probe item is worth ``1 / probe_size``, and a margin above that forgives any
-single-item regression.
+``max_tokens`` must leave room for a full reply with its arithmetic. A smaller
+budget cuts replies short, and a cut reply can fail the shown-work check because
+of its length, not its style. One probe problem is worth ``1 / probe_size`` of
+``clean_rate``. A ``regression_margin`` above that value accepts a candidate that
+fails one more problem than the best.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import logging
-import sys
 from collections.abc import Mapping
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Self
 
+from recipes.openclawrl.examples.openclawrl.user_sim.personas import student_violations
+from reef.core.config import config_option
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.evaluation.config import ConfiguredEvaluationPlugin
 from reef.evaluation.evaluators import RegressionCheckMixin
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
@@ -56,15 +47,14 @@ from reef.train.mlx_backend.runtime import MLXRuntime
 
 logger = logging.getLogger(__name__)
 
-_EVALUATOR = "openclawrl-style-probe"
-_VERSION = "1"
-_METRIC = "clean_rate"
+EVALUATOR_NAME = "openclawrl-style-probe"
+EVALUATOR_VERSION = "1"
+CLEAN_RATE_METRIC = "clean_rate"
 
-# A fixed, pinned held-out probe: canonical GSM8K questions with gold answers.
-# Held constant for the life of a run so a score reflects the candidate, not a
-# freshly sampled problem. Kept small — this generates once per candidate, on
-# the engine thread, between training and selection.
-_PROBE: tuple[tuple[str, str], ...] = (
+# Fixed GSM8K problems with gold answers; a run probes the first ``probe_size``.
+# Each candidate generates one reply per problem on the engine thread, between
+# training and selection, so the set stays small.
+PROBE_PROBLEMS: tuple[tuple[str, str], ...] = (
     (
         "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did she sell altogether in April and May?",
         "72",
@@ -104,102 +94,71 @@ _PROBE: tuple[tuple[str, str], ...] = (
     ),
 )
 
-#: What the probe asks for, worded the way the student asks for it and saying
-#: nothing about style. The criterion scores a reply the student never coached,
-#: so a probe that states the style requirement measures compliance with its own
-#: instruction rather than what the policy learned: a model told "no bullet
-#: points" can score well on the probe while still opening every session with
-#: them. The task framing stays — the student does ask for the working — and the
-#: style is left for the policy to have internalised or not.
-_INSTRUCTION = (
+#: The probe request, in the student's words. It asks for the working but says
+#: nothing about style, so the score shows the style that the policy learned,
+#: not compliance with this instruction.
+PROBE_INSTRUCTION = (
     "Here is my homework problem. Solve it and show the full arithmetic, step by step, then give the final number."
 )
 
 
-def _load_criterion() -> Any:
-    """The benchmark's own ``student_violations``, loaded from the user_sim package.
+@dataclass(frozen=True)
+class OpenClawRLCandidateEvaluationSettings(PluginSettings):
+    """The config of :class:`OpenClawRLCandidateEvaluation`."""
 
-    Reused rather than re-implemented so the probe scores a reply exactly as the
-    judge that produced the run's verdicts does; if the criterion moves, so does
-    the probe.
-    """
-    personas = Path(__file__).parent / "examples" / "openclawrl" / "user_sim" / "personas.py"
-    spec = importlib.util.spec_from_file_location("openclawrl_personas", personas)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load the OpenClaw-RL style criterion from {personas}")
-    module = importlib.util.module_from_spec(spec)
-    # Register before exec: personas.py defines a dataclass, whose processing
-    # looks the module up in sys.modules by name.
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module.student_violations
+    probe_size: int = config_option(8, help=f"The probe problems, 1 to {len(PROBE_PROBLEMS)}.")
+    max_tokens: int = config_option(320, help="The generation budget in tokens for one probe reply.")
+    regression_margin: float = config_option(
+        0.17, help="The allowed drop of clean_rate below the best selected clean_rate."
+    )
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.probe_size <= len(PROBE_PROBLEMS):
+            raise ValueError(f"probe_size must be between 1 and {len(PROBE_PROBLEMS)}, got {self.probe_size}")
+        if self.max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {self.max_tokens}")
+        if self.regression_margin < 0:
+            raise ValueError(f"regression_margin must be non-negative, got {self.regression_margin}")
 
 
 class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPlugin):
-    """The whole OpenClaw-RL candidate evaluation in one class.
+    """The style probe as ``evaluate`` and the regression check on ``clean_rate`` as ``decide``."""
 
-    ``evaluate`` is the OpenClaw-RL-specific probe — a pinned GSM8K set scored
-    with the benchmark's ``student_violations`` criterion, run through the MLX
-    runtime's ``probe_candidate``. ``decide`` comes from
-    :class:`~reef.evaluation.evaluators.RegressionCheckMixin`: publish a candidate
-    only while its ``clean_rate`` has not regressed below the best seen, so the
-    stream climbs during adaptation and a step that makes the policy answer worse
-    is held out of serving. The probe set is pinned so a score reflects the
-    candidate, not a freshly sampled problem.
-    """
-
-    def __init__(self, runtime: MLXRuntime, *, probe_size: int, max_tokens: int, regression_margin: float) -> None:
-        super().__init__(metric=_METRIC, margin=regression_margin)
-        self._runtime = runtime
-        self._max_tokens = int(max_tokens)
-        self._probe = _PROBE[: max(1, int(probe_size))]
-        self._violations = _load_criterion()
-        # Prompts rendered once — the ruler is fixed for the run.
-        self._prompts = [
-            runtime.engine.render_prompt([{"role": "user", "content": f"{_INSTRUCTION}\n\n{question}"}])
-            for question, _ in self._probe
+    def __init__(self, runtime: MLXRuntime, settings: OpenClawRLCandidateEvaluationSettings) -> None:
+        super().__init__(metric=CLEAN_RATE_METRIC, margin=settings.regression_margin)
+        self.runtime = runtime
+        self.max_tokens = settings.max_tokens
+        self.probe = PROBE_PROBLEMS[: settings.probe_size]
+        # The prompts are rendered once, so every candidate gets the same tokens.
+        self.prompts = [
+            runtime.engine.render_prompt([{"role": "user", "content": f"{PROBE_INSTRUCTION}\n\n{question}"}])
+            for question, _ in self.probe
         ]
 
-    def _clean(self, reply: str) -> bool:
-        """A reply counts as clean when it is non-empty and has no style violation.
-
-        This is the judge's own reward condition minus the gold-answer check:
-        the collapse is an empty or markdown-laden reply, and folding in
-        correctness would only add sampling noise to a small probe. The
-        gold-answer hit rate is reported alongside for visibility.
-        """
-        return bool(reply.strip()) and not self._violations(reply)
-
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        replies = self._runtime.probe_candidate(candidate.candidate_id, self._prompts, max_tokens=self._max_tokens)
-        found = [self._violations(reply) for reply in replies]
-        clean = sum(1 for reply, violations in zip(replies, found, strict=True) if reply.strip() and not violations)
-        answered = sum(1 for reply in replies if reply.strip())
-        correct = sum(
-            1 for (_, gold), reply in zip(self._probe, replies, strict=True) if gold in reply.replace(",", "")
+        replies = self.runtime.probe_candidate(candidate.candidate_id, self.prompts, max_tokens=self.max_tokens)
+        violations = [student_violations(reply) for reply in replies]
+        # Clean does not check the gold answer: correctness adds sampling noise
+        # to a small probe. ``gold_rate`` reports it separately.
+        clean_count = sum(1 for reply, found in zip(replies, violations, strict=True) if reply.strip() and not found)
+        answered_count = sum(1 for reply in replies if reply.strip())
+        correct_count = sum(
+            1 for (_, gold), reply in zip(self.probe, replies, strict=True) if gold in reply.replace(",", "")
         )
-        total = len(replies)
+        probe_count = len(replies)
         return EvaluationResult(
-            evaluator=_EVALUATOR,
-            evaluator_version=_VERSION,
+            evaluator=EVALUATOR_NAME,
+            evaluator_version=EVALUATOR_VERSION,
             metrics={
-                _METRIC: clean / total if total else 0.0,
-                "answered_rate": answered / total if total else 0.0,
-                "gold_rate": correct / total if total else 0.0,
-                # How far the replies are from the criterion, not just whether
-                # they met it. ``clean_rate`` is all-or-nothing per reply, so on
-                # a policy that violates every marker it reads 0 for every
-                # candidate and the record shows nothing moving. This does, and
-                # it is reported rather than gated on: which one is the better
-                # gate signal is not settled by the runs made so far.
-                #
-                # A silent turn is not the worst score here — an empty reply
-                # violates only the shown-work check. ``answered_rate`` is the
-                # metric that separates a collapse from a badly-styled answer,
-                # and it is the one that caught the last one.
-                "mean_violations": sum(len(v) for v in found) / total if total else 0.0,
-                "n_clean": clean,
-                "n_total": total,
+                CLEAN_RATE_METRIC: clean_count / probe_count,
+                "answered_rate": answered_count / probe_count,
+                "gold_rate": correct_count / probe_count,
+                # The distance from the criterion; ``clean_rate`` is all or
+                # nothing per reply. An empty reply fails only the shown-work
+                # check, so ``answered_rate``, not this, shows replies that stop.
+                "mean_violations": sum(len(found) for found in violations) / probe_count,
+                "clean_count": clean_count,
+                "probe_count": probe_count,
             },
         )
 
@@ -213,35 +172,27 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
         scenario: str,
         environ: Mapping[str, str],
     ) -> Self:
-        """Build the plugin against the half that can probe an unpublished candidate.
+        """Build the plugin on the training runtime.
 
-        The probe applies a candidate's weights and generates from them, so it
-        belongs to the training runtime: the serving half deliberately never
-        sees a candidate before Reef selects it. Only the in-process MLX runtime
-        can do that; another training runtime (the Ray bridge, whose candidates
-        live in another process) is refused here rather than silently running
-        with no regression check.
+        The probe applies a candidate's weights before Reef selects it, and
+        serving never sees an unselected candidate. Only the in-process MLX
+        runtime can do this. Other training runtimes are refused, so a
+        deployment never runs without the regression check.
         """
         if not isinstance(training_runtime, MLXRuntime):
             raise PluginConfigError(
-                f"{_EVALUATOR} needs the mlx training runtime to probe an unpublished candidate; "
+                f"{EVALUATOR_NAME} needs the mlx training runtime to probe an unpublished candidate; "
                 f"got {type(training_runtime).__name__}"
             )
-        regression_margin = float(config.get("regression_margin", 0.17))
-        plugin = cls(
-            training_runtime,
-            probe_size=int(config.get("probe_size", 8)),
-            max_tokens=int(config.get("max_tokens", 96)),
-            regression_margin=regression_margin,
-        )
+        settings = OpenClawRLCandidateEvaluationSettings.parse(config, plugin_class=cls)
         logger.info(
-            "%s active for scenario %s: %d pinned probes, regression-check margin %.2f",
-            _EVALUATOR,
+            "%s active for scenario %s: %d probe problems, regression-check margin %.2f",
+            EVALUATOR_NAME,
             scenario,
-            len(plugin._probe),
-            regression_margin,
+            settings.probe_size,
+            settings.regression_margin,
         )
-        return plugin
+        return cls(training_runtime, settings)
 
 
-__all__ = ["OpenClawRLCandidateEvaluation"]
+__all__ = ["OpenClawRLCandidateEvaluation", "OpenClawRLCandidateEvaluationSettings"]

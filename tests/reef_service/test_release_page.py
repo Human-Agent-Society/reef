@@ -93,7 +93,6 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         recipe,
         factory,
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 

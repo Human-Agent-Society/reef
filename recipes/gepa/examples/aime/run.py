@@ -200,7 +200,6 @@ class RunService:
             recipe,
             InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
-            agent_record_dir=run_dir / "reef-data",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
         self._app = create_app(

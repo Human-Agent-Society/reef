@@ -1,123 +1,141 @@
-"""OpenClaw-RL's candidate probe and its wiring to reef's regression check.
+"""OpenClaw-RL's candidate probe and its regression check.
 
-The probe is the OpenClaw-RL-specific half — it scores a candidate's replies
-with the benchmark's style criterion. The generic select/reject policy is
-reef's ``RegressionCheckMixin``. These tests pin the probe's scoring and that
-the plugin pairs it with the check into a working evaluate-then-decide plugin,
-using a fake runtime so no model is needed.
+The tests run the plugin on a real MLX runtime around a fake engine, so the
+probe goes through ``MLXRuntime.probe_candidate`` and needs no model.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
 import pytest
+from tests.support.mlx_engine_stubs import FakeAdapterSnapshot, FakeMLXEngine
 
 from recipes.openclawrl.candidate_evaluator import OpenClawRLCandidateEvaluation
 from reef.core.evaluation import UpdateCandidate
 from reef.core.plugins import PluginConfigError
-from reef.train.mlx_backend.runtime import MLXRuntime
+from reef.train.mlx_backend.config import MLXConfig
+from reef.train.mlx_backend.runtime import MLXRuntime, mlx_runtimes
 
-_CLEAN = (
+CLEAN = (
     "She sold 48 clips in April. In May she sold half as many, so 48 divided by 2 "
     "equals 24. Altogether that is 48 plus 24 equals 72 clips."
 )
-_MARKDOWN = "**Answer:** 72\n- April: 48\n- May: 24\n"
-_EMPTY = ""  # a no-reply / tool-loop turn
+MARKDOWN = "**Answer:** 72\n- April: 48\n- May: 24\n"
+EMPTY = ""  # a turn with no reply
 
 
-class _FakeEngine:
-    def render_prompt(self, messages):
-        # The probe only forwards these to probe_candidate, which the fake
-        # overrides, so any stable token stand-in is fine.
-        return tuple(messages[0]["content"])
+@dataclass
+class ScriptedEngine(FakeMLXEngine):
+    """A fake engine that answers each probe prompt with the next scripted reply."""
+
+    replies: list[str] = field(default_factory=list)
+
+    def generate(self, prompt_tokens, *, max_tokens=None, temperature=None, listener=None):
+        rollout = super().generate(prompt_tokens, max_tokens=max_tokens, temperature=temperature, listener=listener)
+        return replace(rollout, text=self.replies.pop(0))
 
 
-class _FakeRuntime(MLXRuntime):
-    """A runtime whose candidate probe returns whatever the test scripts."""
-
-    def __init__(self) -> None:
-        self._engine = _FakeEngine()
-        self.replies: list[str] = []
-
-    def probe_candidate(self, candidate_id, prompts, *, max_tokens):
-        return list(self.replies)
+def probe_runtime(tmp_path: Path) -> tuple[MLXRuntime, ScriptedEngine]:
+    engine = ScriptedEngine()
+    training, serving = mlx_runtimes(MLXConfig(checkpoint_dir=str(tmp_path)), engine)
+    serving.stage_candidate("c", FakeAdapterSnapshot({"layer.lora_a": 1.0, "layer.lora_b": 1.0}))
+    return training, engine
 
 
-def _plugin(margin: float = 0.17):
-    runtime = _FakeRuntime()
-    plugin = OpenClawRLCandidateEvaluation.from_config(
-        {"probe_size": 6, "max_tokens": 64, "regression_margin": margin},
+def build_plugin(training: MLXRuntime, **config) -> OpenClawRLCandidateEvaluation:
+    return OpenClawRLCandidateEvaluation.from_config(
+        {"probe_size": 6, "max_tokens": 64, **config},
         runtime=None,
-        training_runtime=runtime,
+        training_runtime=training,
         scenario="gsm8k",
         environ={},
     )
-    return plugin, runtime
 
 
-def _decide(plugin, runtime, replies):
-    runtime.replies = replies
-    candidate = UpdateCandidate(candidate_id="c")
-    evaluation = plugin.evaluate(candidate)
-    decision = plugin.decide(candidate, evaluation)
-    return decision, evaluation
+class Probe:
+    """Evaluate and decide one candidate with scripted replies."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        training, self.engine = probe_runtime(tmp_path)
+        self.plugin = build_plugin(training)
+
+    def __call__(self, replies: list[str]):
+        self.engine.replies = list(replies)
+        candidate = UpdateCandidate(candidate_id="c")
+        evaluation = self.plugin.evaluate(candidate)
+        return self.plugin.decide(candidate, evaluation), evaluation
 
 
-def test_the_probe_scores_clean_markdown_and_empty_replies() -> None:
-    plugin, runtime = _plugin()
-    # Six probes: three clean, one markdown, one empty, one clean -> 4/6 clean.
-    _, evaluation = _decide(plugin, runtime, [_CLEAN, _CLEAN, _MARKDOWN, _EMPTY, _CLEAN, _CLEAN])
-    assert evaluation.metrics["n_clean"] == 4
-    assert evaluation.metrics["n_total"] == 6
+@pytest.fixture
+def probe(tmp_path: Path) -> Probe:
+    return Probe(tmp_path)
+
+
+def test_the_probe_scores_clean_markdown_and_empty_replies(probe) -> None:
+    _, evaluation = probe([CLEAN, CLEAN, MARKDOWN, EMPTY, CLEAN, CLEAN])
+
+    assert evaluation.metrics["clean_count"] == 4
+    assert evaluation.metrics["probe_count"] == 6
     assert evaluation.metrics["clean_rate"] == pytest.approx(4 / 6)
-    # The empty turn is not even an answer; markdown answered but not clean.
+    # The markdown reply is an answer; the empty reply is not.
     assert evaluation.metrics["answered_rate"] == pytest.approx(5 / 6)
 
 
-def test_the_probe_reports_how_far_the_replies_are_from_the_criterion() -> None:
-    """``clean_rate`` alone cannot separate "nearly clean" from "nothing like it".
+def test_the_probe_generates_greedily_from_the_candidate_weights(probe) -> None:
+    probe([CLEAN] * 6)
 
-    It is all-or-nothing per reply, so a policy that violates some marker every
-    time scores 0 for every candidate and the record shows a flat line whether
-    the replies are improving or not. ``mean_violations`` is the distance, and
-    it is reported next to the rate rather than checked.
-    """
-    plugin, runtime = _plugin()
+    assert [call["weights"] for call in probe.engine.generated] == [{"layer.lora_a": 1.0, "layer.lora_b": 1.0}] * 6
+    assert {call["temperature"] for call in probe.engine.generated} == {0.0}
+    assert {call["max_tokens"] for call in probe.engine.generated} == {64}
+    # Serving gets its own weights back after the probe.
+    assert probe.engine.weights == {"layer.lora_a": 0.0, "layer.lora_b": 0.0}
+
+
+def test_the_probe_reports_how_far_the_replies_are_from_the_criterion(probe) -> None:
+    """``mean_violations`` orders replies that all have a ``clean_rate`` of zero."""
     one_marker = "- April: 48 divided by 2 equals 24, and 48 plus 24 equals 72."
 
-    _, near = _decide(plugin, runtime, [one_marker] * 6)
-    _, far = _decide(plugin, runtime, [_MARKDOWN] * 6)
-    _, silent = _decide(plugin, runtime, [_EMPTY] * 6)
+    _, near = probe([one_marker] * 6)
+    _, far = probe([MARKDOWN] * 6)
+    _, silent = probe([EMPTY] * 6)
 
-    # Every one of these scores a clean rate of zero...
     assert near.metrics["clean_rate"] == far.metrics["clean_rate"] == silent.metrics["clean_rate"] == 0.0
-    # ...and the distance still orders the two that answered.
     assert near.metrics["mean_violations"] == pytest.approx(1.0)
     assert far.metrics["mean_violations"] == pytest.approx(3.0)
-    # A silent turn scores *well* on distance — an empty reply breaks only the
-    # shown-work check — so this metric must not be read as a collapse signal.
-    # ``answered_rate`` is the one that separates the two.
+    # An empty reply fails only the shown-work check, so ``answered_rate`` shows it, not the distance.
     assert silent.metrics["mean_violations"] == pytest.approx(1.0)
     assert silent.metrics["answered_rate"] == 0.0
     assert near.metrics["answered_rate"] == 1.0
 
 
-def test_the_wired_plugin_admits_the_climb_and_rejects_the_collapse() -> None:
-    plugin, runtime = _plugin()
-    # Climb: the probe scores rising clean rates, the check admits them.
-    assert _decide(plugin, runtime, [_CLEAN] * 6)[0].selected  # best -> 1.0
-    # Collapse: the policy stops answering; every probe is empty.
-    collapse, _ = _decide(plugin, runtime, [_EMPTY] * 6)
+def test_the_plugin_accepts_the_climb_and_rejects_the_collapse(probe) -> None:
+    assert probe([CLEAN] * 6)[0].selected
+    collapse, _ = probe([EMPTY] * 6)
     assert not collapse.selected
     assert "holding" in collapse.reason
-    # A within-margin dip is still admitted (5/6 >= 1.0 - 0.17).
-    assert _decide(plugin, runtime, [_CLEAN] * 5 + [_EMPTY])[0].selected
+    # A drop within the margin is accepted: 5/6 >= 1.0 - 0.17.
+    assert probe([CLEAN] * 5 + [EMPTY])[0].selected
 
 
-def test_build_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
-    class _NoProbe:
-        engine = _FakeEngine()
-
+def test_from_config_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
     with pytest.raises(PluginConfigError, match="mlx training runtime"):
         OpenClawRLCandidateEvaluation.from_config(
-            {}, runtime=None, training_runtime=_NoProbe(), scenario="gsm8k", environ={}
+            {}, runtime=None, training_runtime=object(), scenario="gsm8k", environ={}
         )
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"probe_size": 0}, "probe_size must be between 1 and 10"),
+        ({"probe_size": 11}, "probe_size must be between 1 and 10"),
+        ({"max_tokens": 0}, "max_tokens must be positive"),
+        ({"regression_margin": -0.1}, "regression_margin must be non-negative"),
+    ],
+)
+def test_from_config_refuses_an_invalid_setting(tmp_path: Path, config, message) -> None:
+    training, _ = probe_runtime(tmp_path)
+    with pytest.raises(PluginConfigError, match=message):
+        build_plugin(training, **config)

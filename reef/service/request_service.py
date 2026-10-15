@@ -1035,7 +1035,8 @@ class RequestService:
         behavior; a known adapter whose descriptor declares no install
         section raises DescriptorError (HTTP 400) naming it. Unlike the other
         harness reads, a missing or empty scenario header creates a new,
-        randomly named file-serving scenario.
+        randomly named file-serving scenario, unless the deployment turned
+        implicit scenario creation off.
         """
         if not adapter:
             raise ReefError("the harness install route requires an 'adapter' query parameter naming an adapter")
@@ -1137,13 +1138,12 @@ class RequestService:
                 raise ArtifactNotFound("no harness recipes are available")
 
             scenario_name = _random_harness_scenario_name()
-            scenario = self._dispatcher.get_or_create_scenario(
-                scenario_name,
-                release_id=release_id,
-                allow_implicit_creation=True,
-            )
+            scenario = self._dispatcher.get_or_create_scenario(scenario_name, release_id=release_id)
             if scenario is None:
-                raise ReefError("implicit harness scenario creation returned no scenario")
+                raise UnknownScenario(
+                    "this deployment creates no scenario implicitly: create one with POST /reef/scenarios "
+                    f"and name it in the {SCENARIO_HEADER} header"
+                )
             return scenario
 
         parsed = parse_request_headers(headers, RequestType.INFERENCE)

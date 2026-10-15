@@ -1,19 +1,18 @@
 # OpenClaw-RL on Apple Silicon: the policy serves and trains in this process.
 #
-# The sibling serve.yaml is the reference deployment — seven GPUs, Megatron on
-# four, a rollout engine, a served PRM and a 32B student. This one keeps the
-# policy in the Reef process on MLX and sends the two roles that only ever need
-# text (the PRM's votes, the student's reactions) to a hosted model.
+# The sibling serve.yaml is the reference deployment: seven GPUs, Megatron on
+# four, a rollout engine, a served PRM, and a 32B student. This deployment runs
+# the policy in the Reef process on MLX. The PRM votes and the student
+# reactions need only text, so a hosted model supplies both.
 #
-# Launch it host-native, not in the compose stack: `reef serve -c` this file,
-# then point the harness at the machine's LAN address. The task containers
+# Run Reef on the host, not in the compose stack: run `reef serve -c` with this
+# file, then point the harness at the machine's LAN address. The task containers
 # reach the service over that interface, so `reef.host` binds 0.0.0.0.
 #
-# Two things about the paths below. They are relative, so they resolve against
-# the process's working directory: two runs launched from the same checkout
-# share one artifact repository, and the second is refused with "training is
-# already bound to scenario". Give each run its own `run-dir` and `storage`
-# paths, or launch it from its own directory.
+# The paths below are relative to the working directory of the process. Two
+# runs from the same directory share one artifact repository, and Reef refuses
+# the second with "training is already bound to scenario". Give each run its
+# own `run-dir` and `storage` paths, or start each run in its own directory.
 
 reef:
   host: 0.0.0.0
@@ -23,25 +22,25 @@ reef:
   ready-timeout: 1800
 
 inference:
-  # The engine loads this itself, from a local path or the Hub; there is no
-  # separate inference service to point at.
+  # The engine loads the model from a local path or the Hub. There is no
+  # separate inference service.
   model-path: mlx-community/Qwen3.5-9B-MLX-4bit
 
 training:
   backend: mlx
   options:
     checkpoint_dir: work/mlx/checkpoints
-    # Every layer trains. The 9B is 32 layers, 24 of them GatedDeltaNet, whose
-    # kernel has no vjp; the engine runs that recurrence chunkwise in training
-    # mode and, with checkpoint_layers, recomputes each layer's forward in the
-    # backward, so the gradient crosses all 32.
+    # Every layer trains. The 9B model has 32 layers, and 24 are GatedDeltaNet
+    # layers, whose kernel has no vjp. In training mode the engine runs that
+    # recurrence chunkwise. With checkpoint_layers, it recomputes the forward
+    # pass of each layer in the backward pass, so the gradient reaches all 32.
     lora_layers: 32
     lora_rank: 64
     checkpoint_layers: true
-    # k_proj and v_proj are adapted here, which rules out a cached prompt
-    # prefill: it would freeze tensors that depend on trained weights.
-    # in_proj_qkv is the GatedDeltaNet layers' own projection — without it
-    # those layers would only be crossed, never trained.
+    # Adapting k_proj and v_proj rules out a cached prompt prefill, because the
+    # cache would freeze tensors that depend on trained weights. in_proj_qkv is
+    # the projection of the GatedDeltaNet layers. Without it, the gradient
+    # passes through those layers but does not train them.
     lora_keys:
       - mlp.gate_proj
       - mlp.up_proj
@@ -53,16 +52,18 @@ training:
       - linear_attn.in_proj_qkv
     learning_rate: 3.0e-5
     max_tokens: 2048
-    # Chunk the [response, vocab] head so a long response's backward fits.
+    # Chunk the [response, vocab] head so the backward pass of a long response
+    # fits in memory.
     log_probs_chunk_size: 512
-    # The top-K the policy considered while generating. The openclawrl
-    # objective distils onto those candidates, so it cannot be rebuilt later.
+    # The top-K tokens that the policy considered at generation time. The
+    # openclawrl objective distils onto these candidates, and they cannot be
+    # rebuilt after generation.
     capture_topk: 4
-    # Prices drift from the frozen base — the movement neither objective term
-    # targets, and the direction the collapsed runs drifted in. Each loss
-    # family spends it through its own mechanism: the openclawrl objective
-    # this recipe selects adds a KL term to the loss, as the slime reference
-    # does. Set `openclawrl.kl_coef` to drive that term separately.
+    # The weight of a penalty on drift from the frozen base policy. Neither
+    # objective term limits that drift. Each loss family applies the penalty in
+    # its own way. The openclawrl objective that this recipe selects adds a KL
+    # term to the loss, as the slime reference does. Set `loss_options.kl_coef`
+    # to set that term separately.
     kl_coef: 0.05
 
 recipe:
@@ -74,43 +75,36 @@ pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
   record2record:
     config:
-      # Idle window before a session is retired. This has to exceed the gap
-      # between a reply and the student reaction that judges it, because an
-      # expired session can never bind the two: the reply is dropped untrained.
-      # Hermes runs each turn as a fresh process, so the session tag is the only
-      # thing carrying that link -- nothing recovers it once the session is gone.
+      # The idle time in seconds before a session expires. It must exceed the
+      # longest gap between a reply and the student reaction that judges it.
+      # An expired session cannot bind the two, so the reply drops untrained.
+      # Hermes runs each turn as a new process, so only the session tag links
+      # the reply and the reaction.
       #
-      # 45 was set here on the reference's timing, where a reply comes back in
-      # seconds. On this runtime a single generation takes over two minutes and a
-      # training step blocks the engine for longer still: measured against a live
-      # run, 15 of 31 consecutive requests were further apart than 45s, and the
-      # processor reported more sessions expiring unbound than binding. Half the
-      # method's training pairs were being discarded before they were judged.
-      #
-      # 1800 covers a generation, the student's round trip, and a training step
-      # in between. The cost is that a finished session waits that long before
-      # its last turn retires, which only delays the step, where the short value
-      # silently dropped the data.
+      # Allow for one generation, the student round trip, and one training
+      # step, which blocks the engine. On this runtime each of these can take
+      # minutes. A longer value only delays the retirement of the last turn of
+      # a finished session. See results/ for the measured gaps.
       session_ttl_s: 1800
       prm_url: https://openrouter.ai/api/v1/chat/completions
       prm_api: openai
       prm_model: z-ai/glm-5.3
-      # The credential is read from this environment variable; the config never
-      # holds it.
+      # Reef reads the credential from this environment variable. The config
+      # never holds it.
       prm_api_key_env: OPENROUTER_API_KEY
       prm_m: 3
-      # GLM-5.3 cannot have reasoning disabled and bills it against this budget.
-      # Too small and the vote returns null content — a silent failure, not an
-      # error — so leave the judge room to think.
+      # GLM-5.3 always reasons, and the reasoning counts against this budget.
+      # If the budget is too small, the vote returns no content and fails
+      # without an error. Keep room for the reasoning and the answer.
       prm_max_tokens: 16384
-      # The policy's own tokenizer: the teacher renders hint-enhanced prompts
-      # with it whatever dialect the judge happens to speak.
+      # The tokenizer of the policy. The teacher renders hint-enhanced prompts
+      # with it for every prm_api.
       prm_tokenizer_path: mlx-community/Qwen3.5-9B-MLX-4bit
   task2batch:
     config:
-      # Judged turns per optimizer step; the reference uses 16. Halved so a
-      # 72-session stream still produces enough steps to see movement on one
-      # machine, at the cost of a noisier gradient.
+      # Judged turns per optimizer step. The reference uses 16. A value of 8
+      # gives a 72-session stream twice the steps on one machine, but each
+      # gradient is noisier.
       batch_size: 8
 
 storage:
@@ -119,29 +113,24 @@ storage:
   artifact-work-dir: work/mlx/artifact-work
   artifact-cache-dir: work/mlx/artifact-cache
 
-# The candidate check: every candidate runs a pinned style probe before it can
-# reach serving, and a step whose clean rate regresses past the margin is held
-# out instead of published. Remove this section and the trainer falls back to
-# the `always` policy, which publishes every step.
+# Candidate evaluation: each candidate runs a fixed style probe before Reef
+# publishes it. Reef does not publish a candidate whose clean rate drops more
+# than the margin below the best. Without this section, Reef uses the `always`
+# policy and publishes every step.
 #
-# The probe generates from the candidate's weights, so it needs a training
-# runtime that can hold an unpublished candidate — this one. A runtime whose
-# candidates live in another process is refused rather than silently degrading.
+# The probe generates from the weights of the candidate, so it needs a training
+# runtime that holds an unpublished candidate, such as this one. Reef refuses a
+# runtime whose candidates are in another process.
 evaluation:
   module: recipes.openclawrl.candidate_evaluator:OpenClawRLCandidateEvaluation
   config:
     probe_size: 8
-    # Enough room to write a reply the size a session elicits. At 96 the probe
-    # scored truncation rather than style: this model opens with a "here's a
-    # thinking process" preamble, so 50 of 50 probe replies were cut before the
-    # arithmetic and every one failed the shown-work check on length alone. At
-    # 320 that drops to 13 of 50, and the replies run to a median 1056
-    # characters against the 770 a real session's first reply runs to.
+    # The generation budget for one probe reply. Make it large enough for a
+    # full reply with its arithmetic. A cut reply can fail the shown-work check
+    # because of its length, not its style.
     max_tokens: 320
-    # Tolerated dip below the running best. Note the granularity this implies:
-    # at probe_size 8 one probe item is worth 0.125, so a margin above that
-    # forgives any single-item regression and the check acts only on a drop of
-    # two or more. That is deliberate on a probe this small — the check is for
-    # collapse, not jitter — but it is the number to revisit before reading
-    # anything into a check that held nothing out.
+    # The allowed drop of the clean rate below the best selected candidate.
+    # One probe problem is worth 1 / probe_size, which is 0.125 here. A margin
+    # of 0.17 accepts a drop of one problem and refuses a drop of two or more.
+    # The check stops a collapse, not small changes between steps.
     regression_margin: 0.17

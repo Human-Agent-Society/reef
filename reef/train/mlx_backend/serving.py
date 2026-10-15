@@ -1,158 +1,164 @@
 """The serving half of the in-process MLX runtime.
 
-Reef splits a deployment into a training runtime and an inference runtime so
-that the two can live in different processes. An MLX deployment keeps both in
-one, but the split is still real here: exactly one of the two owns the model
-parameters, the gate that decides when a request may read them, and the record
-of which version is answering. That owner is this class, and training reaches
-the engine only through it.
+This runtime owns the engine's live weights, request admission and the
+served version. The training half reaches the engine through it.
 
-The gate is not a lock around a single call. Activation deliberately leaves it
-closed and returns: between swapping the weights and Reef committing the new
-head, a request would freeze the old artifact and be answered by the new
-weights, which the weight surface rejects as a runtime-load mismatch. Reef
-reopens it by committing. So the interface is an explicit ``hold``/``release``
-pair rather than a context manager.
+Activation swaps the weights and leaves admission closed. Reef's scheduler
+reopens it after the durable commit: it calls ``acknowledge_publication``,
+the training runtime's ``commit_candidate``, ``mark_published`` and
+``resume_admission`` in that order. Until then, a request cannot freeze the
+old head and be answered by the new weights.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.runtime.interfaces import ActivatedModel, InferenceHandler, InferenceRuntime, RuntimeContractError
-from reef.train.mlx_backend.inference import MLXInferenceBackend
+from reef.runtime.interfaces import (
+    ActivatedModel,
+    InferenceHandler,
+    InferenceRuntime,
+    ModelCandidate,
+    RuntimeContractError,
+    RuntimeLoadId,
+    new_runtime_load_id_incarnation,
+)
+from reef.surface.weights import artifact_runtime_load_id
+from reef.train.mlx_backend.contracts import AdapterSnapshot, ModelEngine
+from reef.train.mlx_backend.inference import MLXInferenceHandler
 
 logger = logging.getLogger(__name__)
 
 
 class MLXServingRuntime(InferenceRuntime):
-    """Owns the resident model, the admission gate, and the served version."""
+    """Serve one engine's adapter in this process, and hold trained candidates until Reef selects one."""
 
-    def __init__(self, engine: Any, *, adapter_name: str = "reef-mlx", inference_timeout_s: float = 300.0) -> None:
-        # The base owns the endpoint identity, the drain timeout and the
-        # admission gate. Requests arrive here as calls rather than over the
-        # wire, so the URL is nominal.
+    def __init__(self, engine: ModelEngine, *, adapter_name: str = "reef-mlx", inference_timeout_s: float = 300.0):
+        # Requests arrive as calls, not over a wire, so the URL is nominal.
         super().__init__(base_url="mlx://local", inference_timeout_s=inference_timeout_s)
         self._engine = engine
         self._adapter_name = adapter_name
-        self._backend: Any = None
-        #: Trained snapshots awaiting Reef's select-or-reject.
-        self._pending: dict[str, Any] = {}
-        #: What the engine holds. Advances the moment weights are swapped.
-        self._serving_runtime_load_id: str | None = engine.next_runtime_load_id()
-        self.mark_published()
-
-    # -- The engine, for the training half that shares it.
+        self._incarnation = new_runtime_load_id_incarnation()
+        self._load_sequence = 0
+        self._serving_runtime_load_id = self._next_runtime_load_id()
+        self._recovered_release_id: str | None = None
+        self._staged: dict[str, AdapterSnapshot] = {}
+        self._inference_handler = MLXInferenceHandler(engine, self)
 
     @property
-    def engine(self) -> Any:
+    def engine(self) -> ModelEngine:
         return self._engine
 
     @property
-    def inference_backend(self) -> MLXInferenceBackend:
-        if self._backend is None:
-            self._backend = MLXInferenceBackend(self)
-        return self._backend
-
-    @property
     def inference_handler(self) -> InferenceHandler:
-        """Reef's name for the object that executes a request."""
-        return self.inference_backend
+        return self._inference_handler
 
-    # -- Served identity.
+    def _next_runtime_load_id(self) -> str:
+        """A new version for the engine's weights, unique across restarts by its incarnation."""
+        self._load_sequence += 1
+        return str(RuntimeLoadId(self._incarnation, self._load_sequence))
 
-    def serving_runtime_load_id(self) -> str | None:
+    def serving_runtime_load_id(self) -> str:
         return self._serving_runtime_load_id
 
-    def serving_adapter_name(self) -> str | None:
-        # The adapter is resident in this process rather than addressed by
-        # name over a wire, but naming it keeps the served identity explicit
-        # in records and in the weight surface.
+    def serving_adapter_name(self) -> str:
         return self._adapter_name
 
-    # -- The gate.
+    @contextmanager
+    def paused_admission(self) -> Iterator[None]:
+        """Admit no request and wait for admitted ones to finish, for the block.
 
-    async def acquire_inference(self) -> Any:
-        """Wait until this runtime may freeze its weights and serve a request."""
-        return await self._inference_admission.acquire()
+        On exit, admission is open again only if it was open before. Raises
+        ``TimeoutError`` if admitted requests do not finish within
+        ``inference_timeout_s``.
+        """
+        was_open = self.inference_admission_status["open"]
+        try:
+            self.pause_admission(wait=True, timeout=self.inference_timeout_s)
+            yield
+        finally:
+            if was_open:
+                self.resume_admission()
 
-    @property
-    def inference_admission_status(self) -> dict[str, Any]:
-        """Whether serving is admitting, and what it is waiting on."""
-        return dict(self._inference_admission.status)
+    # -- Weight changes
 
-    def hold(self) -> None:
-        """Stop admitting requests and wait for in-flight generation to drain."""
-        self._inference_admission.close(wait=True, timeout=self.inference_timeout_s)
-
-    def release(self) -> None:
-        """Admit requests again."""
-        self._inference_admission.open()
-
-    # -- Weight changes. The caller holds the gate around these.
-
-    def swap_adapter(self, snapshot: Any) -> str:
-        """Make a trained snapshot the resident weights, and mint its version."""
-        self._engine.apply_adapter(snapshot)
-        self._serving_runtime_load_id = self._engine.next_runtime_load_id()
-        return self._serving_runtime_load_id
-
-    def restore_checkpoint(self, artifact: Any) -> str:
-        """Roll serving back to a published adapter."""
+    def restore_checkpoint(self, artifact: Artifact) -> str:
+        """Load a published adapter into the engine and return its new version."""
         local_path = artifact.local_path
         if local_path is None:
             raise RuntimeContractError("mlx rollback requires a materialized adapter")
-        self.hold()
+        was_open = self.inference_admission_status["open"]
+        self._recovered_release_id = None
+        self.pause_admission(wait=True, timeout=self.inference_timeout_s)
+        # A partial or corrupt adapter must never become visible. Leave
+        # admission closed if loading fails; the coordinator chooses recovery.
         self._engine.load_adapter(Path(local_path))
-        self._serving_runtime_load_id = self._engine.next_runtime_load_id()
+        self._serving_runtime_load_id = self._next_runtime_load_id()
         self.mark_published()
-        self.release()
+        if was_open:
+            self.resume_admission()
         return self._serving_runtime_load_id
 
     def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
-        """Reload the in-process adapter lost when the previous runtime exited."""
-        return self.restore_checkpoint(artifact.materialize())
+        """Reload the adapter that this in-process engine lost at startup."""
+        runtime_load_id = self.restore_checkpoint(artifact.materialize())
+        self._recovered_release_id = artifact.ref.release_id
+        return runtime_load_id
 
-    def stage_candidate(self, candidate_id: str, snapshot: Any) -> None:
-        """Hold a trained snapshot until Reef selects or rejects it."""
-        self._pending[candidate_id] = snapshot
+    def activate_checkpoint(self, artifact: Artifact) -> str:
+        """Load a recovered checkpoint when the engine serves other weights.
 
-    def staged_candidate(self, candidate_id: str) -> Any:
-        """The snapshot staged under this id, or None."""
-        return self._pending.get(candidate_id)
+        The engine keeps its weights in this process, so a restart loses
+        them. An artifact that records the version the engine serves, or no
+        version, needs no load.
+        """
+        if artifact.ref.release_id == self._recovered_release_id:
+            return self._serving_runtime_load_id
+        checkpoint = artifact.materialize()
+        recorded = artifact_runtime_load_id(checkpoint)
+        if recorded is None or recorded == self._serving_runtime_load_id:
+            return self._serving_runtime_load_id
+        logger.info("loading recovered adapter %r into the mlx engine", artifact.ref.release_id)
+        runtime_load_id = self.restore_checkpoint(checkpoint)
+        # The release is final when Reef activates it.
+        self.mark_published()
+        return runtime_load_id
+
+    def stage_candidate(self, candidate_id: str, snapshot: AdapterSnapshot) -> None:
+        """Keep a trained adapter until Reef selects or rejects it."""
+        self._staged[candidate_id] = snapshot
+
+    def staged_candidate(self, candidate_id: str) -> AdapterSnapshot | None:
+        return self._staged.get(candidate_id)
 
     def discard_candidate(self, candidate_id: str) -> None:
-        """Drop a rejected candidate; serving never saw its weights."""
-        self._pending.pop(candidate_id, None)
+        """Drop a rejected candidate; serving never used its weights."""
+        self._staged.pop(candidate_id, None)
 
-    def activate_candidate(self, candidate: Any) -> ActivatedModel:
-        """Make a selected candidate the weights that answer new requests."""
-        snapshot = self._pending.pop(candidate.candidate_id, None)
+    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
+        """Make a selected candidate the live adapter; admission stays closed until Reef's commit."""
+        snapshot = self._staged.pop(candidate.candidate_id, None)
         if snapshot is None:
             raise RuntimeContractError(f"no pending mlx candidate {candidate.candidate_id!r} to activate")
-        # Admission stays closed past this method. Between swapping the weights
-        # and Reef committing the new head, a request would freeze the old
-        # artifact and then be answered by the new weights, which the weight
-        # surface correctly rejects as a runtime-load mismatch.
-        # ``commit_serving`` reopens once the commit is durable.
-        self.hold()
+        self.pause_admission(wait=True, timeout=self.inference_timeout_s)
         try:
-            runtime_load_id = self.swap_adapter(snapshot)
+            self._engine.apply_adapter(snapshot)
         except BaseException:
-            self.release()
+            self.resume_admission()
             raise
-        logger.info("activated mlx candidate %s at runtime load ID %s", candidate.candidate_id, runtime_load_id)
-        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=runtime_load_id)
+        self._recovered_release_id = None
+        self._serving_runtime_load_id = self._next_runtime_load_id()
+        logger.info(
+            "activated mlx candidate %s at runtime load ID %s", candidate.candidate_id, self._serving_runtime_load_id
+        )
+        return ActivatedModel(candidate_id=candidate.candidate_id, runtime_load_id=self._serving_runtime_load_id)
 
-    def commit_serving(self) -> None:
-        """Publish the swapped weights to new requests, and reopen the gate.
+    def shutdown(self) -> None:
+        self._engine.close()
 
-        The second half of the activation handshake: Reef calls this once the
-        publication is durable, which is the first moment a new request can
-        safely freeze the new head.
-        """
-        self.mark_published()
-        self.release()
+
+__all__ = ["MLXServingRuntime"]

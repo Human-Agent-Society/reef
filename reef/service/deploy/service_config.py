@@ -15,10 +15,12 @@ from functools import lru_cache
 from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
 
 
 @dataclass(frozen=True)
@@ -166,8 +168,11 @@ class ServiceConfig:
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
     )
-    record_backend: str = config_option(
-        "sqlite", public_path=("storage", "record_backend"), help="Record storage backend."
+    #: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin: ``package.module:ClassName`` or module and config.
+    record_backend: str | Mapping[str, Any] = config_option(
+        "sqlite",
+        public_path=("storage", "record_backend"),
+        help="Scenario storage backend: sqlite, postgres, or a ScenarioStorage plugin reference.",
     )
     record_database_url: str | None = field(
         default=None,
@@ -186,6 +191,26 @@ class ServiceConfig:
         True,
         public_path=("reef", "allow_implicit_scenario_creation"),
         help="Allow requests to create scenarios implicitly.",
+    )
+    scenario_idle_unload_s: float | None = config_option(
+        None,
+        public_path=("reef", "scenario_idle_unload_s"),
+        help="Unload a scenario that is idle for this many seconds. The next request loads it again. Default: never.",
+    )
+    max_loaded_scenarios: int | None = config_option(
+        None,
+        public_path=("reef", "max_loaded_scenarios"),
+        help="Maximum loaded scenarios. At the limit, the idle scenario with the oldest use unloads. Default: no limit.",
+    )
+    max_scenarios: int | None = config_option(
+        None, public_path=("reef", "max_scenarios"), help="Maximum registered scenarios. Default: no limit."
+    )
+    #: A ``ScenarioAdmission`` plugin that replaces the built-in limits. Give ``package.module:ClassName``, or
+    #: a mapping with module and config.
+    scenario_admission: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("reef", "scenario_admission"),
+        help="ScenarioAdmission plugin reference. The plugin decides whether a scenario is created or loaded.",
     )
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
@@ -230,8 +255,21 @@ class ServiceConfig:
 
     def __post_init__(self) -> None:
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
-        if self.record_backend not in {"sqlite", "postgres"}:
-            raise ValueError("reef.record_backend must be sqlite or postgres")
+        if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
+            raise ValueError("reef.scenario_idle_unload_s must be positive")
+        # The built-in admission checks its own limits.
+        ScenarioLimits(max_loaded_scenarios=self.max_loaded_scenarios, max_scenarios=self.max_scenarios)
+        if self.scenario_admission is not None:
+            if self.max_loaded_scenarios is not None or self.max_scenarios is not None:
+                raise ValueError(
+                    "reef.max_loaded_scenarios and reef.max_scenarios configure the built-in admission; "
+                    "a reef.scenario_admission plugin reads its own config"
+                )
+            ScenarioAdmission.reference(self.scenario_admission, setting="reef.scenario_admission")
+        if self.record_backend not in ("sqlite", "postgres"):
+            if isinstance(self.record_backend, str) and ":" not in self.record_backend:
+                raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
+            ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
         if self.record_backend == "postgres":
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
                 raise ValueError("reef.record_database_url is required for the postgres backend")

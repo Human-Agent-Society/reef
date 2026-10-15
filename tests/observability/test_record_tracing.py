@@ -456,7 +456,6 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
         ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
     )
     try:

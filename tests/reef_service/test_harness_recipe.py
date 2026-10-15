@@ -854,7 +854,6 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
         built,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
@@ -897,7 +896,6 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
@@ -919,7 +917,6 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     restarted = Dispatcher(
         built,
         factory,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
@@ -978,7 +975,6 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
@@ -1013,7 +1009,6 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
@@ -1037,7 +1032,6 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     restarted = Dispatcher(
         built,
         factory,
-        agent_record_dir=agent_record_dir,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
@@ -2366,7 +2360,6 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     try:
@@ -2477,7 +2470,6 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
@@ -2541,7 +2533,6 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
     dispatcher = Dispatcher(
         built,
         factory,
-        agent_record_dir=tmp_path / "agent-record",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     try:

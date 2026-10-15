@@ -29,7 +29,6 @@ def _service(tmp_path, *, recipe, skill_text: str | None) -> RequestService:
         recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        agent_record_dir=None,
         scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("delivery")

@@ -14,7 +14,7 @@ from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import ReefError, ScenarioBusy, UnknownScenario
+from reef.core.errors import ReefError, ScenarioBusy, ScenarioCapacityFull, ScenarioLimitReached, UnknownScenario
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.records import RecordConflict
@@ -27,6 +27,8 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
     (ScenarioBusy, web.HTTPConflict),
+    (ScenarioLimitReached, web.HTTPConflict),
+    (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPConflict),
     (RecordConflict, web.HTTPConflict),
@@ -72,6 +74,8 @@ def translate_error(exc: Exception) -> web.HTTPError | None:
     """The HTTP error for a domain exception, or None when it is not mapped."""
     if isinstance(exc, UpstreamStatusError):  # before the table: status is dynamic
         return _translate_upstream(exc)
+    if isinstance(exc, ScenarioCapacityFull):  # Before the table: the response tells when to retry.
+        return web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": str(exc.retry_after_seconds)})
     for error_type, http_error in ERROR_STATUS_TABLE:
         if isinstance(exc, error_type):
             return http_error(text=str(exc))
