@@ -61,25 +61,79 @@ files:
           write_json_snapshots: true
         skills:
           creation_nudge_interval: 0
-      # Keys the merged config must keep at the defaults' value, and keys no tree may set at all: the shared
-      # render refuses a composition that moves them, before any quirks step runs. The first six keep an episode
-      # hermetic and single request with its snapshot readable; the rest name another provider, endpoint or
-      # fallback chain, which Reef's model binding chooses.
-      locked:
-        - security.tirith_enabled
-        - auxiliary.title_generation.enabled
-        - memory.nudge_interval
-        - skills.creation_nudge_interval
-        - curator.enabled
-        - sessions.write_json_snapshots
-        - api_base
-        - base_url
-        - model_aliases
-        - provider
-        - providers
-        - custom_providers
-        - fallback_model
-        - fallback_providers
+      checks:
+        # Keep an episode hermetic and single request, with its snapshot readable.
+        - key: [
+            security.tirith_enabled, auxiliary.title_generation.enabled, memory.nudge_interval,
+            skills.creation_nudge_interval, curator.enabled, sessions.write_json_snapshots,
+          ]
+          match: IsDefault()
+        # hermes reads these sections as objects, and a model that is not
+        # one names the model.
+        - key: model
+          match: AnyOf(IsAbsent(), Eq(null), IsObject())
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        - key: [moa, compression, auxiliary, delegation, cron, curator, curator.auxiliary]
+          match: AnyOf(IsAbsent(), Eq(null), IsObject())
+          reason: hermes reads it as an object
+        # Every model call stays on Reef's model binding. The binding writes
+        # model.provider, model.default, model.base_url and model.api_key,
+        # renders after the tree and wins every key it writes. The keys below name another provider, endpoint, credential,
+        # transport, model or fallback chain. These top-level keys hermes
+        # moves into model.
+        - key: [
+            api_base, base_url, model_aliases, provider, providers, custom_providers, fallback_model,
+            fallback_providers,
+          ]
+          match: IsAbsent()
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        # hermes reads an empty string, list or object as unset. model.model
+        # and model.name are the model, model.api_base the endpoint, the key
+        # names the key, and aliases the models a switch resolves; api_mode
+        # and openai_runtime leave the bound endpoint. moa names the models
+        # of its presets, and the older compression keys move into
+        # auxiliary.compression. An auxiliary task, delegation, cron and the
+        # curator's older auxiliary section each choose their own route.
+        - key: [
+            model.aliases, model.api_base, model.api_key_env, model.key_cmd, model.key_env, model.model, model.name,
+            model.api_mode, model.openai_runtime,
+            moa.aggregator, moa.presets, moa.reference_models,
+            compression.summary_base_url, compression.summary_model,
+            auxiliary.openrouter_model,
+            auxiliary.*.api_key, auxiliary.*.api_key_env, auxiliary.*.api_mode, auxiliary.*.base_url,
+            auxiliary.*.fallback_chain, auxiliary.*.key_cmd, auxiliary.*.key_env, auxiliary.*.model,
+            auxiliary.*.model_provider,
+            delegation.api_key, delegation.api_key_env, delegation.api_mode, delegation.base_url,
+            delegation.fallback_chain, delegation.key_cmd, delegation.key_env, delegation.model,
+            delegation.model_provider, delegation.provider,
+            cron.api_key, cron.api_key_env, cron.api_mode, cron.base_url, cron.fallback_chain, cron.key_cmd,
+            cron.key_env, cron.model, cron.model_provider, cron.provider,
+            curator.auxiliary.api_key, curator.auxiliary.api_key_env, curator.auxiliary.api_mode,
+            curator.auxiliary.base_url, curator.auxiliary.fallback_chain, curator.auxiliary.key_cmd,
+            curator.auxiliary.key_env, curator.auxiliary.model, curator.auxiliary.model_provider,
+            curator.auxiliary.provider,
+          ]
+          match: AnyOf(IsAbsent(), IsIn([null, "", [], {}]))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        # auto and main run an auxiliary task on the main model.
+        - key: [compression.summary_provider, auxiliary.*.provider]
+          match: AnyOf(IsAbsent(), IsIn([null, "", [], {}, "auto", "main"]))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        - key: [
+            auxiliary.*.prefer_fast_model, delegation.prefer_fast_model, cron.prefer_fast_model,
+            curator.auxiliary.prefer_fast_model,
+          ]
+          match: Not(Eq(true))
+          reason: Reef's model binding chooses the model
+        # A request body names no model: model replaces the bound one, and
+        # OpenRouter reads models as fallback models. Delegation sends
+        # request_overrides with each child call as call arguments.
+        - key: [
+            auxiliary.*.extra_body, delegation.extra_body, cron.extra_body, curator.auxiliary.extra_body,
+            delegation.request_overrides, delegation.request_overrides.extra_body,
+          ]
+          match: Not(Contains(Key(IsIn(["model", "models"]))))
+          reason: Reef's model binding chooses the model
     # The env file hermes loads from its home; the model binding puts the
     # provider key here too, since for an OpenRouter host hermes reads the
     # key from the environment and not from config.yaml.

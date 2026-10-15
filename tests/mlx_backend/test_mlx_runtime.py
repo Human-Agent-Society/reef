@@ -248,12 +248,12 @@ def test_the_scheduler_publishes_an_activated_candidate_only_after_the_commit(tm
     serving = runtime.serving
     scheduler = RuntimeScheduler(runtime, serving)
     before = serving.serving_runtime_load_id()
-    candidate = scheduler.train_candidate(
-        runtime.prepare_training_step(batch(), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0).payload
-    )
+    prepared = scheduler.prepare_training_step(batch(), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0)
+    candidate = scheduler.train_candidate(prepared.payload)
 
     activated = scheduler.activate_candidate(candidate)
 
+    assert candidate.current_runtime_load_id == before
     assert activated.runtime_load_id != before
     assert serving.serving_runtime_load_id() == activated.runtime_load_id
     assert runtime.engine.weights == {"layer.lora_a": 1.0, "layer.lora_b": 1.0}

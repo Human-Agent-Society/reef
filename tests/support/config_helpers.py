@@ -27,6 +27,8 @@ def deployment_layout(config):
         {
             "REEF_UPSTREAM_URL": os.environ.get("REEF_UPSTREAM_URL") or "http://127.0.0.1:8000",
             "REEF_UPSTREAM_MODEL": os.environ.get("REEF_UPSTREAM_MODEL") or "test-model",
+            # Examples that bind every address need a token to start.
+            "REEF_TOKEN": os.environ.get("REEF_TOKEN") or "test-token",
             "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
             "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
         },

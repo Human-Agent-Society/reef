@@ -6,21 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.interfaces import RuntimeLoadId
 from reef.runtime.recovery import ScenarioHistory, history_path
-
-
-def test_lag_counts_only_the_scenarios_own_publications(tmp_path: Path) -> None:
-    history = ScenarioHistory(tmp_path / "history.json")
-    history.record_publication("a", "inc:2", "adapter-a-2")
-    history.record_publication("b", "inc:3", "adapter-b-3")
-    history.record_publication("a", "inc:4", "adapter-a-4")
-    # A rollout produced at inc:3 trails one publication of a (inc:4) and none of b.
-    assert history.lag("a", RuntimeLoadId.parse("inc:3")) == 1
-    assert history.lag("b", RuntimeLoadId.parse("inc:3")) == 0
-    assert history.lag("a", RuntimeLoadId.parse("inc:1")) == 2
-    assert history.lag("never-published", RuntimeLoadId.parse("inc:1")) == 0
-    assert history.lag("a", RuntimeLoadId.parse("other:9")) is None
 
 
 def test_history_round_trips_and_protects_latest_checkpoints(tmp_path: Path) -> None:

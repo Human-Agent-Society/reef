@@ -27,19 +27,12 @@ from reef.runtime.interfaces import (
 class ExecutorTrainingRuntime(TrainingRuntime):
     """Train and export checkpoints through a supplied worker control connection."""
 
-    def __init__(self, train_group_handle: CoordinatorClient, *, max_staleness: int = 0) -> None:
-        if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
-            raise ValueError("max_staleness must be a non-negative integer")
+    def __init__(self, train_group_handle: CoordinatorClient) -> None:
         self._train_group_handle = train_group_handle
-        self._max_staleness = max_staleness
 
     @property
     def train_group_handle(self) -> CoordinatorClient:
         return self._train_group_handle
-
-    @property
-    def max_staleness(self) -> int:
-        return self._max_staleness
 
     @property
     def concurrent_training_scenarios(self) -> bool:
@@ -56,7 +49,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         scheduling: StepScheduling,
         scenario_step: int,
         *,
-        serving_runtime_load_id: str | None = None,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         prepared = self._train_group_handle.prepare_training_step(batch, method, algorithm_state, scheduling)
         if not isinstance(prepared, PreparedTrainingStep):
@@ -69,7 +62,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             raise TrainingRuntimeError("non-skip training preparation must carry a payload")
         payload = dict(prepared.payload)
         samples = _ordered_samples(batch, payload.pop("source_rows", None))
-        payload.update(self._admission_fields(samples, serving_runtime_load_id))
+        payload.update(self.version_fields(samples, parent_runtime_load_id))
         # The backend numbers its own checkpoints; the job records the scenario step it trains.
         payload["scenario_step"] = scenario_step
         return PreparedTrainingStep(
@@ -79,17 +72,13 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             metrics=prepared.metrics,
         )
 
-    def _admission_fields(
-        self, samples: Sequence[TrajectoryItem], serving_runtime_load_id: str | None
-    ) -> dict[str, Any]:
-        """Producing-version fields the coordinator checks before it trains on the batch.
+    def version_fields(self, samples: Sequence[TrajectoryItem], parent_runtime_load_id: str | None) -> dict[str, Any]:
+        """Return the versions of one job: the producing versions of each sample, and the parent version.
 
-        When every sample was produced by one recorded version and no
-        staleness is tolerated, the job simply asserts that version.
-        Otherwise it carries the verified serving version, the staleness
-        bound, and each sample's producing version for bounded admission.
+        The parent version is the version that the job trains from. These
+        fields are training metadata, not a check. The record-to-record stage
+        dropped stale samples before the batch formed.
         """
-        versions = tuple(sample.training.get("runtime_load_id", None) for sample in samples)
         spans = [
             [
                 {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id}
@@ -97,26 +86,13 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             ]
             for sample in samples
         ]
-        fields: dict[str, Any] = {}
+        fields: dict[str, Any] = {
+            "producing_runtime_load_ids": [sample.training.get("runtime_load_id", None) for sample in samples]
+        }
         if any(spans):
             fields["producing_runtime_load_spans"] = spans
-        if self._max_staleness == 0 and any(
-            version is None and not sample_spans for version, sample_spans in zip(versions, spans, strict=True)
-        ):
-            raise TrainingRuntimeError("a training job requires a recorded producing runtime load ID for every sample")
-        recorded = {span["runtime_load_id"] for sample_spans in spans for span in sample_spans}
-        recorded |= {version for version in versions if version is not None}
-        if self._max_staleness == 0 and None not in versions and len(recorded) == 1:
-            expected = recorded.pop()
-            if expected is None:
-                raise TrainingRuntimeError("recorded producing runtime load ID cannot be null")
-            fields["expected_runtime_load_id"] = expected
-            return fields
-        if serving_runtime_load_id is None:
-            raise TrainingRuntimeError("token staleness admission requires a verified serving runtime load ID")
-        fields["expected_runtime_load_id"] = serving_runtime_load_id
-        fields["max_staleness"] = self._max_staleness
-        fields["producing_runtime_load_ids"] = list(versions)
+        if parent_runtime_load_id is not None:
+            fields["parent_runtime_load_id"] = parent_runtime_load_id
         return fields
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:

@@ -50,6 +50,59 @@ files:
     primary:
       path: "terminus/config.json"
       defaults: {}
+      checks:
+        # Terminus 2 constructor arguments a tree may set, verified against
+        # harbor 0.20.0, which reef-eval 0.1.1 resolves; a bump should check
+        # the signature again. The last three are the ones Reef's model
+        # binding writes, which the render refuses from a tree without it.
+        #
+        # With ".", the entire file is matched as a dict.
+        - key: "."
+          match: |-
+            Each(Key(IsIn([
+              "enable_summarize", "interleaved_thinking", "llm_call_kwargs", "max_thinking_tokens", "max_turns",
+              "parser_name", "proactive_summarization_threshold", "reasoning_effort", "temperature",
+              "api_base", "llm_kwargs", "model_name"
+            ])))
+          reason: each key must be a Terminus 2 argument
+        - key: [llm_call_kwargs, llm_call_kwargs.extra_body]
+          match: AnyOf(IsAbsent(), Eq(null), IsObject())
+          reason: litellm reads it as an object
+        - key: max_turns
+          match: AnyOf(IsAbsent(), Eq(null), AllOf(IsInt(), Ge(1)))
+          reason: max_turns must be a positive integer
+        # Every model call stays on Reef's model binding. llm_kwargs holds
+        # only the binding's key and provider. Terminus 2 passes
+        # llm_call_kwargs to litellm 1.102.1 on every call, over the
+        # binding's values, so no argument there may choose the endpoint, the
+        # provider, a credential, the model or a fallback model, or add a
+        # logging callback that sends the call to another host. litellm sends
+        # an argument it does not read, and extra_body, in the request body,
+        # so neither names a model (model, or OpenRouter's fallback models).
+        - key: llm_kwargs
+          match: Each(Key(IsIn(["api_key", "custom_llm_provider"])))
+          reason: Reef's model binding chooses the endpoint, the credential and the model
+        - key: llm_call_kwargs
+          match: |-
+            Each(Key(Not(AnyOf(
+              IsIn([
+                "api_base", "api_key", "api_version", "azure", "base_url", "callbacks", "client", "client_id",
+                "client_secret", "context_window_fallback_dict", "custom_llm_provider", "deployment_id",
+                "failure_callback", "fallbacks", "litellm_credential_name", "mock_response", "mock_timeout", "model",
+                "model_alias_map", "model_list", "models", "region_name", "success_callback", "tenant_id",
+                "use_litellm_proxy"
+              ]),
+              StartsWith("arize_"), StartsWith("aws_"), StartsWith("azure_"), StartsWith("dd_"), StartsWith("gcs_"),
+              StartsWith("humanloop_"), StartsWith("langfuse_"), StartsWith("langsmith_"), StartsWith("newrelic_"),
+              StartsWith("posthog_"), StartsWith("s3_"), StartsWith("vertex_"), StartsWith("wandb_"),
+              StartsWith("watsonx_"), StartsWith("weave_"),
+              StartsWith("adaptive_router_"), StartsWith("auto_router_"), StartsWith("complexity_router_"),
+              StartsWith("quality_router_")
+            ))))
+          reason: Reef's model binding chooses the endpoint, the credential and the model
+        - key: llm_call_kwargs.extra_body
+          match: Not(Contains(Key(IsIn(["model", "models"]))))
+          reason: Reef's model binding chooses the endpoint, the credential and the model
   rules: "terminus/AGENTS.md"
   # Terminus 2 has no slash-command surface, so an agent_command is a skill in
   # a second root. Harbor loads both roots and keeps its progressive skill

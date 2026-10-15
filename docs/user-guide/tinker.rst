@@ -58,7 +58,6 @@ and the training side branches from the checkpoint Reef last committed,
 which ``state-dir`` remembers across restarts. Backend-neutral step scheduling retains comparison sets, explicit
 batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
 ``training.options.batch-size`` supplies the configured optimizer batch size.
-Only exact-version samples are admitted: ``max_staleness`` must be zero.
 
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``

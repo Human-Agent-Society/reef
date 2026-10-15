@@ -125,7 +125,7 @@ class Stack:
         )
         prepared = self.coordinator.prepare_training_step(batch, method, {}, ONE_SAMPLE_STEPS)
         assert prepared.payload is not None
-        return {**prepared.payload, "scenario_step": step, "expected_runtime_load_id": "v1"}
+        return {**prepared.payload, "scenario_step": step, "parent_runtime_load_id": "v1"}
 
     def run(self, method: TrainingMethod, *, step: int):
         result = self.coordinator.execute_training_job(self.payload(method, step=step))
@@ -226,19 +226,6 @@ def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tm
     kept = restarted.worker_switch(1)
     assert kept is not None
     assert kept["learning_rate_schedule_state"]["completed_steps"] == 6
-
-
-@pytest.mark.unit
-def test_a_job_dropped_before_training_leaves_the_schedule_where_it_was(tmp_path) -> None:
-    stack = Stack(tmp_path)
-    stale = {**stack.payload(TrainingMethod("sft", WARMUP), step=0), "expected_runtime_load_id": "old"}
-    assert stack.coordinator.execute_training_job(stale).outcome == "stale"
-    assert stack.group.train_calls == []
-    # The retried batch starts the warmup at step 0, as the dropped attempt would have.
-    stack.run(TrainingMethod("sft", WARMUP), step=0)
-    retried = stack.worker_switch(0)
-    assert retried is not None
-    assert retried["learning_rate_schedule_state"]["completed_steps"] == 0
 
 
 @pytest.mark.unit

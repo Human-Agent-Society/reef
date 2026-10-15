@@ -211,14 +211,24 @@ class Scenario:
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+            return trainer.run_once(
+                self.scenario_step,
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
+            )
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
             return self.trainer_for(component).reserve_training_batch(
-                base_release_id=self.current_artifact_ref().release_id
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
             )
+
+    def serving_runtime_load_id(self) -> str | None:
+        """Return the runtime load ID that serves the committed release, or None when it is unknown."""
+        artifact = Artifact(self.current_artifact_ref(), self.repository)
+        return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""

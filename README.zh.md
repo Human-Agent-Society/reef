@@ -27,6 +27,7 @@ harness，包括提示词、规则和技能。
 
 **🚀 [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
 🗺️ [路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
+🗓️ [Office Hours](https://github.com/Human-Agent-Society/reef/issues/818) |
 📣 [发布文章](https://x.com/ao_qu18465/status/2094867930081337730) |
 💬 [加入 Discord](https://discord.gg/5y8e5f937k) |
 📱 [加入微信群](docs/community/wechat.md)**

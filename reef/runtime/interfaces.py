@@ -67,17 +67,6 @@ class RuntimeLoadId:
     def __str__(self) -> str:
         return f"{self.incarnation}:{self.sequence}"
 
-    def lag_behind(self, serving: RuntimeLoadId) -> int | None:
-        """Return how many versions this load is behind ``serving``.
-
-        The result is negative when this load is newer than ``serving``. None
-        means that the two loads belong to different incarnations, so their
-        sequences cannot be compared.
-        """
-        if self.incarnation != serving.incarnation:
-            return None
-        return serving.sequence - self.sequence
-
     @classmethod
     def parse(cls, value: str) -> RuntimeLoadId:
         if not isinstance(value, str):
@@ -805,15 +794,6 @@ class TrainingRuntime(ABC):
     """
 
     @property
-    def max_staleness(self) -> int:
-        """Largest producing-to-serving version lag this runtime admits.
-
-        Exact-version admission is the default. Runtimes that support a
-        positive bounded-staleness window override this property.
-        """
-        return 0
-
-    @property
     def concurrent_training_scenarios(self) -> bool:
         """Whether several scenarios may train on this runtime at once.
 
@@ -841,7 +821,7 @@ class TrainingRuntime(ABC):
         scheduling: StepScheduling,
         scenario_step: int,
         *,
-        serving_runtime_load_id: str | None = None,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         """Turn one reserved batch into backend work, or a state-only skip.
 
@@ -849,6 +829,7 @@ class TrainingRuntime(ABC):
         selected for this job, and ``scheduling`` the recipe's step schedule;
         the backend resolves the objective in its own process, refuses a method
         it cannot train, and records the method in the job's payload.
+        ``parent_runtime_load_id`` is the published version that the job trains from, if known.
         """
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -1167,9 +1148,6 @@ class ScenarioHistoryStore(ABC):
 
     @abstractmethod
     def last_publication(self, scenario: str) -> str | None: ...
-
-    @abstractmethod
-    def lag(self, scenario: str, producing: RuntimeLoadId) -> int | None: ...
 
     @abstractmethod
     def protected_rollouts(self) -> set[int]: ...

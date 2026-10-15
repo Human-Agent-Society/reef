@@ -1,5 +1,5 @@
-Bounded stale-sample training without giving up the version fence
-=================================================================
+Bounded stale-sample training
+=============================
 
 :Status: Deprecated
 
@@ -8,165 +8,120 @@ Bounded stale-sample training without giving up the version fence
    This historical RFC predates the issue-based RFC process and will be removed
    in a future cleanup.
 
-   Today every training job is fenced to the exact serving runtime load ID that
-   produced its rollouts; anything older is discarded. That fence makes
-   version lag zero **by construction**. This RFC adds one shared, bounded
-   staleness window: keep the fence's correctness job (serving identity at
-   execution time), stop using it to decide which sample versions to admit,
-   and let the existing training path own admitted stale data. It
-   is implemented as the shared opt-in ``max_staleness`` setting (default ``0``).
+   Reef used to fence each training job to the exact serving version that
+   produced its rollouts, and it discarded all older samples. This RFC adds
+   one bounded staleness window, the recipe setting ``max_staleness``
+   (default ``0``). An earlier version of this RFC checked the window in the
+   training runtime. The current design checks it only in the record-to-record
+   stage, before a batch forms. Section 3 records that change.
 
-.. _1-where-the-gate-lives-today:
+.. _1-the-problem:
 
-1. Where the gate lives today
------------------------------
+1. The problem
+--------------
 
-Three independently reasonable mechanisms combine to produce this behavior:
+Under the exact fence, a rollout could train only while the weights that
+produced it still served. Each commit made every in-flight rollout
+ineligible. The fence wasted in-flight work and made asynchronous rollout
+generation lockstep.
 
-1. **The producing version determines the version check.**
-   `executor_runtime.prepare_training_step <../../reef/train/runtime.py>`__
-   collects the batch's producing runtime load IDs, requires exactly one, and
-   stamps it as the job's ``expected_runtime_load_id``. The version that
-   produced the samples becomes the version required by the job.
-2. **The bridge rejects mismatch.**
-   `bridge._run_train_step <../../reef/train/slime_backend/reef_adapters/bridge.py>`__
-   compares ``expected_runtime_load_id`` against the currently published serving
-   version and returns ``outcome="stale"`` on any difference.
-3. **The dispatcher discards.** On ``stale``,
-   `dispatcher._process <../../reef/dispatcher.py>`__ calls ``reject_pending()``:
-   the reserved rollouts are dropped rather than retried. A retry would carry
-   the same producing version and fail the same comparison.
+The training path already owns how a sample is consumed. The staleness check
+should only bound which producing versions reach that path. It should not
+inspect the recipe or objective, change the payload, or add an importance
+weight.
 
-As a result, a rollout is trainable **only** while the weights that
-produced it are still serving. The moment a commit publishes a new version,
-every in-flight rollout becomes ineligible.
+.. _2-decision:
 
-.. _2-why-that-is-the-wrong-resting-point:
+2. Decision: the record-to-record stage owns the staleness check
+----------------------------------------------------------------
 
-2. Why exact matching is too restrictive
-----------------------------------------
+``max_staleness`` is a field of ``WeightTrainingRecipe``
+(`reef/recipe/base.py <../../reef/recipe/base.py>`__, environment fallback
+``REEF_MAX_STALENESS``). The recipe gives it to the pipeline as
+``PipelineContext.max_staleness``. ``0`` keeps exact-version training.
 
-The training path already owns how a sample is consumed. Staleness admission
-should only bound *which* producing versions reach that path; it should not
-inspect the configured recipe or objective, reinterpret the payload, or add
-another importance weight. An unconditional producing-version check wastes
-in-flight work and makes asynchronous rollout generation lockstep.
+The check has three parts:
 
-The exact gate remains the safest default. This RFC separates correctness
-fencing from freshness admission while keeping ``max_staleness: 0`` inert.
+1. **Served versions.** At each batch reservation, the scenario gives the
+   version that it serves now (``Scenario.serving_runtime_load_id``). The
+   surface's ``served_runtime_load_id`` resolves it:
 
-.. _3-proposal--split-the-fence-from-the-freshness-policy:
+   +----------------------------+--------------------------------------------+
+   | Committed head             | Served version                             |
+   +============================+============================================+
+   | Live head                  | Its ``runtime_load_id``                    |
+   +----------------------------+--------------------------------------------+
+   | Per-scenario LoRA adapter  | The committed head version                 |
+   +----------------------------+--------------------------------------------+
+   | Durable head               | The runtime's ``current_runtime_load_id``  |
+   +----------------------------+--------------------------------------------+
+   | Initial head (no version)  | ``None``: the check does not run           |
+   +----------------------------+--------------------------------------------+
 
-3. Proposal: split the fence from the freshness policy
-------------------------------------------------------
+   ``Record2Record.observe_serving_runtime_load_id`` adds each new version to
+   a list. A version of another incarnation starts the list again.
+2. **Lag.** The lag of a producing version is the number of versions that
+   this scenario served after it. The same rule applies to full weights and to
+   per-scenario LoRA. A sample is stale when its lag exceeds
+   ``max_staleness``, when it has no recorded version, or when the stage did
+   not see its version. A sample with several token spans counts every span's
+   version. ``stale_sets`` in
+   `reef/record2record/staleness.py <../../reef/record2record/staleness.py>`__
+   does the arithmetic.
+3. **Drop.** Before each batch, ``drop_stale_sets`` ends the held sets that
+   have a stale sample (``drop_held_set``). The check does not run while a
+   batch is reserved. The trainer releases the records of dropped sets in the
+   next commit, so they do not train after a restart.
 
-``expected_runtime_load_id`` currently answers two different questions with one
-comparison:
+Batches can mix samples from different versions. Each sample is classified
+independently, and a stale sample drops its whole record set. After the
+check, payload conversion, validation, and the numerical training path run
+unchanged.
 
-+----------------------+-----------------------+----------------------+
-| Question             | Nature                | Right owner          |
-+======================+=======================+======================+
-| "Is this job         | fencing / correctness | bridge, exact match, |
-| executing against    |                       | unchanged            |
-| the serving state it |                       |                      |
-| was prepared         |                       |                      |
-| against?"            |                       |                      |
-+----------------------+-----------------------+----------------------+
-| "Is this sample      | admission policy      | shared training      |
-| fresh enough to      |                       | config, bridge       |
-| learn from?"         |                       | enforcement          |
-+----------------------+-----------------------+----------------------+
+.. _3-change-from-runtime-admission:
 
-.. _31-check-serving-version-independently-of-sample-version:
+3. Change from runtime admission
+--------------------------------
 
-3.1 Check the serving version independently of the sample version
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The earlier design checked the window in the training runtime, after the
+batch formed. It split one payload key into an exact execution fence
+(``expected_runtime_load_id``, stamped from the serving version) and a
+per-sample admission check before backend side effects. That design put the
+same rule in several places, and each backend needed its own enforcement.
 
-With the window enabled, ``prepare_training_step`` stamps
-``expected_runtime_load_id`` from the runtime's own ``serving_runtime_load_id()`` at
-preparation time instead of from the samples. The bridge's exact-match check
-still catches the race it exists for (the serving version moved between
-preparation and execution). A parallel ``producing_runtime_load_ids`` list in the
-shared training payload retains each sample's producing version. At
-``W = 0``, Reef keeps the old producing-version fence and does not add a
-serving probe.
+The current design removes runtime admission:
 
-.. _32-a-staleness-window-before-bridge-side-effects:
+- The scheduler admission functions and the ``TrainingExecution`` context
+  admission.
+- The ``runtime.max_staleness`` config and
+  ``ExecutorTrainingRuntime.max_staleness`` / ``TrainingRuntime.max_staleness``.
+- Tinker's ``stale`` payload flag.
+- ``ScenarioHistoryStore.lag`` and ``RuntimeLoadId.lag_behind``.
 
-3.2 A staleness window before bridge side effects
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The payload key ``expected_runtime_load_id`` is now
+``parent_runtime_load_id``. It is training metadata: the version that the job
+trains from. The training job ID excludes it, so a retry after a newer
+publication keeps the same job ID and replays its marker. The payload still
+carries each sample's ``producing_runtime_load_ids`` (and
+``producing_runtime_load_spans`` when present).
 
-The shared training setting ``max_staleness: W`` defaults to ``0``, so the change
-is inert until opted into. After the exact execution fence and before packing,
-training, or checkpoint side effects, a sample is admissible iff its producing
-version is within ``W`` published steps of the current serving version **within
-the same incarnation**:
+The ``stale`` training outcome remains for backend-specific races, such as a
+Tinker incumbent that changed during the step. The dispatcher still drops
+such a batch without advancing the scenario step and writes a consumption
+receipt.
 
-- ``lag = serving_step − producing_step``, parsed from canonical
-  ``WeightVersion`` tokens; ``0 ≤ lag ≤ W`` admits.
-- A sample from a different incarnation has undefined lag: never admitted for
-  training, dropped with a counted metric rather than silently.
-- A sample whose lag exceeds ``W`` is dropped at bridge admission, also counted
-  (``staleness/samples_dropped``), so the discard rate is observable instead of
-  implicit.
+.. _4-trade-offs:
 
-Batches containing samples from different versions become legal (the
-"exactly one producing version" assertion relaxes to "every version admissible
-under the window"). Each sample
-is classified independently; if any sample is inadmissible, the reserved batch
-is dropped atomically.
+4. Trade-offs
+-------------
 
-.. _33-the-training-objective-stays-untouched:
-
-3.3 The training objective stays untouched
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Admission receives only the configured window, the serving version, and each
-sample's producing version. It does not branch on recipe or loss-family names.
-After admission, the existing payload conversion, validation, and numerical
-training path runs unchanged.
-
-.. _4-interactions:
-
-4. Interactions
----------------
-
-.. _41-one-job-per-version-and-the-marker-protocol:
-
-4.1 One-job-per-version and the marker protocol
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The ``RUNNING → CHECKPOINT → COMPLETE`` progression and replay ordering stay
-unchanged. For enabled-window jobs, ``job_id`` hashes the retry-stable sample
-payload, rollout ID, and staleness window but excludes the volatile preparation
-fence. Otherwise a lost acknowledgement after publication would re-prepare
-against the newly published serving version, produce a different job ID, and
-miss the COMPLETE marker. A fresh execution still checks the exact fence
-before any side effect; marker replay remains first.
-
-.. _42-recovery:
-
-4.2 Recovery
-~~~~~~~~~~~~
-
-On clean restart the bridge republishes the recovered checkpoint under its
-recorded serving token, so lag remains comparable after recovery. A genuinely
-new serving incarnation never compares equal and all
-older samples are dropped as cross-incarnation. The recovery-pair invariant,
-checkpoint retention, and the critic checkpoint are unaffected because none of
-them use sample version information.
-
-.. _43-what-does-not-change:
-
-4.3 What does *not* change
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-- The bridge's exact-match execution fence. The dispatcher still rejects a
-  ``stale`` result without advancing a scenario step, but now writes a durable
-  compaction receipt and a warning before deleting source payloads.
-- Payload validation and numerical training implementations.
-- Deployments that keep ``W = 0`` retain the current exact-version semantics and
-  avoid the extra serving-version probe.
+- **Rebuilt trainer.** The list of served versions is only in memory. A
+  trainer that rebuilds knows only the versions that it sees after the rebuild. Retained
+  samples from earlier versions are stale, even when they are within the
+  window.
+- **No execution fence.** Nothing checks the window between batch build and
+  job execution. A commit in that interval can make a reserved batch one or
+  more versions older than ``max_staleness`` when it trains.
 
 .. _5-alternatives-considered:
 
@@ -194,6 +149,12 @@ them use sample version information.
 |                                  | numerical choices; the backend   |
 |                                  | already owns the objective.      |
 +----------------------------------+----------------------------------+
+| Runtime admission with an exact  | The earlier version of this RFC. |
+| execution fence                  | It duplicated the rule across    |
+|                                  | the scheduler and each backend,  |
+|                                  | and it discarded batches after   |
+|                                  | the pipeline had built them.     |
++----------------------------------+----------------------------------+
 
 .. _6-rollout-of-the-change:
 
@@ -201,7 +162,5 @@ them use sample version information.
 ------------------------
 
 1. Keep ``max_staleness: 0`` while qualifying the exact-version baseline.
-2. Enable a small window (e.g. ``W = 2``) and observe fresh, admitted-stale, and
-   dropped counts.
-3. Compare the existing objective telemetry against the exact-version
-   baseline.
+2. Enable a small window (for example ``max_staleness: 2``) and compare the
+   existing objective telemetry against that baseline.

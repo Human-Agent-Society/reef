@@ -42,11 +42,15 @@ class AdapterRuntime(RecordingRuntime):
         return activated
 
 
-def _inference(scenario: str, agent_record_id: str) -> AgentRecord:
+def _inference(scenario: str, agent_record_id: str, runtime_load_id: str | None = None) -> AgentRecord:
+    """An inference record; ``runtime_load_id`` is the version that served it, when the runtime reports one."""
+    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    if runtime_load_id is not None:
+        payload["runtime_load_id"] = runtime_load_id
     return AgentRecord.create(
         scenario=scenario,
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        payload=payload,
         agent_record_id=agent_record_id,
     )
 
@@ -61,8 +65,8 @@ def _report(scenario: str, agent_record_id: str, reference: str) -> AgentRecord:
     )
 
 
-def _feed(dispatcher, scenario: str, index: int) -> None:
-    dispatcher.accept_record(_inference(scenario, f"{scenario}-i{index}"))
+def _feed(dispatcher, scenario: str, index: int, runtime_load_id: str | None = None) -> None:
+    dispatcher.accept_record(_inference(scenario, f"{scenario}-i{index}", runtime_load_id))
     dispatcher.accept_record(_report(scenario, f"{scenario}-r{index}", f"{scenario}-i{index}"))
 
 
@@ -79,7 +83,8 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         _feed(dispatcher, "code", 1)
         wait_for_step(dispatcher, 1, scenario="math")
         wait_for_step(dispatcher, 1, scenario="code")
-        _feed(dispatcher, "code", 2)
+        # The staleness check trains only data of the version that code serves now: its own adapter w2.
+        _feed(dispatcher, "code", 2, "w2")
         wait_for_step(dispatcher, 2, scenario="code")
 
         assert dispatcher._registry.training_scenario_names == ("math", "code")
@@ -180,14 +185,15 @@ def test_every_job_names_its_owner_and_only_an_adapter_runtime_gets_the_slot_sce
     """The job marker names the scenario that owns the job, on a full weight runtime too, so a delete never has to
     guess whose job is out; only a runtime training several scenarios gets the scenario that picks its slot."""
     full, adapters = _PayloadRecordingRuntime(), AdapterRuntime()
-    for runtime, scenario in ((full, "math"), (adapters, "code")):
+    # The full weight runtime serves w0; the adapter runtime serves no adapter for code yet.
+    for runtime, scenario, version in ((full, "math", "w0"), (adapters, "code", None)):
         initial = tmp_path / scenario / "initial"
         initial.mkdir(parents=True)
         dispatcher = build_training_dispatcher(
             runtime, tmp_path / scenario, InMemoryRepositoryBackend.factory(initial, root=tmp_path / scenario / "repo")
         )
         try:
-            _feed(dispatcher, scenario, 1)
+            _feed(dispatcher, scenario, 1, version)
             wait_for_step(dispatcher, 1, scenario=scenario)
         finally:
             dispatcher.close()

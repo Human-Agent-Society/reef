@@ -60,7 +60,7 @@ class MLXRuntime(TrainingRuntime):
         scheduling: StepScheduling,
         scenario_step: int,
         *,
-        serving_runtime_load_id: str | None = None,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         """Run the method's objective in this process and check that the engine can train its loss family."""
         objective = resolve_objective(method.objective)

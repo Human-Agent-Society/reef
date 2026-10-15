@@ -700,8 +700,7 @@ health reporting; recovery decisions always use the durable marker.
 ``TrainingBackend.prepare`` performs admission, scoring and data packing
 before yielding a ``PreparedTrainingJob``. Its context holds the checkpoint
 reservation through the final marker write. It may return a stale or
-storage-blocked result without starting a job. Reef applies shared
-scenario/staleness admission. Slime implements checkpoint capacity checks,
+storage-blocked result without starting a job. Slime implements checkpoint capacity checks,
 teacher scoring, tensorization and DP packing in its preparation adapter.
 
 The training payload carries the Reef ``scenario_step`` the job trains; the
@@ -729,10 +728,15 @@ Slime, the startup preflight's error lists what the job left on disk, and
 gives the recovery. A
 checkpointed or completed job replays without preparing or training again.
 Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
-A job's identity is its batch and admission fence: the scenario step is not
-part of it, since the other components of a composite advance that step while
-the job is out, nor is the processor's batch number, which a reload starts
-again. Upgrade Reef while no job is out: ``GET /reef/status`` shows
+A job's identity is its batch. These values are not part of it:
+
+* The scenario step. The other components of a composite advance that step
+  while the job is out.
+* The processor's batch number. A reload starts it again.
+* The version that the job trains from. A newer publication can change it
+  before a retry.
+
+Upgrade Reef while no job is out: ``GET /reef/status`` shows
 ``training_job`` as ``null``. A marker an earlier release left for a job still
 out names it by that release's identity, so the job is refused with
 ``operator recovery required``, and the error names the marker's job and this

@@ -232,9 +232,10 @@ content. A restart invalidates runtime load IDs but not the release chain.
 Staleness
 ---------
 
-The accepted lag between the runtime load that produced a sample and the load
-currently serving, configured by ``max_staleness``. Zero requires a sample to
-train against the weights that generated it.
+The number of versions that a scenario served after the runtime load that
+produced a sample, bounded by ``max_staleness``. Zero requires a sample to
+train against the weights that generated it. The record-to-record stage checks
+it before a batch forms.
 
 Reported and computed feedback
 ------------------------------

@@ -1,4 +1,4 @@
-"""opencode adapter quirks: boot mutations and enforced config invariants.
+"""opencode adapter quirks: boot mutations, agent and command shapes, and frontmatter.
 
 opencode's boot mutates its own composition directories: it injects a
 ``$schema`` key into config files that lack one (an in-place edit of a
@@ -10,10 +10,7 @@ inverse tolerates them and nothing else.
 ``process_config`` checks what the declaration cannot state: an agent must
 keep its own name and carry the fields opencode's schema types, a command
 names an agent the run has, and a tree with no ``default_agent`` must keep
-an agent that can start one. The keys a composition must keep are declared
-in the descriptor (``autoupdate``, ``share``, ``enabled_providers``, and the
-model choices the binding owns) and the shared render refuses them before
-this step runs.
+an agent that can start one.
 
 It also keeps the model Reef's. The descriptor sets ``enabled_providers`` to
 ``["reef"]``, so opencode offers no provider but the binding's, its own zen
@@ -22,9 +19,7 @@ writer of ``provider`` and ``model``: it renders after the tree, wins every
 key it writes, and always writes a non-empty ``apiKey``, which a tree cannot
 hold because admission refuses an inline credential. So the two keys pass
 only in the binding's shape with that key, which a tree rendered alone, as
-admission renders it, never has; the descriptor locks the model choices
-(``small_model``, ``disabled_providers``, an agent's, a mode's or a
-command's ``model``) beside them.
+admission renders it, never has.
 
 opencode reads the frontmatter of a command or a skill with gray-matter,
 which strips a byte order mark, takes the text after the opening ``---`` as

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping
-from dataclasses import replace
 from enum import Enum
 from typing import Any, Self
 
@@ -17,6 +16,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetPool
 from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, SingleRecordSet
+from reef.record2record.staleness import canonical_runtime_load_id, stale_sets
 
 
 class TaskStatus(Enum):
@@ -41,6 +41,12 @@ class Record2Record(ABC, Plugin):
     reserves and consumes through the pool, and the stage ends the consumed
     sets (``consume``). The pool applies the stage's selection policy. The
     stage never calls the pipeline.
+
+    The stage also runs the staleness check. No other part of Reef checks how
+    far the training data lags behind the weights. The pipeline gives the stage
+    each version that the scenario serves (``observe_serving_runtime_load_id``).
+    Then it tells the stage to drop the held sets that are too many versions
+    behind (``drop_stale_sets``).
 
     A record that the stage ends, for example a record that can no longer
     train, appears in ``releasable_record_ids``. The trainer adds those IDs to
@@ -73,6 +79,10 @@ class Record2Record(ABC, Plugin):
         self.terminal: set[str] = set()
         #: Sets formed since the last ``take_formed``, in the order they formed.
         self.formed: list[RecordSet] = []
+        #: The runtime load IDs that produced each held formed set's training data, by formed set ID.
+        self.producing_runtime_load_ids: dict[Hashable, frozenset[str | None]] = {}
+        #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
+        self.served_runtime_load_ids: list[str] = []
 
     @abstractmethod
     def ingest(self, record: AgentRecord) -> None:
@@ -91,22 +101,28 @@ class Record2Record(ABC, Plugin):
         """The pipeline's context changed: its training mode, held-set limit, or admitted report type."""
         return
 
-    def settle(self, record_set: RecordSet, status: TaskStatus, runtime_load_id: str | None = None) -> None:
+    def settle(
+        self,
+        record_set: RecordSet,
+        status: TaskStatus,
+        producing_runtime_load_ids: frozenset[str | None] = frozenset(),
+    ) -> None:
         """Keep or end a formed set from what the task stage made of it.
 
-        ``runtime_load_id`` is the version of the set's training data, when the
-        task stage knows it. A stage's staleness check reads it.
+        ``producing_runtime_load_ids`` are the versions that produced the
+        training data of the set. The staleness check reads them.
         """
         if status is TaskStatus.READY:
-            self.accept(record_set, runtime_load_id)
+            self.producing_runtime_load_ids[record_set.set_id] = producing_runtime_load_ids
+            self.accept(record_set)
         elif status is TaskStatus.SKIPPED:
             self.reject(record_set)
         elif status is not TaskStatus.INGESTED:
             raise TypeError("a task result must have a TaskStatus")
 
-    def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
+    def accept(self, record_set: RecordSet) -> None:
         """Hold a set that has tasks in the pool."""
-        self.pool.put(replace(record_set, runtime_load_id=runtime_load_id))
+        self.pool.put(record_set)
 
     def reject(self, record_set: RecordSet) -> None:
         """End a set that cannot train."""
@@ -116,7 +132,44 @@ class Record2Record(ABC, Plugin):
     def take_ended(self) -> frozenset[Hashable]:
         """Return the IDs of the formed sets that ended since the last call. The pipeline forgets their tasks."""
         ended, self.ended_set_ids = frozenset(self.ended_set_ids), set()
+        for set_id in ended:
+            self.producing_runtime_load_ids.pop(set_id, None)
         return ended
+
+    # ------------------------------------------------------------- staleness
+
+    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
+        """Add the version that the scenario serves now, if the version changed.
+
+        A version of another incarnation starts the list again. The engine
+        restarted, so no earlier version can train.
+        """
+        served = self.served_runtime_load_ids
+        if served and served[-1] == runtime_load_id:
+            return
+        previous = canonical_runtime_load_id(served[-1]) if served else None
+        current = canonical_runtime_load_id(runtime_load_id)
+        if previous is not None and current is not None and previous.incarnation != current.incarnation:
+            served.clear()
+        served.append(runtime_load_id)
+
+    def drop_stale_sets(self, max_staleness: int) -> None:
+        """End the held sets whose training data is more than ``max_staleness`` versions behind.
+
+        The check does not run while a batch is reserved, because the batch refers to held sets.
+        """
+        if self.pool.reserved is not None:
+            return
+        for record_set in stale_sets(
+            self.pool.sets(), self.producing_runtime_load_ids, self.served_runtime_load_ids, max_staleness
+        ):
+            self.drop_held_set(record_set)
+
+    def drop_held_set(self, record_set: RecordSet) -> None:
+        """End a held set that can no longer train. A stage that holds combined sets overrides it."""
+        self.pool.remove(record_set.set_id)
+        self.reject(record_set)
+        self.ended_set_ids.update(record_set.formed_set_ids())
 
     def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
         """End the sets that an acknowledged batch consumed, and return the IDs of their consumed records.
@@ -173,7 +226,7 @@ class PassThroughRecord2Record(Record2Record):
             SingleRecordSet(set_id=record.agent_record_id, arrival_index=self.pool.next_arrival_index(), record=record)
         )
 
-    def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
+    def accept(self, record_set: RecordSet) -> None:
         raise TypeError(f"{type(self).__name__} holds no set: pair it with NoTasks, or hold sets in another stage")
 
     def reject(self, record_set: RecordSet) -> None:

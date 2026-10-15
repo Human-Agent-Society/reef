@@ -280,6 +280,22 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
 
 
 @pytest.mark.unit
+def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
+    processor = threshold_pipeline(PipelineContext("s"))
+    processor.observe_serving_runtime_load_id("e:1")
+    processor.ingest(inference("i1", version="e:1"))
+    processor.ingest(report("r1", "i1"))
+    processor.observe_serving_runtime_load_id("e:2")
+    processor.ingest(inference("i2", version="e:2"))
+    processor.ingest(report("r2", "i2"))
+    batch = processor.build_batch()
+    assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
+    # The stale report ended with the inference that it owns, and its tasks are gone.
+    assert {"r1", "i1"} <= processor.releasable_record_ids()
+    assert "r1" not in processor.tasks
+
+
+@pytest.mark.unit
 def test_the_default_pipeline_makes_no_tasks_and_no_batch() -> None:
     processor = TrainingPipeline(PipelineContext("s"))
     record_set = SingleRecordSet(set_id="i1", arrival_index=1, record=inference("i1"))

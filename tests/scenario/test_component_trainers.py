@@ -1548,7 +1548,7 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             # Trains the judged turns of ``_RetiringRetriesJudging``.
             return TrainingPipeline(
                 context,
-                record2record=JudgingRecord2Record(context, _RetiringRetriesJudging(), _JudgedAtOnce()),
+                record2record=JudgingRecord2Record(_RetiringRetriesJudging(), _JudgedAtOnce()),
                 record2task=_RetiringRetriesTasks(),
                 task2batch=RetiringRetriesBatches(context, 1),
             )

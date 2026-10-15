@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
+from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -41,6 +42,11 @@ class ServiceConfig:
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
     tokens: tuple[str, ...] = config_option(
         (), public_path=("reef", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
+    )
+    allow_unauthenticated: bool = config_option(
+        False,
+        public_path=("reef", "allow_unauthenticated"),
+        help="Serve without bearer tokens on an address that other machines can reach.",
     )
     served_url: str | None = config_option(
         None,
@@ -156,8 +162,17 @@ class ServiceConfig:
         public_path=("inference", "retry_timeout_s"),
         help="Retry deadline in seconds; defaults to the inference timeout.",
     )
+    #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
+    #: and config.
+    artifact_backend: str | Mapping[str, Any] = config_option(
+        "git_lfs",
+        public_path=("storage", "artifact_backend"),
+        help="Artifact backend: git_lfs, or a ConfigurableRepositoryBackendFactory plugin reference.",
+    )
     artifact_repository: str = config_option(
-        ".reef/artifacts.git", public_path=("storage", "artifact_repository"), help="Artifact repository location."
+        ".reef/artifacts.git",
+        public_path=("storage", "artifact_repository"),
+        help="Git LFS artifact repository location.",
     )
     artifact_work_dir: str = config_option(
         ".reef/artifact-work", public_path=("storage", "artifact_work_dir"), help="Artifact working directory."
@@ -266,6 +281,15 @@ class ServiceConfig:
                     "a reef.scenario_admission plugin reads its own config"
                 )
             ScenarioAdmission.reference(self.scenario_admission, setting="reef.scenario_admission")
+        if self.artifact_backend != "git_lfs":
+            if isinstance(self.artifact_backend, str) and ":" not in self.artifact_backend:
+                raise ValueError("storage.artifact_backend must be git_lfs or 'package.module:ClassName'")
+            ConfigurableRepositoryBackendFactory.reference(self.artifact_backend, setting="storage.artifact_backend")
+            if self.artifact_repository != ".reef/artifacts.git":
+                raise ValueError(
+                    "storage.artifact_repository requires storage.artifact_backend: git_lfs; "
+                    "a plugin backend reads its own config"
+                )
         if self.record_backend not in ("sqlite", "postgres"):
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")

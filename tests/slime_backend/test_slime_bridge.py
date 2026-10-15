@@ -476,7 +476,7 @@ def _durable_actor(tmp_path, **training_options):
         **training_options,
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1", parent_release_id="parent-0")
     return actor, group, payload
 
 
@@ -485,7 +485,6 @@ def _sao_durable_actor(
     *,
     producing_versions: tuple[str | None, ...] = ("engine:1",),
     serving_version: str = "engine:3",
-    max_staleness: int = 2,
 ):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
@@ -519,8 +518,7 @@ def _sao_durable_actor(
         "loss": "sao",
         "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 0,
-        "expected_runtime_load_id": serving_version,
-        "max_staleness": max_staleness,
+        "parent_runtime_load_id": serving_version,
         "producing_runtime_load_ids": list(producing_versions),
     }
     return actor, group, manager, payload
@@ -558,8 +556,7 @@ def _loss_family_durable_actor(
         "loss": loss_family,
         "method": TrainingMethod(loss_family).to_dict(),
         "scenario_step": 0,
-        "expected_runtime_load_id": serving_version,
-        "max_staleness": 2,
+        "parent_runtime_load_id": serving_version,
         "producing_runtime_load_ids": [producing_version],
     }
     if loss_family == "openclawrl":
@@ -662,7 +659,7 @@ def test_bridge_packs_locally_then_passes_list_of_boxes(tmp_path, monkeypatch) -
     manager.prepare_external_train_data = prepare
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1", parent_release_id="parent-0")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -685,7 +682,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
     manager = _FakeRolloutManager(["packed"], timeline=timeline)
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template, colocate=True)
     payload = _payload(loss="tttd", advantages=[0.25, -0.25, 0.0])
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -739,21 +736,19 @@ def test_bridge_checkpoint_requires_save_template() -> None:
         _FakeGroup(), _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1")
 
     with pytest.raises(RuntimeError, match="checkpoint path"):
         _execute_and_update_weights(actor, payload)
 
 
-# The identity of the fixture payload: its rows, training method and admission fence, not its scenario step.
-JOB_ID = "a7ea42aae11c5c37e3567d4c7e743476b52416d8d1f9e87ed70ce8caee58adda"
+# The identity of the fixture payload: its rows and training method, not its scenario step or parent version.
+JOB_ID = "f27ecc3d74ba88c709f775871c96881f1953897c2337f57d93e2b63f835be9d7"
 
 
 @pytest.mark.unit
-def test_durable_bridge_is_idempotent_and_rejects_stale_samples(tmp_path) -> None:
+def test_durable_bridge_is_idempotent(tmp_path) -> None:
     actor, group, payload = _durable_actor(tmp_path)
-    stale = {**payload, "expected_runtime_load_id": "old"}
-    assert _execute_and_update_weights(actor, stale) == TrainingJobResult(outcome="stale", runtime_load_id="v1")
 
     first = _execute_and_update_weights(actor, payload)
     assert first.outcome == "complete"
@@ -772,7 +767,7 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1")
 
     checkpoint = actor.execute_training_job(payload)
 
@@ -812,7 +807,7 @@ def test_pause_barrier_failure_marks_the_engines_it_retired_for_rebuild(tmp_path
     manager = _FakeRolloutManager(["packed"])
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
     terminated: list[str] = []
 
@@ -839,7 +834,7 @@ def test_publication_retry_rebuilds_the_engines_the_barrier_retired(tmp_path) ->
     manager = _FakeRolloutManager(["packed"])
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
     barrier_fails = True
 
@@ -864,16 +859,13 @@ def test_publication_retry_rebuilds_the_engines_the_barrier_retired(tmp_path) ->
 
 
 @pytest.mark.unit
-def test_bridge_admits_bounded_sao_lag_and_persists_exact_metrics(tmp_path) -> None:
+def test_bridge_trains_a_sao_job_from_an_older_producing_version(tmp_path) -> None:
     actor, group, manager, payload = _sao_durable_actor(tmp_path)
 
     result = _execute_and_update_weights(actor, payload)
-    marker = read_marker(tmp_path / ".reef-latest-job.json")
 
+    # The record-to-record stage decided that the sample may train; the bridge does not check it again.
     assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_fresh"] == 0
-    assert result.metrics["staleness/samples_admitted_stale"] == 1
-    assert marker["metrics"]["staleness/samples_admitted_stale"] == 1
     assert manager.calls[0]["rollout_log_probs"] == [[-0.1, -0.2]]
     assert "importance_weight" not in payload
     assert "importance_weight" not in manager.calls[0]
@@ -881,7 +873,7 @@ def test_bridge_admits_bounded_sao_lag_and_persists_exact_metrics(tmp_path) -> N
 
 
 @pytest.mark.unit
-def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> None:
+def test_bridge_preserves_mixed_token_runtime_load_ids(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     group._actor_handlers[0].version = "engine:7"
@@ -901,8 +893,7 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
         "loss": "sft",
         "method": TrainingMethod("sft").to_dict(),
         "scenario_step": 0,
-        "expected_runtime_load_id": "engine:7",
-        "max_staleness": 2,
+        "parent_runtime_load_id": "engine:7",
         "producing_runtime_load_ids": [None],
         "producing_runtime_load_spans": [
             [
@@ -915,146 +906,23 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
     result = _execute_and_update_weights(actor, payload)
 
     assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_fresh"] == 0
-    assert result.metrics["staleness/samples_admitted_stale"] == 1
     assert manager.calls[0]["producing_runtime_load_spans"] == payload["producing_runtime_load_spans"]
 
 
 @pytest.mark.unit
-def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_training(tmp_path) -> None:
-    template = str(tmp_path / "checkpoint-{rollout_id}")
-    group = _DurableGroup(template)
-    group._actor_handlers[0].version = "engine:7"
-    manager = _FakeRolloutManager(["packed"])
-    manager.version = "engine:7"
-    actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
-    payload = {
-        "samples": [_row("mixed", tokens=(10, 20, 21), loss_mask=(1, 1), log_probs=(-0.1, -0.2))],
-        "rollout_ids": [0],
-        "loss": "sft",
-        "method": TrainingMethod("sft").to_dict(),
-        "scenario_step": 0,
-        "expected_runtime_load_id": "engine:7",
-        "max_staleness": 0,
-        "producing_runtime_load_ids": [None],
-        "producing_runtime_load_spans": [
-            [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
-            ]
-        ],
-    }
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == "stale"
-    assert result.metrics["staleness/drop_reason"] == "policy_lag_exceeded"
-    assert not group.train_calls
-    assert not manager.calls
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("max_staleness", "lag", "expected_outcome"),
-    [
-        (0, 0, "complete"),
-        (0, 1, "stale"),
-        (1, 0, "complete"),
-        (1, 1, "complete"),
-        (1, 2, "stale"),
-        (2, 0, "complete"),
-        (2, 1, "complete"),
-        (2, 2, "complete"),
-        (2, 3, "stale"),
-    ],
-)
-def test_bridge_enforces_the_inclusive_max_staleness_boundary(
-    tmp_path,
-    max_staleness,
-    lag,
-    expected_outcome,
-) -> None:
-    serving_sequence = 3
-    producing_version = f"engine:{serving_sequence - lag}"
-    actor, group, manager, payload = _sao_durable_actor(
-        tmp_path,
-        producing_versions=(producing_version,),
-        serving_version=f"engine:{serving_sequence}",
-        max_staleness=max_staleness,
-    )
-    if max_staleness == 0:
-        payload.pop("max_staleness")
-        payload.pop("producing_runtime_load_ids")
-        payload["expected_runtime_load_id"] = producing_version
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == expected_outcome
-    if expected_outcome == "complete":
-        assert len(group.train_calls) == 1
-        assert len(manager.calls) == 1
-        if max_staleness > 0:
-            assert result.metrics["staleness/samples_fresh"] == int(lag == 0)
-            assert result.metrics["staleness/samples_admitted_stale"] == int(lag > 0)
-    else:
-        assert not group.train_calls
-        assert not manager.calls
-        if max_staleness > 0:
-            assert result.metrics["staleness/drop_reason"] == "policy_lag_exceeded"
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize("loss_family", ["openclawrl", "sao", "tttd"])
-def test_bridge_admits_bounded_lag_for_every_cookbook_loss_family(tmp_path, loss_family) -> None:
+def test_bridge_trains_every_cookbook_loss_family_from_an_older_producing_version(tmp_path, loss_family) -> None:
     actor, group, manager, payload = _loss_family_durable_actor(tmp_path, loss_family)
 
     result = _execute_and_update_weights(actor, payload)
 
     assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_fresh"] == 0
-    assert result.metrics["staleness/samples_admitted_stale"] == 1
     assert len(group.train_calls) == 1
     assert len(manager.calls) == 1
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    ("producing_version", "reason", "policy_lags"),
-    [
-        ("engine:0", "policy_lag_exceeded", [3]),
-        ("other:3", "cross_incarnation", None),
-        ("engine:4", "future_producing_runtime_load_id", [-1]),
-        ("malformed", "malformed_producing_runtime_load_id", None),
-        ("engine:01", "malformed_producing_runtime_load_id", None),
-        (None, "missing_producing_runtime_load_id", None),
-    ],
-)
-def test_bridge_drops_inadmissible_sao_producing_versions_without_consuming_rollout(
-    tmp_path,
-    producing_version,
-    reason,
-    policy_lags,
-) -> None:
-    actor, group, manager, payload = _sao_durable_actor(
-        tmp_path,
-        producing_versions=(producing_version,),
-    )
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == "stale"
-    assert result.metrics["staleness/samples_dropped"] == 1
-    assert result.metrics["staleness/drop_reason"] == reason
-    assert result.metrics.get("staleness/drop_policy_lags") == policy_lags
-    assert result.metrics["staleness/source_agent_record_ids"] == ["source-0"]
-    assert actor.start_rollout_id() == 0
-    assert not group.train_calls
-    assert not group.save_calls
-    assert not manager.calls
-
-
-@pytest.mark.unit
-def test_bridge_classifies_each_sao_sample_in_a_mixed_version_batch(tmp_path) -> None:
+def test_bridge_keeps_each_sao_samples_producing_version_in_a_mixed_version_batch(tmp_path) -> None:
     actor, _, manager, payload = _sao_durable_actor(
         tmp_path,
         producing_versions=("engine:3", "engine:1"),
@@ -1063,25 +931,7 @@ def test_bridge_classifies_each_sao_sample_in_a_mixed_version_batch(tmp_path) ->
     result = _execute_and_update_weights(actor, payload)
 
     assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_fresh"] == 1
-    assert result.metrics["staleness/samples_admitted_stale"] == 1
     assert manager.calls[0]["producing_runtime_load_ids"] == ["engine:3", "engine:1"]
-
-
-@pytest.mark.unit
-def test_bridge_drops_heterogeneous_samples_in_exact_mode(tmp_path) -> None:
-    actor, group, manager, payload = _sao_durable_actor(
-        tmp_path,
-        producing_versions=("engine:3", "engine:2"),
-        max_staleness=0,
-    )
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == "stale"
-    assert result.metrics["staleness/drop_reason"] == "policy_lag_exceeded"
-    assert not group.train_calls
-    assert not manager.calls
 
 
 @pytest.mark.unit
@@ -1097,64 +947,14 @@ def test_sao_row_runtime_load_id_must_match_the_shared_training_payload(tmp_path
 
 
 @pytest.mark.unit
-def test_bridge_accepts_the_initial_sao_weight_token(tmp_path) -> None:
-    actor, _, _, payload = _sao_durable_actor(
-        tmp_path,
-        producing_versions=("engine:0",),
-        serving_version="engine:0",
-    )
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_fresh"] == 1
-    assert result.metrics["staleness/samples_admitted_stale"] == 0
-
-
-@pytest.mark.unit
-def test_enabled_sao_job_replays_after_fence_and_window_changes(tmp_path) -> None:
+def test_a_sao_job_replays_after_its_parent_version_changes(tmp_path) -> None:
     actor, group, _, payload = _sao_durable_actor(tmp_path)
 
     first = _execute_and_update_weights(actor, payload)
-    replayed = _execute_and_update_weights(
-        actor,
-        {
-            **payload,
-            "expected_runtime_load_id": "engine:4",
-            "max_staleness": 1,
-        },
-    )
+    replayed = _execute_and_update_weights(actor, {**payload, "parent_runtime_load_id": "engine:4"})
 
     assert replayed == first
-    assert replayed.metrics["staleness/samples_admitted_stale"] == 1
     assert len(group.train_calls) == 1
-
-
-@pytest.mark.unit
-def test_enabled_sao_execution_fence_still_rejects_fresh_job(tmp_path) -> None:
-    actor, group, _, payload = _sao_durable_actor(tmp_path)
-
-    result = _execute_and_update_weights(actor, {**payload, "expected_runtime_load_id": "engine:2"})
-
-    assert result.outcome == "stale"
-    assert result.metrics["staleness/drop_reason"] == "execution_fence_mismatch"
-    assert result.metrics["staleness/samples_dropped"] == 1
-    assert not group.train_calls
-
-
-@pytest.mark.unit
-def test_enabled_sao_window_refuses_uncanonical_serving_version_without_dropping(tmp_path) -> None:
-    actor, group, _, payload = _sao_durable_actor(
-        tmp_path,
-        producing_versions=("engine:1",),
-        serving_version="v1",
-    )
-
-    with pytest.raises(RuntimeError, match="cannot classify staleness"):
-        _execute_and_update_weights(actor, payload)
-
-    assert actor.start_rollout_id() == 0
-    assert not group.train_calls
 
 
 @pytest.mark.unit
@@ -1199,7 +999,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
         source_megatron=str(source_megatron),
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1", parent_release_id="parent-0")
 
     first = _execute_and_update_weights(actor, payload)
     assert first.training_job_id is not None
@@ -1253,7 +1053,7 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
     write_marker(tmp_path / ".reef-latest-job.json", marker)
     group = _DurableGroup(template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1", parent_release_id="parent-0")
 
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
@@ -1406,14 +1206,12 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
         "loss": "sao",
         "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 1,
-        "expected_runtime_load_id": recovered_version,
-        "max_staleness": 2,
+        "parent_runtime_load_id": recovered_version,
         "producing_runtime_load_ids": ["checkpoint-incarnation:1"],
     }
     result = _execute_and_update_weights(actor, payload)
 
     assert result.outcome == "complete"
-    assert result.metrics["staleness/samples_admitted_stale"] == 1
 
 
 @pytest.mark.unit

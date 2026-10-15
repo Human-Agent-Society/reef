@@ -51,8 +51,7 @@ CLAUDE_REFUSED = [
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": "{model: m}"}}, id="body-render-cannot-read"),
 ]
 
-#: settings.json keys the descriptor locks: fixed names a tree must not set, so the shared render refuses them
-#: before the adapter's own route check runs.
+#: settings.json keys whose descriptor check is IsAbsent(): fixed names a tree must not set.
 CLAUDE_LOCKED = [
     pytest.param({"model": "m"}, id="settings-model"),
     pytest.param({"fallbackModel": ["m"]}, id="settings-fallback-model"),
@@ -72,7 +71,7 @@ def test_claude_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], b
 @pytest.mark.parametrize("data", CLAUDE_LOCKED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_claude_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
-    with pytest.raises(RenderError, match="the descriptor locks it"):
+    with pytest.raises(RenderError, match=r"on \w+ in claude/settings\.json: Reef's model binding"):
         render("claude", [config(data)], bound=bound, api="anthropic")
 
 
@@ -183,8 +182,8 @@ def test_hermes_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], b
         render("hermes", [config(data)], bound=bound)
 
 
-#: Top-level keys the descriptor locks: hermes moves them into ``model``, and a tree must not set them at all,
-#: so the shared render refuses them before the adapter's own route check runs.
+#: Top-level keys whose descriptor check is IsAbsent(): hermes moves them into ``model``, and a tree must not set
+#: them at all.
 HERMES_LOCKED = [
     pytest.param({"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}}, id="fallback-model"),
     pytest.param({"fallback_providers": [{"provider": "openrouter", "model": "m"}]}, id="fallback-providers"),
@@ -201,7 +200,7 @@ HERMES_LOCKED = [
 @pytest.mark.parametrize("data", HERMES_LOCKED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_hermes_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
-    with pytest.raises(RenderError, match="the descriptor locks it"):
+    with pytest.raises(RenderError, match=r"on \w+ in hermes/config\.yaml: Reef's model binding"):
         render("hermes", [config(data)], bound=bound)
 
 
@@ -225,7 +224,7 @@ HERMES_API_MODES = [
 @pytest.mark.parametrize("api_mode", HERMES_API_MODES)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_hermes_refuses_an_api_mode_the_binding_does_not_set(api_mode: str, bound: bool) -> None:
-    with pytest.raises(RenderError, match=r"must not set model\.api_mode: Reef's model binding"):
+    with pytest.raises(RenderError, match=r"on model\.api_mode in hermes/config\.yaml: Reef's model binding"):
         render("hermes", [config({"model": {"api_mode": api_mode}})], bound=bound)
 
 
@@ -323,8 +322,7 @@ PI_REFUSED = [
     pytest.param(config({"defaultProvider": "evil", "defaultModel": "evil/m"}), False, id="default-model"),
 ]
 
-#: settings.json keys the descriptor locks: fixed names a tree must not set, so the shared render refuses them
-#: before the adapter's own route check runs.
+#: settings.json keys whose descriptor check is IsAbsent(): fixed names a tree must not set.
 PI_LOCKED = [
     pytest.param(config({"enabledModels": ["evil/m"]}), id="enabled-models"),
     pytest.param(config({"httpProxy": OTHER_URL}), id="proxy"),
@@ -340,7 +338,7 @@ def test_pi_refuses_a_setting_that_chooses_the_route(node: tuple[str, dict[str, 
 @pytest.mark.parametrize("node", PI_LOCKED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_pi_refuses_a_key_the_descriptor_locks(node: tuple[str, dict[str, Any]], bound: bool) -> None:
-    with pytest.raises(RenderError, match="the descriptor locks it"):
+    with pytest.raises(RenderError, match=r"on \w+ in pi-agent/settings\.json: Reef's model binding"):
         render("pi", [node], bound=bound)
 
 
@@ -381,7 +379,9 @@ def test_terminus_refuses_a_setting_that_chooses_the_route(data: dict[str, Any],
 
 
 def test_terminus_refuses_a_request_body_that_is_not_an_object() -> None:
-    with pytest.raises(RenderError, match="extra_body must be an object"):
+    with pytest.raises(
+        RenderError, match=r"on llm_call_kwargs\.extra_body in terminus/config\.json: litellm reads it as an object"
+    ):
         render("terminus", [config({"llm_call_kwargs": {"extra_body": '{"model": "m"}'}})], bound=True)
 
 
@@ -403,11 +403,11 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
             "Reef's model binding",
         ),
         ("claude", {"env": {"CLAUDE_CODE_EXTRA_BODY": '{"model": "m"}'}}, "Reef's model binding"),
-        ("claude", {"fallbackModel": ["m"]}, "the descriptor locks it"),
+        ("claude", {"fallbackModel": ["m"]}, "Reef's model binding"),
         (
             "hermes",
             {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}},
-            "the descriptor locks it",
+            "Reef's model binding",
         ),
         (
             "hermes",
@@ -417,7 +417,7 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
         ("hermes", {"delegation": {"request_overrides": {"model": "m"}}}, "Reef's model binding"),
         ("hermes", {"model": {"api_mode": "bedrock_converse"}}, "Reef's model binding"),
         ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}, "Reef's model binding"),
-        ("pi", {"enabledModels": ["evil/m"]}, "the descriptor locks it"),
+        ("pi", {"enabledModels": ["evil/m"]}, "Reef's model binding"),
         ("terminus", {"llm_call_kwargs": {"base_url": OTHER_URL}}, "Reef's model binding"),
         ("terminus", {"llm_call_kwargs": {"extra_body": {"model": "m"}}}, "Reef's model binding"),
     ],

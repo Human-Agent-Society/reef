@@ -413,11 +413,11 @@ class WeightTrainingRecipe(Recipe):
     and obtains its loss family from this hook; deployments do not repeat that
     binding in an environment variable.
 
-    ``max_staleness`` is the shared stale-sample admission window. Zero keeps
-    exact-version training; a positive value admits same-incarnation samples
-    up to that lag before the existing training path runs. The default
-    :meth:`build` also gives it to the pipeline as
-    ``PipelineContext.max_staleness``.
+    ``max_staleness`` is the number of versions that a sample can lag behind
+    the version that the scenario serves and still train. Zero keeps
+    exact-version training. The default :meth:`build` gives the value to the
+    pipeline as ``PipelineContext.max_staleness``. The record-to-record stage
+    drops the data that lags more.
 
     ``candidate_evaluation`` is framework-owned configuration derived from an
     optional top-level ``evaluation`` section. The plugin class it names builds one
@@ -469,12 +469,6 @@ class WeightTrainingRecipe(Recipe):
         self.resolve_training_runtime(self.training_runtime)
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
-        runtime_max_staleness = self.training_runtime.max_staleness
-        if runtime_max_staleness != self.max_staleness:
-            raise ValueError(
-                "max_staleness must match the training runtime; "
-                f"recipe={self.max_staleness}, runtime={runtime_max_staleness}"
-            )
 
     def build_surface(self, scenario: str) -> Surface:
         if self.training_runtime.concurrent_training_scenarios:

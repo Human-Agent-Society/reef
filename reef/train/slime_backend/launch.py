@@ -235,9 +235,7 @@ class SlimeDeployment(TrainingDeployment):
 
         return create_training_plan(config, loss_family=loss_family)
 
-    def runtime_config(
-        self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None
-    ) -> dict[str, Any]:
+    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
         ray_address = settings["ray_address"]
         if not isinstance(ray_address, str) or not ray_address.strip():
             raise ValueError("reef.ray_address is required")
@@ -256,8 +254,6 @@ class SlimeDeployment(TrainingDeployment):
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
         }
-        if max_staleness:
-            runtime_config["max_staleness"] = max_staleness
         inference_handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if inference_handler_factory is not None:
             runtime_config["inference_handler_factory"] = inference_handler_factory

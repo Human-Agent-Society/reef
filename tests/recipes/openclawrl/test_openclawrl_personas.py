@@ -144,7 +144,7 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
 
     worker = _FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
         record2record=stage,
@@ -152,6 +152,8 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
         task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=3), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
+    processor.observe_serving_runtime_load_id("v1")
+    processor.observe_serving_runtime_load_id("v2")
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
     batch = processor.build_batch()
@@ -167,7 +169,7 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
 
     worker = _FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
         record2record=stage,

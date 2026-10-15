@@ -193,9 +193,7 @@ class TrainingDeployment(ABC):
         """
 
     @abstractmethod
-    def runtime_config(
-        self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None
-    ) -> dict[str, Any]:
+    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
         """Describe the runtime for RuntimeRegistry, without constructing it."""
 
     def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
@@ -239,21 +237,17 @@ class InProcessTrainingDeployment(TrainingDeployment):
         if factory is None:
             raise DeployConfigError(f"unknown training runtime type {self.runtime_type!r}")
         # Use the runtime's schema for both CLI and YAML options, without a model.
-        factory.parse_config(
-            self.runtime_config(settings, max_staleness=config["reef"].get("max_staleness", 0)), os.environ
-        )
+        factory.parse_config(self.runtime_config(settings), os.environ)
         return ()
 
-    def runtime_config(
-        self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None
-    ) -> dict[str, Any]:
+    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
         if connector is not None:
             raise ValueError("in-process training does not accept a remote connector")
         options = {
             key.replace("-", "_"): value
             for key, value in normalize_native_options(settings["training_backend_options"]).items()
         }
-        managed = {"type", "model_path", "inference_timeout_s", "train_timeout_s", "max_staleness", "connect"}
+        managed = {"type", "model_path", "inference_timeout_s", "train_timeout_s", "connect"}
         if managed & options.keys():
             raise DeployConfigError("training.options cannot override managed runtime fields")
         return {
@@ -261,5 +255,4 @@ class InProcessTrainingDeployment(TrainingDeployment):
             "type": self.runtime_type,
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
-            "max_staleness": max_staleness,
         }

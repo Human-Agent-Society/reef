@@ -216,11 +216,34 @@ def test_invalid_provider_inputs_fail_before_downloads_or_processes(tmp_path, mo
 @pytest.mark.parametrize("host,probe_host", [("0.0.0.0", "127.0.0.1"), ("::", "[::1]"), ("::1", "[::1]")])
 def test_provider_probe_uses_a_reachable_bind_address(host, probe_host):
     config = {
-        "reef": {"recipe": "recipe", "host": host, "upstream_url": "http://localhost:8000", "upstream_model": "demo"}
+        "reef": {
+            "recipe": "recipe",
+            "host": host,
+            "token": "test-token",
+            "upstream_url": "http://localhost:8000",
+            "upstream_model": "demo",
+        }
     }
     assemble_provider_services(config)
     services = validate_services(config, "<command line>")
     assert services[0]["ready"][-1] == f"http://{probe_host}:8900/healthz"
+
+
+def provider_config(**reef):
+    return {"reef": {"recipe": "recipe", "upstream_url": "http://localhost:8000", "upstream_model": "demo", **reef}}
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.168.1.10", "reef.internal"])
+def test_a_service_that_other_machines_can_reach_requires_a_token(host):
+    with pytest.raises(DeployConfigError, match=r"reef\.tokens is empty"):
+        assemble_provider_services(provider_config(host=host))
+    # An explicit choice serves without authentication.
+    assemble_provider_services(provider_config(host=host, allow_unauthenticated=True))
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost"])
+def test_a_loopback_service_starts_without_a_token(host):
+    assemble_provider_services(provider_config(host=host))
 
 
 def _unused_port():

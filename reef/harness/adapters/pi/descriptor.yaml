@@ -61,14 +61,26 @@ files:
     primary:
       path: "pi-agent/settings.json"
       defaults: {}
-      # Keys no tree may set at all: they choose the models a run may use or
-      # send every call through another host, which Reef's model binding owns.
-      locked:
-        - enabledModels
-        - httpProxy
+      checks:
+        # They choose the models a run may use or send every call through
+        # another host.
+        - key: [enabledModels, httpProxy]
+          match: IsAbsent()
+          reason: Reef's model binding chooses the endpoint and the model
     models:
       path: "pi-agent/models.json"
       defaults: {}
+      # The binding writes the provider reef and selects it with
+      # defaultProvider and defaultModel in settings.json. Another provider,
+      # with its own baseUrl or pi's built in one with a new endpoint, is the
+      # tree choosing where calls go.
+      checks:
+        - key: providers
+          match: Each(Key(Eq("reef")))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+        - key: providers.reef
+          match: Each(Key(IsIn(["api", "apiKey", "baseUrl", "models"])))
+          reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
   rules: "pi-agent/AGENTS.md"
   agent_command: "pi-agent/prompts/{name}.md"
   skill: "pi-agent/skills/{name}/SKILL.md"

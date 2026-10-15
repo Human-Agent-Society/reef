@@ -381,7 +381,6 @@ class OpenClawRLRecord2Record(JudgingRecord2Record):
 
     def __init__(
         self,
-        context: PipelineContext,
         settings: OpenClawRLJudgingSettings,
         *,
         environ: Mapping[str, str] = MappingProxyType({}),
@@ -394,8 +393,8 @@ class OpenClawRLRecord2Record(JudgingRecord2Record):
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
             )
-        super().__init__(context, self.openclawrl_judging, worker)
+        super().__init__(self.openclawrl_judging, worker)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(context, OpenClawRLJudgingSettings.parse(config, plugin_class=cls), environ=environ)
+        return cls(OpenClawRLJudgingSettings.parse(config, plugin_class=cls), environ=environ)

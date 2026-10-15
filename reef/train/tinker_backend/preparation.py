@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, replace
 from typing import Any
 
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch, trajectories
 from reef.runtime.interfaces import (
     LearningRateSchedule,
@@ -35,9 +34,8 @@ def prepare_tinker_step(
     The job trains ``method``'s objective with that objective's Tinker loss,
     which must be registered in this process and accept ``kl_coef``; the
     payload records the method.
-    With ``runtime_load_id`` the payload also records that serving version
-    and whether any trajectory was produced under another one; without it,
-    Reef's coordinator performs staleness admission from the batch itself.
+    With ``runtime_load_id`` the payload also records the version that the
+    job trains from. The record-to-record stage already dropped stale samples.
     """
     objective = resolve_objective(method.objective)
     objective.validate_scheduling(scheduling)
@@ -49,19 +47,9 @@ def prepare_tinker_step(
     if signal.advantages is None or len(signal.advantages) != len(items):
         raise ValueError("Tinker policy training requires one advantage per trajectory")
     rows = []
-    stale = False
     groups: dict[str, int] = {}
     rollout_ids = []
     for index, (item, advantage) in enumerate(zip(items, signal.advantages, strict=True)):
-        training = item.training
-        if runtime_load_id is not None:
-            if training.get("runtime_load_id") != runtime_load_id:
-                stale = True
-            spans = training.get("runtime_load_spans")
-            if spans:
-                parsed_spans = parse_runtime_load_spans(spans, response_length=len(training.get("loss_mask", ())))
-                if any(span.runtime_load_id != runtime_load_id for span in parsed_spans):
-                    stale = True
         rows.append(asdict(TokenRow.from_item(item, advantage)))
         key = f"group:{item.group_id}" if item.group_id is not None else f"row:{index}"
         rollout_ids.append(index if scheduling.unit == "sample" else groups.setdefault(key, len(groups)))
@@ -91,7 +79,7 @@ def prepare_tinker_step(
             "loss": objective.loss_family,
             "method": method.to_dict(),
             "batches": batches,
-            **({"source_runtime_load_id": runtime_load_id, "stale": stale} if runtime_load_id is not None else {}),
+            **({"source_runtime_load_id": runtime_load_id} if runtime_load_id is not None else {}),
         },
     )
 

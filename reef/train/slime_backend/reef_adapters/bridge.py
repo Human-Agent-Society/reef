@@ -40,8 +40,6 @@ from reef.runtime.interfaces import (
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts, read_json, write_json
-from reef.runtime.scheduler import _producing_runtime_load_ids
-from reef.runtime.scheduler import max_staleness as _max_staleness
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -247,7 +245,6 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         scenario = self._job_scenario(payload)
         # The checkpoint index is the bridge's own sequence, not the scenario step.
         rollout_id = self._next_rollout_id
-        max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
@@ -262,13 +259,6 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             from reef.train.slime_backend.score_centering.heads import attach_sampler_heads
 
             attach_sampler_heads(rollout_data, payload, self._score_centering)
-        rollout_versions = rollout_data.get("producing_runtime_load_ids")
-        if (
-            max_staleness > 0
-            and rollout_versions is not None
-            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
-        ):
-            raise ValueError("loss-family row producing versions do not match the shared training payload")
         algorithm.validate_payload(rollout_data)
         optimizer_steps = 0
         if schedule_state is not None:

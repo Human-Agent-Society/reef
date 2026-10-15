@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 import sys
@@ -266,7 +267,8 @@ def local_service_url(settings: ServiceConfig) -> str:
 
 
 def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
-    """Build the standard local HTTP child and its readiness probe."""
+    """Build the standard local HTTP child and its readiness probe. Check authentication first."""
+    require_authentication(settings)
     endpoint = local_service_url(settings)
     python = os.environ.get("REEF_PYTHON", sys.executable)
     return {
@@ -277,6 +279,26 @@ def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str
         "ready": http_readiness_command(python, f"{endpoint}/healthz"),
         "ready_timeout": config.get("ready_timeout", 30),
     }
+
+
+def require_authentication(settings: ServiceConfig) -> None:
+    """Refuse to serve without bearer tokens on an address that other machines can reach."""
+    if settings.tokens or settings.allow_unauthenticated or is_loopback_host(settings.host):
+        return
+    raise DeployConfigError(
+        f"reef.host {settings.host!r} accepts connections from other machines, but reef.tokens is empty. "
+        "Set reef.tokens, bind reef.host to 127.0.0.1, or set reef.allow-unauthenticated to true."
+    )
+
+
+def is_loopback_host(host: str) -> bool:
+    """Return True when only this machine can connect to host."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def is_local_path(value: str) -> bool:
