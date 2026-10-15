@@ -133,8 +133,6 @@ class ScenarioCommitter:
             if not store.durable
             else store.history()
         )
-        #: The sibling record the running commit settled before its own, for the caller's event of that step.
-        self.settled_sibling: CommitRecord | None = None
         self._latest_training_record = next(
             (record for record in reversed(records) if record.operation == "training"),
             None,
@@ -597,7 +595,6 @@ class ScenarioCommitter:
             with self._publication_lock:
                 bound = self.bound_trainer(component)
                 trainer, component = bound.trainer, bound.component
-                self.settled_sibling = None
                 self.settle_sibling_record(component)
                 if trainer.result_on_record(result):
                     # A sibling's commit settled this trainer's durable record after the caller read the result.
@@ -991,8 +988,7 @@ class ScenarioCommitter:
             prepared = bound.trainer.pending_prepared_commit
             if prepared is None or not self._record_matches_prepared(record, prepared):
                 return
-            record = self.finish_recorded_retry(record, prepared, bound.trainer)
-            self.settled_sibling = record
+            self.finish_recorded_retry(record, prepared, bound.trainer)
             return
 
     def _recorded_training_retry(

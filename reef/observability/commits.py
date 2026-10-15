@@ -103,7 +103,7 @@ class CommitExperimentObserver(RecordObserver):
         self.durable = store.durable
         self.store: ScenarioStore = ObservedScenarioStore(store, self)
         self.prepared: PreparedExperiment | None = None
-        self.delivery_lock = RLock()
+        self.reporting_lock = RLock()
         self.delivery = delivery if delivery is not None else ExperimentReportDelivery(tracker)
         self.report_ready: Event | None = None
 
@@ -115,7 +115,7 @@ class CommitExperimentObserver(RecordObserver):
         locks. A factory is already under the registry lock, so loading only
         enqueues; the registry's outer scope flushes after all loads finish.
         """
-        with self.delivery_lock:
+        with self.reporting_lock:
             if self.report_ready is not None:
                 yield
                 return

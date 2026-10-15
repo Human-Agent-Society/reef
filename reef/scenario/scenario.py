@@ -333,11 +333,6 @@ class Scenario:
         """
         return self._committer.commit(result, component=component)
 
-    @property
-    def settled_sibling_record(self) -> CommitRecord | None:
-        """The sibling record the last commit settled before its own: that step is the sibling's."""
-        return self._committer.settled_sibling
-
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
         return self._committer.publish_shipped_content()
