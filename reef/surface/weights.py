@@ -166,7 +166,7 @@ class WeightLoader(ArtifactActivator, RecoveryRestorer):
         recorded = artifact_runtime_load_id(artifact)
         if recorded is None:
             return None
-        served = self._served_version(runtime)
+        served = self.engine_runtime_load_id(runtime)
         if served == recorded:
             return None
         runtime_load_id = runtime.restore_recovered_checkpoint(artifact)
