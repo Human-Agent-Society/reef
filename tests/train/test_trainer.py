@@ -333,14 +333,34 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
 
 
 @pytest.mark.unit
-def test_pairing_processor_raises_for_forked_multi_turn_episode() -> None:
+def test_a_forked_multi_turn_episode_skips_its_set_and_keeps_the_trainer_running() -> None:
+    # The second call's prompt does not extend the first call's transcript — a
+    # context compaction rebuilt it from a summary (#825). The set settles as
+    # skipped with its reason logged; the pipeline stays alive for the rest.
     processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
     processor.ingest(training_inference("i1", [1, 2, 3], [1], [-0.1]))
     processor.ingest(training_inference("i2", [1, 9, 3, 4], [1], [-0.2]))
-    with pytest.raises(ValueError, match="cannot assemble"):
-        processor.ingest(report("r1", ("i1", "i2"), 1.0))
+    processor.ingest(report("r1", ("i1", "i2"), 1.0))
     assert not processor.ready()
-    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
+    assert processor.unassemblable_sets == 1
+    assert processor.operational_metrics()["unassemblable_sets"] == 1
+    assert processor.tasks == {}
+    assert {"i1", "i2", "r1"} <= processor.releasable_record_ids()
+
+
+@pytest.mark.unit
+def test_a_compacted_episode_skips_and_later_reports_still_train() -> None:
+    processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
+    processor.ingest(training_inference("g1", [1, 2, 3], [1], [-0.1]))
+    processor.ingest(report("good", ("g1",), 1.0))
+    processor.ingest(training_inference("c1", [1, 2, 3], [1], [-0.1]))
+    processor.ingest(training_inference("c2", [9, 9, 9], [1], [-0.2]))
+    processor.ingest(report("compact", ("c1", "c2"), 0.5))
+    assert processor.ready()
+    batch = processor.build_batch()
+    assert [sample.metadata["reward"] for sample in batch.items] == [1.0]
+    assert "compact" not in processor.tasks
+    assert processor.unassemblable_sets == 1
 
 
 @pytest.mark.unit

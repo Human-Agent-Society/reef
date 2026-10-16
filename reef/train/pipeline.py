@@ -23,6 +23,7 @@ and runs the training modes and the training instructions.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field, replace
@@ -36,9 +37,12 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import PassThroughRecord2Record, Record2Record, TaskStatus
 from reef.record2record.staleness import producing_runtime_load_ids
-from reef.record2task import NoTasks, Record2Task
+from reef.record2task import NoTasks, Record2Task, TaskResult
+from reef.record2task.assembly import SampleAssemblyError
 from reef.task2batch import NoBatches, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch
+
+logger = logging.getLogger(__name__)
 
 
 #: In manual mode the pipeline holds at most this many batches of sets; it releases older ones.
@@ -186,6 +190,9 @@ class TrainingPipeline:
         self.batch_number = 0
         #: Tasks by the ID of the record set that made them, until the set trains or ends.
         self.tasks: dict[Hashable, tuple[TrainDataItem, ...]] = {}
+        #: Sets whose sample assembly failed, such as an episode that a context
+        #: compaction forked. Each settles as skipped with its reason logged.
+        self.unassemblable_sets = 0
         self.set_training_mode(context.training_mode)
 
     @property
@@ -283,9 +290,25 @@ class TrainingPipeline:
             self.tasks.pop(set_id, None)
 
     def make_formed_tasks(self) -> None:
-        """Make tasks from each set that the stage formed, give each result back, and forget the sets that ended."""
+        """Make tasks from each set that the stage formed, give each result back, and forget the sets that ended.
+
+        A set whose recorded trajectory cannot assemble — the calls stop
+        extending each other, as at a context compaction — settles as skipped
+        with its reason logged, so one such episode cannot stop the trainer.
+        """
         for record_set in self.record2record.take_formed():
-            result = self.record2task.make_tasks(record_set)
+            try:
+                result = self.record2task.make_tasks(record_set)
+            except SampleAssemblyError as unassemblable:
+                self.unassemblable_sets += 1
+                logger.warning(
+                    "scenario %r skips record set %s (records %s): %s",
+                    self.scenario,
+                    record_set.set_id,
+                    ", ".join(record_set.record_ids()),
+                    unassemblable,
+                )
+                result = TaskResult.skipped()
             if result.status is TaskStatus.READY:
                 self.tasks[record_set.set_id] = result.tasks
             self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
@@ -404,6 +427,7 @@ class TrainingPipeline:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
         return {
             "buffered_requests": self.buffered_requests(),
+            "unassemblable_sets": self.unassemblable_sets,
             **self.record2record.operational_metrics(),
             **self.record2task.operational_metrics(),
         }

@@ -61,6 +61,17 @@ class SampleAssemblySettings(PluginSettings):
             raise ValueError("scaffold_tolerance must be non-negative")
 
 
+class SampleAssemblyError(ValueError):
+    """A recorded trajectory that cannot assemble into training data.
+
+    Raised where an episode's calls stop extending each other — a genuine
+    fork, such as the re-rendered prompt a harness sends at a context
+    compaction — so no linear sample covers them. A data property of the
+    episode, not a broken training contract: the training pipeline settles
+    the set as skipped and keeps training the rest.
+    """
+
+
 class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
 
@@ -93,7 +104,7 @@ class SampleAssembly:
                 scaffold_tolerance=self.settings.scaffold_tolerance,
             )
         if sample is None:
-            raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
+            raise SampleAssemblyError("training data cannot assemble the recorded multi-turn trajectory")
         if sample.training.get("turn_count", 1) > 1 and not self.settings.accept_multi_turn_policy_samples:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
         fields: dict[str, Any] = {
