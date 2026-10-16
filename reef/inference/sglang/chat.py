@@ -13,18 +13,20 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
+from reef.core.chat_protocol import (
+    ChatStreamRelay,
+    ReasoningStreamSplitter,
+    normalize_finish_reason,
+    positive_max_tokens,
+    stream_ids,
+)
 from reef.inference.chat import (
     CapturedGeneration,
     ChatCall,
-    ChatStreamRelay,
     NativeGenerateClient,
-    ReasoningStreamSplitter,
     TokenNativeChatHandler,
     finite_log_prob,
-    normalize_finish_reason,
-    positive_max_tokens,
     sse_json_events,
-    stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import InferenceStream

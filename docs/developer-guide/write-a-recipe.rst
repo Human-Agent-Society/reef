@@ -180,8 +180,9 @@ configured learning rate. To train several phases in one run, override
 - The backend resolves the objective in its own process. Use a dotted
   reference for an objective from another package.
 - The backend refuses a method that it cannot train before the job starts.
-  `Per-job families <loss-families.rst#per-job-families>`__ and `Train with
-  Tinker <../user-guide/tinker.rst>`__ list what each backend supports.
+  `Per-job families <loss-families.rst#per-job-families>`__, `Train with
+  Tinker <../user-guide/tinker.rst>`__ and `Train on Apple Silicon with MLX
+  <../user-guide/mlx.rst>`__ list what each backend supports.
 
 A ``LearningRateSchedule`` counts optimizer steps. A job that selects the
 active schedule continues it, also on a retry or after a restart. A job that
@@ -335,11 +336,15 @@ connections live in the integration's ``runtime.py``: for example,
 generic coordinator clients in ``reef.train.runtime`` and ``reef.inference.runtime``;
 adding another backend must not require importing Slime or SGLang.
 
-For a native trainer such as Slime or MLX, the backend integration interface is
-``TrainingBackend`` in ``reef/runtime/interfaces.py``. It exposes
-batch preparation, training, checkpoints and separate weight preparation/sending.
-Slime implements it with ``SlimeTrainingBackend`` in
-``reef/train/slime_backend/reef_adapters/bridge.py``. This is distinct from
+For a native trainer that runs behind Reef's training coordinator, such as
+Slime, the backend integration interface is ``TrainingBackend`` in
+``reef/runtime/interfaces.py``. It exposes batch preparation, training,
+checkpoints and separate weight preparation/sending. Slime implements it with
+``SlimeTrainingBackend`` in ``reef/train/slime_backend/reef_adapters/bridge.py``.
+An in-process trainer can implement ``TrainingRuntime`` and ``InferenceRuntime``
+directly instead. MLX does this with ``MLXRuntime`` in
+``reef/train/mlx_backend/runtime.py`` and ``MLXServingRuntime`` in
+``reef/train/mlx_backend/serving.py``; it has no ``TrainingBackend``. This is distinct from
 ``CandidateBackend`` in ``reef/train/backend.py``: that recipe-facing interface
 prepares, evaluates and settles candidates, including harness updates that need
 no model trainer. ``RuntimeCandidateBackend`` connects that recipe interface to

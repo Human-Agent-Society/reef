@@ -18,6 +18,8 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     RepositoryBackendContext,
 )
+from reef.artifact.artifact import ArtifactMaterializationError
+from reef.artifact.git_lfs import materialized_metadata
 from reef.core.plugins import PluginConfigError
 
 
@@ -628,3 +630,16 @@ def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path,
     (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
     with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
         backend.publish(Artifact.local(source), expected_parent=head)
+
+
+def test_materialized_metadata_reads_the_release_metadata_from_the_manifest(tmp_path: Path) -> None:
+    (tmp_path / "reef-artifact.json").write_text(
+        json.dumps({"content_id": "c", "metadata": {"runtime_load_id": "mlx-1-40"}})
+    )
+    assert materialized_metadata(tmp_path) == {"runtime_load_id": "mlx-1-40"}
+    # A bootstrap tree has no manifest and records nothing.
+    assert materialized_metadata(tmp_path / "bootstrap") == {}
+    # An unreadable manifest is an error, not an unknown version.
+    (tmp_path / "reef-artifact.json").write_text("{not json")
+    with pytest.raises(ArtifactMaterializationError, match="invalid artifact manifest"):
+        materialized_metadata(tmp_path)

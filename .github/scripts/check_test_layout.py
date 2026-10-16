@@ -15,6 +15,7 @@ TEST_DIRECTORIES = {
     "evaluation",
     "harness",
     "inference",
+    "mlx_backend",
     "observability",
     "packaging",
     "plugin_contracts",

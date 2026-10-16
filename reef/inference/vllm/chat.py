@@ -11,18 +11,16 @@ carry no ``kv_transfer_params``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
+from reef.core.chat_protocol import ParsedToolCall, normalize_finish_reason, positive_max_tokens
 from reef.inference.chat import (
     CapturedGeneration,
     NativeGenerateClient,
     TokenNativeChatHandler,
     finite_log_prob,
     integer_tokens,
-    normalize_finish_reason,
-    positive_max_tokens,
 )
 from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
 
@@ -212,14 +210,6 @@ class VLLMGenerateClient(NativeGenerateClient):
         parser = ToolParserManager.get_tool_parser(parser_name)(tokenizer)
         request = ChatCompletionRequest(model="reef", messages=[{"role": "user", "content": ""}], tools=tools)
         return VLLMToolCallParser(parser, request)
-
-
-@dataclass(frozen=True)
-class ParsedToolCall:
-    """One tool call in the shape the chat facade reads: a name and its JSON argument text."""
-
-    name: str
-    parameters: str
 
 
 class VLLMToolCallParser:

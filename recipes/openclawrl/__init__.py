@@ -14,6 +14,8 @@
 - ``slime`` — the Slime loss family, its torch objective, and the frozen
   Megatron teacher. Imported by the training driver and workers only; this
   package's public surface never loads it.
+- ``mlx`` — the same objective on the MLX backend, imported only when that
+  backend resolves the family.
 """
 
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
@@ -23,6 +25,7 @@ from recipes.openclawrl.recipe import OpenClawRLRecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("openclawrl", "recipes.openclawrl.slime:OpenclawrlAlgorithm")
+register_loss_family_ref("openclawrl", "recipes.openclawrl.mlx:OpenClawRLMLXLoss", backend="mlx")
 
 __all__ = [
     "OpenClawRLBatchSettings",

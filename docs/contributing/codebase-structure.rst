@@ -221,7 +221,10 @@ model operations, checkpoint and tensor I/O.
 over a token-native generate route: it renders the prompt, builds the training
 record from a ``CapturedGeneration`` and streams protocol frames. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the control classes that SGLang and vLLM
+and builds its tool-call parser. ``core/chat_protocol.py`` holds the protocol
+helpers that this facade and the in-process MLX backend share: the
+assistant-message split, the streamed reasoning split and the SSE frame
+writers. ``inference/engine_control.py`` holds the control classes that SGLang and vLLM
 share: the coordinator backend, the inference service, the control actor and its
 default serving executor. ``inference/sglang/`` owns SGLang engine launch,
 capture and control independently of training; ``inference/vllm/`` owns vLLM capture,

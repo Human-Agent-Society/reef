@@ -17,7 +17,7 @@ and the model is updated while the agent stays in service.
 +-------------+------------------------------------------------------------+
 | Pipeline    | computed feedback                                          |
 +-------------+------------------------------------------------------------+
-| Needs       | GPUs, plus a second served model for the PRM judge         |
+| Needs       | GPUs or one Apple Silicon Mac, plus a separate PRM judge   |
 +-------------+------------------------------------------------------------+
 | Example     | ``recipes/openclawrl/examples/openclawrl/``                |
 +-------------+------------------------------------------------------------+
@@ -107,8 +107,11 @@ file. The record-to-task stage takes no config.
 
    pipeline.record2record.config.session_ttl_s | 900.0 | idle time in seconds before a session expires
    pipeline.record2record.config.max_open_sessions | 4096 | ceiling on live sessions; the least recently active are evicted above it
-   pipeline.record2record.config.prm_url | "" | the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
-   pipeline.record2record.config.prm_tokenizer_path | "" | the PRM's tokenizer. Required when ``prm_url`` is set.
+   pipeline.record2record.config.prm_api | sglang | how Reef calls the judge: ``sglang`` posts to a served PRM's native ``/generate``; ``openai`` posts chat messages to an OpenAI-compatible ``/chat/completions``
+   pipeline.record2record.config.prm_url | "" | the judge endpoint: the server base URL for ``sglang``, the full ``/chat/completions`` URL for ``openai``. Empty is correlate-only mode: nothing is judged and nothing trains.
+   pipeline.record2record.config.prm_tokenizer_path | "" | the PRM's tokenizer, used by the teacher, the response renderer and an ``sglang`` judge. Required when ``prm_url`` is set.
+   pipeline.record2record.config.prm_model | "" | the provider model name. Required when ``prm_api`` is ``openai``.
+   pipeline.record2record.config.prm_api_key_env | "" | the name of the environment variable that holds the provider credential. Only for ``prm_api: openai``.
    pipeline.record2record.config.prm_m | 3 | judge votes per turn
    pipeline.record2record.config.prm_temperature | 0.6 | judge sampling temperature
    pipeline.record2record.config.prm_max_tokens | 8192 | judge generation budget
@@ -118,6 +121,12 @@ file. The record-to-task stage takes no config.
    pipeline.task2batch.config.batch_size | 16 | judged turns per training step. Must equal the driver's ``--global-batch-size``.
    pipeline.task2batch.config.prm_record_file | "" | judged population, one JSON line per batch; empty disables it
    recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+
+With ``prm_api: openai``, a hosted provider can be the judge, because the
+judge needs only generated text. The config holds the name of the credential
+variable, not the credential. The judging stage fails to start when the
+named variable is not set. ``prm_tokenizer_path`` is still required: the
+teacher and the response renderer use the local tokenizer.
 
 Reef checks the stage config when it loads the recipe. An unknown key or an
 invalid value stops the deployment at startup. A stage key in
@@ -159,6 +168,16 @@ student's preferences.
 ``serve.yaml`` describes, and runs the 72 sessions in order. The stack
 uses seven GPUs: four for the tensor-parallel actor, one for the rollout
 engine, one for the PRM, and one for the Qwen3-32B student model.
+
+Run on Apple Silicon
+~~~~~~~~~~~~~~~~~~~~
+
+``serve-mlx.yaml`` in the example directory runs the same stream on one
+Apple Silicon Mac. The policy serves and trains in the Reef process on MLX.
+The PRM judge and the simulated student are hosted models. Serving is slower
+than on GPUs, so raise ``OPENCLAWRL_TURN_TIMEOUT_S`` and keep a long
+``session_ttl_s``. See `Train on Apple Silicon with MLX <../mlx.rst>`__ for
+the backend and these settings.
 
 Results
 -------

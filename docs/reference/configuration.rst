@@ -134,9 +134,9 @@ only Reef HTTP and constructs its registered training runtime inside that
 process. ``training.options`` is parsed by that runtime factory, with CLI leaf
 overrides taking precedence over YAML. Runtime type, model and shared timeout
 settings cannot be overridden inside the options map. Such integrations reject
-Ray, training/rollout executor and standalone inference-engine settings. MLX
-support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/325>`__;
-this extension contract alone does not install or implement MLX.
+Ray, training/rollout executor and standalone inference-engine settings. The
+built-in ``mlx`` backend uses this contract to serve and train a LoRA adapter
+on Apple Silicon; see `Train on Apple Silicon with MLX <../user-guide/mlx.rst>`__.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
 
@@ -1030,7 +1030,7 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
+   training.backend | slime | built-in (slime, tinker or mlx), installed entry-point name, or dotted TrainingDeployment class
    training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
