@@ -187,10 +187,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # example's ``run.sh`` normally supplies these before invoking ``reef serve``;
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
-    "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
+    "OPD_MODEL_PATH": "/root/models/Qwen3-8B-Base-SFT",
     "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
-    "OPD_ADAPTER_PATH": "/root/models/Qwen3.5-9B-SFT-adapter",
-    "OPD_TEACHER_PATH": "/root/models/Qwen3.5-9B",
+    "OPD_TEACHER_PATH": "/root/models/Qwen3-32B",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
@@ -412,6 +411,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
+        "recipes/opd/examples/math/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -439,6 +439,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
+        "recipes/opd/examples/math/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }
@@ -526,7 +527,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
     # Paths are representative placeholders; tokenizer compatibility has its
     # own contract tests and is checked against real models during GPU startup.
-    with patch("reef.train.slime_backend.distill.teacher_engine.validate_teacher_tokenizer") as validate_tokenizers:
+    with patch("reef.train.slime_backend.distill.algorithm.validate_teacher_tokenizer") as validate_tokenizers:
         spec.validate_backend_args(args, recipe=recipe)
     if getattr(args, "distill_teacher_url", ""):
         validate_tokenizers.assert_called_once_with(args.hf_checkpoint, args.distill_teacher_model_path)

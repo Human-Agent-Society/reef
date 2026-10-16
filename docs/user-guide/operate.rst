@@ -248,6 +248,36 @@ An embedded deployment gives a ``ScenarioStorage`` instance to
 
 With all backends, each scenario needs one Reef writer.
 
+Choose the artifact backend
+---------------------------
+
+The artifact backend stores the releases of each scenario. The default,
+``git_lfs``, keeps them in the Git LFS repository that
+``storage.artifact-repository`` names. Git and Git LFS must be installed.
+
+To use a different store, name a subclass of
+``reef.artifact.ConfigurableRepositoryBackendFactory`` in
+``storage.artifact-backend``. Give ``package.module:ClassName``, or give the
+name and a ``config`` mapping, as for a storage plugin:
+
+.. code-block:: yaml
+
+   storage:
+     artifact-backend:
+       module: my_package.artifacts:ObjectStoreArtifactBackend
+       config:
+         bucket: reef-releases
+
+Reef calls ``from_config(config, context=...)`` to make the backend. The
+`Python artifact backend contract <../reference/python-api.rst#artifact-backends>`__
+gives the necessary behavior. With a plugin backend, Reef does not use Git LFS
+and does not need its tools. Do not set ``storage.artifact-repository``: Reef
+refuses that configuration, because the plugin reads its own config.
+
+A change from one backend to another does not move releases. Keep the old
+store readable while scenarios refer to its releases, or use a new deployment.
+With all backends, each scenario needs one Reef writer.
+
 Limit the scenarios a service holds
 -----------------------------------
 
@@ -333,6 +363,8 @@ Back up a deployment
 A backup must hold the scenario state and the artifact repository
 (``storage.artifact_repository``). Reef rebuilds ``artifact_work_dir`` and
 ``artifact_cache_dir`` from the repository, so they do not need a backup.
+With a plugin artifact backend, back up the plugin's store in place of the
+artifact repository.
 
 .. list-table::
    :header-rows: 1

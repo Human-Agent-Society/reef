@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -13,6 +13,7 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
+from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
@@ -43,6 +44,7 @@ class Scenario:
         scenario_step: int = 0,
         process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
+        experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
             ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
@@ -78,6 +80,7 @@ class Scenario:
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
+            experiment_observer=experiment_observer,
         )
 
     @property
@@ -211,14 +214,24 @@ class Scenario:
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+            return trainer.run_once(
+                self.scenario_step,
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
+            )
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
             return self.trainer_for(component).reserve_training_batch(
-                base_release_id=self.current_artifact_ref().release_id
+                base_release_id=self.current_artifact_ref().release_id,
+                serving_runtime_load_id=self.serving_runtime_load_id(),
             )
+
+    def serving_runtime_load_id(self) -> str | None:
+        """Return the runtime load ID that serves the committed release, or None when it is unknown."""
+        artifact = Artifact(self.current_artifact_ref(), self.repository)
+        return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
@@ -303,6 +316,10 @@ class Scenario:
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
 
+    def experiment_reporting(self) -> AbstractContextManager[None]:
+        """Deliver observed commits after the caller releases its coordination locks."""
+        return self._committer.experiment_reporting()
+
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)
 
@@ -316,11 +333,6 @@ class Scenario:
         already put the result on record.
         """
         return self._committer.commit(result, component=component)
-
-    @property
-    def settled_sibling_record(self) -> CommitRecord | None:
-        """The sibling record the last commit settled before its own: that step is the sibling's."""
-        return self._committer.settled_sibling
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""

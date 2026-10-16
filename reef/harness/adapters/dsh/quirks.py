@@ -28,35 +28,11 @@ counts as a mapping with no keys; frontmatter that does not parse, nests
 too deeply to read, holds any other tag, or is any other value than a
 mapping is refused at render. Every header is written so that YAML 1.2
 reads each value back with its type: a string that YAML 1.1 or 1.2 would
-read as a number, a boolean or a null is quoted.
-
-The traps a mutated patch could reopen, in either profile: the session log
-must stay plain JSONL (the reader cannot parse zstd, and a compressed
-profile refuses a sessions root that holds plain logs), and the session
-telemetry and the LLM title call stay disabled; the web profile's manifest
-keeps ``patchReload: startup``. These keys are declared locks in the
-descriptor, and the shared render refuses a composition that moves them
-before any quirks step runs; the chained reads the check here needed would
-have crashed on a section that is not an object. This step keeps the shape
-check: a patch entry must be an object.
-
-Every model call stays on Reef's model binding, in either profile. The
-binding writes the ``llm-pi-ai`` route ``reef`` and selects it in
-``agent-default-model``, and puts the route's key in ``.env``; it renders
-after the tree and wins every key it writes. The key is a credential, which
-a tree cannot hold because admission refuses an inline credential, so the
-two entries pass only beside it, and only with the keys the binding writes.
-Another route, DeepSeek's own adapter (``llm-deepseek``), the web search
-model and its endpoint, and a provider or a model set for the title call, a
-subagent, a declared agent or the compaction summary are the tree choosing
-where calls go, and are refused, as is a patch entry that names another
-package or holds a js expression in those plugins, where the check cannot
-read the value."""
+read as a number, a boolean or a null is quoted."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
 from typing import Any, ClassVar
 
 import yaml
@@ -70,8 +46,6 @@ PROFILE_PATCHES = {
     "dsh/profiles/headless/cordis.patch.yml": "./extensions/",
     "dsh/profiles/web/cordis.patch.yml": "../headless/extensions/",
 }
-#: The web profile's manifest: with dsh's default for a new web profile, live patch reload, ``dsh web`` exits at start.
-WEB_MANIFEST = "dsh/profiles/web/package.json"
 _ENV = "dsh/.env"
 _EXTENSIONS = "dsh/profiles/headless/extensions/"
 _JS = "!!js "
@@ -94,24 +68,6 @@ YAML_1_2_RESOLVERS = (
         list("-+.0123456789"),
     ),
 )
-
-#: The key Reef's binding puts in .env for its route, the entries it writes, and the keys of each.
-BINDING_KEY_ENV = "REEF_API_KEY"
-BINDING_ROUTE = "reef"
-BINDING_ROUTE_KEYS = frozenset({"api", "apiKeyEnv", "baseURL", "displayName", "models"})
-BINDING_PLUGINS = ("agent-default-model", "llm-pi-ai")
-#: Plugins whose config chooses a model call's provider, endpoint, credential or model, each with where that choice
-#: sits: a key of the config (no parent), or a key of the object, or of each object in the list, under the parent.
-MODEL_ROUTE_KEYS: dict[str, tuple[tuple[str | None, str], ...]] = {
-    "agent-loop": (("agents", "model"), ("agents", "provider")),
-    "compaction-basic": (("modelPolicies", "summarizationModel"), ("modelPolicies", "summarizationProvider")),
-    "session-title-llm": ((None, "model"), (None, "provider")),
-    "tool-subagent": (("agentOptions", "model"), ("agentOptions", "provider")),
-    "tool-subagent-fork": (("agentOptions", "model"), ("agentOptions", "provider")),
-    "web-search-deepseek": ((None, "apiKeyEnv"), (None, "baseURL"), (None, "model")),
-}
-#: DeepSeek's own adapter, whose config is its endpoint: Reef never binds it.
-UNBOUND_ADAPTERS = ("llm-deepseek",)
 
 # dsh's boot scaffolds each profile beside the rendered patch: the empty root
 # entry list, node_modules symlinks into the installation, and the module
@@ -240,70 +196,7 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
     return "---\n" + dumped + "---\n" + body
 
 
-def holds_js(value: object) -> bool:
-    if isinstance(value, str):
-        return value.startswith(_JS)
-    if isinstance(value, dict):
-        return any(holds_js(item) for item in value.values())
-    if isinstance(value, list):
-        return any(holds_js(item) for item in value)
-    return False
-
-
-def check_binding_entry(plugin: str, entry: dict[str, Any]) -> None:
-    """``llm-pi-ai`` holds only the binding's route and ``agent-default-model`` selects it."""
-    refusal = f"dsh composition must not set {plugin}: Reef's model binding writes it"
-    config = entry.get("config")
-    if set(entry) != {"config"} or not isinstance(config, dict):
-        raise RenderError(refusal)
-    if plugin == "agent-default-model":
-        if set(config) != {"model", "provider"} or config["provider"] != BINDING_ROUTE:
-            raise RenderError(refusal)
-        return
-    providers = config.get("providers")
-    if set(config) != {"providers"} or not isinstance(providers, dict) or set(providers) != {BINDING_ROUTE}:
-        raise RenderError(f"{refusal}; its only route is {BINDING_ROUTE!r}")
-    route = providers[BINDING_ROUTE]
-    if not isinstance(route, dict) or set(route) != BINDING_ROUTE_KEYS or route["apiKeyEnv"] != BINDING_KEY_ENV:
-        raise RenderError(refusal)
-
-
-def check_model_route(entries: dict[str, Any]) -> None:
-    """Refuse a model route, an endpoint, a credential or a model the binding did not write."""
-    refusal = "Reef's model binding chooses the provider, the endpoint, the credential and the model"
-    for plugin, entry in entries.items():
-        if not isinstance(entry, dict):
-            continue
-        if "name" in entry:
-            raise RenderError(f"dsh composition must not set {plugin}.name: a patch entry keeps its own package")
-        if plugin in BINDING_PLUGINS:
-            check_binding_entry(plugin, entry)
-        elif plugin in UNBOUND_ADAPTERS and set(entry) - {"disabled"}:
-            raise RenderError(f"dsh composition must not configure {plugin}: {refusal}")
-        elif plugin in MODEL_ROUTE_KEYS:
-            if holds_js(entry):
-                raise RenderError(f"dsh composition must not write {plugin} as a js expression: {refusal}")
-            config = entry.get("config")
-            if not isinstance(config, dict):
-                continue
-            for parent, key in MODEL_ROUTE_KEYS[plugin]:
-                value = config if parent is None else config.get(parent)
-                for item in value if isinstance(value, list) else [value]:
-                    if isinstance(item, dict) and key in item:
-                        where = key if parent is None else f"{parent}.{key}"
-                        raise RenderError(f"dsh composition must not set {plugin} {where}: {refusal}")
-
-
 class DshAdapterRenderer(AdapterRenderer):
-    @staticmethod
-    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        if path not in PROFILE_PATCHES and path != WEB_MANIFEST:
-            return config
-        for plugin, entry in config.items() if path in PROFILE_PATCHES else ():
-            if not isinstance(entry, dict):
-                raise RenderError(f"dsh patch entry {plugin!r} must be an object holding config, disabled, or inject")
-        return config
-
     @staticmethod
     def process_skill(path: str, text: str) -> str:
         return _with_frontmatter(path, text, False)
@@ -312,13 +205,6 @@ class DshAdapterRenderer(AdapterRenderer):
     def process_command(path: str, text: str) -> str:
         # A command is a skill in the second root that only the person invokes.
         return _with_frontmatter(path, text, True)
-
-    @staticmethod
-    def check_model_route(
-        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
-    ) -> None:
-        for patch_path in PROFILE_PATCHES:
-            check_model_route(dict(configs[patch_path]))
 
     @staticmethod
     def finalize_render(files: dict[str, str]) -> dict[str, str]:

@@ -69,4 +69,5 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            max_staleness=self.max_staleness,
         )

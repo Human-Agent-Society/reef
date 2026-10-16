@@ -95,7 +95,6 @@ tests/reef_service/test_bridge_readiness.py
 tests/reef_service/test_client_agent_record_id.py
 tests/reef_service/test_component_config_arguments.py
 tests/reef_service/test_config_layout.py
-tests/reef_service/test_connector.py
 tests/reef_service/test_console_cors.py
 tests/reef_service/test_deploy_config_validation.py
 tests/reef_service/test_deployment_startup.py

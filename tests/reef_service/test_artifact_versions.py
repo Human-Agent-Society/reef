@@ -4,84 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
+from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.artifact_versions import (
+    RecordingExperimentTracker,
+    RollbackRuntime,
+    dispatcher,
+    inference,
+    report,
+    train,
+)
+from tests.support.runtime_stubs import runtime_bindings
 
-from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.observability import ExperimentTracker, NullExperimentLogger
+from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime.interfaces import ActivatedModel, InferenceHandler, ModelCandidate, PreparedTrainingStep
+from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainStepResult
-
-
-class RollbackRuntime(StubTrainingRuntime):
-    def __init__(self, checkpoint_dir) -> None:
-        super().__init__(base_url="http://trainer")
-        self.checkpoint_dir = checkpoint_dir
-        self.trained = 0
-        self.restored: list[str] = []
-        self.restore_order = []
-        self.candidate_versions: dict[str, str] = {}
-
-    @property
-    def inference_handler(self):
-        return None
-
-    def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
-    ):
-        del batch, objective
-        return PreparedTrainingStep(
-            action="train",
-            payload={"scenario_step": scenario_step},
-            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
-            metrics={},
-        )
-
-    def train_candidate(self, payload):
-        self.trained += 1
-        version = f"w{self.trained}"
-        checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
-        checkpoint.mkdir(parents=True)
-        (checkpoint / "model.txt").write_text(version)
-        job_id = f"job-{payload['scenario_step']}"
-        self.candidate_versions[job_id] = version
-        return ModelCandidate(
-            candidate_id=job_id,
-            training_job_id=job_id,
-            checkpoint_path=str(checkpoint),
-            current_runtime_load_id=None,
-        )
-
-    def activate_candidate(self, candidate):
-        return ActivatedModel(candidate.candidate_id, self.candidate_versions[candidate.candidate_id])
-
-    def reject_candidate(self, candidate):
-        self.candidate_versions.pop(candidate.candidate_id, None)
-
-    @property
-    def supports_checkpoint_restore(self):
-        return True
-
-    def restore_checkpoint(self, artifact):
-        assert not self.inference.inference_admission_status["open"]
-        self.restore_order.append("training")
-
-    def restore_serving_checkpoint(self, artifact):
-        assert not self.inference.inference_admission_status["open"]
-        self.restore_order.append("inference")
-        version = artifact.local_path.joinpath("model.txt").read_text()
-        self.restored.append(version)
-        return f"restored:{version}"
 
 
 class BlockingBackend(InferenceHandler):
@@ -96,78 +45,6 @@ class BlockingBackend(InferenceHandler):
         self.started.set()
         await self.finish.wait()
         return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
-
-
-class RecordingExperimentTracker(ExperimentTracker):
-    def __init__(self) -> None:
-        self.events = []
-        self.rollbacks = []
-
-    def bind_scenario(self, **kwargs):
-        del kwargs
-        return NullExperimentLogger()
-
-    def correlation_metrics(self, context):
-        del context
-        return {}
-
-    def record(self, event):
-        self.events.append(event)
-
-    def record_rollback(self, event):
-        self.rollbacks.append(event)
-
-    def close(self):
-        pass
-
-
-def inference(index: int) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
-        agent_record_id=f"i{index}",
-    )
-
-
-def report(index: int) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [f"i{index}"]},
-        agent_record_id=f"r{index}",
-        references=(f"i{index}",),
-    )
-
-
-def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
-    initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
-    (initial / "model.txt").write_text("w0")
-    runtime = RollbackRuntime(tmp_path / "exported")
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    value = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(runtime),
-            batch_size=1,
-            checkpoint_strategy=EveryNVersions(checkpoint_every),
-        ),
-        backend_factory,
-        local_artifact_dir=tmp_path / "staged",
-        experiment_tracker=experiment_tracker,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-    return value, runtime, backend_factory
-
-
-def train(dispatcher: Dispatcher, index: int) -> None:
-    dispatcher.accept_record(inference(index))
-    dispatcher.accept_record(report(index))
-    for _ in range(1000):
-        if dispatcher.get_or_create_scenario("math").scenario_step >= index:
-            return
-        time.sleep(0.001)
-    raise AssertionError("async training did not commit")
 
 
 @pytest.mark.unit
@@ -206,7 +83,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
 
 @pytest.mark.unit
 def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_path, monkeypatch) -> None:
-    value, _, _ = dispatcher(tmp_path)
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     created = value.get_or_create_scenario("math").releases()[0]["release_id"]
     train(value, 1)
     scenario = value.get_or_create_scenario("math")
@@ -239,6 +117,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
     assert len(scenario.store.history()) == 2
+    assert len(tracker.rollbacks) == 1
+    assert tracker.rollbacks[0].produced_artifact_ref == recorded.artifact_ref
 
 
 @pytest.mark.unit
@@ -250,7 +130,8 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     target_version = value.list_releases("math")[-2]["release_id"]
 
     value.rollback("math", target_version)
-    train(value, 4)
+    # The engine serves the restored checkpoint under the version that the restore returned.
+    train(value, 4, "restored:w1")
     # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
     for _ in range(1000):
         if len(tracker.events) == 3:
@@ -424,6 +305,232 @@ def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_p
         value.rollback("math", created)
     assert not training.inference.inference_admission_status["open"]
     assert scenario.current_artifact_ref() == head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tracker_fails", [False, True])
+def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tracker_fails: bool
+) -> None:
+    tracker = RecordingExperimentTracker()
+
+    def correlation(context: TrainingExperimentContext) -> dict[str, str]:
+        if tracker_fails:
+            raise ConnectionError("tracker unavailable")
+        return {"experiment/run_id": f"run-{context.run_segment}"}
+
+    record_event = tracker.record
+    recorded = Event()
+
+    def record(event: TrainingExperimentEvent) -> None:
+        record_event(event)
+        recorded.set()
+        if tracker_fails:
+            raise ConnectionError("tracker unavailable")
+
+    monkeypatch.setattr(tracker, "correlation_metrics", correlation)
+    monkeypatch.setattr(tracker, "record", record)
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    try:
+        train(value, 1)
+        scenario = value.get_or_create_scenario("math")
+        assert recorded.wait(5), "commit event was not reported"
+        (event,) = tracker.events
+        (commit,) = scenario.store.history()
+        assert event.metrics == commit.metrics
+        assert event.context.backend == "RuntimeCandidateBackend"
+        assert event.context.backend_config["runtime"] == "RollbackRuntime"
+        assert event.training_job_id == "job-0"
+        assert event.produced_runtime_load_id == "w1"
+        assert event.checkpoint_path == str(runtime.checkpoint_dir / "0")
+        if tracker_fails:
+            assert "experiment/run_id" not in commit.metrics
+        else:
+            assert commit.metrics["experiment/run_id"] == "run-0"
+    finally:
+        value.close()
+
+
+@pytest.mark.unit
+def test_experiment_events_follow_settled_state_and_resumed_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    observed = []
+
+    def record(event) -> None:
+        observed.append((event.context.step, scenario.scenario_step, scenario.current_artifact_ref()))
+
+    def rollback(event) -> None:
+        observed.append((event.step, scenario.scenario_step, scenario.current_artifact_ref()))
+        observed.append(runtime.inference.inference_admission_status["open"])
+
+    monkeypatch.setattr(tracker, "record", record)
+    monkeypatch.setattr(tracker, "record_rollback", rollback)
+    try:
+        train(value, 1)
+        for _ in range(1000):
+            if observed:
+                break
+            time.sleep(0.001)
+        trained = scenario.current_artifact_ref()
+        restored = value.rollback("math", initial.release_id)
+        assert observed == [(1, 1, trained), (2, 2, restored), True]
+    finally:
+        value.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("operation", ["rollback", "promote"])
+def test_slow_rollback_tracker_does_not_block_scenario_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, runtime, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    entered, release = Event(), Event()
+    record_rollback = tracker.record_rollback
+
+    def record(event) -> None:
+        entered.set()
+        release.wait(10)
+        record_rollback(event)
+
+    try:
+        train(value, 1)
+        monkeypatch.setattr(tracker, "record_rollback", record)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            rollback = executor.submit(value.rollback, "math", initial.release_id, operation=operation)
+            try:
+                assert entered.wait(5), "rollback tracker was not called"
+                assert runtime.inference.inference_admission_status["open"]
+                lookup = executor.submit(value.get_or_create_scenario, "math")
+                assert lookup.result(timeout=2) is scenario
+                assert not rollback.done(), "tracker must remain blocked during the read"
+            finally:
+                release.set()
+            restored = rollback.result(timeout=5)
+        assert tracker.rollbacks[0].produced_artifact_ref == restored
+        assert scenario.store.history()[-1].operation == operation
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    entered, release, recorded = Event(), Event(), Event()
+    record_event = tracker.record
+
+    def correlation(context: TrainingExperimentContext) -> dict[str, str]:
+        entered.set()
+        release.wait(10)
+        return {"experiment/run_id": f"run-{context.run_segment}"}
+
+    def record(event: TrainingExperimentEvent) -> None:
+        record_event(event)
+        recorded.set()
+
+    monkeypatch.setattr(tracker, "correlation_metrics", correlation)
+    monkeypatch.setattr(tracker, "record", record)
+    try:
+        value.accept_record(inference(1))
+        value.accept_record(report(1))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                assert entered.wait(5), "correlation tracker was not called"
+                read = executor.submit(scenario.artifact_with_metrics)
+                artifact, _ = read.result(timeout=2)
+                assert artifact.ref == initial
+                assert not recorded.is_set(), "commit must wait for correlation metadata"
+            finally:
+                release.set()
+        assert recorded.wait(5), "commit event was not reported"
+        (event,) = tracker.events
+        (commit,) = scenario.store.history()
+        assert commit.metrics["experiment/run_id"] == "run-0"
+        assert event.metrics == commit.metrics
+        assert event.context.step == commit.step == 1
+        assert event.context.source_artifact_ref == initial
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_slow_training_tracker_does_not_block_scenario_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    entered, release, recorded = Event(), Event(), Event()
+    record_event = tracker.record
+
+    def record(event: TrainingExperimentEvent) -> None:
+        entered.set()
+        release.wait(10)
+        record_event(event)
+        recorded.set()
+
+    monkeypatch.setattr(tracker, "record", record)
+    try:
+        value.accept_record(inference(1))
+        value.accept_record(report(1))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            try:
+                assert entered.wait(5), "training tracker was not called"
+                lookup = executor.submit(value.get_or_create_scenario, "math")
+                assert lookup.result(timeout=2) is scenario
+                assert not recorded.is_set(), "tracker must remain blocked during the read"
+            finally:
+                release.set()
+        assert recorded.wait(5)
+        assert len(tracker.events) == 1
+    finally:
+        release.set()
+        value.close()
+
+
+@pytest.mark.unit
+def test_rollback_uses_reloaded_scenario_after_waiting_for_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tracker = RecordingExperimentTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    scenario = value.get_or_create_scenario("math")
+    initial = scenario.current_artifact_ref()
+    reporting = scenario.experiment_reporting
+
+    @contextmanager
+    def reload_before_reporting():
+        with value._registry.lock_for("math"):
+            value._registry.reload("math")
+        with reporting():
+            yield
+
+    try:
+        train(value, 1)
+        monkeypatch.setattr(scenario, "experiment_reporting", reload_before_reporting)
+        restored = value.rollback("math", initial.release_id)
+        current = value.get_or_create_scenario("math")
+        assert current is not scenario
+        assert current.current_artifact_ref() == restored
+        assert current.scenario_step == 2
+        assert len(tracker.rollbacks) == 1
+        assert tracker.rollbacks[0].produced_artifact_ref == restored
+    finally:
+        value.close()
 
 
 class CountingCheckpoints(CheckpointStrategy):

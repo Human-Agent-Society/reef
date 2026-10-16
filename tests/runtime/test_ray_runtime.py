@@ -337,7 +337,7 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
 
     assert prepared.payload is not None
     payload = prepared.payload
-    assert payload["scenario_step"] == 7 and payload["expected_runtime_load_id"] == "v0"
+    assert payload["scenario_step"] == 7 and payload["producing_runtime_load_ids"] == ["v0", "v0"]
     candidate = runtime.train_candidate(payload)
     assert candidate.training_job_id == "job-0" and candidate.checkpoint_path == "/checkpoint"
     assert runtime.activate_candidate(candidate) == ActivatedModel("job-0", "v1")
@@ -365,7 +365,7 @@ def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
 
     assert payload["loss"] == "sft"
     assert "advantages" not in payload
-    assert payload["expected_runtime_load_id"] == "v0"
+    assert payload["producing_runtime_load_ids"] == ["v0", "v0"]
     assert payload["scenario_step"] == 3
 
 
@@ -415,7 +415,7 @@ def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, objective,
 
     assert payload["loss"] == loss
     assert payload["advantages"] == pytest.approx(advantages)
-    assert payload["expected_runtime_load_id"] == "v0"
+    assert payload["producing_runtime_load_ids"] == ["v0", "v0"]
     assert payload["scenario_step"] == 9
 
 
@@ -438,27 +438,6 @@ def test_ray_runtime_rejects_unsupported_objective_batch_pairs(batch, objective,
 
     with pytest.raises(error, match=message):
         runtime.prepare_training_step(batch, TrainingMethod(objective), {}, StepScheduling(), 0)
-
-
-@pytest.mark.unit
-def test_ray_runtime_sends_heterogeneous_samples_to_exact_staleness_admission() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:1"
-
-    runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
-    prepared = runtime.prepare_training_step(
-        grouped_policy_batch(versions=("engine:0", "engine:1")),
-        TrainingMethod(_TEST_GROUPED_OBJECTIVE),
-        {},
-        StepScheduling(),
-        0,
-    )
-
-    assert prepared.payload is not None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:1"
-    assert prepared.payload["max_staleness"] == 0
-    assert prepared.payload["producing_runtime_load_ids"] == ["engine:0", "engine:1"]
 
 
 @pytest.mark.unit
@@ -571,65 +550,22 @@ def sao_batch(runtime_load_id: str | None = "slime-v3") -> TrainingBatch:
     )
 
 
+class VersionedHandle(FakeTrainGroupHandle):
+    """A train group whose engine serves ``engine:3``."""
+
+    def __init__(self) -> None:
+        self.probes = 0
+
+    def serving_runtime_load_id(self) -> str | None:
+        self.probes += 1
+        return "engine:3"
+
+
 @pytest.mark.unit
-def test_ray_runtime_prepares_a_sao_job_from_producing_runtime_load_id() -> None:
-    class NoProbeHandle(FakeTrainGroupHandle):
-        def __init__(self) -> None:
-            self.probes = 0
-
-        def serving_runtime_load_id(self) -> str | None:
-            self.probes += 1
-            return "engine:0"
-
-    handle = NoProbeHandle()
+def test_ray_runtime_records_each_samples_producing_version_and_the_parent_version() -> None:
+    handle = VersionedHandle()
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
     initialization_probes = handle.probes
-    prepared = runtime.prepare_training_step(sao_batch(), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 4)
-    assert prepared.payload is not None
-    payload = prepared.payload
-
-    assert payload["loss"] == "sao"
-    assert payload["scenario_step"] == 4 and payload["expected_runtime_load_id"] == "slime-v3"
-    assert "max_staleness" not in payload
-    assert handle.probes == initialization_probes
-
-
-@pytest.mark.unit
-def test_ray_runtime_fences_enabled_sao_window_with_serving_version() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def __init__(self) -> None:
-            self.probes = 0
-
-        def serving_runtime_load_id(self) -> str | None:
-            self.probes += 1
-            return "engine:3"
-
-    handle = VersionedHandle()
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=handle,
-        inference_url="http://router",
-        max_staleness=2,
-    )
-    initialization_probes = handle.probes
-
-    prepared = runtime.prepare_training_step(
-        sao_batch("engine:1"), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 4
-    )
-
-    assert prepared.payload is not None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
-    assert prepared.payload["max_staleness"] == 2
-    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1"]
-    assert prepared.payload["samples"][0][6] == "engine:1"
-    assert handle.probes == initialization_probes + 1
-
-
-@pytest.mark.unit
-def test_ray_runtime_preserves_enabled_sao_mixed_producing_versions() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:3"
-
     first = sao_batch("engine:1").items[0]
     second = policy_trajectory(
         source_agent_record_id="i2",
@@ -640,85 +576,39 @@ def test_ray_runtime_preserves_enabled_sao_mixed_producing_versions() -> None:
         reward=0.7,
         runtime_load_id="engine:2",
     )
-    batch = TrainingBatch("math:sao:2", (first, second))
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=VersionedHandle(),
-        inference_url="http://router",
-        max_staleness=2,
-    )
-
-    prepared = runtime.prepare_training_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0)
-
-    assert prepared.payload is not None
-    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1", "engine:2"]
-    assert [row[6] for row in prepared.payload["samples"]] == ["engine:1", "engine:2"]
-
-
-@pytest.mark.unit
-def test_ray_runtime_preserves_enabled_grouped_mixed_producing_versions() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:3"
-
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=VersionedHandle(),
-        inference_url="http://router",
-        max_staleness=2,
-    )
 
     prepared = runtime.prepare_training_step(
-        grouped_policy_batch(versions=("engine:1", "engine:2")),
-        TrainingMethod(_TEST_GROUPED_OBJECTIVE),
-        {},
-        StepScheduling(),
-        0,
+        TrainingBatch("math:sao:2", (first, second)), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 4
     )
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
-    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1", "engine:2"]
+    payload = prepared.payload
+    assert payload["loss"] == "sao" and payload["scenario_step"] == 4
+    # The versions are training metadata: the record-to-record stage already dropped stale samples.
+    assert payload["producing_runtime_load_ids"] == ["engine:1", "engine:2"]
+    assert [row[6] for row in payload["samples"]] == ["engine:1", "engine:2"]
+    assert payload["parent_runtime_load_id"] == "engine:3"
+    assert "max_staleness" not in payload
+    # The parent version is the published one; preparation does not probe the engine.
+    assert handle.probes == initialization_probes
 
 
 @pytest.mark.unit
-def test_ray_runtime_preserves_sao_batch_when_serving_version_is_unverified() -> None:
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=FakeTrainGroupHandle(),
-        inference_url="http://router",
-        max_staleness=2,
+def test_ray_runtime_omits_the_parent_version_when_nothing_is_published() -> None:
+    runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
+
+    prepared = runtime.prepare_training_step(
+        sao_batch(None), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0
     )
-
-    with pytest.raises(RayRuntimeError, match="verified serving runtime load ID"):
-        runtime.prepare_training_step(
-            sao_batch("engine:1"), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0
-        )
-
-
-@pytest.mark.unit
-def test_ray_runtime_carries_shared_source_fields_for_other_losses() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:3"
-
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=VersionedHandle(),
-        inference_url="http://router",
-        max_staleness=2,
-    )
-
-    prepared = runtime.prepare_training_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling(), 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
-    assert prepared.payload["max_staleness"] == 2
-    assert prepared.payload["producing_runtime_load_ids"] == ["v0", "v0"]
+    assert prepared.payload["producing_runtime_load_ids"] == [None]
+    assert prepared.payload["samples"][0][6] is None
+    assert "parent_runtime_load_id" not in prepared.payload
 
 
 @pytest.mark.unit
-def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:7"
-
+def test_ray_runtime_carries_mixed_token_runtime_load_ids() -> None:
     sample = policy_trajectory(
         source_agent_record_id="i1",
         tokens=(10, 20, 21, 22),
@@ -731,11 +621,7 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission()
             RuntimeLoadSpan(1, 3, "engine:7"),
         ),
     )
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=VersionedHandle(),
-        inference_url="http://router",
-        max_staleness=2,
-    )
+    runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
 
     prepared = runtime.prepare_training_step(
         TrainingBatch("batch", (sample,)), TrainingMethod("sft"), {}, StepScheduling(), 0
@@ -749,78 +635,6 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission()
             {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
         ]
     ]
-
-
-@pytest.mark.unit
-def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_the_batch() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:7"
-
-    sample = policy_trajectory(
-        source_agent_record_id="i1",
-        tokens=(10, 20, 21),
-        loss_mask=(1, 1),
-        rollout_log_probs=(-0.1, -0.2),
-        reward=1.0,
-        runtime_load_spans=(
-            RuntimeLoadSpan(0, 1, "engine:6"),
-            RuntimeLoadSpan(1, 2, "engine:7"),
-        ),
-    )
-    runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
-
-    prepared = runtime.prepare_training_step(
-        TrainingBatch("batch", (sample,)), TrainingMethod("sft"), {}, StepScheduling(), 0
-    )
-
-    assert prepared.payload is not None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:7"
-    assert prepared.payload["max_staleness"] == 0
-    assert prepared.payload["producing_runtime_load_ids"] == [None]
-
-
-@pytest.mark.unit
-def test_ray_runtime_rejects_a_sao_batch_missing_source_fields() -> None:
-    runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
-    batch = TrainingBatch(
-        "math:sao:1",
-        (
-            policy_trajectory(
-                source_agent_record_id="i1",
-                tokens=(5, 1),
-                loss_mask=(1,),
-                action_mask=(1,),
-                rollout_log_probs=(-0.1,),
-                reward=0.5,
-            ),
-        ),
-    )
-
-    with pytest.raises(RayRuntimeError, match="recorded producing runtime load ID"):
-        runtime.prepare_training_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0)
-
-
-@pytest.mark.unit
-def test_enabled_sao_window_sends_missing_source_fields_to_bridge_admission() -> None:
-    class VersionedHandle(FakeTrainGroupHandle):
-        def serving_runtime_load_id(self) -> str | None:
-            return "engine:3"
-
-    runtime = ExecutorRuntimeFixture(
-        train_group_handle=VersionedHandle(),
-        inference_url="http://router",
-        max_staleness=2,
-    )
-
-    prepared = runtime.prepare_training_step(
-        sao_batch(None), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0
-    )
-
-    assert prepared.payload is not None
-    assert prepared.payload["producing_runtime_load_ids"] == [None]
-    assert prepared.payload["samples"][0][6] is None
-    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
 
 
 @pytest.mark.unit

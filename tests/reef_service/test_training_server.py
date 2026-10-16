@@ -14,10 +14,10 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingRuntime
 
 
+from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
-from reef.service.assembly import _repository_location
 from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -211,16 +211,21 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     config_path = deploy.PROJECT_ROOT / config_name
     if not config_path.exists():
         pytest.skip("repo-owned stack: shipped with the repo, not with the package")
-    monkeypatch.delenv("REEF_TOKEN", raising=False)
     from tests.support.config_helpers import load_deployment
 
+    # The stacks bind every address, so they refuse to start without a token.
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    with pytest.raises(deploy.DeployConfigError, match=r"reef\.tokens is empty"):
+        load_deployment(config_path)
+
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
     config = load_deployment(config_path)
     service = next(item for item in config["services"] if item["name"] == "reef")
     args = deploy.service_config_from_mapping(config)
 
     assert service["command"] == [sys.executable, "-m", "reef.service"]
     assert "REEF_TOKEN" not in service.get("env", {})
-    assert args.tokens == ()
+    assert args.tokens == ("test-token",)
     assert args.recipe == recipe
 
 
@@ -233,7 +238,8 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
         _example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),
     ],
 )
-def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> None:
+def test_cookbook_training_configs_leave_max_staleness_unset(relative_path, monkeypatch) -> None:
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
@@ -247,7 +253,7 @@ def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> N
     (_example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
 )
 def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
-    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
@@ -272,12 +278,11 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         connected.update(kwargs)
         return stub_runtimes()
 
-    def factory(repository, **kwargs):
-        backend["repository"] = repository
-        backend.update(kwargs)
+    def factory(config, *, context):
+        backend.update(config=config, context=context)
         return lambda scenario: object()
 
-    monkeypatch.setattr(deploy.GitLFSRepositoryBackend, "factory", factory)
+    monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
 
     dispatcher = deploy.build_dispatcher(
         _settings(agent_record_dir=str(tmp_path / "agent-record")),
@@ -295,14 +300,17 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         "inference_timeout_s": 30.0,
         "train_timeout_s": None,
     }
-    assert backend["repository"] == Path("/state/artifacts.git")
+    assert backend == {
+        "config": {"repository": "/state/artifacts.git"},
+        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
+    }
 
 
 @pytest.mark.unit
 def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -319,8 +327,8 @@ def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_pa
 @pytest.mark.unit
 def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
     selected = "reef.recipe.base:Recipe"
@@ -349,8 +357,8 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -379,10 +387,10 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
 def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) -> None:
     captured = {}
 
-    def factory(repository, **kwargs):
+    def factory(config, *, context):
         return lambda scenario: object()
 
-    monkeypatch.setattr(deploy.GitLFSRepositoryBackend, "factory", factory)
+    monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
@@ -403,8 +411,8 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
 @pytest.mark.unit
 def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
     evaluation = {
@@ -430,8 +438,8 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
 @pytest.mark.unit
 def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -448,8 +456,8 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
 @pytest.mark.unit
 def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
     generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
@@ -494,8 +502,8 @@ def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
     monkeypatch, tmp_path, recipe, error, message
 ) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -519,8 +527,8 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
     from reef.recipe import RecipeConfigError
 
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -542,8 +550,8 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
 @pytest.mark.unit
 def test_build_dispatcher_refuses_a_stage_setting_with_its_pipeline_key(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -563,8 +571,8 @@ def test_build_dispatcher_refuses_a_stage_setting_with_its_pipeline_key(monkeypa
 def test_build_dispatcher_loads_configured_inference_handler(monkeypatch, tmp_path) -> None:
     connected = {}
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -597,11 +605,11 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return stub_runtimes(max_staleness=kwargs["max_staleness"])
+        return stub_runtimes()
 
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -618,27 +626,28 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
     assert dispatcher._recipe.name == "sao"
     # The runtime connector was invoked (inference branch never connects).
     assert connected["actor_name"] == "reef-train-bridge"
-    assert connected["max_staleness"] == 2
+    # The window belongs to the recipe's pipeline; the runtime connection never receives it.
+    assert "max_staleness" not in connected
     assert dispatcher._recipe.max_staleness == 2
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("max_staleness", [0, 1, 2])
-def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
+def test_build_dispatcher_resolves_max_staleness_environment_for_the_recipe(
     monkeypatch,
     tmp_path,
     max_staleness,
 ) -> None:
     connected = {}
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return stub_runtimes(max_staleness=kwargs.get("max_staleness", 0))
+        return stub_runtimes()
 
     dispatcher = deploy.build_dispatcher(
         _settings(recipe=OPENCLAWRL_RECIPE, agent_record_dir=str(tmp_path / "agent-record")),
@@ -646,7 +655,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
         connector=connector,
     )
 
-    assert connected.get("max_staleness", 0) == max_staleness
+    assert "max_staleness" not in connected
     assert dispatcher._recipe.max_staleness == max_staleness
 
 
@@ -654,8 +663,8 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
 @pytest.mark.parametrize("attribute", ["ray_address", "model_path"])
 def test_build_dispatcher_requires_runtime_locations(attribute, monkeypatch) -> None:
     monkeypatch.setattr(
-        deploy.GitLFSRepositoryBackend,
-        "factory",
+        GitLFSRepositoryBackendFactory,
+        "from_config",
         lambda *args, **kwargs: lambda scenario: object(),
     )
 
@@ -665,12 +674,6 @@ def test_build_dispatcher_requires_runtime_locations(attribute, monkeypatch) -> 
             environ={},
             connector=lambda **kwargs: stub_runtimes(),
         )
-
-
-@pytest.mark.unit
-def test_repository_location_preserves_remote_git_locations() -> None:
-    assert _repository_location("https://git.example/repository") == "https://git.example/repository"
-    assert _repository_location("git@example:repository") == "git@example:repository"
 
 
 def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
@@ -1039,3 +1042,26 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
     stack.shutdown(grace=30)
 
     assert stopped == ["requested", 0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.yaml")])
+def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
+    from tests.support.config_helpers import load_deployment
+    from reef.runtime.executor.arguments import native_arguments
+
+    monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen3-8b-sft")
+    monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen3-32b")
+    monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-test")
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    config = load_deployment(deploy.PROJECT_ROOT / config_path)
+    args = deploy.service_config_from_mapping(config)
+    assert args.recipe == "recipes.opd.recipe:OPDRecipe"
+    assert args.teacher_model_path == "/models/qwen3-32b"
+    assert args.teacher_num_gpus == 2
+    flags = native_arguments(config["reef"]["training_backend_options"])
+    assert "--opd-teacher=separate" in flags
+    assert "--opd-top-k=1" in flags
+    assert "--rollout-temperature=1.0" in flags
+    assert "--megatron-lora-rank=128" in flags
+    assert not any(flag.startswith("--opd-teacher-checkpoint") for flag in flags)

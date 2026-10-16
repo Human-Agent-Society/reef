@@ -95,7 +95,6 @@ def test_slime_runtime_uses_the_selected_inference_factory(monkeypatch):
             "actor_name": "separate-trainer",
             "namespace": "training-cluster",
             "train_timeout_s": 14400,
-            "max_staleness": 2,
         },
         model_path="model",
         recipe_config={"method": "custom"},
@@ -103,7 +102,6 @@ def test_slime_runtime_uses_the_selected_inference_factory(monkeypatch):
     )
     assert isinstance(training, SlimeTrainingRuntime)
     assert inference is selected
-    assert training.max_staleness == 2
     assert received[0][0]["control"] is coordinator
     assert received[0][1:] == ("model", {"method": "custom"})
     assert connections[0]["actor_name"] == "separate-trainer"
@@ -190,7 +188,7 @@ def test_automatic_service_assembly_uses_both_native_runtime_implementations(mon
         ray_address="auto",
         inference_handler_config={"trust_remote_code": True},
     )
-    training, inference = _connect_training_runtime(settings, model_path="model", max_staleness=0)
+    training, inference = _connect_training_runtime(settings, model_path="model")
     try:
         assert isinstance(training, SlimeTrainingRuntime)
         assert isinstance(inference, SGLangInferenceRuntime)

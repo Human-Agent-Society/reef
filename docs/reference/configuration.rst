@@ -84,7 +84,7 @@ The public layout groups fields by their owner:
 * ``recipe.config``: fields declared by that recipe.
 * ``recipe.runtime``: the runtime type and its declared settings.
 * ``training``: backend selection, bridge startup/request timeouts, Ray connection and native Slime ``options``.
-* ``storage``: artifact repository, work/cache directories and record retention.
+* ``storage``: artifact backend and repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
 * ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
@@ -649,6 +649,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    reef.served-url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
+   reef.allow-unauthenticated | false | when true, serve without a token on a ``reef.host`` that other machines can reach. When false, Reef does not start on such an address without a token. A loopback address, such as ``127.0.0.1``, ``::1`` or ``localhost``, needs no token
    reef.allow-implicit-scenario-creation | true | when false, an unknown scenario is HTTP 404
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    inference.upstream-url | the OpenAI-compatible provider, with no ``/v1`` suffix
@@ -664,7 +665,8 @@ persistent.
 
 .. config::
 
-   storage.artifact-repository | .reef/artifacts.git | the Git-backed release chain
+   storage.artifact-backend | git_lfs | where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
+   storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
    storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commit logs and settings
@@ -1355,9 +1357,9 @@ The following names are relative to ``operations/``:
        store. ``failed_total`` counts append exceptions, including conflicts;
        validation rejections before append do not count as write failures.
    * - ``runtime/stale_batches_total``
-     - Training submissions the runtime rejects as stale, such as an exact
-       version mismatch or an exceeded bounded-staleness window. This does not
-       count compatible older samples as errors or increment on status reads.
+     - Candidates the training backend refuses as stale, such as a Tinker
+       candidate whose base checkpoint changed while it trained. Samples that
+       the record-to-record stage drops for ``max_staleness`` do not count.
    * - ``records/unread_count``
      - Training-visible records after the processor's read cursor. These may
        still need feedback or filtering; this is not a ready-batch count.

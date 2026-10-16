@@ -307,7 +307,7 @@ class ReportRecord2Record(Record2Record):
         inferences = tuple(self.inferences[ref] for ref in report.references)
         return ReportContext(report, report_score(report), inferences, parsed_report)
 
-    def accept(self, record_set: RecordSet, runtime_load_id: str | None) -> None:
+    def accept(self, record_set: RecordSet) -> None:
         context = candidate_context(record_set)
         report = context.report
         key, slot = self.grouping.placement(context)
@@ -393,6 +393,9 @@ class ReportRecord2Record(Record2Record):
                     limit,
                 )
                 self.limit_warned = True
+
+    def drop_held_set(self, record_set: RecordSet) -> None:
+        self.release_set(report_sets((record_set,))[0])
 
     def release_set(self, report_set: ReportSet) -> None:
         """Release a whole held group or singleton. Its reports own every source that they reference."""

@@ -35,6 +35,7 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import PassThroughRecord2Record, Record2Record, TaskStatus
+from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2task import NoTasks, Record2Task
 from reef.task2batch import NoBatches, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch
@@ -287,7 +288,7 @@ class TrainingPipeline:
             result = self.record2task.make_tasks(record_set)
             if result.status is TaskStatus.READY:
                 self.tasks[record_set.set_id] = result.tasks
-            self.record2record.settle(record_set, result.status, result.runtime_load_id)
+            self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
         self.forget_ended_sets()
 
     def ingest(self, item: AgentRecord) -> None:
@@ -302,6 +303,10 @@ class TrainingPipeline:
         self.record2record.ingest(item)
         self.make_formed_tasks()
 
+    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
+        """Give the record stage the runtime load ID that serves the scenario now, for its staleness check."""
+        self.record2record.observe_serving_runtime_load_id(runtime_load_id)
+
     # ------------------------------------------------------------ batch cycle
     #
     # Batch when enough sets are held (auto, hybrid) or an instruction is
@@ -315,6 +320,8 @@ class TrainingPipeline:
         self.make_formed_tasks()
         if self.pending is not None:
             return True
+        self.record2record.drop_stale_sets(self.context.max_staleness)
+        self.forget_ended_sets()
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:

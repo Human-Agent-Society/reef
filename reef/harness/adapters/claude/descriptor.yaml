@@ -43,7 +43,7 @@ env:
 # only with nothing else on the command line, stops at "unknown option" after
 # the --settings below. reef-claude update is reef's own install of the
 # served release. Claude Code copies settings.env over its environment, so
-# the quirks refuse a tree whose settings.env sets either switch; a project
+# the checks below refuse a tree whose settings.env sets either switch; a project
 # .claude/settings.json of the person's own can still set them.
 client_env:
   DISABLE_AUTOUPDATER: "1"
@@ -85,29 +85,62 @@ files:
         # Covers a run where the person passes their own --settings, which
         # replaces the one in client_args.
         disableDeepLinkRegistration: "disable"
-      # Keys the merged config must keep at the defaults' value, and settings
-      # keys no tree may set at all: the shared render refuses a composition
-      # that moves them, before any quirks step runs. The locked settings
-      # choose the model, a credential helper or a login method, which Reef's
-      # model binding owns.
-      locked:
-        - includeCoAuthoredBy
-        - disableDeepLinkRegistration
-        - advisorModel
-        - apiKeyHelper
-        - availableModels
-        - awsAuthRefresh
-        - awsCredentialExport
-        - enforceAvailableModels
-        - fallbackModel
-        - forceLoginGatewayUrl
-        - forceLoginMethod
-        - gcpAuthRefresh
-        - model
-        - modelOverrides
-        - modelPicker
-        - proxyAuthHelper
-        - switchModelsOnFlag
+      checks:
+        - key: [includeCoAuthoredBy, disableDeepLinkRegistration]
+          match: IsDefault()
+        # Settings that choose the model, a credential helper or a login
+        # method, which Reef's model binding owns.
+        - key: [
+            advisorModel, apiKeyHelper, availableModels, awsAuthRefresh, awsCredentialExport,
+            enforceAvailableModels, fallbackModel, forceLoginGatewayUrl, forceLoginMethod, gcpAuthRefresh,
+            model, modelOverrides, modelPicker, proxyAuthHelper, switchModelsOnFlag,
+          ]
+          match: IsAbsent()
+          reason: Reef's model binding chooses the model, the credential and the login method
+        # Claude Code copies settings.env over its environment. It reads the
+        # updater switches as on only for 1, true, yes or on, so a tree sets
+        # neither, under any name Windows matches without case.
+        - key: env
+          match: Each(Key(Not(Uppercase(IsIn(["DISABLE_AUTOUPDATER", "DISABLE_UPDATES"])))))
+          reason: the episode env and reef-claude set it so Claude Code keeps the pinned version
+        - key: [env.DISABLE_TELEMETRY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC]
+          match: Not(Strip(Lowercase(IsIn(["0", "false", "off", "no", ""]))))
+          reason: benchmark episodes keep telemetry and non-essential traffic off
+        # The env names Claude Code 2.1.257 reads to choose the endpoint, the
+        # provider, the credential or the model of a model call: every
+        # ANTHROPIC_ name, the cloud providers and their credentials, the
+        # provider switches, proxies, endpoints, sockets, credential helpers
+        # and files, and model names. The binding writes the first three, and
+        # the render refuses them from a tree without the binding's token.
+        - key: env
+          match: |-
+            Each(Key(AnyOf(
+              IsIn(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"]),
+              Not(Uppercase(AnyOf(
+                StartsWith("ANTHROPIC_"), StartsWith("AWS_"), StartsWith("AZURE_"), StartsWith("GOOGLE_"),
+                StartsWith("GCLOUD_"), StartsWith("GCE_"), StartsWith("CLOUDSDK_"), StartsWith("CLOUD_ML_"),
+                StartsWith("VERTEX_"),
+                StartsWith("CLAUDE_CODE_USE_ANTHROPIC_"), StartsWith("CLAUDE_CODE_USE_BEDROCK"),
+                StartsWith("CLAUDE_CODE_USE_FOUNDRY"), StartsWith("CLAUDE_CODE_USE_GATEWAY"),
+                StartsWith("CLAUDE_CODE_USE_MANTLE"), StartsWith("CLAUDE_CODE_USE_VERTEX"),
+                StartsWith("CLAUDE_CODE_PROVIDER_"), AllOf(StartsWith("CLAUDE_CODE_SKIP_"), EndsWith("_AUTH")),
+                EndsWith("_MODEL"), HasSubstr("_MODEL_CATALOG"), HasSubstr("_MODEL_OPTION"), HasSubstr("_MODEL_FORCE"),
+                HasSubstr("PROXY"), HasSubstr("BASE_URL"), HasSubstr("ENDPOINT"), HasSubstr("SOCKET"),
+                HasSubstr("API_KEY"), HasSubstr("AUTH_"), HasSubstr("CREDS"), HasSubstr("CREDENTIAL"),
+                HasSubstr("HELPER"), HasSubstr("FILE_DESCRIPTOR")
+              )))
+            )))
+          reason: Reef's model binding chooses the endpoint, the credential and the model
+        # Claude Code merges the JSON object in CLAUDE_CODE_EXTRA_BODY into
+        # every request body, over the bound model, so the object names no
+        # model (model, or OpenRouter's fallback models).
+        - key: env
+          match: |-
+            Each(AnyOf(
+              Key(Not(Uppercase(Eq("CLAUDE_CODE_EXTRA_BODY")))),
+              Value(ParseJson(AllOf(IsObject(), Not(Contains(Key(IsIn(["model", "models"])))))))
+            ))
+          reason: Reef's model binding chooses the model, so CLAUDE_CODE_EXTRA_BODY must be a JSON object without model or models
   rules: "claude/CLAUDE.md"
   agent_command: "claude/commands/{name}.md"
   skill: "claude/skills/{name}/SKILL.md"

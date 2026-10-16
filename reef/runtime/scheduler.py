@@ -1,4 +1,4 @@
-"""Scenario scheduling, serialized training execution, admission, and resource handoffs.
+"""Scenario scheduling, serialized training execution, and resource handoffs.
 
 Backbone objects, in the order a training step meets them:
 
@@ -11,9 +11,9 @@ Backbone objects, in the order a training step meets them:
 - :class:`InferenceMemory` — pairs a colocated engine's memory releases with
   their resumes.
 
-The module-level functions implement staleness admission: whether a batch's
-producing versions are close enough to the serving version to train on, and
-what to report when they are not.
+The record-to-record stage checks staleness before a batch forms
+(``reef.record2record.staleness``). The jobs here carry each sample's
+producing runtime load ID only as training metadata.
 """
 
 from __future__ import annotations
@@ -24,11 +24,10 @@ import sys
 import traceback
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from threading import Lock, RLock
-from typing import Any, Literal
+from typing import Any
 
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
@@ -41,11 +40,8 @@ from reef.runtime.interfaces import (
     PreparedTrainingJob,
     PreparedTrainingStep,
     RuntimeContractError,
-    RuntimeLoadId,
-    ScenarioHistoryStore,
     StaleCandidate,
     TrainingBackend,
-    TrainingContext,
     TrainingJobResult,
     TrainingJobState,
     TrainingJobStore,
@@ -68,294 +64,6 @@ from reef.runtime.recovery import (
 
 #: Job states that hold an activated candidate Reef still has to commit or finish.
 COMMIT_PENDING_STATES = frozenset({"UPDATING_WEIGHTS", *PUBLISHED_STATES})
-
-
-# -- Staleness admission ------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _StalenessDecision:
-    action: Literal["admit", "drop"]
-    metrics: Mapping[str, Any]
-
-
-def max_staleness(payload: Mapping[str, Any]) -> int:
-    value = payload.get("max_staleness", 0)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("training job max_staleness must be a non-negative integer")
-    return value
-
-
-def uses_staleness_admission(payload: Mapping[str, Any]) -> bool:
-    """Whether the serving version is an admission fence, not job identity."""
-    return max_staleness(payload) > 0 or "producing_runtime_load_ids" in payload
-
-
-def _source_agent_record_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
-    samples = payload.get("samples")
-    if not isinstance(samples, Sequence) or isinstance(samples, str | bytes):
-        return ()
-    return tuple(
-        str(row[0]) for row in samples if isinstance(row, Sequence) and not isinstance(row, str | bytes) and row
-    )
-
-
-def _producing_runtime_load_ids(payload: Mapping[str, Any]) -> Sequence[Any]:
-    versions = payload.get("producing_runtime_load_ids")
-    if not isinstance(versions, Sequence) or isinstance(versions, str | bytes) or not versions:
-        raise ValueError("bounded staleness admission requires producing_runtime_load_ids")
-    source_ids = _source_agent_record_ids(payload)
-    if len(versions) != len(source_ids):
-        raise ValueError(
-            "bounded staleness admission requires one producing runtime load ID "
-            f"per sample: {len(versions)} versions for {len(source_ids)} samples"
-        )
-    return versions
-
-
-def _admission_runtime_load_id_groups(payload: Mapping[str, Any]) -> list[list[Any]]:
-    """Return each sample's exact span versions for bounded admission."""
-    versions = _producing_runtime_load_ids(payload)
-    raw_groups = payload.get("producing_runtime_load_spans")
-    if raw_groups is None:
-        return [[version] for version in versions]
-    if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, str | bytes) or len(raw_groups) != len(versions):
-        raise ValueError("producing_runtime_load_spans must contain one span list per sample")
-    samples = payload["samples"]
-    groups: list[list[Any]] = []
-    for sample_index, (raw_spans, scalar) in enumerate(zip(raw_groups, versions, strict=True)):
-        if not raw_spans:
-            groups.append([scalar])
-            continue
-        row = samples[sample_index]
-        response_length = len(row[2]) if isinstance(row, Sequence) and len(row) > 2 else None
-        spans = parse_runtime_load_spans(
-            raw_spans,
-            field_name=f"producing_runtime_load_spans[{sample_index}]",
-            response_length=response_length,
-        )
-        group = [span.runtime_load_id for span in spans]
-        if scalar is not None and set(group) != {scalar}:
-            raise ValueError(f"producing runtime load ID for sample {sample_index} disagrees with its token spans")
-        groups.append(group)
-    return groups
-
-
-def _stale_drop_decision(
-    payload: Mapping[str, Any],
-    *,
-    serving_runtime_load_id: str,
-    producing_runtime_load_ids: Sequence[Any],
-    reason: str,
-    policy_lags: Sequence[int] = (),
-) -> _StalenessDecision:
-    source_ids = _source_agent_record_ids(payload)
-    metrics: dict[str, Any] = {
-        "staleness/samples_dropped": len(source_ids) or len(producing_runtime_load_ids),
-        "staleness/drop_reason": reason,
-        "staleness/source_agent_record_ids": list(source_ids),
-        "staleness/producing_runtime_load_ids": [
-            None if version is None else str(version) for version in producing_runtime_load_ids
-        ],
-        "staleness/serving_runtime_load_id": serving_runtime_load_id,
-    }
-    if policy_lags:
-        metrics["staleness/drop_policy_lags"] = list(policy_lags)
-    return _StalenessDecision(action="drop", metrics=metrics)
-
-
-def _lag_decision(
-    payload: Mapping[str, Any],
-    *,
-    serving_runtime_load_id: str,
-    groups: Sequence[Sequence[Any]],
-    lags: Sequence[int],
-    sample_lags: Sequence[int],
-    drop_reason: str | None,
-    extra_metrics: Mapping[str, Any] | None = None,
-) -> _StalenessDecision:
-    """Turn a lag walk's outcome into a decision; a drop reports the lags seen so far."""
-    if drop_reason is not None:
-        return _stale_drop_decision(
-            payload,
-            serving_runtime_load_id=serving_runtime_load_id,
-            producing_runtime_load_ids=[version for group in groups for version in group],
-            reason=drop_reason,
-            policy_lags=lags,
-        )
-    return _StalenessDecision(
-        action="admit",
-        metrics={
-            "staleness/samples_fresh": sum(lag == 0 for lag in sample_lags),
-            "staleness/samples_admitted_stale": sum(lag > 0 for lag in sample_lags),
-            **(extra_metrics or {}),
-        },
-    )
-
-
-def _producing_problem(value: Any) -> str | None:
-    """Why ``value`` cannot name a producing version, or ``None`` when it parses."""
-    if not isinstance(value, str) or not value:
-        return "missing_producing_runtime_load_id"
-    try:
-        RuntimeLoadId.parse(value)
-    except (TypeError, ValueError):
-        return "malformed_producing_runtime_load_id"
-    return None
-
-
-def _canonical_serving(serving_runtime_load_id: str) -> RuntimeLoadId:
-    try:
-        serving = RuntimeLoadId.parse(serving_runtime_load_id)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"cannot classify staleness from serving runtime load ID {serving_runtime_load_id!r}"
-        ) from exc
-    if str(serving) != serving_runtime_load_id:
-        raise RuntimeError(f"cannot classify staleness from non-canonical serving version {serving_runtime_load_id!r}")
-    return serving
-
-
-def _staleness_admission(
-    payload: Mapping[str, Any],
-    *,
-    serving_runtime_load_id: str,
-    max_staleness: int,
-) -> _StalenessDecision:
-    """Bounded admission against the engine-global version sequence.
-
-    A sample's lag is the sequence distance between its producing version and
-    the serving version; both must share one incarnation, and a multi-span
-    sample's versions must ascend.
-    """
-    serving = _canonical_serving(serving_runtime_load_id)
-    groups = _admission_runtime_load_id_groups(payload)
-    lags: list[int] = []
-    sample_lags: list[int] = []
-    drop_reason: str | None = None
-    for group in groups:
-        group_lags: list[int] = []
-        previous_sequence: int | None = None
-        for value in group:
-            drop_reason = _producing_problem(value)
-            if drop_reason is not None:
-                break
-            producing = RuntimeLoadId.parse(value)
-            lag = producing.lag_behind(serving)
-            if str(producing) != value:
-                drop_reason = "malformed_producing_runtime_load_id"
-                break
-            if lag is None:
-                drop_reason = "cross_incarnation"
-                break
-            if previous_sequence is not None and producing.sequence <= previous_sequence:
-                drop_reason = "non_monotonic_producing_runtime_load_ids"
-                break
-            previous_sequence = producing.sequence
-            lags.append(lag)
-            group_lags.append(lag)
-            if lag < 0:
-                drop_reason = "future_producing_runtime_load_id"
-            elif lag > max_staleness:
-                drop_reason = "policy_lag_exceeded"
-            if drop_reason is not None:
-                break
-        if drop_reason is not None:
-            break
-        sample_lags.append(max(group_lags))
-    return _lag_decision(
-        payload,
-        serving_runtime_load_id=serving_runtime_load_id,
-        groups=groups,
-        lags=lags,
-        sample_lags=sample_lags,
-        drop_reason=drop_reason,
-    )
-
-
-def _scenario_staleness_admission(
-    payload: Mapping[str, Any],
-    *,
-    scenario: str,
-    history: ScenarioHistoryStore,
-    serving_runtime_load_id: str,
-    max_staleness: int,
-) -> _StalenessDecision:
-    """Bounded admission against one scenario's own publication history.
-
-    The engine's runtime load ID advances on every scenario's publication, so
-    the global sequence gap overstates this scenario's staleness. A sample's
-    lag is the number of *this* scenario's publications that postdate the
-    version its tokens were produced under.
-    """
-    if uses_staleness_admission(payload):
-        groups = _admission_runtime_load_id_groups(payload)
-    else:
-        groups = [[payload.get("expected_runtime_load_id")]]
-    lags: list[int] = []
-    sample_lags: list[int] = []
-    drop_reason: str | None = None
-    for group in groups:
-        group_lags: list[int] = []
-        for value in group:
-            drop_reason = _producing_problem(value)
-            if drop_reason is not None:
-                break
-            lag = history.lag(scenario, RuntimeLoadId.parse(value))
-            if lag is None:
-                drop_reason = "cross_incarnation"
-                break
-            lags.append(lag)
-            group_lags.append(lag)
-            if lag > max_staleness:
-                drop_reason = "policy_lag_exceeded"
-                break
-        if drop_reason is not None:
-            break
-        sample_lags.append(max(group_lags))
-    return _lag_decision(
-        payload,
-        serving_runtime_load_id=serving_runtime_load_id,
-        groups=groups,
-        lags=lags,
-        sample_lags=sample_lags,
-        drop_reason=drop_reason,
-        extra_metrics={"staleness/scenario": scenario},
-    )
-
-
-def _admission_decision(payload: Mapping[str, Any], context: TrainingContext) -> _StalenessDecision | None:
-    """Decide whether the coordinator may train on ``payload`` at the context's serving version.
-
-    ``None`` means exact-version admission passed and there is nothing to
-    report; a drop with empty metrics means the exact version simply mismatched.
-    """
-    serving = context.runtime_load_id
-    window = max_staleness(payload)
-    if context.history is not None:
-        scenario = payload.get("scenario")
-        if not isinstance(scenario, str) or not scenario:
-            raise ValueError("per-scenario LoRA training jobs must name their scenario")
-        return _scenario_staleness_admission(
-            payload,
-            scenario=scenario,
-            history=context.history,
-            serving_runtime_load_id=serving,
-            max_staleness=window,
-        )
-    if uses_staleness_admission(payload):
-        if payload.get("expected_runtime_load_id") != serving:
-            groups = _admission_runtime_load_id_groups(payload)
-            return _stale_drop_decision(
-                payload,
-                serving_runtime_load_id=serving,
-                producing_runtime_load_ids=[value for group in groups for value in group],
-                reason="execution_fence_mismatch",
-            )
-        return _staleness_admission(payload, serving_runtime_load_id=serving, max_staleness=window)
-    if payload.get("expected_runtime_load_id") != serving:
-        return _StalenessDecision(action="drop", metrics={})
-    return None
 
 
 # -- Colocated memory ---------------------------------------------------------
@@ -418,17 +126,15 @@ JOB_OWNER_KEY = "owner"
 
 
 def training_job_id(payload: Mapping[str, Any]) -> str:
-    """Preserve the retry-stable identity of the shared training payload: its batch and admission fence."""
+    """Preserve the retry-stable identity of the shared training payload: its batch."""
     identity = dict(payload)
-    identity.pop("max_staleness", None)
     identity.pop(JOB_OWNER_KEY, None)
     # The other components of a composite advance the scenario step while a job is out; its retry must replay.
     identity.pop("scenario_step", None)
     # The processor numbers batches per process; a reload numbers the same rows again.
     identity.pop("batch_id", None)
-    if uses_staleness_admission(payload):
-        # A newer admission fence on retry must not repeat an optimizer step.
-        identity.pop("expected_runtime_load_id", None)
+    # A retry after a newer publication trains the same batch. It must not repeat an optimizer step.
+    identity.pop("parent_runtime_load_id", None)
     encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -448,9 +154,8 @@ class TrainingExecution:
     prepares a backend job. RUNNING is intentionally ambiguous after a failure:
     Reef cannot infer whether an optimizer stepped, so automatic retry refuses.
 
-    Inside a coordinator, ``context`` adds staleness admission before the
-    backend prepares a job and ``publisher`` performs the colocated device
-    handoff before it trains; standalone execution needs neither.
+    Inside a coordinator, ``publisher`` performs the colocated device
+    handoff before a job trains; standalone execution needs none.
     """
 
     def __init__(
@@ -459,13 +164,11 @@ class TrainingExecution:
         backend: TrainingBackend,
         state: TrainingJobState,
         *,
-        context: TrainingContext | None = None,
         publisher: BackendWeightPublisher | None = None,
     ) -> None:
         self._store = store
         self._backend = backend
         self._state = state
-        self._context = context
         self._publisher = publisher
 
     def recover(self) -> dict[str, Any] | None:
@@ -489,15 +192,6 @@ class TrainingExecution:
             )
         if marker is not None and disposition != "fresh":
             return marker_result(marker) if marker["status"] == "COMPLETE" else marker_checkpoint_result(marker)
-        admission_metrics: Mapping[str, Any] = {}
-        if self._context is not None:
-            decision = _admission_decision(payload, self._context)
-            if decision is not None and decision.action == "drop":
-                return TrainingJobResult(
-                    outcome="stale", runtime_load_id=self._context.runtime_load_id, metrics=decision.metrics or None
-                )
-            if decision is not None:
-                admission_metrics = decision.metrics
         with self._backend.prepare(
             payload, job_id=job_id, scenario_step=scenario_step, prior_marker=marker
         ) as prepared:
@@ -505,7 +199,7 @@ class TrainingExecution:
                 if prepared.outcome not in {"stale", "storage_blocked"}:
                     raise RuntimeError("training preparation may only return stale or storage_blocked")
                 return prepared
-            return self._run(prepared, self._store, job_id, payload, admission_metrics, marker)
+            return self._run(prepared, self._store, job_id, payload, marker)
         raise RuntimeError("training preparation suppressed an execution failure")
 
     def _run(
@@ -514,10 +208,9 @@ class TrainingExecution:
         store: TrainingJobStore,
         job_id: str,
         payload: Mapping[str, Any],
-        admission_metrics: Mapping[str, Any],
         prior_marker: Mapping[str, Any] | None,
     ) -> TrainingJobResult:
-        """Train and checkpoint one admitted job, recording RUNNING then CHECKPOINT."""
+        """Train and checkpoint one job, recording RUNNING then CHECKPOINT."""
         checkpoint = prepared.checkpoint
         # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
         running: dict[str, Any] = {
@@ -532,7 +225,7 @@ class TrainingExecution:
             running[COMMITTED_MARKER_KEY] = {
                 key: value for key, value in prior_marker.items() if key != COMMITTED_MARKER_KEY
             }
-        parent_runtime_load_id = payload.get("expected_runtime_load_id")
+        parent_runtime_load_id = payload.get("parent_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
         # The owner: the adapter's scenario on a runtime training several, else the scenario the payload names.
@@ -552,9 +245,8 @@ class TrainingExecution:
             # Replay must see all telemetry with the checkpoint, even if
             # the process dies immediately after this transition.
             updates: dict[str, Any] = {"checkpoint_path": str(checkpoint.path)}
-            durable = {**admission_metrics, **metrics.durable}
-            if durable:
-                updates["metrics"] = durable
+            if metrics.durable:
+                updates["metrics"] = dict(metrics.durable)
             if metrics.training:
                 updates["train_metrics"] = dict(metrics.training)
             store.transition(running, "CHECKPOINT", **updates)
@@ -607,11 +299,7 @@ class RuntimeScheduler:
             algorithm_state,
             scheduling,
             scenario_step,
-            serving_runtime_load_id=(
-                self.inference_runtime.serving_runtime_load_id()
-                if self.training_runtime.max_staleness > 0
-                else self.inference_runtime.current_runtime_load_id()
-            ),
+            parent_runtime_load_id=self.inference_runtime.current_runtime_load_id(),
         )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
@@ -803,9 +491,7 @@ class TrainingCoordinator:
         state = TrainingJobState()
         self._weight_publisher = BackendWeightPublisher(training, inference, state, self._store)
         self._publication = TrainingPublication(self._store, self._weight_publisher, state)
-        self._execution = TrainingExecution(
-            self._store, training, state, context=self._context, publisher=self._weight_publisher
-        )
+        self._execution = TrainingExecution(self._store, training, state, publisher=self._weight_publisher)
         self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None

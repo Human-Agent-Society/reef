@@ -25,7 +25,6 @@ class TinkerConfig:
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
     inference_timeout_s: float = config_option(300.0)
     train_timeout_s: float | None = config_option(None)
-    max_staleness: int = config_option(0)
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():
@@ -36,7 +35,5 @@ class TinkerConfig:
             raise ValueError("Tinker learning_rate must be finite and positive")
         if not math.isfinite(self.kl_coef) or self.kl_coef < 0:
             raise ValueError("Tinker kl_coef must be finite and non-negative")
-        if self.max_staleness != 0:
-            raise ValueError("Tinker currently requires max_staleness=0")
         if self.inference_timeout_s <= 0 or (self.train_timeout_s is not None and self.train_timeout_s <= 0):
             raise ValueError("Tinker timeouts must be positive")

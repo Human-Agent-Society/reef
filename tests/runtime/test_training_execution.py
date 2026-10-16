@@ -18,7 +18,7 @@ from reef.runtime.interfaces import (
 from reef.runtime.recovery import FileTrainingJobStore
 from reef.runtime.scheduler import TrainingExecution, training_job_id
 
-PAYLOAD = {"scenario_step": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
+PAYLOAD = {"scenario_step": 0, "samples": [["sample-1"]], "parent_runtime_load_id": "engine:0"}
 
 
 class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
@@ -253,13 +253,11 @@ def test_another_job_cannot_overwrite_inflight_state(backend, status):
     assert backend.events == []
 
 
-def test_job_identity_preserves_scenarios_but_excludes_staleness_fences():
-    payload = {**PAYLOAD, "max_staleness": 1, "scenario": "one"}
-    assert training_job_id(payload) == training_job_id(
-        {**payload, "max_staleness": 2, "expected_runtime_load_id": "new"}
-    )
+def test_job_identity_preserves_scenarios_but_excludes_the_parent_version():
+    payload = {**PAYLOAD, "scenario": "one", "parent_runtime_load_id": "old"}
+    # A retry after a newer publication trains the same batch, so it is the same job.
+    assert training_job_id(payload) == training_job_id({**payload, "parent_runtime_load_id": "new"})
     assert training_job_id(payload) != training_job_id({**payload, "scenario": "two"})
-    assert training_job_id(PAYLOAD) != training_job_id({**PAYLOAD, "expected_runtime_load_id": "new"})
 
 
 def test_every_job_marker_names_its_owner_and_the_owner_is_no_part_of_the_identity(backend):

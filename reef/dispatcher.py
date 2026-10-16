@@ -14,7 +14,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any, Literal
@@ -27,13 +27,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
-from reef.observability import (
-    ExperimentTracker,
-    NullExperimentTracker,
-    RollbackExperimentEvent,
-    TrainingExperimentContext,
-    TrainingExperimentEvent,
-)
+from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
@@ -570,10 +564,9 @@ class Dispatcher(ScenarioUnloader):
         thread holds the lock or the cycle lock of the scenario, the scenario
         is busy, so this method never waits for them.
         """
-        lock = self._registry.lock_for(scenario)
-        if not lock.acquire(blocking=False):
-            return False
-        try:
+        with self._registry.lock_for(scenario, blocking=False) as acquired:
+            if not acquired:
+                return False
             cycle_lock = self.workers.cycle_lock(scenario)
             if not cycle_lock.acquire(blocking=False):
                 return False
@@ -587,8 +580,6 @@ class Dispatcher(ScenarioUnloader):
             finally:
                 cycle_lock.release()
             self.workers.close_replaced_instances(scenario)
-        finally:
-            lock.release()
         logger.info("unloaded idle scenario %r; its next request loads it again", scenario)
         return True
 
@@ -694,27 +685,15 @@ class Dispatcher(ScenarioUnloader):
         return self.rollback(scenario, release_id, operation="promote")
 
     def rollback(self, scenario: str, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
-        with self._registry.lock_for(scenario):
-            current = self._registry.require(scenario)
-            source = current.current_artifact_ref()
-            context = self._experiment_context(current)
-            published = current.rollback(release_id, operation=operation)
-            if published == source:
-                return published
-            event = RollbackExperimentEvent(
-                scenario=scenario,
-                recipe=self._recipe.name,
-                step=current.scenario_step,
-                run_segment=context.run_segment,
-                source_artifact_ref=source,
-                produced_artifact_ref=published,
-                target_release_id=release_id,
-            )
-        try:
-            self._experiment_tracker.record_rollback(event)
-        except Exception:
-            logger.exception("experiment tracker failed to record rollback")
-        return published
+        while True:
+            with self._registry.lock_for(scenario):
+                current = self._registry.require(scenario)
+            # Wait for earlier reports without blocking scenario resolution.
+            with current.experiment_reporting(), self._registry.lock_for(scenario):
+                if self._registry.get_optional(scenario) is not current:
+                    # Reload or deletion won the gap before the reporting scope.
+                    continue
+                return current.rollback(release_id, operation=operation)
 
     def current_artifact(
         self,
@@ -870,90 +849,7 @@ class Dispatcher(ScenarioUnloader):
         if current.trainer_for(component).result_on_record(result):
             # Another trainer's commit settled this trainer's durable record since the caller read the result.
             raise SettledTrainingResultError(f"scenario {scenario!r} component {component!r}: its result is on record")
-        context = self._experiment_context(current, component)
-        tracked_result = result
-        try:
-            correlation = dict(self._experiment_tracker.correlation_metrics(context))
-            if correlation:
-                tracked_result = current.trainer_for(component).add_commit_metrics(result, correlation)
-        except Exception:
-            logger.exception("experiment tracker failed to prepare correlation metadata")
-
-        current.commit(tracked_result, component=component)
-        settled = current.settled_sibling_record
-        if settled is not None:
-            # The commit first put a sibling's durable record on record: that step is the sibling's and gets its
-            # own event, from its record, and this commit's step, source and run position follow it.
-            settled_metrics = dict(settled.metrics or {})
-            try:
-                self._experiment_tracker.record(
-                    TrainingExperimentEvent(
-                        context=replace(
-                            self._experiment_context(current, settled.component),
-                            step=settled.step,
-                            source_artifact_ref=context.source_artifact_ref,
-                            run_segment=context.run_segment,
-                            run_step=context.run_step,
-                        ),
-                        produced_artifact_ref=settled.artifact_ref,
-                        metrics=settled_metrics,
-                        outcome="rejected" if settled_metrics.get("selected") is False else "committed",
-                        training_job_id=settled.training_job_id,
-                    )
-                )
-            except Exception:
-                logger.exception("experiment tracker failed to record a settled training step")
-            context = replace(
-                context,
-                step=settled.step + 1,
-                source_artifact_ref=settled.artifact_ref,
-                run_step=context.run_step + 1,
-            )
-        # The commit may annotate the result further (a merged result names the release it landed on):
-        # the event carries what the record carries. The step is the one this commit took, captured in
-        # the context before it: another trainer may have moved the scenario on since.
-        recorded = current.last_commit_for(component)
-        metrics = (
-            dict(recorded.metrics)
-            if recorded is not None and recorded.metrics is not None and recorded.step == context.step
-            else dict(tracked_result.metrics)
-        )
-        try:
-            self._experiment_tracker.record(
-                TrainingExperimentEvent(
-                    context=context,
-                    produced_artifact_ref=current.current_artifact_ref(),
-                    metrics=metrics,
-                    outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
-                    training_job_id=tracked_result.training_job_id,
-                    source_runtime_load_id=tracked_result.source_runtime_load_id,
-                    produced_runtime_load_id=tracked_result.runtime_load_id,
-                    checkpoint_path=tracked_result.checkpoint_path,
-                )
-            )
-        except Exception:
-            logger.exception("experiment tracker failed to record committed training step")
-
-    def _experiment_context(self, current: Scenario, component: str | None = None) -> TrainingExperimentContext:
-        backend = current.trainer_for(component).candidate_backend
-        try:
-            backend_config = None if backend is None else dict(backend.experiment_config())
-        except Exception:
-            logger.exception("training backend failed to describe experiment configuration")
-            backend_config = None
-        run_segment, run_step = current.store.training_run_position() if current.store.durable else (0, 0)
-        return TrainingExperimentContext(
-            scenario=current.name,
-            recipe=self._recipe.name,
-            step=current.scenario_step + 1,
-            source_artifact_ref=current.current_artifact_ref(),
-            run_segment=run_segment,
-            run_step=run_step,
-            backend=None if backend is None else type(backend).__name__,
-            backend_config=backend_config,
-            # One trainer's events need no name; several trainers' events say whose they are.
-            component=component if len(current.trainers) > 1 else None,
-        )
+        current.commit(result, component=component)
 
     # -- Preload ---------------------------------------------------------
 
@@ -1137,7 +1033,7 @@ class Dispatcher(ScenarioUnloader):
             # Keep only the short commit and recovery window under the scenario
             # registry lock. Candidate generation above can take minutes and must
             # not block record acceptance for this scenario.
-            with self._registry.lock_for(scenario):
+            with current.experiment_reporting(), self._registry.lock_for(scenario):
                 if not self.workers.cycles_run():
                     # The service stopped under this cycle: its model calls may have failed as the routes went away.
                     logger.info(
@@ -1339,7 +1235,7 @@ class Dispatcher(ScenarioUnloader):
             if execution.outcome not in ("drop", "commit"):
                 raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
             # The registry lock keeps a local worker's reload out between the instance check and the commit.
-            with self._registry.lock_for(current.name):
+            with current.experiment_reporting(), self._registry.lock_for(current.name):
                 loaded = self._registry.get_optional(current.name)
                 if loaded is None:
                     raise RuntimeContractError(

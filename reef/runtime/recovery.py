@@ -27,13 +27,7 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Any, Literal
 
-from reef.runtime.interfaces import (
-    MarkerStatus,
-    RuntimeLoadId,
-    ScenarioHistoryStore,
-    TrainingJobResult,
-    TrainingJobStore,
-)
+from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 
 logger = logging.getLogger(__name__)
@@ -347,22 +341,6 @@ class ScenarioHistory(ScenarioHistoryStore):
         if entry is None or not entry["publications"]:
             return None
         return str(entry["publications"][-1])
-
-    def lag(self, scenario: str, producing: RuntimeLoadId) -> int | None:
-        """How many of ``scenario``'s publications postdate ``producing``.
-
-        ``None`` means the producing version belongs to another incarnation
-        (a previous training-group lifetime), which is never admissible.
-        """
-        entry = self._entries.get(scenario)
-        publications = [RuntimeLoadId.parse(value) for value in ([] if entry is None else entry["publications"])]
-        if publications and publications[-1].incarnation != producing.incarnation:
-            return None
-        return sum(
-            1
-            for published in publications
-            if published.incarnation == producing.incarnation and published.sequence > producing.sequence
-        )
 
     def protected_rollouts(self) -> set[int]:
         """Global rollout ids whose checkpoints carry a scenario's latest adapter."""

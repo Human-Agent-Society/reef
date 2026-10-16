@@ -18,16 +18,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.scenario.test_component_trainers import (
-    HARNESS,
-    WEIGHTS,
-    _ComponentBackend,
-    _JudgedAtOnce,
-    _Judgment,
-    _TwoTrainerRecipe,
-)
+from tests.scenario.test_component_trainers import _JudgedAtOnce, _Judgment
 from tests.support._threshold_processor import threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.component_trainers import HARNESS, WEIGHTS, _ComponentBackend, _TwoTrainerRecipe
 
 from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
@@ -104,7 +98,7 @@ def session_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingP
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
-        record2record=JudgingRecord2Record(context, _SessionJudging(), _JudgedAtOnce()),
+        record2record=JudgingRecord2Record(_SessionJudging(), _JudgedAtOnce()),
         record2task=_SessionTasks(),
         task2batch=SessionBatches(context, batch_size),
     )

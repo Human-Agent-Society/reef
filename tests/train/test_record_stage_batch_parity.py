@@ -62,7 +62,16 @@ GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_batch_goldens.json
 
 CYCLE = "cycle"
 RELOAD = "reload"
-Step = AgentRecord | str
+
+
+@dataclass(frozen=True)
+class Serve:
+    """The scenario serves ``runtime_load_id`` from this step on; the pipeline's staleness check measures against it."""
+
+    runtime_load_id: str
+
+
+Step = AgentRecord | Serve | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -137,6 +146,7 @@ class StreamRun:
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
     max_staleness: int = 0
+    serving_runtime_load_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
     high_water: tuple[int, int] | None = None
@@ -167,7 +177,9 @@ class StreamRun:
 
     def drain(self, trainer: Trainer) -> None:
         """Commit every batch the trainer can reserve now."""
-        while (batch := trainer.reserve_training_batch()) is not None:
+        while (
+            batch := trainer.reserve_training_batch(serving_runtime_load_id=self.serving_runtime_load_id)
+        ) is not None:
             execution = trainer.execute_reserved_step(len(self.commits))
             if execution.result is None:
                 raise AssertionError(f"batch {batch.batch_id} produced no result")
@@ -191,6 +203,9 @@ class StreamRun:
             for step in steps:
                 if isinstance(step, AgentRecord):
                     self.records.append(step)
+                elif isinstance(step, Serve):
+                    self.serving_runtime_load_id = step.runtime_load_id
+                    trainer.pipeline.observe_serving_runtime_load_id(step.runtime_load_id)
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -448,7 +463,7 @@ class ToyJudgingRecord2Record(JudgingRecord2Record):
         cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]
     ) -> ToyJudgingRecord2Record:
         NoSettings.parse(config, plugin_class=cls)
-        return cls(context, ToyJudging(), ImmediateWorker())
+        return cls(ToyJudging(), ImmediateWorker())
 
 
 #: Trains the judged records of ``ToyJudging``.
@@ -682,8 +697,11 @@ def sdpo_steps() -> list[Step]:
 
 def computed_steps() -> list[Step]:
     return [
+        Serve("e:1"),
         turn("a", version="e:1"),
+        Serve("e:2"),
         turn("b", version="e:2", completes="a"),
+        Serve("e:3"),
         turn("c", version="e:3", completes="b"),
         turn("bad-d", version="e:3", completes="c"),
         turn("e", version="e:3", completes="bad-d"),

@@ -245,11 +245,9 @@ def _actor(
     return actor, group, manager, template
 
 
-def _job(scenario: str, step: int, producing: str, *, max_staleness: int | None = None) -> dict:
+def _job(scenario: str, step: int, producing: str) -> dict:
     payload = _payload([_sao_row(f"{scenario}-{step}", producing_runtime_load_id=producing)])
-    payload.update(scenario=scenario, scenario_step=step, expected_runtime_load_id=producing)
-    if max_staleness is not None:
-        payload.update(max_staleness=max_staleness, producing_runtime_load_ids=[producing])
+    payload.update(scenario=scenario, scenario_step=step, parent_runtime_load_id=producing)
     return payload
 
 
@@ -320,55 +318,6 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
     assert health["training_job"]["scenario"] == "a" and health["training_job"]["scenario_step"] == 1
-
-
-@pytest.mark.unit
-def test_staleness_counts_only_the_scenarios_own_publications(tmp_path, _local_ray_get) -> None:
-    version = _EngineVersion(0)
-    actor, _, _, _ = _actor(tmp_path, version)
-    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # engine now inc:1
-    assert _run(actor, _job("b", 0, "inc:1")).outcome == "complete"  # engine now inc:2
-
-    # a's rollout produced at inc:1 (right after a published) is still fresh
-    # for a even though b moved the engine to inc:2.
-    assert _run(actor, _job("a", 1, "inc:1")).outcome == "complete"  # engine inc:3
-    # A rollout produced before a's latest publication is stale for a ...
-    stale = _run(actor, _job("a", 2, "inc:2"))
-    assert stale.outcome == "stale"
-    assert stale.metrics["staleness/drop_reason"] == "policy_lag_exceeded"
-    # ... unless the policy admits one publication of lag.
-    assert _run(actor, _job("a", 2, "inc:2", max_staleness=1)).outcome == "complete"
-    # b has published once; a's two later publications do not age b's rollouts.
-    assert _run(actor, _job("b", 1, "inc:2")).outcome == "complete"
-    assert _run(actor, _job("b", 2, "old:1")).outcome == "stale"
-
-
-@pytest.mark.unit
-def test_sample_remains_admissible_after_the_adapter_that_produced_it_is_evicted(tmp_path, _local_ray_get) -> None:
-    # Issue #26's last open item asked whether the residency window has to be
-    # sized against the staleness bound, the way AReaL ties lora_keep_versions
-    # to max_head_offpolicyness. It does not: a Reef sample carries its own
-    # rollout_log_probs and producing runtime load ID, so admission is sequence
-    # arithmetic over recorded data and never reaches for the producing engine.
-    version = _EngineVersion(0)
-    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
-    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # engine inc:1
-    assert _run(actor, _job("a", 1, "inc:1")).outcome == "complete"  # engine inc:2
-
-    # One slot, so publishing inc:2 unloaded the adapter that served inc:1.
-    assert manager.engine.unloaded == [scenario_adapter_name("a", "inc:1")]
-    assert actor.health()["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:2"]
-
-    # A rollout that inc:1 produced is one publication behind and its adapter
-    # is gone. The staleness bound alone decides: refused at zero lag,
-    # admitted at one, with nothing reloaded either way.
-    assert _run(actor, _job("a", 2, "inc:1")).outcome == "stale"
-    admitted = _run(actor, _job("a", 2, "inc:1", max_staleness=1))
-    assert admitted.outcome == "complete"
-    assert manager.engine.unloaded == [
-        scenario_adapter_name("a", "inc:1"),
-        scenario_adapter_name("a", "inc:2"),
-    ]
 
 
 @pytest.mark.unit
