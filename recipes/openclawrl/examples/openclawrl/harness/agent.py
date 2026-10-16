@@ -31,8 +31,10 @@ reef-eval invokes this once per stream position. It owns the whole session:
 
 Agent configuration (``--agent-arg``): ``reef_url`` (required; reef as
 reachable from inside a container, e.g. ``http://172.17.0.1:28900`` — and
-allowlist that host) and ``hermes_memory`` (off by default: memory and
-weights are two separate adaptation channels; the paper's numbers need
+allowlist that host), ``shim_host`` (the host that hermes uses to reach the
+shim, when the containers cannot reach the host at the ``reef_url`` address,
+e.g. ``host.docker.internal``; allowlist it instead) and ``hermes_memory``
+(off by default: memory and weights are two separate adaptation channels; the paper's numbers need
 memory OFF, and memory-only / weights-only / both are variants of the
 same stream). Everything else is a constant below, except ``REEF_TOKEN``:
 run.sh mints one per run, because this stack listens on the LAN.
@@ -134,6 +136,8 @@ class HermesStreamAgent(BaseAgent):
         self._reef_url = str(kwargs.get("reef_url", "")).strip().rstrip("/")
         if not self._reef_url:
             raise ValueError("the hermes stream harness requires --agent-arg reef_url=http://<host>:<port>")
+        # The shim runs on the same host as reef. By default hermes reaches it at reef's address.
+        self._shim_host = str(kwargs.get("shim_host", "")).strip() or urlsplit(self._reef_url).hostname or "172.17.0.1"
         self._hermes_memory = str(kwargs.get("hermes_memory", "")).strip().lower() in ("1", "true", "yes")
         # The container user for every command the harness runs: the host
         # user, so the state mount never holds root-owned files. None (the
@@ -264,10 +268,8 @@ class HermesStreamAgent(BaseAgent):
             f"rm -rf {HERMES_HOME}/homework && mkdir -p {HERMES_HOME}/homework && "
             f"printf %s {shlex.quote(homework)} > {HERMES_HOME}/homework/{problem['index']}.txt",
         )
-        # The shim runs on the same host as reef; hermes reaches it there.
-        shim_host = urlsplit(self._reef_url).hostname or "172.17.0.1"
         hermes_config = HERMES_CONFIG.format(
-            shim_host=shim_host,
+            shim_host=self._shim_host,
             shim_port=SHIM_PORT,
             model=MODEL,
             memory="true" if self._hermes_memory else "false",

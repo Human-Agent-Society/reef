@@ -69,8 +69,6 @@ The deployment checks these conditions before it loads the model:
 
 - ``training.options.checkpoint_dir`` is required. Each trained candidate is
   written to a directory below it.
-- ``recipe.config.max_staleness`` must be 0. The backend trains only on
-  samples from the version that is currently served.
 - Ray, executor and inference-engine settings are refused:
   ``training.ray-address``, ``training.ray-namespace``,
   ``training.ray-actor-name``, ``training.colocate``, ``inference.url``,
@@ -79,8 +77,8 @@ The deployment checks these conditions before it loads the model:
   ``inference.tensor-parallel-size``, ``inference.options``, and the
   ``execution.training`` and ``execution.rollout`` sections.
 - ``training.options`` cannot set ``type``, ``model_path``,
-  ``inference_timeout_s``, ``train_timeout_s``, ``max_staleness`` or
-  ``connect``. Reef sets these fields itself.
+  ``inference_timeout_s``, ``train_timeout_s`` or ``connect``. Reef sets
+  these fields itself.
 
 ``training.options`` keys accept ``-`` or ``_``, and
 ``--training.options.<key>`` on the command line overrides the YAML value.

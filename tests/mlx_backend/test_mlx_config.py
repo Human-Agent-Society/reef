@@ -66,12 +66,11 @@ def test_an_invalid_engine_setting_is_refused(options: dict, message: str) -> No
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        ({"max_staleness": 2}, "recipe.config.max_staleness"),
         ({"train_timeout_s": 30.0}, "no train timeout"),
         ({"kl_coef": -0.1}, "kl_coef"),
         ({"checkpoint_dir": " "}, "checkpoint_dir"),
     ],
-    ids=["staleness", "train-timeout", "kl-coef", "checkpoint-dir"],
+    ids=["train-timeout", "kl-coef", "checkpoint-dir"],
 )
 def test_an_invalid_deployment_setting_is_refused(options: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):

@@ -263,6 +263,16 @@ with `REEF_URL=http://<LAN address>:8904` and `REEF_TOKEN=reef-local`. The
 task containers reach the service over the machine's LAN address, so do not
 use localhost.
 
+Some Docker runtimes, such as colima, cannot route a container to the
+host's LAN address. With these runtimes, do these steps:
+
+- Keep `reef_url` at the LAN address. The shim runs on the host and uses it.
+- Add `"shim_host": "host.docker.internal"` to the agent `kwargs`. Hermes
+  then calls the shim at that name.
+- Set `extra_allowed_hosts` to `["host.docker.internal"]`.
+- Set `OPENCLAWRL_USER_LLM_URL` to a `host.docker.internal` address if the
+  student model runs on the host.
+
 Serving on a Mac is slower than on GPUs. Set
 `OPENCLAWRL_TURN_TIMEOUT_S` above its 600-second default, and keep
 `pipeline.record2record.config.session_ttl_s` at the 1800 that

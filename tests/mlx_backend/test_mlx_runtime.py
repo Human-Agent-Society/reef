@@ -410,7 +410,6 @@ def test_a_staged_snapshot_is_the_trained_adapter(tmp_path: Path) -> None:
     ("options", "message"),
     [
         ({}, "checkpoint_dir is required"),
-        ({"max_staleness": 4}, "recipe.config.max_staleness"),
         ({"chat_template_kwargs": "enable_thinking=false"}, "chat_template_kwargs"),
         ({"lora_keys": "self_attn.q_proj"}, "lora_keys"),
         ({"loss_option": {}}, "unknown config fields: loss_option"),
@@ -419,7 +418,6 @@ def test_a_staged_snapshot_is_the_trained_adapter(tmp_path: Path) -> None:
     ],
     ids=[
         "no-checkpoint-dir",
-        "stale-samples",
         "template-kwargs",
         "lora-keys",
         "unknown-key",

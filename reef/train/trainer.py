@@ -661,9 +661,9 @@ class Trainer:
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
         """Attach provider correlation fields to the exact pending result.
 
-        Dispatcher calls this immediately before the durable commit. Updating
+        The committer calls this before preparing the durable commit. Updating
         the pending value under the trainer lock keeps the commit record and
-        the post-commit experiment event on one immutable result snapshot.
+        the storage-observed experiment event on one immutable result snapshot.
         """
         if not metrics:
             return result

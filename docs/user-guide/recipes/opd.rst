@@ -129,3 +129,12 @@ to the student's ids, and its context limit must cover the longest recorded
 sequence. A scoring failure fails the step before it starts, so no partially
 scored batch trains. ``perf/distill_teacher_time`` reports the scoring time of
 each step in seconds.
+
+Math example
+------------
+
+The `math example <../../../recipes/opd/examples/math/README.md>`__ distils
+Qwen3-32B into a Qwen3-8B-Base student fine-tuned on OpenThoughts3 math
+through the teacher engine and evaluates on AIME'24, the model pair of the
+original write-up. The page documents the protocol, the eight-GPU
+configuration and the results.

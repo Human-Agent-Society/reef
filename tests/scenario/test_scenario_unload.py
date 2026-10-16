@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -319,3 +320,23 @@ def test_limits_must_be_positive() -> None:
         ScenarioLimits(max_loaded_scenarios=0)
     with pytest.raises(ValueError, match="max_scenarios"):
         ScenarioLimits(max_scenarios=0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("held_lock", ["registry", "cycle"])
+def test_unload_returns_without_waiting_for_scenario_locks(tmp_path, held_lock) -> None:
+    dispatcher = make_dispatcher(tmp_path)
+    try:
+        dispatcher.get_or_create_scenario("math")
+        if held_lock == "registry":
+            lock = dispatcher._registry.lock_for("math")
+        else:
+            lock = dispatcher.workers.cycle_lock("math")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with lock:
+                assert pool.submit(dispatcher.unload_if_idle, "math").result(timeout=2) is False
+                assert loaded_names(dispatcher) == ["math"]
+            assert pool.submit(dispatcher.unload_if_idle, "math").result(timeout=2) is True
+        assert loaded_names(dispatcher) == []
+    finally:
+        dispatcher.close()

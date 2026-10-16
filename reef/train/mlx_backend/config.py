@@ -123,7 +123,6 @@ class MLXConfig(MLXEngineConfig):
     )
     inference_timeout_s: float = config_option(300.0, help="Seconds to wait for admitted requests to finish.")
     train_timeout_s: float | None = config_option(None, help="Unsupported; training runs in this process.")
-    max_staleness: int = config_option(0, help="Must be 0; the backend trains on exact-version samples.")
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -137,10 +136,6 @@ class MLXConfig(MLXEngineConfig):
             raise ValueError("inference_timeout_s must be finite and positive")
         if self.train_timeout_s is not None:
             raise ValueError("the mlx backend trains in the service process and has no train timeout")
-        if self.max_staleness != 0:
-            raise ValueError(
-                "the mlx backend trains on exact-version samples only; set recipe.config.max_staleness to 0"
-            )
 
 
 __all__ = ["MLXConfig", "MLXEngineConfig", "check_template_kwargs"]

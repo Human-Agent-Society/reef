@@ -1042,3 +1042,26 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
     stack.shutdown(grace=30)
 
     assert stopped == ["requested", 0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.yaml")])
+def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
+    from tests.support.config_helpers import load_deployment
+    from reef.runtime.executor.arguments import native_arguments
+
+    monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen3-8b-sft")
+    monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen3-32b")
+    monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-test")
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    config = load_deployment(deploy.PROJECT_ROOT / config_path)
+    args = deploy.service_config_from_mapping(config)
+    assert args.recipe == "recipes.opd.recipe:OPDRecipe"
+    assert args.teacher_model_path == "/models/qwen3-32b"
+    assert args.teacher_num_gpus == 2
+    flags = native_arguments(config["reef"]["training_backend_options"])
+    assert "--opd-teacher=separate" in flags
+    assert "--opd-top-k=1" in flags
+    assert "--rollout-temperature=1.0" in flags
+    assert "--megatron-lora-rank=128" in flags
+    assert not any(flag.startswith("--opd-teacher-checkpoint") for flag in flags)
