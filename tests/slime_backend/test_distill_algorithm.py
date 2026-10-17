@@ -136,6 +136,7 @@ def test_flags_carry_the_family_prefix_and_land_on_args_under_distill_names(toy_
         ("top_k_source", "oracle"),
         ("top_k_distribution", "flat"),
         ("importance_sampling_level", "batch"),
+        ("normalize_advantages", 1),
     ],
 )
 def test_settings_reject_invalid_values(name: str, value: Any) -> None:
@@ -170,6 +171,26 @@ def test_advantage_clipping_rejects_invalid_bounds(value: float) -> None:
 def test_advantage_clipping_requires_sampled_reverse_kl(divergence: str, top_k: int, distribution: str) -> None:
     with pytest.raises(ValueError, match="advantage_clip requires sampled reverse KL"):
         DistillSettings(divergence=divergence, top_k=top_k, top_k_distribution=distribution, advantage_clip=1.0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("normalize", "divergence", "top_k", "distribution", "expected"),
+    [
+        (True, "reverse", 1, "renormalized", True),
+        (False, "reverse", 1, "renormalized", False),
+        (True, "forward", 1, "renormalized", False),
+        (True, "reverse", 0, "renormalized", False),
+        (True, "reverse", 1, "tail", False),
+    ],
+)
+def test_advantage_normalization_applies_to_sampled_reverse_kl_only(
+    normalize: bool, divergence: str, top_k: int, distribution: str, expected: bool
+) -> None:
+    settings = DistillSettings(
+        divergence=divergence, top_k=top_k, top_k_distribution=distribution, normalize_advantages=normalize
+    )
+    assert settings.normalizes_advantages is expected
 
 
 @pytest.mark.unit

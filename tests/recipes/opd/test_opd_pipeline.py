@@ -132,6 +132,7 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
     )
     assert (settings.divergence, settings.top_k, settings.importance_sampling_cap) == ("reverse", 1, 0.0)
     assert settings.advantage_clip == 0.0
+    assert settings.normalizes_advantages
     args = SimpleNamespace()
     family.apply_driver_options(args, settings)
     assert args.distill_teacher_checkpoint == "/teacher"
@@ -139,11 +140,15 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
     assert args.distill_top_k == 1
     assert args.distill_importance_sampling_cap == 0.0
     assert args.distill_advantage_clip == 0.0
+    assert settings_from_args(args).normalizes_advantages
     clipped, remaining = family.parse_driver_options(["--opd-teacher-checkpoint=/teacher", "--opd-advantage-clip=1.0"])
     assert remaining == []
     family.apply_driver_options(args, clipped)
     assert args.distill_advantage_clip == 1.0
     assert settings_from_args(args).advantage_clip == 1.0
+    # Normalization is OPD's method, not an option.
+    _, remaining = family.parse_driver_options(["--opd-teacher-checkpoint=/teacher", "--opd-normalize-advantages=0"])
+    assert remaining == ["--opd-normalize-advantages=0"]
     with pytest.raises(ValueError, match="teacher_checkpoint"):
         family.parse_driver_options([])
 

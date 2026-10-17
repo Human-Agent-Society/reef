@@ -24,6 +24,7 @@ from tests.support.reference_algorithms import distill
 from reef.train.slime_backend.distill import DistillSettings
 from reef.train.slime_backend.distill.objective import (
     chunked_token_divergence,
+    normalized_sampled_advantages,
     restricted_divergence,
     sampled_reverse_kl,
     sequence_importance_weight,
@@ -227,6 +228,113 @@ def test_sampled_reverse_kl_clips_gradient_but_preserves_reported_gap() -> None:
     torch.testing.assert_close(logits.grad, expected_gradient)
     torch.testing.assert_close(loss.detach(), gap)
     assert teacher_log_probs.grad is None
+
+
+@pytest.mark.unit
+def test_sampled_reverse_kl_puts_a_given_advantage_in_the_gradient_after_the_clip() -> None:
+    logits = torch.tensor([[-6.0, 0.0]] * 3, dtype=torch.float64, requires_grad=True)
+    student_log_probs = logits.log_softmax(-1)[:, 0]
+    gap = torch.tensor([-4.0, 0.25, 4.0], dtype=torch.float64)
+    teacher_log_probs = student_log_probs.detach() - gap
+    advantage = torch.tensor([3.0, -0.5, 0.0], dtype=torch.float64)
+
+    loss = sampled_reverse_kl(student_log_probs, teacher_log_probs, advantage_clip=1.0, advantage=advantage)
+    loss.sum().backward()
+
+    scores = torch.tensor([[1.0, 0.0]] * 3, dtype=torch.float64) - logits.detach().softmax(-1)
+    expected_gradient = -torch.tensor([1.0, -0.5, 0.0], dtype=torch.float64)[:, None] * scores
+    torch.testing.assert_close(logits.grad, expected_gradient)
+    torch.testing.assert_close(loss.detach(), gap)
+
+
+def _normalization_inputs() -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    teacher = [torch.tensor([-1.0, -2.0, -0.5]), torch.tensor([-3.0, -0.2]), torch.tensor([-1.5, -1.0, -4.0, -0.1])]
+    rollout = [torch.tensor([-0.5, -1.0, -1.5]), torch.tensor([-1.0, -0.4]), torch.tensor([-1.0, -2.0, -0.5, -0.3])]
+    masks = [torch.tensor([1, 0, 1]), torch.tensor([1, 1]), torch.tensor([1, 1, 1, 0])]
+    return teacher, rollout, masks
+
+
+def _normalize(
+    teacher: list[torch.Tensor],
+    rollout: list[torch.Tensor],
+    masks: list[torch.Tensor],
+    *,
+    skip_response_tokens: int = 0,
+    data_parallel_group: object = None,
+    data_parallel_world: int = 1,
+) -> list[torch.Tensor]:
+    return normalized_sampled_advantages(
+        teacher,
+        rollout,
+        masks,
+        skip_response_tokens=skip_response_tokens,
+        device="cpu",
+        data_parallel_group=data_parallel_group,
+        data_parallel_world=data_parallel_world,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("skip", [0, 1])
+def test_normalized_advantages_are_centered_and_scaled_over_the_trained_tokens_of_all_samples(skip: int) -> None:
+    teacher, rollout, masks = _normalization_inputs()
+
+    advantages = _normalize(teacher, rollout, masks, skip_response_tokens=skip)
+
+    trained = [mask.bool().clone() for mask in masks]
+    for mask in trained:
+        mask[:skip] = False
+    differences = torch.cat([(t - r)[mask] for t, r, mask in zip(teacher, rollout, trained, strict=True)]).double()
+    expected = (differences - differences.mean()) / torch.sqrt(differences.var(unbiased=False) + 1e-8)
+    torch.testing.assert_close(
+        torch.cat([a[mask] for a, mask in zip(advantages, trained, strict=True)]).double(), expected
+    )
+    assert all(advantage.dtype == torch.float32 for advantage in advantages)
+    assert all(not advantage[~mask].any() for advantage, mask in zip(advantages, trained, strict=True))
+
+
+@pytest.mark.unit
+def test_equal_differences_give_small_finite_advantages() -> None:
+    teacher, _, masks = _normalization_inputs()
+    rollout = [row + 0.3 for row in teacher]  # Equal up to float32 rounding.
+
+    advantages = _normalize(teacher, rollout, masks)
+
+    assert all(advantage.abs().max() < 1e-3 for advantage in advantages)
+
+
+def _data_parallel_normalization_worker(rank: int, world: int, port: int) -> None:
+    """One data-parallel rank with its share of the job's samples: the statistics must cover every rank's."""
+    import torch.distributed as dist
+
+    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world)
+    try:
+        teacher, rollout, masks = _normalization_inputs()
+        whole_job = _normalize(teacher, rollout, masks)
+        share = slice(0, 1) if rank == 0 else slice(1, 3)
+        local = _normalize(
+            teacher[share],
+            rollout[share],
+            masks[share],
+            data_parallel_group=dist.group.WORLD,
+            data_parallel_world=world,
+        )
+        for value, expected in zip(local, whole_job[share], strict=True):
+            torch.testing.assert_close(value, expected)
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.unit
+def test_data_parallel_ranks_share_the_whole_job_statistics() -> None:
+    import socket
+
+    import torch.multiprocessing as multiprocessing
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    multiprocessing.spawn(_data_parallel_normalization_worker, args=(2, port), nprocs=2, join=True)
 
 
 # --- the importance weight and the teacher copy -------------------------------------

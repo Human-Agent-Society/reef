@@ -16,7 +16,10 @@ class OpdSettings(DistillSettings):
     still scores the token against the full vocabulary. ``importance_sampling_cap``
     0 drops the truncated importance-sampling ratio between the sampler and the
     trainer that the cookbook loss applies; with one update per on-policy batch
-    the ratio is 1 up to numerics.
+    the ratio is 1 up to numerics. The gradient uses normalized advantages:
+    the teacher-minus-rollout log-prob differences, centered and scaled to
+    unit standard deviation over the training job. No flag turns the
+    normalization off.
     """
 
     teacher: str = "separate"
@@ -25,6 +28,7 @@ class OpdSettings(DistillSettings):
     teacher_update_rate: float = 0.0
     importance_sampling_cap: float = 0.0
     importance_sampling_level: str = "token"
+    normalize_advantages: bool = True
 
 
 @register_loss_family

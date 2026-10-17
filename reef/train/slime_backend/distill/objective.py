@@ -22,7 +22,10 @@ across the shards (:func:`~reef.train.slime_backend.vocab_parallel.gather_log_pr
 :func:`restricted_divergence` compares the two distributions on them, either
 renormalized over the K ids, the reverse KL then estimated at the sampled
 token (:func:`sampled_reverse_kl`), or with one bucket for the rest of the
-vocabulary (:func:`append_tail_log_probability`).
+vocabulary (:func:`append_tail_log_probability`). A family can normalize
+its advantages. Then the pre-train hook centers and scales the gradient
+weights of the sampled reverse KL over the whole training job, before the
+step (:func:`normalized_sampled_advantages`).
 
 A divergence is a sum of per-shard terms that all depend on the student's
 global log-sum-exp. Letting autograd differentiate a shard's term alone
@@ -41,14 +44,14 @@ from __future__ import annotations
 
 import math
 from argparse import Namespace
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
 import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
-from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillSettings, settings_from_args
+from reef.train.slime_backend.distill.algorithm import ADVANTAGES_KEY, DIVERGENCES, DistillSettings, settings_from_args
 from reef.train.slime_backend.distill.teacher_engine import ENGINE_TEACHER_BATCH_KEYS
 from reef.train.slime_backend.score_centering import settings_from_args as centering_settings_from_args
 from reef.train.slime_backend.score_centering.term import score_centering_term
@@ -248,7 +251,11 @@ def token_importance_weights(
 
 
 def sampled_reverse_kl(
-    student_log_prob: torch.Tensor, teacher_log_prob: torch.Tensor, *, advantage_clip: float = 0.0
+    student_log_prob: torch.Tensor,
+    teacher_log_prob: torch.Tensor,
+    *,
+    advantage_clip: float = 0.0,
+    advantage: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """KL(student || teacher) estimated at the sampled token, with the score-function gradient.
 
@@ -257,12 +264,70 @@ def sampled_reverse_kl(
     Without clipping, its gradient is that gap, held fixed, times the gradient
     of ``log p(y)``: the unbiased estimator of the expected loss gradient
     (the on-policy distillation loss of tinker-cookbook).
-    A positive ``advantage_clip`` bounds the gradient's log-prob difference
-    symmetrically. The returned value retains the unclipped KL estimate.
+    An ``[R]`` ``advantage``, such as the output of
+    :func:`normalized_sampled_advantages`, replaces the negated gap in the
+    gradient. A positive ``advantage_clip`` bounds the gradient's weight
+    symmetrically. The returned value is always the unclipped, unnormalized
+    KL estimate.
     """
     gap = (student_log_prob - teacher_log_prob).detach()
-    gradient_gap = gap.clamp(min=-advantage_clip, max=advantage_clip) if advantage_clip > 0 else gap
+    gradient_gap = gap if advantage is None else -advantage.detach()
+    if advantage_clip > 0:
+        gradient_gap = gradient_gap.clamp(min=-advantage_clip, max=advantage_clip)
     return gap + gradient_gap * (student_log_prob - student_log_prob.detach())
+
+
+#: Added to the variance, so that a job whose differences are all equal keeps finite advantages.
+ADVANTAGE_VARIANCE_EPSILON = 1e-8
+
+
+@torch.no_grad()
+def normalized_sampled_advantages(
+    teacher_log_probs: Sequence[torch.Tensor],
+    rollout_log_probs: Sequence[torch.Tensor],
+    loss_masks: Sequence[torch.Tensor],
+    *,
+    skip_response_tokens: int,
+    device: torch.device | int | str,
+    data_parallel_group: Any,
+    data_parallel_world: int,
+) -> list[torch.Tensor]:
+    """Per sample, ``log t(y) - log p_rollout(y)``, centered and scaled over the trained tokens of the job.
+
+    Each argument holds one ``[R]`` row per sample, at the sample's response
+    tokens. A trained token has a nonzero loss mask and is not one of the
+    first ``skip_response_tokens``. The mean and the standard deviation
+    include the trained tokens of all data-parallel ranks. Thus all samples
+    of the job use the same center and scale. Untrained tokens get 0.
+
+    The rollout engine's log-probs replace the student's. They are known
+    before the step, and with one update per on-policy batch the two agree
+    up to numerics.
+    """
+    differences: list[torch.Tensor] = []
+    trained_masks: list[torch.Tensor] = []
+    totals = torch.zeros(3, dtype=torch.float64, device=device)
+    for teacher, rollout, mask in zip(teacher_log_probs, rollout_log_probs, loss_masks, strict=True):
+        # The copy keeps the batch's own loss mask unchanged.
+        trained = mask.to(device=device, dtype=torch.float64).clone()
+        trained[:skip_response_tokens] = 0
+        difference = teacher.to(device=device, dtype=torch.float64) - rollout.to(device=device, dtype=torch.float64)
+        totals += torch.stack([(difference * trained).sum(), (difference.square() * trained).sum(), trained.sum()])
+        differences.append(difference)
+        trained_masks.append(trained)
+    if data_parallel_world > 1:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=data_parallel_group)
+    difference_sum, square_sum, token_count = totals.tolist()
+    # A job without trained tokens gets mean 0 and only zero advantages.
+    token_count = max(token_count, 1.0)
+    mean = difference_sum / token_count
+    # Rounding can make the variance slightly negative.
+    variance = max(square_sum / token_count - mean * mean, 0.0)
+    scale = math.sqrt(variance + ADVANTAGE_VARIANCE_EPSILON)
+    return [
+        ((difference - mean) / scale * trained).float()
+        for difference, trained in zip(differences, trained_masks, strict=True)
+    ]
 
 
 def sequence_importance_weight(
@@ -329,6 +394,12 @@ def _topk_divergences(
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
     tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
+    if settings.normalizes_advantages:
+        advantages = batch.get(ADVANTAGES_KEY)
+        if advantages is None:
+            raise RuntimeError(f"{ADVANTAGES_KEY} is missing: the pre-train hook did not normalize this batch")
+    else:
+        advantages = None
     per_sample: list[torch.Tensor] = []
     rows_and_teacher = zip(
         student_rows_per_sample,
@@ -356,6 +427,7 @@ def _topk_divergences(
                     student_at[:, -1],
                     teacher_at_sampled.to(device=device).float(),
                     advantage_clip=settings.advantage_clip,
+                    advantage=None if advantages is None else advantages[index].to(device=device),
                 )
             )
         else:
@@ -479,9 +551,16 @@ def distill_loss(
     if weighted.numel() == 0:
         loss = loss + 0 * logits.sum()
     if centering_settings is not None:
-        # sampled_reverse_kl's value is log p(y) - log teacher(y). Negate
-        # and apply the gradient's bound before IS weighting for the same advantage.
-        centering_advantages = [-sample.detach() for sample in per_sample_divergence]
+        # Score centering uses the same advantage as the sampled reverse-KL
+        # gradient, before IS weighting: the job-normalized advantage, or the
+        # negated value log teacher(y) - log p(y). The same bound applies.
+        if settings.normalizes_advantages:
+            centering_advantages = [
+                advantage.to(device=sample.device)
+                for advantage, sample in zip(batch[ADVANTAGES_KEY], per_sample_divergence, strict=True)
+            ]
+        else:
+            centering_advantages = [-sample.detach() for sample in per_sample_divergence]
         if settings.advantage_clip > 0:
             centering_advantages = [
                 advantage.clamp(min=-settings.advantage_clip, max=settings.advantage_clip)
@@ -506,27 +585,49 @@ def distill_loss(
 
 
 def distill_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
-    """``--reef-actor-pre-train-hook-path`` entry point: score every teacher sequence before the step."""
+    """``--reef-actor-pre-train-hook-path`` entry point: score every teacher sequence before the step.
+
+    For a family that normalizes its advantages, the hook then fills
+    :data:`ADVANTAGES_KEY` from the sampled-token log-probs of the teacher
+    and of the rollout engine.
+    """
     if not rollout_data.get("teacher_tokens"):
         raise ValueError("every distill sample must carry teacher_tokens")
-    if actor.args.distill_teacher_url:
+    settings = settings_from_args(actor.args)
+    if settings.teacher_url:
         if any(
             len(rollout_data.get(key, ())) != len(rollout_data["teacher_tokens"]) for key in ENGINE_TEACHER_BATCH_KEYS
         ):
             raise ValueError("the teacher engine's columns must be filled by the bridge before training")
-        return
-    from slime.utils.timer import timer
+    else:
+        from slime.utils.timer import timer
 
-    from reef.train.slime_backend.distill.teacher import compute_teacher_rows
+        from reef.train.slime_backend.distill.teacher import compute_teacher_rows
 
-    with timer("distill_teacher"):
-        compute_teacher_rows(actor, rollout_data)
+        with timer("distill_teacher"):
+            compute_teacher_rows(actor, rollout_data, settings)
+    # A checkpoint teacher fills its rows only on the last pipeline stage, where the loss runs.
+    # All ranks of one data-parallel group are on the same stage, so they all join the all-reduce.
+    if settings.normalizes_advantages and "distill_teacher_sampled_log_probs" in rollout_data:
+        from megatron.core import mpu
+
+        data_parallel_group = mpu.get_data_parallel_group()
+        rollout_data[ADVANTAGES_KEY] = normalized_sampled_advantages(
+            rollout_data["distill_teacher_sampled_log_probs"],
+            rollout_data["rollout_log_probs"],
+            rollout_data["loss_masks"],
+            skip_response_tokens=settings.skip_response_tokens,
+            device=torch.cuda.current_device(),
+            data_parallel_group=data_parallel_group,
+            data_parallel_world=dist.get_world_size(group=data_parallel_group) if dist.is_initialized() else 1,
+        )
 
 
 __all__ = [
     "chunked_token_divergence",
     "distill_actor_pre_train",
     "distill_loss",
+    "normalized_sampled_advantages",
     "restricted_divergence",
     "sampled_reverse_kl",
     "sequence_importance_weight",
