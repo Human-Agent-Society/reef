@@ -8,6 +8,7 @@ written as a manifest the gate reads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -27,6 +28,10 @@ MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
 
 class TaskSplitError(ReefError):
     """A split request or manifest that cannot be honored."""
+
+
+class TaskSplitConflict(TaskSplitError):
+    """New tasks connect sources already assigned to both train and eval."""
 
 
 @dataclass(frozen=True)
@@ -67,17 +72,8 @@ def checked_split(split: str, names: object) -> tuple[str, ...]:
     return tuple(sorted(listed))
 
 
-def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Assign each group of tasks that share a source record to one split; the seed fixes the draw.
-
-    ``sources`` maps a task name to the agent record ids it was made from.
-    Groups are drawn in seeded random order into the eval split until it
-    holds at least ``eval_fraction`` of the tasks, then the rest train.
-    """
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise TaskSplitError("seed must be an integer")
-    if isinstance(eval_fraction, bool) or not isinstance(eval_fraction, (int, float)) or not 0 <= eval_fraction <= 1:
-        raise TaskSplitError("eval_fraction must be a number between 0 and 1")
+def checked_source_records(sources: Mapping[str, Iterable[str]]) -> dict[str, tuple[str, ...]]:
+    """Materialize and validate source references once for either split path."""
     if not isinstance(sources, Mapping) or any(not isinstance(name, str) or not name for name in sources):
         raise TaskSplitError("sources must map non-empty task names to their record ids")
     record_ids_by_task: dict[str, tuple[str, ...]] = {}
@@ -89,6 +85,21 @@ def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: floa
         if isinstance(record_ids, str) or any(not isinstance(record_id, str) or not record_id for record_id in listed):
             raise TaskSplitError(f"sources of {name!r} must be a sequence of non-empty record ids")
         record_ids_by_task[name] = listed
+    return record_ids_by_task
+
+
+def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
+    """Assign each group of tasks that share a source record to one split; the seed fixes the draw.
+
+    ``sources`` maps a task name to the agent record ids it was made from.
+    Groups are drawn in seeded random order into the eval split until it
+    holds at least ``eval_fraction`` of the tasks, then the rest train.
+    """
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TaskSplitError("seed must be an integer")
+    if isinstance(eval_fraction, bool) or not isinstance(eval_fraction, (int, float)) or not 0 <= eval_fraction <= 1:
+        raise TaskSplitError("eval_fraction must be a number between 0 and 1")
+    record_ids_by_task = checked_source_records(sources=sources)
     names = list(record_ids_by_task)
     order = sorted(task_groups(record_ids_by_task), key=lambda group: group[0])
     random.Random(seed).shuffle(order)
@@ -202,3 +213,49 @@ def manifest_task_paths(manifest_path: Path, root: Path, split: str) -> tuple[Pa
             raise TaskSplitError(f"{manifest_path}: {split} task {name!r}: {exc}") from exc
         paths.append(path)
     return tuple(paths)
+
+
+def extend_split_by_source(
+    *,
+    previous: TaskSplit,
+    previous_sources: Mapping[str, Iterable[str]],
+    sources: Mapping[str, Iterable[str]],
+) -> TaskSplit:
+    """Place new source components without moving previously assigned tasks.
+
+    Components sharing an existing placement inherit it. A component joining
+    train and eval is rejected. Independent components use a seeded hash so
+    incremental singleton writes do not each force an eval placement.
+    """
+    existing_names = set(previous.train) | set(previous.eval)
+    if set(previous_sources) != existing_names:
+        raise TaskSplitError("previous_sources must describe exactly the previously assigned tasks")
+    if existing_names & set(sources):
+        raise TaskSplitError("new sources must not replace an existing task's source references")
+    combined = checked_source_records(sources={**previous_sources, **sources})
+    training = set(previous.train)
+    evaluation = set(previous.eval)
+    for group in task_groups(combined):
+        new_names = set(group) - existing_names
+        if not new_names:
+            continue
+        has_training = bool(training.intersection(group))
+        has_evaluation = bool(evaluation.intersection(group))
+        if has_training and has_evaluation:
+            raise TaskSplitConflict(f"split conflict: tasks {sorted(new_names)} connect train and eval sources")
+        if has_evaluation:
+            evaluation.update(new_names)
+        elif has_training:
+            training.update(new_names)
+        else:
+            references = sorted({reference for name in group for reference in combined[name]})
+            identity = {"seed": previous.seed, "sources": references, "task": group[0] if not references else None}
+            digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
+            draw = int.from_bytes(digest, byteorder="big") / (1 << (len(digest) * 8))
+            if draw < previous.eval_fraction:
+                evaluation.update(new_names)
+            else:
+                training.update(new_names)
+    return TaskSplit(
+        train=tuple(training), eval=tuple(evaluation), seed=previous.seed, eval_fraction=previous.eval_fraction
+    )

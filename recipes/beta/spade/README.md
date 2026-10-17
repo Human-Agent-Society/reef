@@ -24,12 +24,12 @@ SPADE is a task generator. The deployment selects it in `pipeline.record2task.co
 
 1. `generate` makes `count` Designer proposals across the configured `skills`. Each prompt includes the previous generation's results as SPADE's experience section. A task that has `solution/hint.txt` asks for a `hint` arm of `hint_plays` plays with that file appended to the instruction.
 2. `validate` writes the task under the service's tasks root, runs Harbor's oracle and nop agents, and removes the task again. The reference solution must score 1. Doing nothing must score below 1. A duplicate task is invalid. After a reload cancels a generation, a rerun replaces a task with the same name from the earlier attempt.
-3. The recipe writes each valid task again and plays it: `plays_per_task` plain episodes for training, then the hint arm. Hint episodes measure only.
-4. `record_results` reports each proposal's regret against the Designer's receipt. A refused or unplayed proposal scores 0.
+3. The recipe saves each valid task and assigns its split before play. It plays training tasks for `plays_per_task` plain episodes, then the hint arm. Eval tasks remain saved without plays.
+4. `record_results` reports training proposals' regret against their Designer receipts. A refused training proposal scores 0. Held-out proposals receive no Designer reward and do not enter the experience.
 
 Regret is the mean hint reward minus the mean plain reward. Without hint episodes, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
 
-When the generation finished without a service error, the service splits the played tasks by source record ID into `manifest-<generation>.json` under the tasks root. The generator saves each proposal, refusal, and measurement in `state_dir/<scenario>/generation-<generation>.json`. After a restart, it reads the last report to recover the experience and continue with the next generation.
+The recipe stores tasks under its `state_dir/<scenario>/store/tasks/` and writes `split-manifest.json` beside that directory. Related source sessions keep the same split across generations. The generator saves each proposal, refusal, and measurement in `state_dir/<scenario>/generation-<generation>.json`. After a restart, it reads the last report to recover the experience and continue with the next generation.
 
 The Designer's reports and the hint episodes share the scenario with the training episodes. The recipe trains only on the plain arm.
 
@@ -45,9 +45,10 @@ The generator's `config` keys:
 | `turn_limit` | 12 | the turn limit the Designer writes for |
 | `grounding_path` | none | a text file added to the Designer prompt |
 | `hint_plays` | 2 | plays of the hint arm; 0 turns it off |
-| `eval_fraction`, `seed` | 0.25, 0 | the manifest's evaluation split |
 | `designer_report` | true | report each proposal's regret against the Designer's receipt |
 | `served_model` | the deployment's | the model the Designer asks for |
+
+Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0, so all tasks train unless a holdout is configured. Existing stores require the same split settings when reopened.
 
 The generated-task recipe uses the `task_group` objective. It centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend. Selecting Slime fails because it has no loss family with that name.
 

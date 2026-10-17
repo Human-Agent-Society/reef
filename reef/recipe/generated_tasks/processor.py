@@ -11,16 +11,18 @@ deployment's :class:`~reef.core.tasks.TaskGenerator`.
 One round is one job on a private worker, off the trainer's thread:
 
 1. Ask the generator for tasks, with the round's source sessions when the record stage gave any.
-2. Validate each task with the generator.
-3. Write each valid task through the generator service and play it: ``plays_per_task`` times on the
-   training arm, then each measurement arm the generator asked for.
-4. Send the results to the generator.
+2. Save the candidates and validate each task with the generator.
+3. Publish valid tasks with their fixed train/eval split before play.
+4. Stage training tasks through the generator service and play their training and measurement arms.
+   Eval tasks remain saved without plays.
+5. Send the results to the generator.
 
 The first round starts when the pipeline first looks for a batch. The next round starts after
 ``batches_per_round`` batches were acknowledged since the previous round started. Its episodes train
 while it runs, so the generator always writes for the policy that trains now. A round that played no
-task is followed at once. A summary of each round goes under ``state_dir/<scenario>``; a restart
-reads it to continue with the next round.
+task is followed at once.
+A summary of each round goes under ``state_dir/<scenario>/store/plays/``.
+A restart reads the new summaries to continue with the next round.
 
 Only the training arm, labeled ``plain``, trains. The record stage releases reports of other arms, and
 reports without an arm, such as a generator's own reports, without assembling them. A generated task
@@ -42,8 +44,11 @@ from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import GeneratedTask, TaskGenerationRequest, TaskGenerator, TaskPlayResult
+from reef.core.tasks.metadata import TRAINING_ARM, reported_arm, reported_task_name
+from reef.core.tasks.split import TaskSplitConflict
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
+from reef.recipe.generated_tasks.store import FileTaskStore, TaskConflict
 from reef.record2record import GroupDecision, Record2Record, ReportContext, RoundGrouping, RoundRecord2Record
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
@@ -62,25 +67,10 @@ REALIGN_THRESHOLD = 32768
 DEFAULT_BATCHES_PER_ROUND = 1
 ERROR_EXCERPT_CHARS = 300
 ROUND_PREFIX = "round-"
-# The arm label of the plays this recipe trains on: played as they are, with no extra instruction files.
-TRAINING_ARM = "plain"
-
-
-def reported_task_name(report: AgentRecord) -> str | None:
-    """The task a report names under ``metadata.task.name``, the way the task player sends it."""
-    metadata = report.payload.get("metadata")
-    task = metadata.get("task") if isinstance(metadata, Mapping) else None
-    name = task.get("name") if isinstance(task, Mapping) else None
-    return name if isinstance(name, str) and name else None
-
-
-def reported_arm(report: AgentRecord) -> str | None:
-    """The ``arm`` label of an episode, under ``metadata.episode.labels`` where the task player puts the labels."""
-    metadata = report.payload.get("metadata")
-    episode = metadata.get("episode") if isinstance(metadata, Mapping) else None
-    labels = episode.get("labels") if isinstance(episode, Mapping) else None
-    arm = labels.get("arm") if isinstance(labels, Mapping) else None
-    return arm if isinstance(arm, str) else None
+STORE_DIRECTORY = "store"
+PLAY_DIRECTORY = "plays"
+DEFAULT_EVAL_FRACTION = 0.0
+DEFAULT_SPLIT_SEED = 0
 
 
 def rewards_of(plays: tuple[TaskPlay, ...]) -> tuple[float, ...]:
@@ -246,8 +236,12 @@ class RoundSettings(PluginSettings):
     )
     description: str = config_option("", help="What the tasks are about; every generation request carries it.")
     generator_url: str = config_option("", help="The generator service, ${endpoints.generator}.")
-    state_dir: str = config_option("", help="Where each scenario keeps its round summaries.")
+    state_dir: str = config_option("", help="Where each scenario keeps its task store and round summaries.")
     served_model: str = config_option("", help="The model the task player asks for; the deployment's by default.")
+    eval_fraction: float = config_option(
+        DEFAULT_EVAL_FRACTION, help="The fraction of new source components held out before rollout."
+    )
+    split_seed: int = config_option(DEFAULT_SPLIT_SEED, help="The fixed seed for the task store's train/eval split.")
     scaffold_tolerance: int = config_option(
         DEFAULT_SCAFFOLD_TOLERANCE, help="Masked tokens the sample assembly may realign before a response."
     )
@@ -257,6 +251,10 @@ class RoundSettings(PluginSettings):
             raise ValueError("rounds must be non-negative")
         if self.scaffold_tolerance < 0:
             raise ValueError("scaffold_tolerance must be non-negative")
+        if isinstance(self.eval_fraction, bool) or not 0 <= self.eval_fraction <= 1:
+            raise ValueError("eval_fraction must be between 0 and 1")
+        if isinstance(self.split_seed, bool) or not isinstance(self.split_seed, int):
+            raise ValueError("split_seed must be an integer")
         if self.rounds > 0 and (not self.description.strip() or not self.state_dir):
             raise ValueError("rounds need a description (what the tasks are about) and a state_dir")
         if self.generator is not None:
@@ -315,8 +313,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     round generates tasks, validates them, has the generator service play
     them, and sends the results to the generator; the plays come back as
     records. This stage owns the worker, the round numbers, and the round
-    summaries under ``state_dir/<scenario>``; a restart reads them to continue
-    with the next round.
+    summaries under ``state_dir/<scenario>/store/plays/``.
+    A restart reads these summaries to continue with the next round.
     """
 
     def __init__(
@@ -358,10 +356,18 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             self.worker = BackgroundJobWorker(self, thread_name="generated-task-rounds", concurrency=1)
         if self.task_generator is not None:
             logger.info("scenario %r generates tasks with %s", self.scenario, type(self.task_generator).__name__)
-        recorded = recorded_rounds(self.state_dir) if self.state_dir is not None else ()
+        self.task_store = (
+            FileTaskStore(
+                root=self.state_dir / STORE_DIRECTORY, eval_fraction=settings.eval_fraction, seed=settings.split_seed
+            )
+            if self.state_dir is not None and self.rounds > 0
+            else None
+        )
+        self.play_state_dir = self.state_dir / STORE_DIRECTORY / PLAY_DIRECTORY if self.state_dir is not None else None
+        recorded = recorded_rounds(self.play_state_dir) if self.play_state_dir is not None else ()
         # The round summaries keep how many plays of each task reported, so replayed reports close the groups.
-        if self.state_dir is not None:
-            for task_name, count in recorded_reported_plays(self.state_dir).items():
+        if self.play_state_dir is not None:
+            for task_name, count in recorded_reported_plays(self.play_state_dir).items():
                 round_stage.plays_reported(task_name, count)
         # The worker puts each task's count here as its plays end; the trainer's thread takes them in poll.
         self.reported_play_counts: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
@@ -466,12 +472,15 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     def close(self) -> None:
         if self.worker is not None:
             self.worker.close()
+        if self.task_store is not None:
+            self.task_store.close()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         return {"rounds_completed": self.completed_rounds, "round_in_flight": 0 if self.round_in_flight is None else 1}
 
     def status(self) -> Mapping[str, Any]:
         return {
+            "task_store": self.task_store.counts() if self.task_store is not None else {},
             "task_generation": {
                 "generator": None if self.task_generator is None else type(self.task_generator).__name__,
                 "in_flight": self.round_in_flight,
@@ -492,32 +501,60 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
 
     async def run_round(self, job: RoundJob) -> RoundOutcome:
         """The worker's job: generate, validate, play, and send the results back; then the round's summary."""
-        if self.task_generator is None or self.state_dir is None:
+        if self.task_generator is None or self.task_store is None:
             raise RuntimeError("a round needs a task generator and a state_dir")
         results: list[TaskPlayResult] = []
         reported_plays: dict[str, int] = {}
         error = ""
         # The generator is a deployment's plugin: whatever it raises stops the round, and what ran is kept.
         try:
-            generated = await self.task_generator.generate(TaskGenerationRequest(job.source_records, self.description))
-            for item in generated:
+            generation = self.task_store.begin_generation(
+                generation=job.round_number,
+                source_record_ids=tuple(record.agent_record_id for record in job.source_records),
+            )
+            if generation.candidates is None:
+                generated = await self.task_generator.generate(
+                    TaskGenerationRequest(job.source_records, self.description)
+                )
+                generation = self.task_store.save_candidates(generation=job.round_number, candidates=generated)
+            for index in generation.pending_indices:
+                item = generation.candidate(index=index)
                 if any(arm.name == TRAINING_ARM for arm in item.measurement_arms):
                     refusal = f"the measurement arm {TRAINING_ARM!r} has the name of the training arm"
-                    results.append(TaskPlayResult(item.task, error=refusal))
+                    self.task_store.reject_task(generation=job.round_number, index=index, reason=refusal)
                     continue
                 validation = await self.task_generator.validate(item.task)
                 if validation.is_valid:
+                    try:
+                        self.task_store.publish_task(generation=job.round_number, index=index)
+                    except (TaskConflict, TaskSplitConflict) as conflict:
+                        self.task_store.reject_task(generation=job.round_number, index=index, reason=str(conflict))
+                else:
+                    self.task_store.reject_task(
+                        generation=job.round_number, index=index, reason="; ".join(validation.errors)
+                    )
+            self.task_store.complete_generation(generation=job.round_number)
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+            logger.exception("generated-task round %d stopped on scenario %r", job.round_number, self.scenario)
+        # Play already validated tasks even when a later validation stopped the round.
+        generation = self.task_store.generation(generation=job.round_number)
+        try:
+            for outcome in sorted(generation.outcomes, key=lambda outcome: outcome.index):
+                item = generation.candidate(index=outcome.index)
+                if outcome.error:
+                    results.append(TaskPlayResult(task=item.task, error=outcome.error))
+                elif outcome.split == "eval":
+                    results.append(TaskPlayResult(task=item.task, split="eval"))
+                else:
                     result, reported = await self.played(item, job.round_number)
                     results.append(result)
                     if result.is_played:
                         reported_plays[item.task.name] = reported
-                        # The task's group can close now, before the round ends.
                         self.reported_play_counts.put((item.task.name, reported))
-                else:
-                    results.append(TaskPlayResult(item.task, error="; ".join(validation.errors)))
         except Exception as exc:
-            error = str(exc) or type(exc).__name__
-            logger.exception("generated-task round %d stopped on scenario %r", job.round_number, self.scenario)
+            error = error or str(exc) or type(exc).__name__
+            logger.exception("generated-task rollout %d stopped on scenario %r", job.round_number, self.scenario)
         try:
             await self.task_generator.record_results(tuple(results))
         except Exception as exc:
@@ -583,9 +620,9 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
 
         A restart counts these files and reads the reported plays back.
         """
-        if self.state_dir is None:
+        if self.play_state_dir is None or self.task_store is None:
             raise RuntimeError("a round summary needs a state_dir")
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.play_state_dir.mkdir(parents=True, exist_ok=True)
         document = {
             "round": round_number,
             "error": error,
@@ -594,6 +631,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 {
                     "name": result.task.name,
                     "error": result.error,
+                    "split": result.split,
                     "training_rewards": list(result.training_rewards),
                     "measurement_rewards": {arm: list(rewards) for arm, rewards in result.measurement_rewards.items()},
                     "reported_plays": reported_plays.get(result.task.name),
@@ -601,8 +639,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 for result in results
             ],
         }
-        path = self.state_dir / f"{ROUND_PREFIX}{round_number:05d}.json"
-        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        path = self.play_state_dir / f"{ROUND_PREFIX}{round_number:05d}.json"
+        self.task_store.write_atomic(path=path, content=(json.dumps(document, indent=2) + "\n").encode("utf-8"))
         return path
 
 

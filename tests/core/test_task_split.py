@@ -14,6 +14,7 @@ from reef.core.tasks import (
     split_by_source,
     write_split_manifest,
 )
+from reef.core.tasks.split import TaskSplitConflict, extend_split_by_source
 
 SOURCES = {
     "t1": ["r1", "r2"],
@@ -25,6 +26,61 @@ SOURCES = {
     "t7": ["r7"],
     "t8": ["r8"],
 }
+
+
+@pytest.mark.unit
+def test_incremental_splits_keep_existing_placements_and_follow_shared_sources() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    previous_sources = {"train-task": ("train-source",), "eval-task": ("eval-source",)}
+    extended = extend_split_by_source(
+        previous=previous,
+        previous_sources=previous_sources,
+        sources={"new-task": ("train-source", "new-source")},
+    )
+    assert extended.train == ("new-task", "train-task")
+    assert extended.eval == previous.eval
+
+
+@pytest.mark.unit
+def test_incremental_split_refuses_a_train_eval_bridge_without_changing_placements() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    previous_sources = {"train-task": ("train-source",), "eval-task": ("eval-source",)}
+    with pytest.raises(TaskSplitConflict, match="split conflict"):
+        extend_split_by_source(
+            previous=previous,
+            previous_sources=previous_sources,
+            sources={"bridge": ("train-source", "eval-source")},
+        )
+    assert previous.train == ("train-task",)
+    assert previous.eval == ("eval-task",)
+    assert set(previous_sources) == {"train-task", "eval-task"}
+
+
+@pytest.mark.unit
+def test_incremental_split_detects_a_transitive_bridge() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    with pytest.raises(TaskSplitConflict, match="split conflict"):
+        extend_split_by_source(
+            previous=previous,
+            previous_sources={"train-task": ("train-source",), "eval-task": ("eval-source",)},
+            sources={"first": ("train-source", "shared"), "second": ("shared", "eval-source")},
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fraction", [0.0, 0.5, 1.0])
+def test_incremental_split_is_repeatable_and_respects_the_fraction_extremes(fraction: float) -> None:
+    previous = TaskSplit(train=(), eval=(), seed=7, eval_fraction=fraction)
+    sources = {"a": ("one",), "b": ("one",), "c": ("two",)}
+    first = extend_split_by_source(previous=previous, previous_sources={}, sources=sources)
+    assert first == extend_split_by_source(
+        previous=previous, previous_sources={}, sources=dict(reversed(list(sources.items())))
+    )
+    assert ("a" in first.eval) == ("b" in first.eval)
+    if fraction == 0.0:
+        assert first.eval == ()
+    if fraction == 1.0:
+        assert first.train == ()
 
 
 def test_tasks_sharing_a_record_land_on_the_same_side() -> None:

@@ -29,6 +29,7 @@ dependencies = [
     # service play Harbor tasks with reef-eval.
     "harbor>=0.20,<0.21",
     "pyyaml",
+    "pydantic>=2,<3",  # Typed task-store checkpoints.
     "reef-client>=0.2.0",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",

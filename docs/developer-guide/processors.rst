@@ -318,11 +318,14 @@ plays of a task. Each play shows the agent the files that
 ``solution/hint.txt``. The recipe never trains on a measurement arm.
 
 A ``TaskPlayResult`` holds the task, ``training_rewards``,
-``measurement_rewards`` (by arm name), and an ``error``. The rewards include
+``measurement_rewards`` (by arm name), a ``split`` (``train`` by default), and an ``error``. The rewards include
 only episodes that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
+
+An eval result has ``split="eval"``, no rewards and no error.
+Generators must keep it out of training feedback and measured experience.
 
 The generator service scores an episode whose verifier ran past its timeout
 as 0, and reports it, so a training play of that kind trains. The task's
@@ -336,9 +339,10 @@ time the pipeline looks for a batch, it starts a round when one is due. In each 
 
 1. Asks the generator for tasks with the configured ``description`` and the
    request's source sessions.
-2. Validates each task with the generator.
-3. Writes each valid task through the generator service and plays it
-   ``plays_per_task`` times on the training arm, then plays each measurement arm.
+2. Saves the candidates, then validates each task with the generator.
+3. Publishes valid tasks to the local store and assigns their train/eval split before play.
+   It stages training tasks through the generator service and plays each one ``plays_per_task`` times, then plays its measurement arms.
+   Eval tasks remain saved without plays.
 4. Sends the results to ``record_results``.
 
 The training plays carry the arm ``plain``, and only reports with that label
@@ -372,9 +376,15 @@ round started; a batch that the backend dropped as stale does not count. A
 round that played no task is followed at once. An exception from the
 generator stops the round. The record-to-task stage still sends the results
 it has to ``record_results``. A summary of each round goes to
-``state_dir/<scenario>/round-<round>.json``, with the IDs of its source records. After a restart, the
+``state_dir/<scenario>/store/plays/round-<round>.json``, with the IDs of its source records. After a restart, the
 record-to-task stage continues with the next round. ``GET /reef/status`` shows the generator, the
 round, the task counts, and the last error under ``task_generation``.
+
+The store saves candidates before validation and records each publication or rejection independently of play results.
+Its generation documents own task metadata; task directories contain only Harbor files.
+The store rebuilds its cumulative ``split-manifest.json`` from publication outcomes when reopened.
+``GET /reef/status`` exposes task counts under ``task_store``.
+Legacy summaries outside the store remain untouched and do not resume into the new store.
 
 Container operations run in the generator service, ``reef.record2task.generator``.
 The record-to-task stage calls this service over HTTP. The ``generator`` deployment

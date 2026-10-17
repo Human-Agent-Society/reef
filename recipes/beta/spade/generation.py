@@ -16,6 +16,7 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
@@ -142,6 +143,7 @@ class ProposalRecord:
     task_name: str | None
     refusal: str
     designer_report_id: str = ""
+    split: Literal["train", "eval"] = "train"
 
     @property
     def is_written(self) -> bool:
