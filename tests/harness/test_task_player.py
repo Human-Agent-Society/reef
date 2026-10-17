@@ -551,3 +551,12 @@ def test_main_refuses_a_manifest_beside_task_directories(tmp_path: Path) -> None
                 "m",
             ]
         )
+
+
+def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    labels = {"arm": "plain", "batch": "tasks:generated-tasks:1", "task_use": "use-t1-0"}
+    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels).play(task_path)
+    headers = reef.inferences[0]["headers"]
+    assert headers["x-reef-tag-batch"] == "tasks:generated-tasks:1" and headers["x-reef-tag-task_use"] == "use-t1-0"
+    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == labels and played.is_reported

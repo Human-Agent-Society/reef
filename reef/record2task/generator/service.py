@@ -9,7 +9,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   designer's record id beside the task or the refusal.
 - ``POST /proposals/{record_id}/report``: report a score against the designer's receipt.
 - ``POST /tasks``: write a task under the tasks root, refusing a duplicate (by content hash) or a
-  different task under a taken name; ``DELETE /tasks/{name}`` removes one.
+  different task under a taken name. Writing the same task again under its name answers 200 with the
+  path, so a caller can stage a task again after a stop. ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
 - ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
 - ``POST /manifests``: the split manifest of one generation's tasks under the tasks root.
@@ -44,6 +45,7 @@ from aiohttp import web
 from reef_client.client import ReefClientError
 
 from reef.core.tasks import (
+    HarborTask,
     HarborTaskConflict,
     HarborTaskError,
     TaskGenerationRequest,
@@ -52,7 +54,7 @@ from reef.core.tasks import (
     write_split_manifest,
 )
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskPlay, TaskPlayer
+from reef.harness.client.tasks import TaskPlay, TaskPlayer, TaskPlayError, checked_labels
 from reef.record2task.generator.designer import (
     Designer,
     DesignerError,
@@ -456,6 +458,17 @@ def checked_tags(value: object) -> dict[str, str]:
     return {name: str(item) for name, item in tags.items()}
 
 
+def checked_play_labels(value: object) -> dict[str, str]:
+    """A play's tags as the task player's labels; ``arm`` comes from the play, so a tag may not name it."""
+    tags = checked_tags(value)
+    if any(name.strip().lower() == "arm" for name in tags):
+        raise WireError("tags may not name 'arm'; the play's arm sets it")
+    try:
+        return checked_labels(tags)
+    except TaskPlayError as exc:
+        raise WireError(str(exc)) from exc
+
+
 def checked_count(value: object, label: str, *, minimum: int = 0) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise WireError(f"{label} must be an integer of at least {minimum}")
@@ -523,6 +536,16 @@ class GeneratorService:
                 except HarborTaskError:
                     continue
         return hashes
+
+    def holds_task(self, task: HarborTask) -> bool:
+        """Whether the tasks root holds this task under its name, with the same digest."""
+        path = self.tasks_root / task.name
+        if not (path / "task.toml").is_file():
+            return False
+        try:
+            return read_harbor_task(path).digest == task.digest
+        except HarborTaskError:
+            return False
 
     def task_path_for(self, value: object) -> Path:
         """A task directory under the root, named by path or by name; anything else is refused."""
@@ -633,6 +656,9 @@ class GeneratorService:
             task = task_from_document(await self.body_of(request))
         except WireError as exc:
             return error_response(400, str(exc))
+        if await asyncio.to_thread(self.holds_task, task):
+            path = self.tasks_root / task.name
+            return web.json_response({"path": str(path), "name": task.name, "digest": task.digest}, status=200)
         digest = content_hash(task)
         if digest in await asyncio.to_thread(self.known_hashes):
             return error_response(409, "duplicate of a task already under the root", duplicate=True)
@@ -683,7 +709,7 @@ class GeneratorService:
                 count=checked_count(body.get("plays", 1), "plays", minimum=1),
                 is_reporting=is_reporting,
                 extra_instruction_paths=extra_paths,
-                tags=checked_tags(body.get("tags")),
+                tags=checked_play_labels(body.get("tags")),
             )
         except WireError as exc:
             return error_response(400, str(exc))

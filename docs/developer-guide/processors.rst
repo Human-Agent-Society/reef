@@ -387,11 +387,12 @@ stage's task pool. A task that an earlier generation published is rejected as a
 duplicate.
 
 When no play runs and the task pool holds tasks, the record stage takes them
-all into one play. A play job writes each task through the generator service
-(again, if a stopped play left it there),
-plays it ``plays_per_task`` times, then plays its measurement arms, and saves
-its result. A task that cannot run at all has an infrastructure failure as its
-result. When every train task of a generation has a result, the next job sends
+all into one play. A play job runs each task through an ``EpisodeRunner``
+(``reef.record2task.generator.runner``). The runner stages the saved task where
+it runs and plays it: ``plays_per_task`` times on the training arm, then its
+measurement arms. The play job saves the task's result. An episode with an
+error and no reward could not run; when every training episode of a task could
+not run, the task's result is an infrastructure failure, not a solver failure. When every train task of a generation has a result, the next job sends
 the generation's results to ``record_results``. A generation can therefore
 close after later generations started. A generation whose delivery fails waits
 for the next job, and later generations still go out.
@@ -451,7 +452,11 @@ A task whose play was running at the stop has no result, so it plays again.
 Legacy summaries outside the store remain untouched and do not resume into the new store.
 
 Container operations run in the generator service, ``reef.record2task.generator``.
-The record-to-task stage calls this service over HTTP. The ``generator`` deployment
+The record-to-task stage calls this service over HTTP. The task store is the
+source of each task; the service's tasks root holds staged copies. Staging the
+same task again under its name returns the staged copy, so a play that a stop
+interrupted, or a service that restarted with an empty tasks root, can still
+play a saved task. The ``generator`` deployment
 section configures the service that ``reef serve`` starts.
 See `generator configuration
 <../reference/configuration.rst#the-generator-section>`__ for its settings.

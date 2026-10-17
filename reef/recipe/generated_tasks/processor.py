@@ -47,7 +47,6 @@ from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import GeneratedTask, TaskGenerationRequest, TaskGenerator, TaskPlayResult
 from reef.core.tasks.metadata import TRAINING_ARM, reported_arm, reported_task_name
 from reef.core.tasks.split import TaskSplitConflict
-from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.store import FileTaskStore, PlayedResult, StoredTask, TaskConflict
 from reef.record2record import (
@@ -63,7 +62,8 @@ from reef.record2record import (
 )
 from reef.record2task import Record2Task, ReportTasks, TaskResult
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
+from reef.record2task.generator.client import DuplicateTask, Generator, GeneratorError, HttpGenerator, TaskNameConflict
+from reef.record2task.generator.runner import Episode, GeneratorEpisodeRunner
 from reef.task2batch import Task2Batch
 from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
@@ -85,10 +85,12 @@ DEFAULT_GENERATION_DEADLINE_SECONDS = 1800.0
 DELIVERY_RECEIPT = "delivery"
 
 
-def rewards_of(plays: tuple[TaskPlay, ...]) -> tuple[float, ...]:
+def rewards_of(episodes: tuple[Episode, ...]) -> tuple[float, ...]:
     """The rewards of the episodes that ran. An episode that ran without a reward counts as 0."""
     return tuple(
-        play.reward if play.reward is not None else 0.0 for play in plays if play.reward is not None or not play.error
+        episode.reward if episode.reward is not None else 0.0
+        for episode in episodes
+        if not episode.is_infrastructure_failure
     )
 
 
@@ -417,7 +419,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                     )
                 task_player = HttpGenerator(generator_url)
         self.task_generator = task_generator
-        self.task_player = task_player
+        self.runner = GeneratorEpisodeRunner(task_player) if task_player is not None else None
         self.worker = worker
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(self, thread_name="generated-task-rounds", concurrency=1)
@@ -709,52 +711,49 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         return PlayOutcome(receipt=job.receipt, played=played, error="")
 
     async def played(self, item: GeneratedTask, generation: int) -> tuple[TaskPlayResult, int]:
-        """Write one valid task and play it: the training arm, then each measurement arm.
+        """Stage one saved task and play it through the episode runner: the training arm, then each measurement arm.
 
         Returns the task's result and how many of its training episodes reached Reef, 0 for a task that was
-        not played. A task the agent could not play at all (every training episode ended before the agent
-        ran) is removed and comes back with the first episode's error, and its measurement arms are not played.
+        not played. A task whose training episodes all could not run is unstaged and comes back with the first
+        episode's error as an infrastructure failure, and its measurement arms are not played.
         """
-        if self.task_player is None:
+        if self.runner is None:
             raise RuntimeError("playing a task needs the generator service")
         task = item.task
         try:
-            written = await self.task_player.write_task(task)
-        except DuplicateTask:
-            # A play that a stop interrupted left the task staged; stage it again.
-            await self.task_player.delete_task(task.name)
-            written = await self.task_player.write_task(task)
-        except TaskNameConflict as exc:
+            task_path = await self.runner.stage(task)
+        except (DuplicateTask, TaskNameConflict) as exc:
             return TaskPlayResult(task, error=f"refused: {exc}"), 0
-        tags = {"round": str(generation)}
-        training = await self.task_player.play(
-            written.path,
+        labels = {"round": str(generation)}
+        training = await self.runner.play(
+            task_path,
             scenario=self.scenario,
             arm=TRAINING_ARM,
             plays=self.plays_per_task,
-            is_reporting=True,
             extra_instruction_files=(),
-            tags=tags,
+            labels=labels,
             model=self.served_model,
         )
-        if training and all(play.reward is None and play.error for play in training):
-            await self.task_player.delete_task(task.name)
+        if training and all(episode.is_infrastructure_failure for episode in training):
+            try:
+                await self.runner.unstage(task.name)
+            except GeneratorError:
+                logger.warning("generated-task %s could not be unstaged on scenario %r", task.name, self.scenario)
             error = f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
             return TaskPlayResult(task, error=error, infrastructure_failure=True), 0
         measurement_rewards: dict[str, tuple[float, ...]] = {}
         for arm in item.measurement_arms:
-            plays = await self.task_player.play(
-                written.path,
+            episodes = await self.runner.play(
+                task_path,
                 scenario=self.scenario,
                 arm=arm.name,
                 plays=arm.count,
-                is_reporting=True,
                 extra_instruction_files=arm.extra_instruction_files,
-                tags=tags,
+                labels=labels,
                 model=self.served_model,
             )
-            measurement_rewards[arm.name] = rewards_of(plays)
-        reported = sum(play.is_reported for play in training)
+            measurement_rewards[arm.name] = rewards_of(episodes)
+        reported = sum(episode.is_reported for episode in training)
         return TaskPlayResult(task, rewards_of(training), measurement_rewards), reported
 
     async def deliver_results(self) -> str:
