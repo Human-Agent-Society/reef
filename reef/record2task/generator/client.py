@@ -60,6 +60,8 @@ class WrittenTask:
     path: Path
     name: str
     digest: str
+    #: False when the same task was already under its name, so this write created nothing to remove.
+    created: bool = True
 
 
 class Generator(ABC):
@@ -236,6 +238,7 @@ class HttpGenerator(Generator):
             path=Path(checked_string(document, "path", label="a written task")),
             name=checked_string(document, "name", label="a written task"),
             digest=checked_string(document, "digest", label="a written task"),
+            created=status == 201,
         )
 
     async def delete_task(self, name: str) -> None:

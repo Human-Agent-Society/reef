@@ -702,7 +702,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
             )
             raise
         finally:
-            await self.service.delete_task(task.name)
+            # A copy that was already staged belongs to its writer, which may be playing it.
+            if written.created:
+                await self.service.delete_task(task.name)
         self.save_validation(task.name, tuple(results), stage, str(written.path))
         return TaskValidationResult(errors)
 

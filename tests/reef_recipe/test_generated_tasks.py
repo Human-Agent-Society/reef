@@ -50,6 +50,7 @@ from reef.recipe.generated_tasks.processor import (
 from reef.recipe.generated_tasks.store import FileTaskStore, PlayedResult
 from reef.record2record import GroupDecision, ReportContext
 from reef.record2task.generator.client import GeneratorError
+from reef.record2task.generator.runner import Episode
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
@@ -127,12 +128,15 @@ def played(processor: TrainingPipeline, task: str, index: int, score: float, **f
     processor.ingest(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
 
 
-def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
-    def play(reward: float | None, error: str = "") -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
+def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
+    def episode(reward: float | None, error: str = "") -> Episode:
+        return Episode("e", reward, (), error)
 
-    assert rewards_of((play(1.0), play(None), play(None, "the trial raised"))) == (1.0, 0.0)
-    assert rewards_of((play(0.5, "a late error"),)) == (0.5,)
+    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
+    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
+    assert (
+        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
+    )
 
 
 def test_reported_task_name_reads_the_task_players_metadata() -> None:
@@ -948,7 +952,7 @@ def test_a_task_whose_play_a_stop_interrupted_is_staged_again_and_plays(tmp_path
     restarted, _ = rounds(tmp_path, task_generator, player, rounds=1)
     looked(restarted)
     ((result,),) = task_generator.results
-    assert result.is_played and player.deleted == ["harbor-00000-000"]
+    assert result.is_played and player.deleted == [], "staging the same task again reuses the staged copy"
 
 
 def test_a_generator_that_fails_at_once_waits_between_deferred_rounds(tmp_path: Path) -> None:

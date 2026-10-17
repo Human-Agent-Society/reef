@@ -275,7 +275,9 @@ class SpadeTaskGenerator(TaskGenerator):
         except GeneratorError as exc:
             self.save_error(task.name, str(exc))
             raise
-        await self.service.delete_task(task.name)
+        # A copy that was already staged belongs to its writer, which may be playing it.
+        if written.created:
+            await self.service.delete_task(task.name)
         return TaskValidationResult(() if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",))
 
     async def write(self, task: HarborTask) -> WrittenTask:

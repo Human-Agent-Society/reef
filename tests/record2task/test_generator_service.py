@@ -277,6 +277,8 @@ def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_pat
         written = await generator.write_task(proposed.task)
         assert written.path == tmp_path / "tasks" / proposed.task.name and written.digest == proposed.task.digest
         assert read_harbor_task(written.path) == proposed.task
+        again = await generator.write_task(proposed.task)
+        assert again.path == written.path and written.created and not again.created, "staging again returns it"
         with pytest.raises(DuplicateTask, match="duplicate"):
             await generator.write_task(
                 HarborTask(
@@ -445,9 +447,25 @@ def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path:
                 extra_instruction_files=("solution/missing.txt",),
                 tags={},
             )
+        for tags, message in (
+            ({"arm": "plain"}, "may not name 'arm'"),
+            ({"task": "other"}, "player's own tag"),
+            ({"batch": ""}, "non-empty printable ASCII value"),
+        ):
+            with pytest.raises(GeneratorError, match=rf"refused \(400\).*{message}"):
+                await generator.play(
+                    written.path,
+                    scenario="spade",
+                    arm="plain",
+                    plays=1,
+                    is_reporting=True,
+                    extra_instruction_files=(),
+                    tags=tags,
+                )
         return None
 
     run_with(built, body)
+    assert len(plays.calls) == 1, "a play with labels that cannot ride as tags never runs"
     call = plays.calls[0]
     assert call["task"] == "harbor-00001-000-inspection" and call["arm"] == "hint" and call["plays"] == 2
     assert call["model"] == "served" and call["scenario"] == "spade" and call["tags"] == {"generation": "1"}
