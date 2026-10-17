@@ -81,8 +81,8 @@ class RecordingBatches(Task2Batch):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, 1)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"recording:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class RecordingPipeline(TrainingPipeline):
@@ -135,8 +135,8 @@ class PairTasks(ReportTasks):
 
 
 class PairBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"pairs:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class PairPipeline(TrainingPipeline):

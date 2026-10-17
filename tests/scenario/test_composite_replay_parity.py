@@ -90,8 +90,8 @@ class _SessionTasks(JudgedTasks):
 class SessionBatches(Task2Batch):
     """Batches the judged turns of ``_SessionJudging``."""
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:session:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 def session_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:

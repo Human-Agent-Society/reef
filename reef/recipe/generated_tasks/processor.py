@@ -625,5 +625,5 @@ class GeneratedTaskBatches(Task2Batch):
         # One record set of the batch is one complete task group.
         super().__init__(context, settings.tasks_per_step)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:generated-tasks:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)

@@ -13,9 +13,7 @@ from reef.task2batch.base import BatchSettings, Task2Batch
 
 
 class DistillBatches(Task2Batch):
-    """Batch tasks as they come, ``batch_size`` record sets to a batch. A subclass sets ``batch_label``, its batches' name."""
-
-    batch_label = "teacher"
+    """Batch tasks as they come, ``batch_size`` record sets to a batch."""
 
     @classmethod
     def from_config(
@@ -29,5 +27,5 @@ class DistillBatches(Task2Batch):
     ) -> Self:
         return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)

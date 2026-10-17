@@ -296,7 +296,7 @@ class TrainingPipeline:
         if item.request_type is RequestType.TRAIN:
             if item.scenario != self.scenario:
                 raise ValueError("training records must belong to the pipeline's scenario")
-            request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
+            request = TrainingRequest.from_dict(item.payload, request_id=item.agent_record_id)
             if request.id not in self.consumed_requests:
                 self.training_requests.setdefault(request.id, request)
             return
@@ -349,10 +349,11 @@ class TrainingPipeline:
                 for formed_set_id in record_set.formed_set_ids()
                 for task in self.tasks[formed_set_id]
             )
-            batch = self.task2batch.make_batch(tasks, self.batch_number)
-            if request is not None:
-                batch = replace(batch, batch_id=f"{self.scenario}:instruction:{request.id}", request=request)
-            self.pending = batch
+            if request is None:
+                self.pending = self.task2batch.make_batch(tasks, f"{self.scenario}:batch:{self.batch_number}")
+            else:
+                batch = self.task2batch.make_batch(tasks, f"{self.scenario}:instruction:{request.id}")
+                self.pending = replace(batch, request=request)
         return self.pending
 
     def acknowledge(self, batch_id: str, *, trained: bool = True) -> frozenset[str]:

@@ -137,12 +137,12 @@ class CoralBatches(Task2Batch):
         # One batch is one sibling group.
         super().__init__(context, 1)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         parents = {item.metadata["coral"]["group"] for item in items}
         if len(parents) != 1:
             raise RuntimeError("CoralBatches batches exactly one sibling group per step")
         parent = next(iter(parents))
-        batch = TrainingBatch(f"{self.scenario}:coral:{parent}:{batch_number}", items)
+        batch = TrainingBatch(batch_id, items)
         group = trajectories(batch)
         rewards = tuple(trajectory_reward(sample) for sample in group)
         if all(reward == rewards[0] for reward in rewards[1:]):

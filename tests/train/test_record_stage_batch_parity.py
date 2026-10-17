@@ -322,8 +322,8 @@ class SlotBatches(Task2Batch):
     ) -> Self:
         return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:slots:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class SlotGroupRecord2Record(ReportRecord2Record):
@@ -451,8 +451,8 @@ class ToyBatches(Task2Batch):
     ) -> Self:
         return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class ToyJudgingRecord2Record(JudgingRecord2Record):

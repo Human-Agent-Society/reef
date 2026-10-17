@@ -222,12 +222,12 @@ class TTTDBatches(Task2Batch):
             )
         return cls(context, record2record)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         steps = {item.metadata["tttd"]["step"] for item in items}
         if len(steps) != 1:
             raise RuntimeError("TTTDBatches creates exactly one complete step per batch")
         step = next(iter(steps))
-        batch = TrainingBatch(f"{self.scenario}:tttd:{step}", items)
+        batch = TrainingBatch(batch_id, items)
         # Lay the accepted rollouts back out as the step's grid.
         samples = {
             (item.metadata["tttd"]["group"], item.metadata["tttd"]["rollout"]): item for item in trajectories(batch)

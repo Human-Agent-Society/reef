@@ -399,7 +399,7 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
 @pytest.mark.unit
 def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
     batch = TrainingBatch(
-        "math:sao:1",
+        "math:batch:1",
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
@@ -413,7 +413,7 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
 @pytest.mark.unit
 def test_backend_preparation_advances_step_state() -> None:
     batch = TrainingBatch(
-        "math:sao:1",
+        "math:batch:1",
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 

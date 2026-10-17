@@ -292,7 +292,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
         return MARKER
 
     person = [{"name": "TWILIO_SID", "kind": "env"}]
-    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=person)
+    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     b = backend(tmp_path, extending)
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
         result = run_backend_step(b, TrainingBatch("demo:instruction:ask-1", (), request=request), b.initial_state())

@@ -50,8 +50,8 @@ class FeedbackTasks(ReportTasks):
 
 
 class FeedbackBatches(Task2Batch):
-    def make_batch(self, tasks, batch_number):
-        return TrainingBatch(f"batch:{batch_number}", tasks)
+    def make_batch(self, tasks, batch_id):
+        return TrainingBatch(batch_id, tasks)
 
 
 def feedback_pipeline(context, batch_size):

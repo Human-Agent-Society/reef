@@ -1329,8 +1329,8 @@ class _RetiringRetriesTasks(JudgedTasks):
 class RetiringRetriesBatches(Task2Batch):
     """Batches the judged turns of ``_RetiringRetriesJudging``."""
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:retiring:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 @dataclass(frozen=True)
