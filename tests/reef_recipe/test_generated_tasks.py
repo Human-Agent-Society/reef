@@ -38,6 +38,7 @@ from reef.recipe.generated_tasks.processor import (
     GeneratedTaskRecord2Record,
     GeneratedTaskTasks,
     RoundJob,
+    RoundOutcome,
     RoundSettings,
     TaskBatchSettings,
     TaskGroupSettings,
@@ -715,6 +716,17 @@ def test_a_round_that_played_no_task_does_not_block_the_next_one(tmp_path: Path)
     assert [job.round_number for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
 
 
+def test_a_round_whose_job_failed_waits_for_batches_instead_of_starting_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    worker.finished.append(Failed("round-00000"))
+    assert not looked(p) and [job.round_number for job in worker.submitted] == [0]
+    assert (
+        not p.background_jobs_running() and "round-00000 did not finish" in p.status()["task_generation"]["last_error"]
+    )
+
+
 def test_a_restarted_processor_carries_on_from_the_round_summaries(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), rounds=2)
     assert not looked(p) and p.status()["task_generation"]["completed"] == 1
@@ -748,11 +760,21 @@ def test_a_generator_failure_ends_the_round_with_what_ran(
     assert summary(tmp_path, 0)["error"] == error
 
 
-def test_a_round_that_never_finishes_is_named_in_the_status(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
+def test_a_closed_pipeline_starts_no_round_and_ignores_a_round_that_finishes_late(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
     p.close()
-    assert not looked(p)
-    assert "no further round runs" in p.status()["task_generation"]["last_error"]
+    worker.finished.append(RoundOutcome(receipt="round-00000", round_number=0, results=(), error=""))
+    assert not looked(p) and [job.round_number for job in worker.submitted] == [0]
+    assert p.status()["task_generation"]["completed"] == 0, "the late round settled nothing"
+
+
+def test_a_worker_that_refuses_a_round_stops_the_pipeline_with_the_reason(tmp_path: Path) -> None:
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
+    p.record2task.worker.close()
+    with pytest.raises(RuntimeError, match="round 0 cannot run"):
+        p.ready()
 
 
 def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) -> None:
