@@ -9,7 +9,7 @@ from tests.support.task_service_stubs import task_for
 
 from reef.core.tasks import GeneratedTask, PlayArm, manifest_task_paths, read_harbor_task
 from reef.core.tasks.split import TaskSplitConflict
-from reef.record2task.store import FileTaskStore, TaskConflict, TaskStoreError
+from reef.record2task.store import FileTaskStore, PlayedResult, TaskConflict, TaskStoreError
 
 TASK_NAME = "stored-task"
 SOURCE_ID = "source-session"
@@ -257,3 +257,56 @@ def test_interrupted_source_completion_keeps_the_published_task_recoverable(
         assert not reopened.generation(generation=0).is_complete
         reopened.complete_generation(generation=0)
         assert reopened.generation(generation=0).is_complete
+
+
+def completed(store: FileTaskStore, generation: int, *names: str, sources: tuple[str, ...] = ()) -> None:
+    """Save and publish one complete generation of train tasks."""
+    store.begin_generation(generation=generation, source_record_ids=sources)
+    store.save_candidates(
+        generation=generation,
+        candidates=tuple(
+            candidate(name, source=f"source-{name}", port=PORT + index) for index, name in enumerate(names)
+        ),
+    )
+    for index in range(len(names)):
+        store.publish_task(generation=generation, index=index)
+    store.complete_generation(generation=generation)
+
+
+@pytest.mark.unit
+def test_play_results_make_tasks_unavailable_and_complete_a_generations_feedback(tmp_path: Path) -> None:
+    with FileTaskStore(root=tmp_path, eval_fraction=0.0, seed=SEED) as store:
+        completed(store, 0, "first-task", "second-task")
+        assert [saved.generated.task.name for saved in store.available_tasks()] == ["first-task", "second-task"]
+        store.record_result(generation=0, result=PlayedResult("first-task", (1.0, 0.0), reported_plays=2))
+        assert [saved.generated.task.name for saved in store.available_tasks()] == ["second-task"]
+        assert store.deliverable_generations() == ()
+        with pytest.raises(TaskStoreError, match="already has a result"):
+            store.record_result(generation=0, result=PlayedResult("first-task", (1.0,)))
+        store.record_result(
+            generation=0, result=PlayedResult("second-task", error="sandbox gone", infrastructure_failure=True)
+        )
+        (state,) = store.deliverable_generations()
+        first, second = state.task_results()
+        assert first.training_rewards == (1.0, 0.0) and first.is_played
+        assert second.infrastructure_failure and second.error == "sandbox gone"
+        assert store.counts()["played/train"] == 2
+    with FileTaskStore(root=tmp_path, eval_fraction=0.0, seed=SEED) as reopened:
+        assert reopened.available_tasks() == () and len(reopened.deliverable_generations()) == 1
+        reopened.mark_delivered(generation=0)
+        assert reopened.deliverable_generations() == ()
+
+
+@pytest.mark.unit
+def test_an_incomplete_generation_offers_no_task_and_is_found_by_its_sources(tmp_path: Path) -> None:
+    with FileTaskStore(root=tmp_path, eval_fraction=0.0, seed=SEED) as store:
+        completed(store, 0, "done-task", sources=("done-source",))
+        store.begin_generation(generation=1, source_record_ids=("open-source",))
+        store.save_candidates(generation=1, candidates=(candidate("open-task", source="open-source"),))
+        store.publish_task(generation=1, index=0)
+        assert [saved.generated.task.name for saved in store.available_tasks()] == ["done-task"]
+        assert store.completed_source_record_ids() == {"done-source"}
+        found = store.find_generation(source_record_ids=("open-source",))
+        assert found is not None and found.generation == 1 and not found.is_complete
+        assert store.find_generation(source_record_ids=()) is None
+        assert store.next_generation() == 2

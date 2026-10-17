@@ -49,8 +49,10 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). A duplicate task is invalid.
-4. The recipe saves each valid task and assigns its split before play. It plays training tasks `plays_per_task` times; eval tasks remain saved without plays.
-5. `record_results` computes each played task's pass rate and its place against the band, and writes the generation's report. It sends no Designer reports, because the Designer here is not trained.
+4. The recipe saves each valid task and assigns its split. Later it plays training tasks `plays_per_task` times; eval tasks remain saved without plays.
+5. When every training task of the generation has a result, `record_results` computes each played task's pass rate and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
+
+Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
 
 An accepted task names two source records: the author's last recorded call, the one that wrote the task, and the session's record. A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
 
@@ -184,7 +186,7 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above creates it, and round 0 starts when the recipe's pipeline first looks for a batch after that. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps its cumulative manifest under `rounds/autoenvscaling/store/` and its round summaries under `store/plays/`.
+`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above creates it, and round 0 starts when the recipe's pipeline first looks for a batch after that. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps its cumulative manifest and each task's play result under `rounds/autoenvscaling/store/`.
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 
@@ -192,9 +194,9 @@ Optional, for an upstream that serves only the Responses API (a ChatGPT plan): s
 
 With `gpt-6-sol`, agent mode takes about 10 to 25 minutes per session, so a generation of 5 sessions takes about 2 to 3 hours before its tasks play. Prompt mode takes about 1 to 2 minutes per session.
 
-The built-in generated-task recipe starts the next round after `batches_per_round` trained batches, and plays the round's tasks only after the whole generation is written. So training waits for each round ([#765](https://github.com/Human-Agent-Society/reef/issues/765), [#766](https://github.com/Human-Agent-Society/reef/pull/766)). To train today, build the task pool first, then train from the finished pool:
+The built-in generated-task recipe plays a generation's tasks only after the whole generation is saved, and it runs one generation or play at a time. So training waits for each generation ([#765](https://github.com/Human-Agent-Society/reef/issues/765), [#766](https://github.com/Human-Agent-Society/reef/pull/766)). To train today, build the task pool first, then train from the finished pool:
 
-1. **Build the pool.** Run the generator's rounds with no training, or with a recipe whose plays only measure. The recipe starts a round only when its training pipeline asks for a batch, so run the rounds from a script. `GeneratedTaskTasks.run_round` runs one round with no trainer: generate, validate, play through the generator service, and record the results. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section. Its plays are records that measure the band against the model it serves.
+1. **Build the pool.** Run the generator's generations with no training. The recipe starts a round only when its training pipeline asks for a batch, so run the generations from a script. A `GenerationJob` run by `GeneratedTaskTasks.run` generates, validates and saves one generation with no trainer, and plays nothing. Set the generator's `generator_url` to the generator service of a deployment that trains nothing, for example [`recipes/basic/external-provider.yaml`](../../basic/external-provider.yaml) with the example's `generator` section.
 
    ```python
    import os
@@ -202,11 +204,11 @@ The built-in generated-task recipe starts the next round after `batches_per_roun
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
-   from reef.recipe.generated_tasks.processor import RoundJob, RoundSettings, TaskGroupSettings
+   from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
 
 
    async def build_pool(generator_config: dict[str, object], rounds: int, rounds_dir: str) -> None:
-       """Run the generator's rounds with no trainer: generate, validate, play, and record the results."""
+       """Run the generator's generations with no trainer: generate, validate, and save the tasks."""
        context = PipelineContext("autoenvscaling")
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
        settings = RoundSettings(
@@ -218,13 +220,13 @@ The built-in generated-task recipe starts the next round after `batches_per_roun
        record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=4))
        tasks = GeneratedTaskTasks(context, settings, record_stage, task_generator=generator)
        try:
-           for number in range(tasks.next_round, rounds):
-               await tasks.run_round(RoundJob(receipt=f"round-{number:05d}", round_number=number))
+           for number in range(tasks.task_store.next_generation(), rounds):
+               await tasks.run(GenerationJob(receipt=f"generation-{number:05d}", generation=number))
        finally:
            tasks.close()
    ```
 
-   `generator_config` is the generator's `config` from the example, with its environment references filled in. The recipe saves all valid tasks to `rounds_dir/autoenvscaling/store/tasks/` and writes the cumulative `split-manifest.json` beside that directory. The band remains a diagnostic in the generation report. A restart continues with the next round.
+   `generator_config` is the generator's `config` from the example, with its environment references filled in. The recipe saves all valid tasks to `rounds_dir/autoenvscaling/store/tasks/` and writes the cumulative `split-manifest.json` beside that directory. A restart continues with the next generation.
 
 2. **Train from the pool.** Start the example with `rounds: 0`, in the environment of [Run it](#run-it), and create the scenario as there. With `rounds: 0` the recipe generates nothing and trains on the episodes that the task player reports with the label `arm=plain`, as [SPADE's README](../spade/README.md) describes. A task's group trains once it has `plays_per_task` episodes (4 in the example), so play the cumulative manifest's training side four times. `--agent-json` gives the task player the example's `generator.agent`, with thinking off.
 

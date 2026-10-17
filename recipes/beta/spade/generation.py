@@ -144,6 +144,7 @@ class ProposalRecord:
     refusal: str
     designer_report_id: str = ""
     split: Literal["train", "eval"] = "train"
+    infrastructure_failure: bool = False
 
     @property
     def is_written(self) -> bool:

@@ -39,6 +39,11 @@ class TaskResult:
         return cls(TaskStatus.PENDING)
 
     @classmethod
+    def deferred(cls) -> TaskResult:
+        """The set could not finish now. The record stage keeps its records and offers the set again later."""
+        return cls(TaskStatus.DEFERRED)
+
+    @classmethod
     def skipped(cls) -> TaskResult:
         """The set cannot train. The record stage ends its records."""
         return cls(TaskStatus.SKIPPED)

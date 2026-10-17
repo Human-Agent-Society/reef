@@ -12,7 +12,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 from typing import Literal, Self
@@ -20,7 +20,14 @@ from typing import Literal, Self
 from pydantic import TypeAdapter, ValidationError
 
 from reef.core.errors import ReefError
-from reef.core.tasks import GeneratedTask, HarborTaskError, TaskSplit, read_harbor_task, write_harbor_task
+from reef.core.tasks import (
+    GeneratedTask,
+    HarborTaskError,
+    TaskPlayResult,
+    TaskSplit,
+    read_harbor_task,
+    write_harbor_task,
+)
 from reef.core.tasks.split import MANIFEST_VERSION, extend_split_by_source
 
 STORE_VERSION = 1
@@ -65,14 +72,28 @@ class CandidateOutcome:
 
 
 @dataclass(frozen=True)
+class PlayedResult:
+    """What the plays of one published train task returned, and how many training episodes reached Reef."""
+
+    task_name: str
+    training_rewards: tuple[float, ...] = ()
+    measurement_rewards: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    error: str = ""
+    infrastructure_failure: bool = False
+    reported_plays: int = 0
+
+
+@dataclass(frozen=True)
 class GenerationState:
-    """Recoverable candidates and validation outcomes for one generation job."""
+    """Recoverable candidates, validation outcomes, play results and feedback delivery for one generation."""
 
     generation: int
     source_record_ids: tuple[str, ...]
     candidates: tuple[GeneratedTask, ...] | None = None
     outcomes: tuple[CandidateOutcome, ...] = ()
     is_complete: bool = False
+    results: tuple[PlayedResult, ...] = ()
+    is_delivered: bool = False
 
     def __post_init__(self) -> None:
         indices = [outcome.index for outcome in self.outcomes]
@@ -80,6 +101,11 @@ class GenerationState:
             raise ValueError("generation outcomes must identify distinct saved candidates")
         if self.is_complete and (self.candidates is None or self.pending_indices):
             raise ValueError("a complete generation must have an outcome for every candidate")
+        names = [result.task_name for result in self.results]
+        if len(names) != len(set(names)) or not set(names) <= set(self.train_task_names):
+            raise ValueError("play results must name distinct train tasks of the generation")
+        if self.is_delivered and not self.is_feedback_complete:
+            raise ValueError("a generation's feedback is delivered only after every train task has a result")
 
     def candidate(self, *, index: int) -> GeneratedTask:
         """Resolve a candidate position from a persisted checkpoint."""
@@ -92,6 +118,41 @@ class GenerationState:
         """Candidate positions whose validation has not completed."""
         completed = {outcome.index for outcome in self.outcomes}
         return tuple(index for index in range(len(self.candidates or ())) if index not in completed)
+
+    @property
+    def train_task_names(self) -> tuple[str, ...]:
+        """The names of the generation's published train tasks."""
+        return tuple(
+            self.candidate(index=outcome.index).task.name for outcome in self.outcomes if outcome.split == "train"
+        )
+
+    @property
+    def is_feedback_complete(self) -> bool:
+        """Whether the generation is complete and every train task of it has a play result."""
+        return self.is_complete and {result.task_name for result in self.results} == set(self.train_task_names)
+
+    def task_results(self) -> tuple[TaskPlayResult, ...]:
+        """The result of each candidate with an outcome, in candidate order, as the generator receives them."""
+        played = {result.task_name: result for result in self.results}
+        task_results: list[TaskPlayResult] = []
+        for outcome in sorted(self.outcomes, key=lambda outcome: outcome.index):
+            task = self.candidate(index=outcome.index).task
+            if outcome.error:
+                task_results.append(TaskPlayResult(task, error=outcome.error))
+            elif outcome.split == "eval":
+                task_results.append(TaskPlayResult(task, split="eval"))
+            else:
+                result = played[task.name]
+                task_results.append(
+                    TaskPlayResult(
+                        task,
+                        result.training_rewards,
+                        result.measurement_rewards,
+                        error=result.error,
+                        infrastructure_failure=result.infrastructure_failure,
+                    )
+                )
+        return tuple(task_results)
 
 
 @dataclass(frozen=True)
@@ -154,6 +215,38 @@ class TaskStore(ABC):
     @abstractmethod
     def tasks(self, *, split: SplitName | None = None) -> tuple[StoredTask, ...]:
         """List published tasks, optionally restricted to a split."""
+
+    @abstractmethod
+    def available_tasks(self) -> tuple[StoredTask, ...]:
+        """List the train tasks of complete generations that have no play result yet."""
+
+    @abstractmethod
+    def find_generation(self, *, source_record_ids: tuple[str, ...]) -> GenerationState | None:
+        """Return the generation made from exactly these source records, if one exists."""
+
+    @abstractmethod
+    def completed_source_record_ids(self) -> frozenset[str]:
+        """Return the source records of complete generations, which no new generation uses again."""
+
+    @abstractmethod
+    def next_generation(self) -> int:
+        """Return the number after the highest saved generation."""
+
+    @abstractmethod
+    def complete_generation_count(self) -> int:
+        """Return how many generations are complete."""
+
+    @abstractmethod
+    def record_result(self, *, generation: int, result: PlayedResult) -> None:
+        """Save the play result of one train task."""
+
+    @abstractmethod
+    def deliverable_generations(self) -> tuple[GenerationState, ...]:
+        """Return the generations whose feedback is complete and not yet delivered, oldest first."""
+
+    @abstractmethod
+    def mark_delivered(self, *, generation: int) -> None:
+        """Record that the generator received the generation's results."""
 
     @abstractmethod
     def counts(self) -> dict[str, int]:
@@ -273,6 +366,10 @@ class FileTaskStore(TaskStore):
                     f"task {generated.task.name!r} has a different digest: "
                     f"{existing.generated.task.digest} != {generated.task.digest}"
                 )
+            if existing is not None and existing.generation != generation:
+                raise TaskConflict(
+                    f"task {generated.task.name!r} is already published in generation {existing.generation}"
+                )
             if index in outcomes:
                 self.write_manifest()
                 return published[generated.task.name]
@@ -345,11 +442,78 @@ class FileTaskStore(TaskStore):
                     )
             return tuple(saved for saved in saved_by_name.values() if split is None or saved.split == split)
 
-    def counts(self) -> dict[str, int]:
-        """Count published train/eval tasks and rejected candidates."""
+    def available_tasks(self) -> tuple[StoredTask, ...]:
+        """Return the unplayed train tasks of complete generations, oldest generation first."""
         with self.lock:
+            played = {result.task_name for state in self.generations.values() for result in state.results}
+            return tuple(
+                saved
+                for saved in sorted(self.tasks(split="train"), key=lambda saved: saved.generation)
+                if self.generations[saved.generation].is_complete and saved.generated.task.name not in played
+            )
+
+    def find_generation(self, *, source_record_ids: tuple[str, ...]) -> GenerationState | None:
+        """Return the generation of exactly these source records; description-only generations match nothing."""
+        with self.lock:
+            if not source_record_ids:
+                return None
+            return next(
+                (state for state in self.generations.values() if state.source_record_ids == source_record_ids), None
+            )
+
+    def completed_source_record_ids(self) -> frozenset[str]:
+        """Return every source record that a complete generation used."""
+        with self.lock:
+            return frozenset(
+                record_id
+                for state in self.generations.values()
+                if state.is_complete
+                for record_id in state.source_record_ids
+            )
+
+    def next_generation(self) -> int:
+        """Return the number after the highest saved generation, 0 for an empty store."""
+        with self.lock:
+            return max(self.generations, default=-1) + 1
+
+    def complete_generation_count(self) -> int:
+        """Return how many generations are complete."""
+        with self.lock:
+            return sum(state.is_complete for state in self.generations.values())
+
+    def record_result(self, *, generation: int, result: PlayedResult) -> None:
+        """Save one train task's play result; a task has one result."""
+        with self.lock:
+            state = self.generations[generation]
+            if any(saved.task_name == result.task_name for saved in state.results):
+                raise TaskStoreError(f"task {result.task_name!r} of generation {generation} already has a result")
+            self.save_generation(state=replace(state, results=(*state.results, result)))
+
+    def deliverable_generations(self) -> tuple[GenerationState, ...]:
+        """Return the generations whose feedback is complete and undelivered, in generation order."""
+        with self.lock:
+            return tuple(
+                state
+                for _, state in sorted(self.generations.items())
+                if state.is_feedback_complete and not state.is_delivered
+            )
+
+    def mark_delivered(self, *, generation: int) -> None:
+        """Save the delivery, so a restart does not send the generation's results again."""
+        with self.lock:
+            self.save_generation(state=replace(self.generations[generation], is_delivered=True))
+
+    def counts(self) -> dict[str, int]:
+        """Count train tasks by play state, eval tasks, and rejected and unvalidated candidates."""
+        with self.lock:
+            played = {result.task_name for state in self.generations.values() for result in state.results}
             counts = Counter(
-                f"{'available' if saved.split == 'train' else 'held_out'}/{saved.split}" for saved in self.tasks()
+                (
+                    "held_out/eval"
+                    if saved.split == "eval"
+                    else "played/train" if saved.generated.task.name in played else "available/train"
+                )
+                for saved in self.tasks()
             )
             counts["rejected"] = sum(
                 bool(outcome.error) for state in self.generations.values() for outcome in state.outcomes

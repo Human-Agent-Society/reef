@@ -963,14 +963,17 @@ Task generation
 - ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
-``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
+``async record_results(results: tuple[TaskPlayResult, ...], *, generation: int)``
+is optional. It receives the results of one earlier ``generate`` call, named by
+``TaskGenerationRequest.generation``, possibly after later calls and after a
+restart. A second call for the same generation must have no effect. The
 default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
 
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
-carries source records and non-empty requirements text.
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={}, generation=0)``
+carries source records, non-empty requirements text, and the number of the generation.
 Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
 Use an empty record tuple for description-only generation.
 For local materials, pass a tuple of ``Path`` values in ``assets``.

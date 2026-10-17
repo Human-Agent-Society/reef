@@ -75,7 +75,7 @@ def closed_with(generator: AutoEnvScalingGenerator, task: HarborTask, errors: tu
         # The recipe writes a valid task again to play it.
         asyncio.run(generator.service.write_task(task))
         played = TaskPlayResult(task, (0.0, 1.0))
-    asyncio.run(generator.record_results((played,)))
+    asyncio.run(generator.record_results((played,), generation=0))
     return json.loads((generator.state_dir / f"generation-{generator.generation:05d}.json").read_text())
 
 
