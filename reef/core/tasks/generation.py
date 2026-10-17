@@ -33,14 +33,18 @@ class TaskGenerationRequest:
     contents, not both. Construction validates fields but performs no I/O.
     Consumers own file reads, transport limits, and generation settings.
     Description-only generation uses an empty source_records tuple.
+    ``generation`` numbers the call; ``record_results`` names it again.
     """
 
     source_records: tuple[AgentRecord, ...]
     description: str
     assets: tuple[Path, ...] = ()
     asset_files: Mapping[str, str] = field(default_factory=dict)
+    generation: int = 0
 
     def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int) or self.generation < 0:
+            raise ValueError("generation must be a non-negative integer")
         if not isinstance(self.source_records, tuple):
             raise ValueError("source_records must be a tuple of AgentRecord values")
         if any(not isinstance(record, AgentRecord) for record in self.source_records):
@@ -152,6 +156,8 @@ class TaskPlayResult:
     episode that ran and returned no reward counts as 0. ``error`` is not
     empty when the task was not played: it failed validation, the task player
     refused it, or the agent could not start on it.
+    ``infrastructure_failure`` marks an error where the task could not run,
+    not a failure of the solver.
     An eval task has no rewards and is not played, even with an empty error.
     """
 
@@ -160,6 +166,7 @@ class TaskPlayResult:
     measurement_rewards: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
     error: str = ""
     split: Literal["train", "eval"] = "train"
+    infrastructure_failure: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, HarborTask):
@@ -184,6 +191,8 @@ class TaskPlayResult:
             raise ValueError("task result split must be train or eval")
         if self.split == "eval" and (self.training_rewards or self.measurement_rewards):
             raise ValueError("an eval task result cannot contain rollout rewards")
+        if self.infrastructure_failure and not self.error:
+            raise ValueError("an infrastructure failure needs an error")
 
     @property
     def is_played(self) -> bool:
@@ -213,7 +222,8 @@ class TaskGenerator(Plugin, ABC):
         """Return zero or more new tasks.
 
         Preserve the request's source record ids in each task's
-        ``source_agent_record_ids``. An exception stops the round.
+        ``source_agent_record_ids``. An exception is a failure to run, and the
+        recipe retries the generation within its limits.
         """
 
     @abstractmethod
@@ -221,14 +231,17 @@ class TaskGenerator(Plugin, ABC):
         """Check one generated task before the recipe plays it.
 
         Return task defects as validation errors. Raise when the checks cannot
-        run; the exception stops the round. The task is a value: a validation
+        run; the recipe retries the generation within its limits. The task is a value: a validation
         that needs a directory writes its own copy.
         """
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Receive the result of each task that the last :meth:`generate` call returned.
+    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+        """Receive the result of each task that the :meth:`generate` call of ``generation`` returned.
 
-        The recipe calls this once for each round, after the round's plays,
-        also when the round stopped early. A task that the round did not reach
-        has no result. The default keeps nothing.
+        The recipe calls this once for each generation, after every train task
+        of it has a result. Later generations may have started before, and the
+        process may have restarted since the generation. A generator keeps what
+        it needs for each open generation across a restart, and ignores a
+        second call for a generation that it already closed. The default keeps
+        nothing.
         """

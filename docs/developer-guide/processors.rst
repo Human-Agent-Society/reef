@@ -330,13 +330,18 @@ generator gets what it needs from its ``config`` and from these calls only:
 - ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``
   returns zero or more tasks. A ``GeneratedTask`` holds a ``HarborTask`` and
   its ``measurement_arms``. Preserve the request's source record IDs in each
-  task's ``source_agent_record_ids``.
+  task's ``source_agent_record_ids``. ``request.generation`` numbers the call.
+  An exception is a failure to run, and the recipe retries the generation.
 - ``async validate(task: HarborTask) -> TaskValidationResult`` checks one
   task. Empty ``errors`` means the task passed. Return task defects as errors.
-  Raise when the checks cannot run. The task is a value, so the check does not
+  Raise when the checks cannot run; the recipe retries the generation. The task is a value, so the check does not
   need a file system that it shares with Reef.
-- ``async record_results(results: tuple[TaskPlayResult, ...])`` receives the
-  results of the last ``generate`` call. The default keeps nothing.
+- ``async record_results(results: tuple[TaskPlayResult, ...], *, generation: int)``
+  receives the results of the ``generate`` call numbered ``generation``, once
+  every train task of it has a result. Later generations may have started
+  before, and the process may have restarted since. A generator keeps what it
+  needs for each open generation across a restart, and ignores a second call
+  for a generation that it already closed. The default keeps nothing.
 
 A ``PlayArm(name, count, extra_instruction_files)`` asks for ``count`` more
 plays of a task. Each play shows the agent the files that
@@ -344,11 +349,13 @@ plays of a task. Each play shows the agent the files that
 ``solution/hint.txt``. The recipe never trains on a measurement arm.
 
 A ``TaskPlayResult`` holds the task, ``training_rewards``,
-``measurement_rewards`` (by arm name), a ``split`` (``train`` by default), and an ``error``. The rewards include
+``measurement_rewards`` (by arm name), a ``split`` (``train`` by default), an ``error``, and
+``infrastructure_failure``. The rewards include
 only episodes that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
-could not start on it.
+could not start on it. ``infrastructure_failure`` marks an error where the task
+could not run at all; it is not a failure of the solver.
 
 An eval result has ``split="eval"``, no rewards and no error.
 Generators must keep it out of training feedback and measured experience.
@@ -357,20 +364,37 @@ The generator service scores an episode whose verifier ran past its timeout
 as 0, and reports it, so a training play of that kind trains. The task's
 oracle passed the same verifier, so the timeout is the agent's.
 
-The recipe splits the rounds across its stages. The record stage
-(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due,
-holds the source sessions, and forms a round set with the round number and its sessions.
-The record-to-task stage (``GeneratedTaskTasks``) takes the round set, runs the round
-on its own ``BackgroundJobWorker`` outside the trainer lock, and returns pending until
-the round finishes. One round runs at a time. In each round it:
+The recipe splits the work across its stages. The record stage
+(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due and
+which saved tasks play next. The record-to-task stage (``GeneratedTaskTasks``) runs each
+generation and each play on its own ``BackgroundJobWorker``, outside the trainer lock,
+and returns pending until the job finishes. One job runs at a time.
+
+A generation job does not play. It:
 
 1. Asks the generator for tasks with the configured ``description`` and the
-   request's source sessions.
+   round's source sessions.
 2. Saves the candidates, then validates each task with the generator.
-3. Publishes valid tasks to the local store and assigns their train/eval split before play.
-   It stages training tasks through the generator service and plays each one ``plays_per_task`` times, then plays its measurement arms.
-   Eval tasks remain saved without plays.
-4. Sends the results to ``record_results``.
+3. Publishes valid tasks to the local store and assigns their train/eval split.
+   Eval tasks stay saved and are never played.
+
+A generator or check that fails to run is retried from the saved candidates,
+up to ``generation_attempts`` times within ``generation_deadline_seconds``.
+After that the round is deferred: its sessions stay held, and the next run
+runs the round again. The next round waits ``deferred_retry_seconds``, unless
+new sessions arrive first. A round that made train tasks puts them in the record
+stage's task pool. A task that an earlier generation published is rejected as a
+duplicate.
+
+When no play runs and the task pool holds tasks, the record stage takes them
+all into one play. A play job writes each task through the generator service
+(again, if a stopped play left it there),
+plays it ``plays_per_task`` times, then plays its measurement arms, and saves
+its result. A task that cannot run at all has an infrastructure failure as its
+result. When every train task of a generation has a result, the next job sends
+the generation's results to ``record_results``. A generation can therefore
+close after later generations started. A generation whose delivery fails waits
+for the next job, and later generations still go out.
 
 The training plays carry the arm ``plain``, and only reports with that label
 train. A generated task whose measurement arm is
@@ -394,25 +418,36 @@ holds source sessions in arrival order. Each round takes at most
 has none. The generator receives each session's inference records and then
 its report as ``source_records``. The pipeline keeps a session's records
 while its round set is pending, then releases them. A session that arrives after the
-last round is released at once. A restart before the release can use a
-session again.
+last round is released at once.
+
+Rounds take their sessions from a run. A run starts with the sessions that
+wait at that moment; sessions that arrive later wait for the next run. A run
+ends when it has no session left, after ``max_rounds_per_run`` rounds, or
+after ``max_run_seconds``. A deferred round runs again, with the same
+sessions, in the next run that new sessions start.
 
 The first round starts when the pipeline first looks for a batch. The next
 round starts after ``batches_per_round`` batches trained since the previous
-round started; a batch that the backend dropped as stale does not count. A
-round that played no task is followed at once. A round whose job failed waits
-for batches like a played round, so a failing worker does not start round
-after round. An exception from the
-generator stops the round. The record-to-task stage still sends the results
-it has to ``record_results``. A summary of each round goes to
-``state_dir/<scenario>/store/plays/round-<round>.json``, with the IDs of its source records. After a restart, the
-record-to-task stage continues with the next round. ``GET /reef/status`` shows the generator, the
-round, the task counts, and the last error under ``task_generation``.
+round started, and only while the task pool holds fewer than ``refill_tasks``
+tasks, so saved tasks play before more are generated. The pool counts tasks
+that wait for a play, not tasks in a play that is queued or running. A batch
+that the backend dropped as stale does not count. A round that made no train
+task and a play that played no task are followed at once, because no batch
+comes from them. The ``rounds`` limit counts the rounds that finished a
+generation; a deferred round and a round of replayed sessions do not count.
 
-The store saves candidates before validation and records each publication or rejection independently of play results.
+The rounds still wait for batches. When the played groups cannot fill a batch,
+for example fewer tasks than ``tasks_per_step``, no further round starts.
+
+The store saves candidates before validation and records each publication, rejection and play result.
 Its generation documents own task metadata; task directories contain only Harbor files.
 The store rebuilds its cumulative ``split-manifest.json`` from publication outcomes when reopened.
-``GET /reef/status`` exposes task counts under ``task_store``.
+After a restart, the record-to-task stage continues with the next generation number.
+It puts the train tasks that have no result back in the task pool and sends the results that the generator did not receive, even when no other job is due.
+A deferred round is kept in memory only; after a restart, its sessions come back through the record replay and form rounds again.
+A replayed session that a complete generation already used makes no new generation.
+A task whose play was running at the stop has no result, so it plays again.
+``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the task pool size.
 Legacy summaries outside the store remain untouched and do not resume into the new store.
 
 Container operations run in the generator service, ``reef.record2task.generator``.

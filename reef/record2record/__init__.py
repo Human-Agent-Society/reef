@@ -55,7 +55,7 @@ the trainer can both use it.
 
 from reef.record2record.base import InferenceRecord2Record, PassThroughRecord2Record, Record2Record, TaskStatus
 from reef.record2record.judging import JudgedSet, JudgingRecord2Record, RecordJudging
-from reef.record2record.pool import RecordSetPool
+from reef.record2record.pool import Pool, RecordSetPool
 from reef.record2record.reports import (
     ExclusiveReportRecord2Record,
     GroupDecision,
@@ -64,9 +64,9 @@ from reef.record2record.reports import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2record.rounds import RoundGrouping, RoundRecord2Record, RoundSet
+from reef.record2record.rounds import PlaySet, RoundGrouping, RoundRecord2Record, RoundSet
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder, SelectionPolicy
-from reef.record2record.sets import RecordSet, SingleRecordSet
+from reef.record2record.sets import PoolItem, RecordSet, SingleRecordSet, TaskSet
 
 __all__ = [
     "ArrivalOrder",
@@ -77,6 +77,9 @@ __all__ = [
     "JudgedSet",
     "JudgingRecord2Record",
     "PassThroughRecord2Record",
+    "PlaySet",
+    "Pool",
+    "PoolItem",
     "Record2Record",
     "RecordJudging",
     "RecordSet",
@@ -90,5 +93,6 @@ __all__ = [
     "RoundSet",
     "SelectionPolicy",
     "SingleRecordSet",
+    "TaskSet",
     "TaskStatus",
 ]

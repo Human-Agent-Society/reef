@@ -1,29 +1,29 @@
-"""The generated-task stages: rounds of generated tasks played here, their training episodes trained here.
+"""The generated-task stages: tasks generated and saved here, played from the task pool, and trained here.
 
 The record stage (``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) groups the task player's reports: every
 episode of the training arm names its task under ``metadata.task``, the episodes of one task form a
 group, and a group is complete at ``plays_per_task`` episodes. A training play that reports nothing, such
 as a failed trial, never joins its group. So when a task's plays end, its group is complete at the number
 of plays that reported, and a group of one is discarded. ``GeneratedTaskBatches`` batches
-``tasks_per_step`` complete groups, in arrival order. When a round is due, the record stage forms a round
-set. ``GeneratedTaskTasks`` runs it with the deployment's :class:`~reef.core.tasks.TaskGenerator` and
-returns pending until the round finishes.
+``tasks_per_step`` complete groups, in arrival order.
 
-One round is one job on a private worker, off the trainer's thread:
+When a round is due, the record stage forms a round set; when saved tasks wait in its task pool and no
+play runs, it forms a play set. ``GeneratedTaskTasks`` runs each set as one job on a private worker, off
+the trainer's thread, and returns pending until the job finishes. A generation job:
 
-1. Ask the generator for tasks, with the round's source sessions when the record stage gave any.
-2. Save the candidates and validate each task with the generator.
-3. Publish valid tasks with their fixed train/eval split before play.
-4. Stage training tasks through the generator service and play their training and measurement arms.
-   Eval tasks remain saved without plays.
-5. Send the results to the generator.
+1. Asks the generator for tasks, with the round's source sessions when the record stage gave any.
+2. Saves the candidates and validates each task with the generator.
+3. Publishes valid tasks with their fixed train/eval split. Eval tasks are never played.
+
+A play job stages each train task through the generator service, plays its training and measurement arms,
+and saves the result. When every train task of a generation has a result, the next job sends the
+generation's results to the generator.
 
 The first round starts when the pipeline first looks for a batch. The next round starts after
-``batches_per_round`` batches were acknowledged since the previous round started. Its episodes train
-while it runs, so the generator always writes for the policy that trains now. A round that played no
-task is followed at once.
-A summary of each round goes under ``state_dir/<scenario>/store/plays/``.
-A restart reads the new summaries to continue with the next round.
+``batches_per_round`` batches were acknowledged since the previous round started, and only while the task
+pool holds fewer than ``refill_tasks`` tasks. A round that made no train task and a play that played no task
+are followed at once; a deferred round waits ``deferred_retry_seconds`` or for new sessions. A restart
+continues from the task store.
 
 Only the training arm, labeled ``plain``, trains. The record stage releases reports of other arms, and
 reports without an arm, such as a generator's own reports, without assembling them. A generated task
@@ -32,7 +32,7 @@ whose measurement arm is named ``plain`` is not played.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import queue
 from collections.abc import Hashable, Mapping
@@ -49,21 +49,23 @@ from reef.core.tasks.metadata import TRAINING_ARM, reported_arm, reported_task_n
 from reef.core.tasks.split import TaskSplitConflict
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.store import FileTaskStore, TaskConflict
+from reef.recipe.generated_tasks.store import FileTaskStore, PlayedResult, StoredTask, TaskConflict
 from reef.record2record import (
     GroupDecision,
+    PlaySet,
     Record2Record,
     RecordSet,
     ReportContext,
     RoundGrouping,
     RoundRecord2Record,
     RoundSet,
+    TaskStatus,
 )
 from reef.record2task import Record2Task, ReportTasks, TaskResult
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.task2batch import Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +77,12 @@ DEFAULT_SCAFFOLD_TOLERANCE = 8
 REALIGN_THRESHOLD = 32768
 DEFAULT_BATCHES_PER_ROUND = 1
 ERROR_EXCERPT_CHARS = 300
-ROUND_PREFIX = "round-"
 STORE_DIRECTORY = "store"
-PLAY_DIRECTORY = "plays"
 DEFAULT_EVAL_FRACTION = 0.0
 DEFAULT_SPLIT_SEED = 0
+DEFAULT_GENERATION_ATTEMPTS = 3
+DEFAULT_GENERATION_DEADLINE_SECONDS = 1800.0
+DELIVERY_RECEIPT = "delivery"
 
 
 def rewards_of(plays: tuple[TaskPlay, ...]) -> tuple[float, ...]:
@@ -89,38 +92,49 @@ def rewards_of(plays: tuple[TaskPlay, ...]) -> tuple[float, ...]:
     )
 
 
-def recorded_rounds(state_dir: Path) -> tuple[int, ...]:
-    """The rounds whose summaries are under the state directory, in order."""
-    if not state_dir.is_dir():
-        return ()
-    numbers = []
-    for path in sorted(state_dir.glob(f"{ROUND_PREFIX}*.json")):
-        stem = path.name[len(ROUND_PREFIX) : -len(".json")]
-        if stem.isdigit():
-            numbers.append(int(stem))
-    return tuple(numbers)
+@dataclass(frozen=True)
+class GenerationJob(SupportsReceipt):
+    """One generation to run, with its source sessions' records; the receipt names it."""
 
-
-def recorded_reported_plays(state_dir: Path) -> dict[str, int]:
-    """Each played task's count of training episodes that reached Reef, from the round summaries.
-
-    A summary written before the counts were kept names none.
-    """
-    counts: dict[str, int] = {}
-    for round_number in recorded_rounds(state_dir):
-        document = json.loads((state_dir / f"{ROUND_PREFIX}{round_number:05d}.json").read_text(encoding="utf-8"))
-        for task in document["tasks"]:
-            if task.get("reported_plays") is not None:
-                counts[task["name"]] = task["reported_plays"]
-    return counts
+    generation: int
+    source_records: tuple[AgentRecord, ...] = ()
 
 
 @dataclass(frozen=True)
-class RoundJob(SupportsReceipt):
-    """One round to run, with its source sessions' records; the receipt names it."""
+class GenerationOutcome(SupportsReceipt):
+    """What the worker hands back for one generation: its train tasks, or a deferral after its attempts ran out."""
 
-    round_number: int
-    source_records: tuple[AgentRecord, ...] = ()
+    generation: int
+    tasks: tuple[TaskItem, ...]
+    is_deferred: bool
+    error: str
+
+
+@dataclass(frozen=True)
+class DeliveryJob(SupportsReceipt):
+    """Send the generator the results that it has not received; a restart submits it."""
+
+
+@dataclass(frozen=True)
+class DeliveryOutcome(SupportsReceipt):
+    """The error of a delivery that failed, empty when every delivery went through."""
+
+    error: str
+
+
+@dataclass(frozen=True)
+class PlayJob(SupportsReceipt):
+    """Saved train tasks to play, by name; the receipt names the play."""
+
+    task_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PlayOutcome(SupportsReceipt):
+    """What the worker hands back for one play: how many of its tasks played."""
+
+    played: int
+    error: str
 
 
 def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, ...]:
@@ -135,13 +149,22 @@ def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, .
     return tuple(records.values())
 
 
-@dataclass(frozen=True)
-class RoundOutcome(SupportsReceipt):
-    """What the worker hands back for one round."""
-
-    round_number: int
-    results: tuple[TaskPlayResult, ...]
-    error: str
+def task_item(saved: StoredTask) -> TaskItem:
+    """The task that the task pool holds for a saved train task, with its generation, split and arms."""
+    task = saved.generated.task
+    return TaskItem(
+        saved.path,
+        source_agent_record_ids=task.source_agent_record_ids,
+        metadata={
+            "task": {
+                "name": task.name,
+                "digest": task.digest,
+                "round": saved.generation,
+                "split": saved.split,
+                "arms": [arm.name for arm in saved.generated.measurement_arms],
+            }
+        },
+    )
 
 
 def episode_assembly(scaffold_tolerance: int = DEFAULT_SCAFFOLD_TOLERANCE) -> SampleAssembly:
@@ -222,8 +245,20 @@ class TaskGroupSettings(PluginSettings):
     )
     source_records_per_round: int = config_option(0, help="The source sessions that each round takes, at most.")
     source_tag: str = config_option("", help="The name=value tag that marks a source session.")
+    refill_tasks: int = config_option(
+        1, help="The next round starts only while the task pool holds fewer saved tasks than this."
+    )
+    max_rounds_per_run: int = config_option(0, help="The rounds that one run of source sessions takes; 0 is no limit.")
+    max_run_seconds: float = config_option(0.0, help="The seconds after which a run stops; 0 is no limit.")
+    deferred_retry_seconds: float = config_option(
+        600.0, help="The seconds after a deferred round before the next round is due, unless new sessions wait."
+    )
 
     def __post_init__(self) -> None:
+        if self.refill_tasks < 1:
+            raise ValueError("refill_tasks must be positive")
+        if self.max_rounds_per_run < 0 or self.max_run_seconds < 0 or self.deferred_retry_seconds < 0:
+            raise ValueError("max_rounds_per_run, max_run_seconds and deferred_retry_seconds must be non-negative")
         if self.plays_per_task < 2:
             raise ValueError("plays_per_task must be at least two: a group of one has no relative reward")
         if self.batches_per_round < 1:
@@ -239,13 +274,13 @@ class TaskGroupSettings(PluginSettings):
 class RoundSettings(PluginSettings):
     """The config of ``GeneratedTaskTasks``."""
 
-    rounds: int = config_option(0, help="The rounds of task generation; 0 generates nothing.")
+    rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     generator: Mapping[str, Any] | None = config_option(
         None, help="The TaskGenerator class (module) and its config. Required with rounds."
     )
     description: str = config_option("", help="What the tasks are about; every generation request carries it.")
     generator_url: str = config_option("", help="The generator service, ${endpoints.generator}.")
-    state_dir: str = config_option("", help="Where each scenario keeps its task store and round summaries.")
+    state_dir: str = config_option("", help="Where each scenario keeps its task store.")
     served_model: str = config_option("", help="The model the task player asks for; the deployment's by default.")
     eval_fraction: float = config_option(
         DEFAULT_EVAL_FRACTION, help="The fraction of new source components held out before rollout."
@@ -254,10 +289,18 @@ class RoundSettings(PluginSettings):
     scaffold_tolerance: int = config_option(
         DEFAULT_SCAFFOLD_TOLERANCE, help="Masked tokens the sample assembly may realign before a response."
     )
+    generation_attempts: int = config_option(
+        DEFAULT_GENERATION_ATTEMPTS, help="The attempts of a generation whose generator or checks fail to run."
+    )
+    generation_deadline_seconds: float = config_option(
+        DEFAULT_GENERATION_DEADLINE_SECONDS, help="The seconds that all attempts of one generation may take."
+    )
 
     def __post_init__(self) -> None:
         if self.rounds < 0:
             raise ValueError("rounds must be non-negative")
+        if self.generation_attempts < 1 or self.generation_deadline_seconds <= 0:
+            raise ValueError("generation_attempts and generation_deadline_seconds must be positive")
         if self.scaffold_tolerance < 0:
             raise ValueError("scaffold_tolerance must be non-negative")
         if isinstance(self.eval_fraction, bool) or not 0 <= self.eval_fraction <= 1:
@@ -299,6 +342,10 @@ class GeneratedTaskRecord2Record(RoundRecord2Record):
             batches_per_round=settings.batches_per_round,
             sources_per_round=settings.source_records_per_round,
             exclusive_sources=True,
+            refill_tasks=settings.refill_tasks,
+            max_rounds_per_run=settings.max_rounds_per_run,
+            max_run_seconds=settings.max_run_seconds,
+            deferred_retry_seconds=settings.deferred_retry_seconds,
         )
 
     @classmethod
@@ -314,18 +361,25 @@ class GeneratedTaskRecord2Record(RoundRecord2Record):
 
 
 class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
-    """The record-to-task stage of generated tasks: played episodes as tasks, and the rounds.
+    """The record-to-task stage of generated tasks: played episodes as tasks, and the generation and play jobs.
 
-    The record stage forms a ``RoundSet`` when a round is due. ``make_tasks``
-    submits the round to the worker and returns ``TaskResult.pending()``. The
-    round's source sessions go to the generator as the request's
-    ``source_records``. The round generates tasks, validates them, has the
-    generator service play them, and sends the results to the generator; the
-    plays come back as records. ``take_finished`` hands back each finished
-    round: ``READY`` with no tasks when it played a task, because its episodes
-    train as reports, and ``SKIPPED`` when it played none. This stage owns the
-    worker and the round summaries under ``state_dir/<scenario>/store/plays/``.
-    A restart reads these summaries to continue with the next round.
+    The record stage forms a ``RoundSet`` when a round is due and a
+    ``PlaySet`` when saved tasks wait to play. ``make_tasks`` submits either
+    one to the worker and returns ``TaskResult.pending()``.
+
+    A generation job generates tasks from the round's description and source
+    sessions, validates them and saves them in the task store; it plays none.
+    A generator or check that fails to run is retried up to
+    ``generation_attempts`` times within ``generation_deadline_seconds``. After
+    that the round is deferred, and its sessions wait for the next run. The
+    round comes back ``READY`` with the saved train tasks, or ``SKIPPED`` when
+    it made none.
+
+    A play job writes each task through the generator service, plays it, and
+    saves its result. The plays come back as records. When every train task of
+    a generation has a result, the next job sends the generation's results to
+    the generator. A restart puts the unplayed train tasks back in the record
+    stage's task pool and sends the results that the generator did not receive.
     """
 
     def __init__(
@@ -338,16 +392,18 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         task_player: Generator | None = None,
         worker: BackgroundJobWorker | None = None,
     ) -> None:
-        #: The record stage that forms the round sets and closes the task groups.
+        #: The record stage that forms the round and play sets and closes the task groups.
         self.round_stage = round_stage
         self.assembly = episode_assembly(settings.scaffold_tolerance)
         self.scenario = context.scenario
-        # The record stage's groups complete at the plays that each round makes.
+        # The record stage's groups complete at the plays that each task makes.
         self.plays_per_task = round_stage.task_grouping.plays_per_task
         self.rounds = settings.rounds
         self.description = settings.description
         self.served_model = settings.served_model or None
-        # Every scenario keeps its own rounds.
+        self.generation_attempts = settings.generation_attempts
+        self.generation_deadline_seconds = settings.generation_deadline_seconds
+        # Every scenario keeps its own task store.
         self.state_dir = Path(settings.state_dir).expanduser() / self.scenario if settings.state_dir else None
         if self.rounds > 0:
             if task_generator is None:
@@ -374,22 +430,26 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             if self.state_dir is not None and self.rounds > 0
             else None
         )
-        self.play_state_dir = self.state_dir / STORE_DIRECTORY / PLAY_DIRECTORY if self.state_dir is not None else None
-        recorded = recorded_rounds(self.play_state_dir) if self.play_state_dir is not None else ()
-        # The round summaries keep how many plays of each task reported, so replayed reports close the groups.
-        if self.play_state_dir is not None:
-            for task_name, count in recorded_reported_plays(self.play_state_dir).items():
-                round_stage.plays_reported(task_name, count)
         # The worker puts each task's count here as its plays end; the trainer's thread takes them in take_finished.
         self.reported_play_counts: queue.SimpleQueue[tuple[str, int]] = queue.SimpleQueue()
-        round_stage.resume_rounds(next_round=recorded[-1] + 1 if recorded else 0, round_limit=self.rounds)
-        self.completed_rounds = len(recorded)
-        self.round_in_flight: int | None = None
-        #: The set ID of each submitted round, by the round job's receipt.
-        self.round_set_ids: dict[str, Hashable] = {}
-        self.tasks_generated = 0
-        self.tasks_played = 0
+        round_stage.resume_rounds(
+            completed_rounds=self.task_store.complete_generation_count() if self.task_store is not None else 0,
+            round_limit=self.rounds,
+        )
+        if self.task_store is not None:
+            for saved in self.task_store.available_tasks():
+                round_stage.add_tasks((task_item(saved),), round_number=saved.generation)
+            # The saved results close the groups of replayed reports.
+            for state in self.task_store.generations.values():
+                for result in state.results:
+                    round_stage.plays_reported(result.task_name, result.reported_plays)
+        #: The set ID of each submitted job, by the job's receipt.
+        self.job_set_ids: dict[str, Hashable] = {}
+        self.generation_in_flight: int | None = None
         self.last_error = ""
+        # Results that a stop kept from the generator go out now, even when no other job is due.
+        if self.task_store is not None and self.worker is not None and self.task_store.deliverable_generations():
+            self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
 
     @classmethod
     def from_config(
@@ -427,49 +487,80 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         return replace(sample, group_id=task_name)
 
     def make_tasks(self, record_set: RecordSet) -> TaskResult:
-        """Submit a round set to the worker and return pending; make a sample from any other set."""
-        if not isinstance(record_set, RoundSet):
+        """Submit a round or play set to the worker and return pending; make a sample from any other set."""
+        if isinstance(record_set, PlaySet):
+            job: SupportsReceipt = PlayJob(
+                receipt=f"play-{record_set.play_number:05d}",
+                task_names=tuple(task.task_path.name for task in record_set.tasks),
+            )
+        elif isinstance(record_set, RoundSet):
+            if self.task_store is None:
+                raise RuntimeError("a round needs a task store: set pipeline.record2task.config.state_dir")
+            records = session_records(record_set.sources)
+            completed = self.task_store.completed_source_record_ids()
+            remaining = tuple(record for record in records if record.agent_record_id not in completed)
+            # A restart replays sessions that a complete generation already used; their tasks are saved.
+            if records and not remaining:
+                return TaskResult(TaskStatus.INGESTED)
+            existing = self.task_store.find_generation(
+                source_record_ids=tuple(record.agent_record_id for record in remaining)
+            )
+            generation = self.task_store.next_generation() if existing is None else existing.generation
+            job = GenerationJob(
+                receipt=f"generation-{generation:05d}", generation=generation, source_records=remaining
+            )
+            self.generation_in_flight = generation
+        else:
             return super().make_tasks(record_set)
-        receipt = f"round-{record_set.round_number:05d}"
-        job = RoundJob(
-            receipt=receipt, round_number=record_set.round_number, source_records=session_records(record_set.sources)
-        )
         if self.worker is None or not self.worker.submit(job):
-            raise RuntimeError(f"the round worker is closed or broken; round {record_set.round_number} cannot run")
-        self.round_set_ids[receipt] = record_set.set_id
-        self.round_in_flight = record_set.round_number
+            raise RuntimeError(f"the round worker is closed or broken; {job.receipt} cannot run")
+        self.job_set_ids[job.receipt] = record_set.set_id
         return TaskResult.pending()
 
     def take_finished(self) -> tuple[tuple[Hashable, TaskResult], ...]:
-        """Close the task groups whose plays ended, and hand back each finished round."""
+        """Close the task groups whose plays ended, and hand back each finished generation and play."""
         while not self.reported_play_counts.empty():
             self.round_stage.plays_reported(*self.reported_play_counts.get_nowait())
         if self.worker is None:
             return ()
         finished: list[tuple[Hashable, TaskResult]] = []
         for outcome in self.worker.poll():
-            set_id = self.round_set_ids.pop(outcome.receipt)
-            self.round_in_flight = None
+            if outcome.receipt == DELIVERY_RECEIPT:
+                self.last_error = (
+                    outcome.error if isinstance(outcome, DeliveryOutcome) else "the delivery did not finish"
+                )
+                continue
+            set_id = self.job_set_ids.pop(outcome.receipt)
             if isinstance(outcome, Failed):
                 self.last_error = f"{outcome.receipt} did not finish; see the service log"
                 logger.error("generated-task %s failed on scenario %r", outcome.receipt, self.scenario)
-                finished.append((set_id, TaskResult.ready(())))
+                if outcome.receipt.startswith("generation-"):
+                    self.generation_in_flight = None
+                    finished.append((set_id, TaskResult.deferred()))
+                else:
+                    finished.append((set_id, TaskResult.skipped()))
                 continue
-            if not isinstance(outcome, RoundOutcome):
-                raise TypeError("the round worker must hand back a RoundOutcome")
-            played = sum(1 for result in outcome.results if result.is_played)
-            self.completed_rounds += 1
-            self.tasks_generated += len(outcome.results)
-            self.tasks_played += played
+            if isinstance(outcome, GenerationOutcome):
+                self.generation_in_flight = None
+                self.last_error = outcome.error
+                logger.info(
+                    "generated-task generation %d on scenario %r: %d train tasks%s",
+                    outcome.generation,
+                    self.scenario,
+                    len(outcome.tasks),
+                    ", deferred" if outcome.is_deferred else "",
+                )
+                if outcome.is_deferred:
+                    finished.append((set_id, TaskResult.deferred()))
+                else:
+                    finished.append(
+                        (set_id, TaskResult.ready(outcome.tasks) if outcome.tasks else TaskResult.skipped())
+                    )
+                continue
+            if not isinstance(outcome, PlayOutcome):
+                raise TypeError("the round worker must hand back a GenerationOutcome or a PlayOutcome")
             self.last_error = outcome.error
-            logger.info(
-                "generated-task round %d on scenario %r: %d tasks played of %d",
-                outcome.round_number,
-                self.scenario,
-                played,
-                len(outcome.results),
-            )
-            finished.append((set_id, TaskResult.ready(()) if played else TaskResult.skipped()))
+            finished.append((set_id, TaskResult.ready(()) if outcome.played else TaskResult.skipped()))
         return tuple(finished)
 
     def close(self) -> None:
@@ -479,94 +570,145 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             self.task_store.close()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        return {"rounds_completed": self.completed_rounds, "round_in_flight": 0 if self.round_in_flight is None else 1}
+        return {"generation_in_flight": 0 if self.generation_in_flight is None else 1}
 
     def status(self) -> Mapping[str, Any]:
+        completed = self.task_store.complete_generation_count() if self.task_store is not None else 0
+        if self.generation_in_flight is not None:
+            next_generation = self.generation_in_flight + 1
+        else:
+            next_generation = self.task_store.next_generation() if self.task_store is not None else 0
         return {
             "task_store": self.task_store.counts() if self.task_store is not None else {},
             "task_generation": {
                 "generator": None if self.task_generator is None else type(self.task_generator).__name__,
-                "in_flight": self.round_in_flight,
-                "next": self.round_stage.next_round,
-                "completed": self.completed_rounds,
+                "in_flight": self.generation_in_flight,
+                "next": next_generation,
+                "completed": completed,
                 "of": self.rounds,
-                "tasks_generated": self.tasks_generated,
-                "tasks_played": self.tasks_played,
                 "last_error": self.last_error,
             },
         }
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
-        """Run one job on the worker: a task-generation round."""
-        if not isinstance(job, RoundJob):
-            raise TypeError(f"the round worker takes RoundJob, not {type(job).__name__}")
-        return await self.run_round(job)
-
-    async def run_round(self, job: RoundJob) -> RoundOutcome:
-        """The worker's job: generate, validate, play, and send the results back; then the round's summary."""
+        """Run one job on the worker, after sending the generator any results that it has not received."""
         if self.task_generator is None or self.task_store is None:
-            raise RuntimeError("a round needs a task generator and a state_dir")
-        results: list[TaskPlayResult] = []
-        reported_plays: dict[str, int] = {}
-        error = ""
-        # The generator is a deployment's plugin: whatever it raises stops the round, and what ran is kept.
-        try:
-            generation = self.task_store.begin_generation(
-                generation=job.round_number,
-                source_record_ids=tuple(record.agent_record_id for record in job.source_records),
-            )
-            if generation.candidates is None:
-                generated = await self.task_generator.generate(
-                    TaskGenerationRequest(job.source_records, self.description)
-                )
-                generation = self.task_store.save_candidates(generation=job.round_number, candidates=generated)
-            for index in generation.pending_indices:
-                item = generation.candidate(index=index)
-                if any(arm.name == TRAINING_ARM for arm in item.measurement_arms):
-                    refusal = f"the measurement arm {TRAINING_ARM!r} has the name of the training arm"
-                    self.task_store.reject_task(generation=job.round_number, index=index, reason=refusal)
-                    continue
-                validation = await self.task_generator.validate(item.task)
-                if validation.is_valid:
-                    try:
-                        self.task_store.publish_task(generation=job.round_number, index=index)
-                    except (TaskConflict, TaskSplitConflict) as conflict:
-                        self.task_store.reject_task(generation=job.round_number, index=index, reason=str(conflict))
-                else:
-                    self.task_store.reject_task(
-                        generation=job.round_number, index=index, reason="; ".join(validation.errors)
-                    )
-            self.task_store.complete_generation(generation=job.round_number)
-        except Exception as exc:
-            error = str(exc) or type(exc).__name__
-            logger.exception("generated-task round %d stopped on scenario %r", job.round_number, self.scenario)
-        # Play already validated tasks even when a later validation stopped the round.
-        generation = self.task_store.generation(generation=job.round_number)
-        try:
-            for outcome in sorted(generation.outcomes, key=lambda outcome: outcome.index):
-                item = generation.candidate(index=outcome.index)
-                if outcome.error:
-                    results.append(TaskPlayResult(task=item.task, error=outcome.error))
-                elif outcome.split == "eval":
-                    results.append(TaskPlayResult(task=item.task, split="eval"))
-                else:
-                    result, reported = await self.played(item, job.round_number)
-                    results.append(result)
-                    if result.is_played:
-                        reported_plays[item.task.name] = reported
-                        self.reported_play_counts.put((item.task.name, reported))
-        except Exception as exc:
-            error = error or str(exc) or type(exc).__name__
-            logger.exception("generated-task rollout %d stopped on scenario %r", job.round_number, self.scenario)
-        try:
-            await self.task_generator.record_results(tuple(results))
-        except Exception as exc:
-            error = error or str(exc) or type(exc).__name__
-            logger.exception("the task generator did not take the results of round %d", job.round_number)
-        self.write_round_summary(job.round_number, tuple(results), error, reported_plays, job.source_records)
-        return RoundOutcome(receipt=job.receipt, round_number=job.round_number, results=tuple(results), error=error)
+            raise RuntimeError("a job needs a task generator and a state_dir")
+        delivery_error = await self.deliver_results()
+        if isinstance(job, DeliveryJob):
+            return DeliveryOutcome(receipt=job.receipt, error=delivery_error)
+        if isinstance(job, GenerationJob):
+            generation = await self.run_generation(job)
+            # A generation without train tasks has its complete results now.
+            delivery_error = await self.deliver_results() or delivery_error
+            return replace(generation, error=generation.error or delivery_error)
+        if isinstance(job, PlayJob):
+            play = await self.run_play(job)
+            delivery_error = await self.deliver_results() or delivery_error
+            return replace(play, error=play.error or delivery_error)
+        raise TypeError(f"the round worker takes GenerationJob or PlayJob, not {type(job).__name__}")
 
-    async def played(self, item: GeneratedTask, round_number: int) -> tuple[TaskPlayResult, int]:
+    async def run_generation(self, job: GenerationJob) -> GenerationOutcome:
+        """Generate, validate and save one generation; retry a failure to run within the attempts and deadline."""
+        if self.task_store is None:
+            raise RuntimeError("a generation needs a state_dir")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.generation_deadline_seconds
+        error = ""
+        for attempt in range(1, self.generation_attempts + 1):
+            remaining_seconds = deadline - loop.time()
+            if remaining_seconds <= 0:
+                break
+            # The generator is a deployment's plugin: whatever it raises is a failure to run.
+            try:
+                await asyncio.wait_for(self.generated(job), remaining_seconds)
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+                logger.exception(
+                    "generated-task generation %d attempt %d failed on scenario %r",
+                    job.generation,
+                    attempt,
+                    self.scenario,
+                )
+                continue
+            state = self.task_store.generation(generation=job.generation)
+            saved = {saved.generated.task.name: saved for saved in self.task_store.tasks(split="train")}
+            tasks = tuple(task_item(saved[name]) for name in state.train_task_names)
+            return GenerationOutcome(
+                receipt=job.receipt, generation=job.generation, tasks=tasks, is_deferred=False, error=""
+            )
+        return GenerationOutcome(
+            receipt=job.receipt,
+            generation=job.generation,
+            tasks=(),
+            is_deferred=True,
+            error=error or "the generation deadline passed",
+        )
+
+    async def generated(self, job: GenerationJob) -> None:
+        """One attempt: continue from the saved candidates and validation outcomes, then complete the generation."""
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("a generation needs a task generator and a state_dir")
+        generation = self.task_store.begin_generation(
+            generation=job.generation,
+            source_record_ids=tuple(record.agent_record_id for record in job.source_records),
+        )
+        if generation.candidates is None:
+            generated = await self.task_generator.generate(
+                TaskGenerationRequest(job.source_records, self.description, generation=job.generation)
+            )
+            generation = self.task_store.save_candidates(generation=job.generation, candidates=generated)
+        for index in generation.pending_indices:
+            item = generation.candidate(index=index)
+            if any(arm.name == TRAINING_ARM for arm in item.measurement_arms):
+                refusal = f"the measurement arm {TRAINING_ARM!r} has the name of the training arm"
+                self.task_store.reject_task(generation=job.generation, index=index, reason=refusal)
+                continue
+            validation = await self.task_generator.validate(item.task)
+            if validation.is_valid:
+                try:
+                    self.task_store.publish_task(generation=job.generation, index=index)
+                except (TaskConflict, TaskSplitConflict) as conflict:
+                    self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
+            else:
+                self.task_store.reject_task(
+                    generation=job.generation, index=index, reason="; ".join(validation.errors)
+                )
+        self.task_store.complete_generation(generation=job.generation)
+
+    async def run_play(self, job: PlayJob) -> PlayOutcome:
+        """Play each task and save its result; a task that cannot run has an infrastructure failure as its result."""
+        if self.task_store is None:
+            raise RuntimeError("a play needs a state_dir")
+        saved_by_name = {saved.generated.task.name: saved for saved in self.task_store.tasks(split="train")}
+        played = 0
+        for name in job.task_names:
+            saved = saved_by_name[name]
+            try:
+                result, reported = await self.played(saved.generated, saved.generation)
+            except Exception as exc:
+                logger.exception("generated-task %s could not play on scenario %r", name, self.scenario)
+                result = TaskPlayResult(saved.generated.task, error=str(exc) or type(exc).__name__)
+                result = replace(result, infrastructure_failure=True)
+                reported = 0
+            self.task_store.record_result(
+                generation=saved.generation,
+                result=PlayedResult(
+                    task_name=name,
+                    training_rewards=result.training_rewards,
+                    measurement_rewards=dict(result.measurement_rewards),
+                    error=result.error,
+                    infrastructure_failure=result.infrastructure_failure,
+                    reported_plays=reported,
+                ),
+            )
+            if result.is_played:
+                played += 1
+                # The task's group can close now, before the play ends.
+                self.reported_play_counts.put((name, reported))
+        return PlayOutcome(receipt=job.receipt, played=played, error="")
+
+    async def played(self, item: GeneratedTask, generation: int) -> tuple[TaskPlayResult, int]:
         """Write one valid task and play it: the training arm, then each measurement arm.
 
         Returns the task's result and how many of its training episodes reached Reef, 0 for a task that was
@@ -578,9 +720,13 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         task = item.task
         try:
             written = await self.task_player.write_task(task)
-        except (DuplicateTask, TaskNameConflict) as exc:
+        except DuplicateTask:
+            # A play that a stop interrupted left the task staged; stage it again.
+            await self.task_player.delete_task(task.name)
+            written = await self.task_player.write_task(task)
+        except TaskNameConflict as exc:
             return TaskPlayResult(task, error=f"refused: {exc}"), 0
-        tags = {"round": str(round_number)}
+        tags = {"round": str(generation)}
         training = await self.task_player.play(
             written.path,
             scenario=self.scenario,
@@ -594,7 +740,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         if training and all(play.reward is None and play.error for play in training):
             await self.task_player.delete_task(task.name)
             error = f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
-            return TaskPlayResult(task, error=error), 0
+            return TaskPlayResult(task, error=error, infrastructure_failure=True), 0
         measurement_rewards: dict[str, tuple[float, ...]] = {}
         for arm in item.measurement_arms:
             plays = await self.task_player.play(
@@ -611,40 +757,24 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         reported = sum(play.is_reported for play in training)
         return TaskPlayResult(task, rewards_of(training), measurement_rewards), reported
 
-    def write_round_summary(
-        self,
-        round_number: int,
-        results: tuple[TaskPlayResult, ...],
-        error: str,
-        reported_plays: Mapping[str, int],
-        source_records: tuple[AgentRecord, ...] = (),
-    ) -> Path:
-        """Keep each task's result and reported plays, the round's error, and its source records' IDs.
+    async def deliver_results(self) -> str:
+        """Send each generation whose train tasks all have results to the generator, oldest first.
 
-        A restart counts these files and reads the reported plays back.
+        Returns the error of the last delivery that failed; a failed generation waits for the next job, and later
+        generations still go out.
         """
-        if self.play_state_dir is None or self.task_store is None:
-            raise RuntimeError("a round summary needs a state_dir")
-        self.play_state_dir.mkdir(parents=True, exist_ok=True)
-        document = {
-            "round": round_number,
-            "error": error,
-            "source_record_ids": [record.agent_record_id for record in source_records],
-            "tasks": [
-                {
-                    "name": result.task.name,
-                    "error": result.error,
-                    "split": result.split,
-                    "training_rewards": list(result.training_rewards),
-                    "measurement_rewards": {arm: list(rewards) for arm, rewards in result.measurement_rewards.items()},
-                    "reported_plays": reported_plays.get(result.task.name),
-                }
-                for result in results
-            ],
-        }
-        path = self.play_state_dir / f"{ROUND_PREFIX}{round_number:05d}.json"
-        self.task_store.write_atomic(path=path, content=(json.dumps(document, indent=2) + "\n").encode("utf-8"))
-        return path
+        if self.task_generator is None or self.task_store is None:
+            raise RuntimeError("delivering results needs a task generator and a state_dir")
+        error = ""
+        for state in self.task_store.deliverable_generations():
+            try:
+                await self.task_generator.record_results(state.task_results(), generation=state.generation)
+            except Exception as exc:
+                logger.exception("the task generator did not take the results of generation %d", state.generation)
+                error = str(exc) or type(exc).__name__
+                continue
+            self.task_store.mark_delivered(generation=state.generation)
+        return error
 
 
 class GeneratedTaskBatches(Task2Batch):

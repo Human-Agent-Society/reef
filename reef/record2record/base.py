@@ -10,6 +10,7 @@ from collections.abc import Hashable, Mapping
 from enum import Enum
 from typing import Any, Self
 
+from reef.core.batches import TrainDataItem
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
@@ -29,6 +30,7 @@ class TaskStatus(Enum):
     #: The set makes no task, as in a pipeline that trains no weights. The stage forgets the set and keeps its records.
     INGESTED = "ingested"
     PENDING = "pending"
+    DEFERRED = "deferred"
 
 
 class Record2Record(ABC, Plugin):
@@ -107,11 +109,13 @@ class Record2Record(ABC, Plugin):
         record_set: RecordSet,
         status: TaskStatus,
         producing_runtime_load_ids: frozenset[str | None] = frozenset(),
+        tasks: tuple[TrainDataItem, ...] = (),
     ) -> None:
         """Keep or end a formed set from what the task stage made of it.
 
         ``producing_runtime_load_ids`` are the versions that produced the
-        training data of the set. The staleness check reads them.
+        training data of the set. The staleness check reads them. ``tasks``
+        are the set's tasks when it is ``READY``.
         """
         if status is TaskStatus.READY:
             self.producing_runtime_load_ids[record_set.set_id] = producing_runtime_load_ids

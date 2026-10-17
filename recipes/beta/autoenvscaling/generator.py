@@ -3,9 +3,13 @@
 ``generate`` has the author rebuild the next ``count`` sessions of the sources file. Admission
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
-on a copy under the generator service's tasks root. ``record_results`` places each played task against the band
-``[band_low, band_high]`` and writes the generation report.
-Eval tasks remain unplayed and receive no band measurement.
+on a copy under the generator service's tasks root. ``generate`` keeps the open generation in
+``open-<generation>.json`` under the state directory, named by the recipe's generation number, and ``validate``
+adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
+a restart: it places each played task against the band ``[band_low, band_high]`` and writes the generation report.
+A second call for a closed generation does nothing.
+Eval tasks remain unplayed and receive no band measurement. A task that could not run is an outage, not a band
+measurement.
 The recipe owns the split manifest.
 The generator reports nothing to the Designer, which is not trained here. A cursor under the state directory lets a restart continue with the next session.
 """
@@ -20,9 +24,11 @@ import shlex
 import statistics
 import threading
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self
+
+from pydantic import TypeAdapter
 
 from recipes.beta.autoenvscaling.author import (
     AgentAuthor,
@@ -99,6 +105,7 @@ RUN set -e; cd {path}; if [ -d .git ]; then \\
     chown -R "$(stat -c %u:%g .)" .git; \\
   fi"""
 CURSOR_FILE = "cursor.json"
+OPEN_PREFIX = "open-"
 # Where a session that became no task in the band stopped; a task inside the band has no stage.
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
 STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission refused its task
@@ -324,6 +331,26 @@ class SessionProposal:
 
 
 @dataclass(frozen=True)
+class OpenGeneration:
+    """What ``generate`` made and ``record_results`` has not closed yet, with what ``validate`` found for each task.
+
+    ``stages`` holds the stage of a refused task, empty when it passed the checks; ``paths`` holds where
+    ``validate`` wrote each task.
+    """
+
+    number: int
+    refused: tuple[SessionProposal, ...]
+    pending: dict[str, SessionProposal]
+    error: str = ""
+    checks: dict[str, tuple[CheckResult, ...]] = field(default_factory=dict)
+    stages: dict[str, str] = field(default_factory=dict)
+    paths: dict[str, str] = field(default_factory=dict)
+
+
+OPEN_GENERATION = TypeAdapter(OpenGeneration)
+
+
+@dataclass(frozen=True)
 class TaskOutcome:
     """A played task: its rewards, the solver's pass rate (the mean training reward), and its place in the band.
 
@@ -465,17 +492,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             if cursor_path.is_file()
             else GenerationCursor()
         )
-        # The open generation: what generate made and record_results has not closed yet.
+        # The generation that generate makes now; generate takes the next number from the cursor.
         self.generation = self.cursor.next_generation
-        self.refused: list[SessionProposal] = []
-        self.pending: dict[str, SessionProposal] = {}
-        # What validate found for each task: each check's result, and the stage of a refused task ("" when valid).
-        self.check_results: dict[str, tuple[CheckResult, ...]] = {}
-        self.validation_stages: dict[str, str] = {}
-        # Where validate wrote each task; the recipe writes it again under the same name to play it.
-        self.task_paths: dict[str, Path] = {}
-        # The generation's error for its report.
-        self.error = ""
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -530,11 +548,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.generation = self.cursor.next_generation
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
         self.save_cursor(replace(self.cursor, next_generation=self.generation + 1))
-        self.refused, self.pending, self.error = [], {}, ""
-        self.check_results, self.validation_stages, self.task_paths = {}, {}, {}
         if request.source_records:
-            self.error = "AutoEnvScalingGenerator takes its sessions from its sources file, not from source records"
-            raise ValueError(self.error)
+            error = "AutoEnvScalingGenerator takes its sessions from its sources file, not from source records"
+            self.save_open(request.generation, OpenGeneration(self.generation, (), {}, error))
+            raise ValueError(error)
+        refused: list[SessionProposal] = []
+        pending: dict[str, SessionProposal] = {}
+        error = ""
         tasks: list[GeneratedTask] = []
         for index in range(self.count):
             position = self.cursor.next_position
@@ -543,24 +563,54 @@ class AutoEnvScalingGenerator(TaskGenerator):
             try:
                 task = await self.rebuilt(source, index)
             except ProposalRefused as exc:
-                self.refused.append(
-                    replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
-                )
+                refused.append(replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc)))
             except AuthorError as exc:
                 # An outage must not pass for the author's failure: it ends the generation, and the report names it.
-                self.error = f"the author could not rebuild {source.record_id}: {exc}"
-                self.refused.append(replace(proposal, stage=STAGE_OUTAGE, refusal=self.error))
+                error = f"the author could not rebuild {source.record_id}: {exc}"
+                refused.append(replace(proposal, stage=STAGE_OUTAGE, refusal=error))
             else:
-                self.pending[task.name] = replace(
+                pending[task.name] = replace(
                     proposal, designer_record_id=task.source_agent_record_ids[0], task_name=task.name
                 )
                 tasks.append(GeneratedTask(task))
             # The session is taken; a restart continues with the next one. A cancelled run takes none.
             self.save_cursor(replace(self.cursor, next_position=position + 1))
-            if self.error:
-                logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, self.error)
+            if error:
+                logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                 break
+        self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
         return tuple(tasks)
+
+    def open_path(self, generation: int) -> Path:
+        return self.state_dir / f"{OPEN_PREFIX}{generation:05d}.json"
+
+    def save_open(self, generation: int, state: OpenGeneration) -> None:
+        """Keep an open generation under the state directory, replacing the file whole."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.open_path(generation)
+        partial = path.with_name(f"{path.name}.partial")
+        partial.write_bytes(OPEN_GENERATION.dump_json(state))
+        os.replace(partial, path)
+
+    def save_validation(
+        self, task_name: str, checks: tuple[CheckResult, ...], stage: str, path: str, *, error: str = ""
+    ) -> None:
+        """Add what validate found for a task, and an error that stopped it, to the open generation of the task."""
+        for open_path in sorted(self.state_dir.glob(f"{OPEN_PREFIX}*.json")):
+            state = OPEN_GENERATION.validate_json(open_path.read_bytes())
+            if task_name in state.pending:
+                generation = int(open_path.stem[len(OPEN_PREFIX) :])
+                self.save_open(
+                    generation,
+                    replace(
+                        state,
+                        checks={**state.checks, task_name: checks},
+                        stages={**state.stages, task_name: stage},
+                        paths={**state.paths, task_name: path} if path else state.paths,
+                        error=error or state.error,
+                    ),
+                )
+                return
 
     async def rebuilt(self, source: SessionSource, index: int) -> HarborTask:
         """The author's task from one session, admitted; its sources are the author's last recorded call and the
@@ -625,9 +675,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         try:
             written = await self.service.write_task(task)
         except (DuplicateTask, TaskNameConflict) as exc:
-            self.validation_stages[task.name] = STAGE_CHECK
+            self.save_validation(task.name, (), STAGE_CHECK, "")
             return TaskValidationResult((f"refused: {exc}",))
-        self.task_paths[task.name] = written.path
         results: list[CheckResult] = []
         errors: tuple[str, ...] = ()
         stage = ""
@@ -644,28 +693,42 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     errors, stage = (f"the {check.name} check could not run: {result.could_not_run}",), STAGE_UNCHECKED
                     break
         except GeneratorError as exc:
-            self.error = f"the check of {task.name} could not run: {exc}"
+            self.save_validation(
+                task.name,
+                tuple(results),
+                stage,
+                str(written.path),
+                error=f"the check of {task.name} could not run: {exc}",
+            )
             raise
         finally:
-            self.check_results[task.name] = tuple(results)
             await self.service.delete_task(task.name)
-        self.validation_stages[task.name] = stage
+        self.save_validation(task.name, tuple(results), stage, str(written.path))
         return TaskValidationResult(errors)
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Save training pass rates, band measurements and held-out outcomes in the generation report.
+    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+        """Close an open generation: save training pass rates, band measurements and held-out outcomes in its report.
 
         The band is diagnostic and does not change the store's manifest.
         """
-        proposals = list(self.refused)
+        open_path = self.open_path(generation)
+        if not open_path.is_file():
+            logger.info("AutoEnvScaling generation %d of scenario %r is already closed", generation, self.scenario)
+            return
+        state = OPEN_GENERATION.validate_json(open_path.read_bytes())
+        pending = dict(state.pending)
+        proposals = list(state.refused)
         outcomes: dict[str, TaskOutcome] = {}
         for result in results:
-            proposal = self.pending.pop(result.task.name)
+            proposal = pending.pop(result.task.name)
             if result.split == "eval":
                 proposals.append(replace(proposal, stage=STAGE_HELD_OUT))
                 continue
             if not result.is_played:
-                stage = self.validation_stages[result.task.name] or STAGE_PLAY
+                if result.infrastructure_failure:
+                    stage = STAGE_OUTAGE
+                else:
+                    stage = state.stages.get(result.task.name) or STAGE_PLAY
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
                 continue
             pass_rate = statistics.fmean(result.training_rewards) if result.training_rewards else 0.0
@@ -679,7 +742,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             outcome = TaskOutcome(
                 name=result.task.name,
                 digest=result.task.digest,
-                path=str(self.task_paths[result.task.name]),
+                path=state.paths.get(result.task.name, ""),
                 source_record_id=proposal.source_record_id,
                 training_rewards=result.training_rewards,
                 pass_rate=pass_rate,
@@ -694,28 +757,29 @@ class AutoEnvScalingGenerator(TaskGenerator):
             )
         proposals.extend(
             replace(proposal, stage=STAGE_UNREACHED, refusal="the round ended before it played the task")
-            for proposal in self.pending.values()
+            for proposal in pending.values()
         )
         proposals.sort(key=lambda proposal: proposal.index)
         document = {
-            "generation": self.generation,
-            "error": self.error,
+            "generation": state.number,
+            "error": state.error,
             "band": {"low": self.band_low, "high": self.band_high},
             "manifest": None,
             "manifest_error": "",
             "next_position": self.cursor.next_position,
             "proposals": [
-                {**asdict(proposal), "checks": self.checks_document(proposal.task_name)} for proposal in proposals
+                {**asdict(proposal), "checks": checks_document(state, proposal.task_name)} for proposal in proposals
             ],
             "tasks": [
-                {**asdict(outcome), "checks": self.checks_document(outcome.name)} for outcome in outcomes.values()
+                {**asdict(outcome), "checks": checks_document(state, outcome.name)} for outcome in outcomes.values()
             ],
         }
-        report_path = self.state_dir / f"generation-{self.generation:05d}.json"
+        report_path = self.state_dir / f"generation-{state.number:05d}.json"
         report_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        open_path.unlink()
         logger.info(
             "AutoEnvScaling generation %d on scenario %r: %d tasks inside the band of %d played, %d sessions; %s",
-            self.generation,
+            state.number,
             self.scenario,
             sum(outcome.band == BAND_INSIDE for outcome in outcomes.values()),
             len(outcomes),
@@ -723,6 +787,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             report_path,
         )
 
-    def checks_document(self, task_name: str | None) -> list[dict[str, object]]:
-        """Each check's result for a task, as the report keeps it; none for a session that became no task."""
-        return [asdict(result) for result in self.check_results.get(task_name or "", ())]
+
+def checks_document(state: OpenGeneration, task_name: str | None) -> list[dict[str, object]]:
+    """Each check's result for a task, as the report keeps it; none for a session that became no task."""
+    return [asdict(result) for result in state.checks.get(task_name or "", ())]

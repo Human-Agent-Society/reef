@@ -137,7 +137,7 @@ class Recipe:
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted.
 
-        The record-to-task stage names them, for example generated tasks' round summaries.
+        The record-to-task stage names them, for example generated tasks' task store.
         """
         stage = self.stages().record2task
         return Record2Task.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
