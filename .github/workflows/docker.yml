@@ -34,6 +34,9 @@ jobs:
           persist-credentials: false
       - run: docker build --check --target reef -f docker/Dockerfile.reef .
       - run: docker build --check --target tttd -f docker/Dockerfile.reef .
+      # The vLLM image's default base is the locally built Slime layer; the
+      # check needs a tag Docker Hub can resolve, so point it at slimerl/slime:latest.
+      - run: docker build --check --build-arg SLIME_IMAGE_TAG=latest -f docker/Dockerfile.reef-vllm .
 
   # Full image build, kept for the day a runner with 100GB+ of docker storage
   # exists (self-hosted or larger hosted). Uncomment, point runs-on at that

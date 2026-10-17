@@ -1,0 +1,91 @@
+# check=skip=UndefinedVar
+# UndefinedVar is skipped because PYTHONPATH comes from the Slime base image,
+# which docker build --check cannot see without pulling the base.
+# Reef image for the vLLM training engine: Slime on torch 2.13 plus vLLM.
+#
+# Dockerfile.reef builds on slimerl/slime, whose torch 2.11 cannot host vLLM
+# 0.29 (torch 2.13). This image starts from a Slime training layer built on
+# SGLang's torch 2.13 / CUDA 13 image instead; docker/build-reef-vllm.sh
+# produces that layer and then builds this file on top of it. It serves one
+# pairing: training.backend slime with inference.backend vllm over the disk
+# weight transport. It is not an SGLang training image: the Slime layer skips
+# Slime's SGLang patches and this file does not install Reef's reviewed SGLang
+# revision, so SGLang engines and LoRA deployments stay on Dockerfile.reef.
+#
+# Build:   docker/build-reef-vllm.sh                      (all three stages)
+#          docker build -f docker/Dockerfile.reef-vllm -t reef-vllm .  (this stage)
+# Deploy:  reef serve -c <stack.yaml> with inference.backend: vllm
+#          (see docker/README.md, "vLLM training image")
+
+ARG SLIME_IMAGE_TAG=reef-torch213
+FROM slimerl/slime:${SLIME_IMAGE_TAG}
+
+# The SGLang base marks its interpreter as externally managed; install into it
+# the way the Slime layer does.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+WORKDIR /workspace/Reef
+
+# vLLM pins torch 2.13.0 and flashinfer-python 0.6.18. The base already carries
+# torch 2.13.0+cu130 and transformers 5.12.1, so this adds vLLM with its own
+# dependencies and moves flashinfer-python up by one patch release. The assert
+# turns a torch replacement into a build failure. Kept above COPY so repo
+# changes do not re-download vLLM.
+ARG VLLM_VERSION=0.29.0
+RUN pip install --no-cache-dir "vllm==${VLLM_VERSION}" && \
+    python -c "import torch; assert torch.__version__ == '2.13.0+cu130', torch.__version__"
+
+# flashinfer refuses to start when flashinfer-python, flashinfer-cubin and
+# flashinfer-jit-cache disagree on their version. The cubin package is
+# CUDA-agnostic; the JIT cache is built per CUDA release.
+ARG FLASHINFER_VERSION=0.6.18
+RUN pip install --no-cache-dir --no-deps --index-url https://flashinfer.ai/whl \
+        "flashinfer-cubin==${FLASHINFER_VERSION}" && \
+    pip install --no-cache-dir --no-deps --index-url https://flashinfer.ai/whl/cu130 \
+        "flashinfer-jit-cache==${FLASHINFER_VERSION}+cu130" && \
+    python -c "import flashinfer, flashinfer_cubin, flashinfer_jit_cache; \
+               assert flashinfer.__version__ == flashinfer_cubin.__version__ == '${FLASHINFER_VERSION}', \
+                   (flashinfer.__version__, flashinfer_cubin.__version__); \
+               print('flashinfer', flashinfer.__version__, 'jit-cache', flashinfer_jit_cache.__version__)"
+
+COPY . .
+
+# Reef's runtime: the Slime pinned in the runtime group replaces the Slime
+# layer's checkout; Reef and its client install without dependency resolution
+# so the CUDA-matched stack stays as built. The pure-Python core dependencies
+# the base lacks are listed explicitly for the same reason: resolving `reef`
+# itself would pull the Harbor evaluation stack through reef-eval, which this
+# image does not need.
+RUN pip uninstall -y slime && \
+    pip install --no-cache-dir --no-deps --group runtime && \
+    pip install -e . --no-deps && \
+    pip install --no-cache-dir --no-deps reef-client && \
+    pip install --no-cache-dir alembic "sqlalchemy>=2.0,<3" tomli-w aiohttp pyyaml huggingface_hub \
+        "ray[default]" psutil
+
+# Megatron-Core needs numpy 1.x and vLLM declares numpy without a pin. Purge
+# whatever the resolver left (see the same step in Dockerfile.reef) and pin.
+RUN pip uninstall -y numpy && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/numpy \
+           /usr/local/lib/python3.12/dist-packages/numpy.libs \
+           /usr/local/lib/python3.12/dist-packages/numpy-* && \
+    pip install --no-cache-dir "numpy==1.26.4" scipy && \
+    python -c "import numpy, scipy.linalg; assert numpy.__version__ == '1.26.4', numpy.__version__"
+
+# The Slime layer ships Megatron-LM as a source checkout, not a package.
+# /workspace/Reef stays off the path for the reason given in Dockerfile.reef.
+# The uv settings mirror the pip setting above.
+ENV PYTHONPATH=/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
+    PYTHONUNBUFFERED=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
+
+# The import chain the Slime driver and a vLLM engine walk at startup; drift in
+# the compiled stack surfaces here as a build failure. On this base vLLM logs
+# "Failed to import Triton kernels" once per engine start: Triton 3.7 renamed
+# the triton_kernels MXFP4 MoE module that vLLM 0.29 imports. Dense models
+# never reach that code.
+RUN python -c "from sglang.srt.server_args import ServerArgs; \
+               import torch, vllm, slime, megatron.core, transformer_engine, reef, transformers, scipy.linalg; \
+               print('torch', torch.__version__, 'vllm', vllm.__version__, 'transformers', transformers.__version__)"
+
+CMD ["bash", "-c", "echo 'reef vLLM training image. Run: reef serve -c <stack.yaml> with inference.backend: vllm (docker/README.md, vLLM training image)'"]
