@@ -23,7 +23,7 @@ The three stages
 - The **record-to-record stage** (``Record2Record``, ``reef.record2record``)
   decides which records train, in which sets, and in what order. A set is a
   report with the inference records that it references, a ready group, one
-  judged record, or a round request.
+  judged record, or a round set.
 - The **record-to-task stage** (``Record2Task``, ``reef.record2task``) turns
   one record set into tasks. A task is a ``TrainDataItem``: a ``TrajectoryItem``
   that trains directly, or a ``TaskItem`` (a Harbor task) that an algorithm
@@ -72,10 +72,13 @@ The trainer calls it on its own thread, under its lock; no call may block:
   pipeline; every other record goes to the record stage. The pipeline gives
   each set that the stage forms to the record-to-task stage and gives the
   result back to the record stage (``settle``): ``READY`` with tasks, or a
-  skip, which ends the set's records.
+  skip, which ends the set's records. A record-to-task stage with slow work
+  returns ``TaskResult.pending()`` instead, and the pipeline holds the set
+  and its records (see `Pending tasks <#pending-tasks>`__).
 - ``ready()``: is a batch available. It first lets background work land: the
-  record-to-task stage's ``poll`` (for example a finished round), then the
-  record stage's ``poll`` (for example finished judgments).
+  results that the record-to-task stage's ``take_finished`` hands back (for
+  example a finished round), then the record stage's ``poll`` (for example
+  finished judgments, or a round that is due).
 - ``build_batch()``: reserve ``batch_size`` sets from the record stage, in
   its selection order, and give their tasks to ``make_batch``. The trainer
   validates the batch against ``output_schema``. The same batch stays
@@ -87,9 +90,12 @@ The trainer calls it on its own thread, under its lock; no call may block:
   them again. ``trained=False`` says the backend dropped the batch as stale,
   for a record stage that paces work on what trained.
 
-The pipeline also merges the record and task stages' ``status()``, metrics, background
-work (``background_jobs_running()``), and ``close()``. ``releasable_record_ids()``
-returns the completed records that no held set references, and
+The pipeline also merges the record and task stages' ``status()`` and metrics.
+``background_jobs_running()`` is true while a set is pending or the record
+stage runs a background job; the trainer then polls ``ready()`` at a fixed
+interval. ``close()`` closes all three stages, and after it the pipeline
+settles no further result. ``releasable_record_ids()``
+returns the completed records that no held or pending set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
 commits retain the stored bodies; consumption progress prevents retraining
 on restart. Storage can independently evict any body under capacity pressure,
@@ -106,6 +112,27 @@ passes such changes to the record stage as its updated ``PipelineContext``
 stage adds an entry only when a terminal outcome cannot become a batch and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
+
+Pending tasks
+-------------
+
+A record-to-task stage that needs slow work, such as task generation, must
+not block the trainer. Its ``make_tasks`` submits the work to a worker that the
+stage owns and returns ``TaskResult.pending()``. The pipeline holds the set
+and its records. Each time the pipeline looks for a batch, it calls the
+stage's ``take_finished()``, which returns ``(set_id, TaskResult)`` pairs for
+the work that finished. The pipeline then settles each set in the record
+stage, the same way as an immediate result:
+
+- Each set settles one time. The pipeline logs and ignores a result for a set
+  that is not pending, such as a duplicate.
+- A result from ``take_finished`` must not be pending.
+- After ``close()``, the pipeline settles nothing. The stage's ``close``
+  stops its worker.
+
+``Record2Task`` has no ``poll`` or ``background_jobs_running`` hook. A
+subclass that defines either one fails when Python defines the class, and
+the error names ``take_finished``. Stages with immediate results need no change.
 
 The record-to-record stage
 --------------------------
@@ -331,10 +358,11 @@ as 0, and reports it, so a training play of that kind trains. The task's
 oracle passed the same verifier, so the timeout is the agent's.
 
 The recipe splits the rounds across its stages. The record stage
-(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due
-and holds the source sessions. The record-to-task stage (``GeneratedTaskTasks``) runs one round
-at a time, on its own ``BackgroundJobWorker``, outside the trainer lock: each
-time the pipeline looks for a batch, it starts a round when one is due. In each round it:
+(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due,
+holds the source sessions, and forms a round set with the round number and its sessions.
+The record-to-task stage (``GeneratedTaskTasks``) takes the round set, runs the round
+on its own ``BackgroundJobWorker`` outside the trainer lock, and returns pending until
+the round finishes. One round runs at a time. In each round it:
 
 1. Asks the generator for tasks with the configured ``description`` and the
    request's source sessions.
@@ -364,15 +392,17 @@ header ``x-reef-tag-<name>: <value>``, is a source session. The record stage
 holds source sessions in arrival order. Each round takes at most
 ``source_records_per_round`` of them, and a round without a waiting session
 has none. The generator receives each session's inference records and then
-its report as ``source_records``. The record stage keeps a session's records
-until its round finishes, then releases them. A session that arrives after the
+its report as ``source_records``. The pipeline keeps a session's records
+while its round set is pending, then releases them. A session that arrives after the
 last round is released at once. A restart before the release can use a
 session again.
 
 The first round starts when the pipeline first looks for a batch. The next
 round starts after ``batches_per_round`` batches trained since the previous
 round started; a batch that the backend dropped as stale does not count. A
-round that played no task is followed at once. An exception from the
+round that played no task is followed at once. A round whose job failed waits
+for batches like a played round, so a failing worker does not start round
+after round. An exception from the
 generator stops the round. The record-to-task stage still sends the results
 it has to ``record_results``. A summary of each round goes to
 ``state_dir/<scenario>/store/plays/round-<round>.json``, with the IDs of its source records. After a restart, the

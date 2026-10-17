@@ -28,6 +28,7 @@ class TaskStatus(Enum):
     SKIPPED = "skipped"
     #: The set makes no task, as in a pipeline that trains no weights. The stage forgets the set and keeps its records.
     INGESTED = "ingested"
+    PENDING = "pending"
 
 
 class Record2Record(ABC, Plugin):

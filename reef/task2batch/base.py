@@ -90,6 +90,10 @@ class Task2Batch(ABC, Plugin):
         instruction's batch has no tasks.
         """
 
+    def close(self) -> None:
+        """Release resources that the stage owns. Calling it more than one time is safe."""
+        return
+
 
 class NoBatches(Task2Batch):
     """Make no batch: the no-update default. A pipeline with it never becomes ready."""
