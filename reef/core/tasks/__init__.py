@@ -23,6 +23,7 @@ from reef.core.tasks.split import (
     manifest_task_paths,
     read_split_manifest,
     split_by_source,
+    task_groups,
     write_split_manifest,
 )
 
@@ -44,6 +45,7 @@ __all__ = [
     "read_harbor_task",
     "read_split_manifest",
     "split_by_source",
+    "task_groups",
     "write_harbor_task",
     "write_split_manifest",
 ]
