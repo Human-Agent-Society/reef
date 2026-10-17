@@ -9,8 +9,10 @@ import pytest
 from reef.core.tasks import (
     TaskSplit,
     TaskSplitError,
+    hashed_split,
     manifest_task_paths,
     read_split_manifest,
+    source_split,
     split_by_source,
     write_split_manifest,
 )
@@ -285,3 +287,55 @@ def test_a_split_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
 def test_a_side_name_that_is_not_a_task_directory_name_is_refused(name: str) -> None:
     with pytest.raises(TaskSplitError, match="task names"):
         TaskSplit((), (name,), 0, 1)
+
+
+# ------------------------------------------------------------------------------------------- splits before play
+
+
+def test_a_hashed_split_is_fixed_by_the_seed_and_the_name() -> None:
+    # The keyed hash of seed 0 over "r1" reads as 0.11377...: a restart, or a later release, places it the same.
+    assert hashed_split(0, "r1", eval_fraction=0.1138) == "eval"
+    assert hashed_split(0, "r1", eval_fraction=0.1137) == "train"
+    assert hashed_split(7, "r1", eval_fraction=0.1138) == "train", "another seed is another draw"
+    names = [f"task-{index}" for index in range(4000)]
+    share = sum(hashed_split(3, name, eval_fraction=0.25) == "eval" for name in names) / len(names)
+    assert 0.22 < share < 0.28
+    assert {hashed_split(3, name, eval_fraction=0) for name in names} == {"train"}
+    assert {hashed_split(3, name, eval_fraction=1) for name in names} == {"eval"}
+
+
+def test_a_task_is_in_eval_when_any_of_its_records_hashes_to_eval() -> None:
+    for seed in range(20):
+        for name, records in SOURCES.items():
+            hashed = [hashed_split(seed, key, eval_fraction=0.3) for key in records or [name]]
+            expected = "eval" if "eval" in hashed else "train"
+            assert source_split(seed, name, records, eval_fraction=0.3) == expected, (seed, name)
+            # The task's name decides nothing once it has records; their order decides nothing either.
+            assert source_split(seed, "other", list(reversed(records)) or [name], eval_fraction=0.3) == expected
+
+
+def test_tasks_from_the_same_records_share_a_split_and_a_train_task_holds_no_eval_record() -> None:
+    for seed in range(20):
+        assert source_split(seed, "a", ("r1", "r2"), eval_fraction=0.5) == source_split(
+            seed, "b", ("r2", "r1"), eval_fraction=0.5
+        )
+        for name, records in SOURCES.items():
+            if source_split(seed, name, records, eval_fraction=0.5) == "train":
+                assert all(hashed_split(seed, record, eval_fraction=0.5) == "train" for record in records)
+    assert {source_split(seed, "t", ("r1", "r2"), eval_fraction=0) for seed in range(20)} == {"train"}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"seed": True}, "seed must be an integer"),
+        ({"eval_fraction": 1.5}, "eval_fraction must be a number between 0 and 1"),
+        ({"record_ids": "r1"}, "sequence of non-empty record ids"),
+        ({"record_ids": ("r1", "")}, "sequence of non-empty record ids"),
+        ({"name": "", "record_ids": ()}, "non-empty text"),
+        ({"name": ""}, "non-empty text"),
+    ],
+)
+def test_a_bad_split_before_play_is_refused(arguments: dict[str, object], message: str) -> None:
+    with pytest.raises(TaskSplitError, match=message):
+        source_split(**{"seed": 0, "name": "t", "record_ids": ("r1",), "eval_fraction": 0.5, **arguments})  # type: ignore[arg-type]

@@ -15,11 +15,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from reef.core.plugins import Plugin
 from reef.core.records_types import AgentRecord
 from reef.core.tasks.harbor import HarborTask
+from reef.core.tasks.split import SplitName
 
 ARM_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
@@ -146,18 +147,22 @@ class GeneratedTask:
 class TaskPlayResult:
     """What became of one generated task in a round.
 
-    ``training_rewards`` holds the rewards of the plays the recipe trains on.
+    ``training_rewards`` holds the rewards of the plays the recipe trains on,
+    or of the same plays held out of training for an eval task.
     ``measurement_rewards`` maps the name of each measurement arm to the
     rewards of its plays. Each tuple holds only the episodes that ran. An
     episode that ran and returned no reward counts as 0. ``error`` is not
     empty when the task was not played: it failed validation, the task player
-    refused it, or the agent could not start on it.
+    refused it, or the agent could not start on it. ``split`` is the split the
+    recipe placed the task in before play, ``train`` or ``eval``. It is empty
+    for a task that was not placed.
     """
 
     task: HarborTask
     training_rewards: tuple[float, ...] = ()
     measurement_rewards: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
     error: str = ""
+    split: SplitName | Literal[""] = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, HarborTask):
@@ -178,6 +183,10 @@ class TaskPlayResult:
             raise TypeError("error must be text")
         if self.error and (self.training_rewards or self.measurement_rewards):
             raise ValueError("a task that was not played has no rewards")
+        if self.split not in ("", "train", "eval"):
+            raise ValueError("split must be train, eval, or empty for a task that was not placed")
+        if self.error and self.split:
+            raise ValueError("a task that was not played has no split")
 
     @property
     def is_played(self) -> bool:

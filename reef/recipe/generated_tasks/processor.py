@@ -12,19 +12,24 @@ One round is one job on a private worker, off the trainer's thread:
 
 1. Ask the generator for tasks, with the round's source sessions when the record stage gave any.
 2. Validate each task with the generator.
-3. Write each valid task through the generator service and play it: ``plays_per_task`` times on the
-   training arm, then each measurement arm the generator asked for.
-4. Send the results to the generator.
+3. Place each valid task in the train or the eval split with :func:`~reef.core.tasks.source_split`, by
+   its source records, ``eval_fraction`` and ``split_seed``. A source session counts as one record, its report.
+4. Write each valid task through the generator service and play it: ``plays_per_task`` times on the
+   training arm, or on the held out arm for an eval task, then each measurement arm the generator asked for.
+5. Send the results to the generator.
 
 The first round starts when the pipeline first looks for a batch. The next round starts after
 ``batches_per_round`` batches were acknowledged since the previous round started. Its episodes train
 while it runs, so the generator always writes for the policy that trains now. A round that played no
-task is followed at once. A summary of each round goes under ``state_dir/<scenario>``; a restart
-reads it to continue with the next round.
+train task is followed at once, and so is a round whose eval tasks left too few train groups for those
+batches. A summary of each round goes under ``state_dir/<scenario>``; a restart reads it to continue with
+the next round. With an eval fraction above 0, ``split-manifest.json`` there lists each played task in its
+split after each round.
 
-Only the training arm, labeled ``plain``, trains. The record stage releases reports of other arms, and
-reports without an arm, such as a generator's own reports, without assembling them. A generated task
-whose measurement arm is named ``plain`` is not played.
+Only the training arm, labeled ``plain``, trains. An eval task plays on the held out arm, labeled
+``heldout``. The record stage releases reports of other arms, and reports without an arm, such as a
+generator's own reports, without assembling them. A generated task whose measurement arm is named
+``plain``, or ``heldout`` with an eval fraction above 0, is not played.
 """
 
 from __future__ import annotations
@@ -41,7 +46,16 @@ from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Faile
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
-from reef.core.tasks import GeneratedTask, TaskGenerationRequest, TaskGenerator, TaskPlayResult
+from reef.core.tasks import (
+    GeneratedTask,
+    SplitName,
+    TaskGenerationRequest,
+    TaskGenerator,
+    TaskPlayResult,
+    TaskSplit,
+    source_split,
+    write_split_manifest,
+)
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, Record2Record, ReportContext, RoundGrouping, RoundRecord2Record
@@ -62,8 +76,11 @@ REALIGN_THRESHOLD = 32768
 DEFAULT_BATCHES_PER_ROUND = 1
 ERROR_EXCERPT_CHARS = 300
 ROUND_PREFIX = "round-"
+SPLIT_MANIFEST = "split-manifest.json"
 # The arm label of the plays this recipe trains on: played as they are, with no extra instruction files.
 TRAINING_ARM = "plain"
+# The arm label of an eval task's plays: played as the training arm is, never trained.
+HELD_OUT_ARM = "heldout"
 
 
 def reported_task_name(report: AgentRecord) -> str | None:
@@ -116,6 +133,44 @@ def recorded_reported_plays(state_dir: Path) -> dict[str, int]:
     return counts
 
 
+def changed_split_settings(state_dir: Path, *, seed: int, eval_fraction: float) -> str:
+    """Why the round summaries refuse these split settings, or empty when every summary used them.
+
+    A summary without split settings trained every task: it was written with ``eval_fraction`` 0, or before
+    the splits were kept. With ``eval_fraction`` 0 the seed places nothing.
+    """
+    for round_number in recorded_rounds(state_dir):
+        document = json.loads((state_dir / f"{ROUND_PREFIX}{round_number:05d}.json").read_text(encoding="utf-8"))
+        recorded_fraction = document.get("eval_fraction", 0.0)
+        recorded_seed = document.get("split_seed")
+        if recorded_fraction != eval_fraction or (eval_fraction > 0 and recorded_seed != seed):
+            return (
+                f"round {round_number} under {state_dir} placed its tasks with eval_fraction {recorded_fraction} "
+                f"and split_seed {recorded_seed}, not {eval_fraction} and {seed}; a scenario keeps both for the "
+                "life of its state_dir, so change them only with a new state_dir"
+            )
+    return ""
+
+
+def recorded_split(state_dir: Path, *, seed: int, eval_fraction: float) -> TaskSplit:
+    """The split of each task that the round summaries name as played.
+
+    A summary written before the splits were kept trained every task it played.
+    """
+    splits: dict[str, str] = {}
+    for round_number in recorded_rounds(state_dir):
+        document = json.loads((state_dir / f"{ROUND_PREFIX}{round_number:05d}.json").read_text(encoding="utf-8"))
+        for task in document["tasks"]:
+            if not task["error"]:
+                splits[task["name"]] = task.get("split", "train")
+    return TaskSplit(
+        train=tuple(name for name, split in splits.items() if split == "train"),
+        eval=tuple(name for name, split in splits.items() if split == "eval"),
+        seed=seed,
+        eval_fraction=eval_fraction,
+    )
+
+
 @dataclass(frozen=True)
 class RoundJob(SupportsReceipt):
     """One round to run, with its source sessions' records; the receipt names it."""
@@ -134,6 +189,18 @@ def session_records(sessions: tuple[ReportContext, ...]) -> tuple[AgentRecord, .
         for record in (*session.inferences, session.report):
             records.setdefault(record.agent_record_id, record)
     return tuple(records.values())
+
+
+def split_record_ids(record_ids: tuple[str, ...], source_records: tuple[AgentRecord, ...]) -> tuple[str, ...]:
+    """The record IDs a task's split hashes: an inference record of a source session counts as the session's report.
+
+    So a task made from a session of many model calls is in eval no more often than one made from a short session.
+    """
+    reports: dict[str, list[str]] = {}
+    for record in source_records:
+        for reference in record.references:
+            reports.setdefault(reference, []).append(record.agent_record_id)
+    return tuple(dict.fromkeys(key for record_id in record_ids for key in reports.get(record_id, [record_id])))
 
 
 @dataclass(frozen=True)
@@ -251,12 +318,18 @@ class RoundSettings(PluginSettings):
     scaffold_tolerance: int = config_option(
         DEFAULT_SCAFFOLD_TOLERANCE, help="Masked tokens the sample assembly may realign before a response."
     )
+    eval_fraction: float = config_option(
+        0.0, help="The share of source records whose tasks are held out of training; at least 0 and below 1."
+    )
+    split_seed: int = config_option(0, help="The seed of the keyed hash that places each task in a split.")
 
     def __post_init__(self) -> None:
         if self.rounds < 0:
             raise ValueError("rounds must be non-negative")
         if self.scaffold_tolerance < 0:
             raise ValueError("scaffold_tolerance must be non-negative")
+        if not 0 <= self.eval_fraction < 1:
+            raise ValueError("eval_fraction must be at least 0 and below 1")
         if self.rounds > 0 and (not self.description.strip() or not self.state_dir):
             raise ValueError("rounds need a description (what the tasks are about) and a state_dir")
         if self.generator is not None:
@@ -312,11 +385,12 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     Each time the pipeline looks for a batch, the stage starts a round when
     the record stage says one is due, on the worker. The round's source
     sessions go to the generator as the request's ``source_records``. The
-    round generates tasks, validates them, has the generator service play
-    them, and sends the results to the generator; the plays come back as
-    records. This stage owns the worker, the round numbers, and the round
-    summaries under ``state_dir/<scenario>``; a restart reads them to continue
-    with the next round.
+    round generates tasks, validates them, places each in a split, has the
+    generator service play them, and sends the results to the generator; the
+    plays come back as records. This stage owns the worker, the round numbers,
+    and the round summaries and the split manifest under
+    ``state_dir/<scenario>``; a restart reads the summaries to continue with
+    the next round.
     """
 
     def __init__(
@@ -338,8 +412,18 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         self.rounds = settings.rounds
         self.description = settings.description
         self.served_model = settings.served_model or None
+        self.eval_fraction = settings.eval_fraction
+        self.split_seed = settings.split_seed
+        #: The complete groups in one batch, set by ``GeneratedTaskBatches``: a round whose eval tasks left too
+        #: few train groups for the batches the next round waits for is followed at once.
+        self.tasks_per_step: int | None = None
         # Every scenario keeps its own rounds.
         self.state_dir = Path(settings.state_dir).expanduser() / self.scenario if settings.state_dir else None
+        # The split is a function of its settings, so other settings would place new tasks from old records anew.
+        if self.state_dir is not None:
+            refusal = changed_split_settings(self.state_dir, seed=self.split_seed, eval_fraction=self.eval_fraction)
+            if refusal:
+                raise PluginConfigError(refusal)
         if self.rounds > 0:
             if task_generator is None:
                 raise ValueError("rounds need a task generator: set pipeline.record2task.config.generator")
@@ -434,7 +518,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         self.next_round += 1
 
     def absorb_finished_rounds(self) -> None:
-        """Take the rounds that the worker finished, and tell the record stage whether each one played no task."""
+        """Take the rounds that the worker finished, and tell the record stage whether each one played no train task."""
         if self.worker is None:
             return
         for outcome in self.worker.poll():
@@ -447,18 +531,24 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             if not isinstance(outcome, RoundOutcome):
                 raise TypeError("the round worker must hand back a RoundOutcome")
             played = sum(1 for result in outcome.results if result.is_played)
+            trained = sum(1 for result in outcome.results if result.is_played and result.split == "train")
             self.completed_rounds += 1
             self.tasks_generated += len(outcome.results)
             self.tasks_played += played
             self.last_error = outcome.error
             logger.info(
-                "generated-task round %d on scenario %r: %d tasks played of %d",
+                "generated-task round %d on scenario %r: %d tasks played of %d, %d held out",
                 outcome.round_number,
                 self.scenario,
                 played,
                 len(outcome.results),
+                played - trained,
             )
-            self.round_stage.round_finished(played_none=played == 0)
+            # Eval tasks make no batch. A round with no train task is followed at once. So is a round whose eval
+            # tasks left too few train groups for the batches the next round waits for; a round that played too
+            # few tasks for them waits, as it does without eval tasks.
+            needed = self.round_stage.batches_per_round * (self.tasks_per_step or 0)
+            self.round_stage.round_finished(played_none=trained == 0 or trained < needed <= played)
 
     def background_jobs_running(self) -> bool:
         return self.round_in_flight is not None
@@ -491,7 +581,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         return await self.run_round(job)
 
     async def run_round(self, job: RoundJob) -> RoundOutcome:
-        """The worker's job: generate, validate, play, and send the results back; then the round's summary."""
+        """The worker's job: generate, validate, split, play, and send the results back; then the round's summary."""
         if self.task_generator is None or self.state_dir is None:
             raise RuntimeError("a round needs a task generator and a state_dir")
         results: list[TaskPlayResult] = []
@@ -500,16 +590,27 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         # The generator is a deployment's plugin: whatever it raises stops the round, and what ran is kept.
         try:
             generated = await self.task_generator.generate(TaskGenerationRequest(job.source_records, self.description))
+            # Without an eval fraction no task plays on the held out arm, so a measurement arm may take its name.
+            taken = (TRAINING_ARM, HELD_OUT_ARM) if self.eval_fraction > 0 else (TRAINING_ARM,)
             for item in generated:
-                if any(arm.name == TRAINING_ARM for arm in item.measurement_arms):
-                    refusal = f"the measurement arm {TRAINING_ARM!r} has the name of the training arm"
+                clash = next((arm.name for arm in item.measurement_arms if arm.name in taken), None)
+                if clash is not None:
+                    role = "training" if clash == TRAINING_ARM else "held out"
+                    refusal = f"the measurement arm {clash!r} has the name of the {role} arm"
                     results.append(TaskPlayResult(item.task, error=refusal))
                     continue
                 validation = await self.task_generator.validate(item.task)
                 if validation.is_valid:
-                    result, reported = await self.played(item, job.round_number)
+                    split = source_split(
+                        self.split_seed,
+                        item.task.name,
+                        split_record_ids(item.task.source_agent_record_ids, job.source_records),
+                        eval_fraction=self.eval_fraction,
+                    )
+                    result, reported = await self.played(item, job.round_number, split)
                     results.append(result)
-                    if result.is_played:
+                    # An eval task's plays form no group, so no count closes one.
+                    if result.is_played and split == "train":
                         reported_plays[item.task.name] = reported
                         # The task's group can close now, before the round ends.
                         self.reported_play_counts.put((item.task.name, reported))
@@ -524,14 +625,30 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             error = error or str(exc) or type(exc).__name__
             logger.exception("the task generator did not take the results of round %d", job.round_number)
         self.write_round_summary(job.round_number, tuple(results), error, reported_plays, job.source_records)
+        if self.eval_fraction > 0:
+            task_split = recorded_split(self.state_dir, seed=self.split_seed, eval_fraction=self.eval_fraction)
+            write_split_manifest(self.state_dir / SPLIT_MANIFEST, task_split)
+            if task_split.train and not task_split.eval:
+                logger.warning(
+                    "scenario %r has no eval task yet: none of its %d played tasks hashed to eval with "
+                    "eval_fraction %s and split_seed %d",
+                    self.scenario,
+                    len(task_split.train),
+                    self.eval_fraction,
+                    self.split_seed,
+                )
         return RoundOutcome(receipt=job.receipt, round_number=job.round_number, results=tuple(results), error=error)
 
-    async def played(self, item: GeneratedTask, round_number: int) -> tuple[TaskPlayResult, int]:
-        """Write one valid task and play it: the training arm, then each measurement arm.
+    async def played(
+        self, item: GeneratedTask, round_number: int, split: SplitName = "train"
+    ) -> tuple[TaskPlayResult, int]:
+        """Write one valid task and play it on its split's arm, then on each measurement arm.
 
-        Returns the task's result and how many of its training episodes reached Reef, 0 for a task that was
-        not played. A task the agent could not play at all (every training episode ended before the agent
-        ran) is removed and comes back with the first episode's error, and its measurement arms are not played.
+        The split's arm is the training arm for a train task and the held out arm for an eval task. Returns
+        the task's result and how many episodes of the split's arm reached Reef, 0 for a task that was not
+        played. A task the agent could not play at all (every episode of the split's arm ended before the
+        agent ran) is removed and comes back with the first episode's error, and its measurement arms are not
+        played.
         """
         if self.task_player is None:
             raise RuntimeError("playing a task needs the generator service")
@@ -541,19 +658,20 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         except (DuplicateTask, TaskNameConflict) as exc:
             return TaskPlayResult(task, error=f"refused: {exc}"), 0
         tags = {"round": str(round_number)}
-        training = await self.task_player.play(
+        # The record stage trains only the training arm, and releases the held out arm's reports untrained.
+        split_plays = await self.task_player.play(
             written.path,
             scenario=self.scenario,
-            arm=TRAINING_ARM,
+            arm=TRAINING_ARM if split == "train" else HELD_OUT_ARM,
             plays=self.plays_per_task,
             is_reporting=True,
             extra_instruction_files=(),
             tags=tags,
             model=self.served_model,
         )
-        if training and all(play.reward is None and play.error for play in training):
+        if split_plays and all(play.reward is None and play.error for play in split_plays):
             await self.task_player.delete_task(task.name)
-            error = f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
+            error = f"the agent could not play the task: {split_plays[0].error[:ERROR_EXCERPT_CHARS]}"
             return TaskPlayResult(task, error=error), 0
         measurement_rewards: dict[str, tuple[float, ...]] = {}
         for arm in item.measurement_arms:
@@ -568,8 +686,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 model=self.served_model,
             )
             measurement_rewards[arm.name] = rewards_of(plays)
-        reported = sum(play.is_reported for play in training)
-        return TaskPlayResult(task, rewards_of(training), measurement_rewards), reported
+        reported = sum(play.is_reported for play in split_plays)
+        return TaskPlayResult(task, rewards_of(split_plays), measurement_rewards, split=split), reported
 
     def write_round_summary(
         self,
@@ -581,14 +699,19 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     ) -> Path:
         """Keep each task's result and reported plays, the round's error, and its source records' IDs.
 
-        A restart counts these files and reads the reported plays back.
+        With an eval fraction above 0, also keep each task's split and the split settings. A restart counts these
+        files, reads the reported plays back, and refuses other split settings.
         """
         if self.state_dir is None:
             raise RuntimeError("a round summary needs a state_dir")
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        # Without an eval fraction every task trains, and the summary is the one written before the splits.
+        is_split = self.eval_fraction > 0
+        settings = {"eval_fraction": self.eval_fraction, "split_seed": self.split_seed} if is_split else {}
         document = {
             "round": round_number,
             "error": error,
+            **settings,
             "source_record_ids": [record.agent_record_id for record in source_records],
             "tasks": [
                 {
@@ -597,6 +720,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                     "training_rewards": list(result.training_rewards),
                     "measurement_rewards": {arm: list(rewards) for arm, rewards in result.measurement_rewards.items()},
                     "reported_plays": reported_plays.get(result.task.name),
+                    **({"split": result.split} if is_split else {}),
                 }
                 for result in results
             ],
@@ -619,7 +743,10 @@ class GeneratedTaskBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, TaskBatchSettings.parse(config, plugin_class=cls))
+        settings = TaskBatchSettings.parse(config, plugin_class=cls)
+        if isinstance(record2task, GeneratedTaskTasks):
+            record2task.tasks_per_step = settings.tasks_per_step
+        return cls(context, settings)
 
     def __init__(self, context: PipelineContext, settings: TaskBatchSettings) -> None:
         # One record set of the batch is one complete task group.

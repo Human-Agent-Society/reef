@@ -317,8 +317,9 @@ plays of a task. Each play shows the agent the files that
 ``solution/hint.txt``. The recipe never trains on a measurement arm.
 
 A ``TaskPlayResult`` holds the task, ``training_rewards``,
-``measurement_rewards`` (by arm name), and an ``error``. The rewards include
-only episodes that ran. An episode that ran
+``measurement_rewards`` (by arm name), an ``error``, and the task's
+``split``: ``train`` or ``eval``, empty when the task was not played. The
+rewards include only episodes that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
@@ -336,13 +337,17 @@ time the pipeline looks for a batch, it starts a round when one is due. In each 
 1. Asks the generator for tasks with the configured ``description`` and the
    request's source sessions.
 2. Validates each task with the generator.
-3. Writes each valid task through the generator service and plays it
-   ``plays_per_task`` times on the training arm, then plays each measurement arm.
+3. Places each valid task in the train or the eval split by its source
+   records (see `generated tasks <../reference/configuration.rst#generated-tasks>`__).
+   It writes the task through the generator service and plays it
+   ``plays_per_task`` times on the training arm, or on the arm ``heldout`` for
+   an eval task. Then it plays each measurement arm.
 4. Sends the results to ``record_results``.
 
 The training plays carry the arm ``plain``, and only reports with that label
-train. A generated task whose measurement arm is
-named ``plain`` comes back unplayed with an error. The record stage groups
+train. A generated task whose measurement arm is named ``plain``, or
+``heldout`` with an ``eval_fraction`` above 0, comes back unplayed with an
+error. The record stage groups
 the training reports by ``metadata.task.name``. A group is complete at
 ``plays_per_task`` episodes, and a batch holds ``tasks_per_step`` complete
 groups. A training play that reports nothing, such as a failed trial, never
@@ -368,7 +373,8 @@ session again.
 The first round starts when the pipeline first looks for a batch. The next
 round starts after ``batches_per_round`` batches trained since the previous
 round started; a batch that the backend dropped as stale does not count. A
-round that played no task is followed at once. An exception from the
+round that played no train task is followed at once, and so is a round whose
+eval tasks left too few train groups for those batches. An exception from the
 generator stops the round. The record-to-task stage still sends the results
 it has to ``record_results``. A summary of each round goes to
 ``state_dir/<scenario>/round-<round>.json``, with the IDs of its source records. After a restart, the

@@ -1,13 +1,19 @@
 """Split generated tasks into a train split and an eval split by the records they came from.
 
-Two tasks made from a shared agent record go to the same split, so nothing
-the train split saw reappears, reworded, in the gate. The split is a
-function of the task names, their sources and a seed, and the result is
-written as a manifest the gate reads.
+:func:`split_by_source` splits a closed set of tasks once: two tasks made
+from a shared agent record go to the same split, so nothing the train split
+saw reappears, reworded, in the gate. :func:`source_split` places one task
+before it is played, from its own sources alone: tasks made from the same
+records share a split, and a train task never comes from a record that
+hashes to eval, but two tasks that share only some records can split apart.
+Each split is a function of the task names, their sources and a seed, and
+the result is written as a manifest the gate reads.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -16,10 +22,12 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from reef.core.errors import ReefError
 from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, read_harbor_task
 
+SplitName = Literal["train", "eval"]
 MANIFEST_VERSION = 1
 STAGING_DIRECTORY = ".staging"
 MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
@@ -106,6 +114,38 @@ def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: floa
         seed=seed,
         eval_fraction=float(eval_fraction),
     )
+
+
+def hashed_split(seed: int, name: str, *, eval_fraction: float) -> SplitName:
+    """HMAC-SHA256 keyed by the seed over the name, read as a number in [0, 1): eval below the fraction, else train."""
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise TaskSplitError("seed must be an integer")
+    if isinstance(eval_fraction, bool) or not isinstance(eval_fraction, (int, float)) or not 0 <= eval_fraction <= 1:
+        raise TaskSplitError("eval_fraction must be a number between 0 and 1")
+    if not isinstance(name, str) or not name:
+        raise TaskSplitError("a hashed name must be non-empty text")
+    digest = hmac.new(str(seed).encode("ascii"), name.encode("utf-8"), hashlib.sha256).digest()
+    # The top 53 bits, so the number is exact as a float and never rounds up to 1.
+    position = (int.from_bytes(digest[:8], "big") >> 11) / 2**53
+    return "eval" if position < eval_fraction else "train"
+
+
+def source_split(seed: int, name: str, record_ids: Iterable[str], *, eval_fraction: float) -> SplitName:
+    """A task's split before play: eval when any of its source record ids hashes to eval, train otherwise.
+
+    A task with no source records hashes its own name. So a train task never
+    comes from a record that hashes to eval, and tasks made from the same
+    records share a split. A task made from more records is in eval more often.
+    """
+    if not isinstance(name, str) or not name:
+        raise TaskSplitError("a task name must be non-empty text")
+    listed = None if isinstance(record_ids, str) or not isinstance(record_ids, Iterable) else tuple(record_ids)
+    if listed is None or any(not isinstance(record_id, str) or not record_id for record_id in listed):
+        raise TaskSplitError(f"sources of {name!r} must be a sequence of non-empty record ids")
+    hashed_names = listed or (name,)
+    if any(hashed_split(seed, hashed_name, eval_fraction=eval_fraction) == "eval" for hashed_name in hashed_names):
+        return "eval"
+    return "train"
 
 
 def write_split_manifest(path: Path, split: TaskSplit) -> None:

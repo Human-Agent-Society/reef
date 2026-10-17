@@ -985,10 +985,12 @@ measurement arms the generator wants played on it. ``PlayArm(name, count,
 extra_instruction_files=())`` names an arm, its number of plays, and the task
 files shown after the instruction. Arm names are unique for each task.
 
-``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="")``
+``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="", split="")``
 holds the rewards of the training plays and, by arm name, of each measurement
 arm. Each tuple holds only the episodes that ran. ``is_played`` is true when
-``error`` is empty. A task that was not played has no rewards.
+``error`` is empty. A task that was not played has no rewards and no split.
+``split`` is ``train`` or ``eval``: the split the recipe placed the task in
+before play. The plays of an eval task never train.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
