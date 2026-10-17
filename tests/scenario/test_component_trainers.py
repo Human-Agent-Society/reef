@@ -2344,7 +2344,9 @@ def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, n
     monkeypatch.setattr(delivery, "lock", report_lock)
     attempted = []
 
-    def shipped(state, tree):
+    def shipped(backend, state, tree):
+        if backend is not backends[HARNESS]:
+            return None
         updates = state.get("updates", 0)
         if updates and next_operation != "reload":
             return None
@@ -2370,7 +2372,7 @@ def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, n
         attempted.append(event.step)
 
     monkeypatch.setattr(tracker, "record_rollback", record_rollback)
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
+    monkeypatch.setattr(type(backends[HARNESS]), "shipped_content_update", shipped)
     monkeypatch.setattr(tracker, "record", record)
     try:
         with ThreadPoolExecutor(max_workers=3) as pool:

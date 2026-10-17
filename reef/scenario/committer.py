@@ -511,21 +511,23 @@ class ScenarioCommitter:
         new head, or ``None`` when the served release already carries the content.
         """
         with self.experiment_reporting(), self._lock, self._publication_lock:
+            surface = self._binding.surface
+            files_component = surface.files_component
+            component = self.trainers[0].component if files_component is None else files_component
+            trainer = self.trainer_for(component)
+            if not trainer.has_shipped_content_update:
+                return None
             current_ref = self._artifacts.current
             if isinstance(current_ref, LiveWeightArtifactRef):
                 return None
             if self._store.durable:
                 self._synchronize_checkpoint()
-            surface = self._binding.surface
             served = self._artifacts.resolve(current_ref)
-            files_component = surface.files_component
             published_tree = (
                 served if files_component is None else surface.component_artifact(served, files_component)
             ).local_path
             if published_tree is None:
                 return None
-            component = self.trainers[0].component if files_component is None else files_component
-            trainer = self.trainer_for(component)
             result = trainer.shipped_content_update(published_tree)
             if result is None:
                 return None

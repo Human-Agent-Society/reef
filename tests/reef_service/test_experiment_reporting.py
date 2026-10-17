@@ -110,7 +110,9 @@ def test_shipped_content_tracker_runs_after_registration(tmp_path, monkeypatch, 
     (update / "harness.txt").write_text("updated shipped content")
     entered, release = Event(), Event()
 
-    def shipped(state, tree):
+    def shipped(backend, state, tree):
+        if backend is not backends[HARNESS]:
+            return None
         return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
 
     def blocked(event):
@@ -126,7 +128,7 @@ def test_shipped_content_tracker_runs_after_registration(tmp_path, monkeypatch, 
                 return value._registry.reload("agent")
             return value.get_or_create_scenario("agent")
 
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
+    monkeypatch.setattr(type(backends[HARNESS]), "shipped_content_update", shipped)
     monkeypatch.setattr(tracker, "record", blocked)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -160,7 +162,9 @@ def test_failed_load_still_reports_landed_commit_outside_registry_lock(tmp_path,
     entered, release = Event(), Event()
     publish = Scenario.publish_shipped_content
 
-    def shipped(state, tree):
+    def shipped(backend, state, tree):
+        if backend is not backends[HARNESS]:
+            return None
         return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
 
     def fail_after_publication(scenario):
@@ -173,7 +177,7 @@ def test_failed_load_still_reports_landed_commit_outside_registry_lock(tmp_path,
         tracker.events.append(event)
         raise ConnectionError("tracker unavailable")
 
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
+    monkeypatch.setattr(type(backends[HARNESS]), "shipped_content_update", shipped)
     monkeypatch.setattr(Scenario, "publish_shipped_content", fail_after_publication)
     monkeypatch.setattr(tracker, "record", blocked)
     try:

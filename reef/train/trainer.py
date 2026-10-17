@@ -617,6 +617,17 @@ class Trainer:
             self._pending.prepared_commit = prepared
             return prepared
 
+    @property
+    def has_shipped_content_update(self) -> bool:
+        """Whether this backend overrides the no-op hook and can update now."""
+        with self._lock:
+            backend = self._candidate_backend
+            return (
+                backend is not None
+                and self._pending is None
+                and type(backend).shipped_content_update is not CandidateBackend.shipped_content_update
+            )
+
     def shipped_content_update(self, published_tree: Path) -> TrainStepResult | None:
         """The backend's update of its shipped content; ``None`` while a step is pending or nothing is stale."""
         with self._lock:

@@ -14,6 +14,7 @@ from reef.surface.base import (
     ArtifactActivator,
     ComponentSurface,
     InferenceHooks,
+    RecoveryRestorer,
     ServingRuntime,
     Surface,
     WeightRuntime,
@@ -43,7 +44,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader(ArtifactActivator):
+class WeightLoader(ArtifactActivator, RecoveryRestorer):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -138,6 +139,47 @@ class WeightLoader(ArtifactActivator):
         runtime_load_id = runtime.restore_checkpoint(artifact)
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise TypeError("restore_checkpoint must return a non-empty runtime load ID")
+        return runtime_load_id
+
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
+        """Put a recovered head back into a runtime that no longer holds it.
+
+        A runtime keeping its weights inside the Reef process loses them when
+        that process exits. Recovery already picks the release that should
+        serve, but picking is not loading, and nothing loaded it: the scenario
+        came back reporting its full step count and trained on from an engine
+        silently answering out of the bare base model, with no record anywhere
+        that it had. Only asking the model to do something it had been trained
+        to do differently revealed it.
+
+        Deliberately not ``activate``: that also fires after publications and
+        rollbacks, where the weights are already in place, and its signature
+        cannot tell which caller it has. This runs on the startup path only.
+
+        The runtime hook defaults to keeping resident weights. It receives a
+        lazy artifact so an opted-out runtime never downloads a checkpoint.
+        A known matching version needs no restore. When the serving version
+        is unknown, the runtime hook decides whether its weights need loading.
+        """
+        if not isinstance(runtime, WeightRuntime):
+            return None
+        recorded = artifact_runtime_load_id(artifact)
+        if recorded is None:
+            return None
+        served = self.engine_runtime_load_id(runtime)
+        if served == recorded:
+            return None
+        runtime_load_id = runtime.restore_recovered_checkpoint(artifact)
+        if runtime_load_id is None:
+            return None
+        if not isinstance(runtime_load_id, str) or not runtime_load_id:
+            raise TypeError("restore_recovered_checkpoint must return a non-empty runtime load ID or None")
+        logger.info(
+            "restored %r into the serving runtime: published under %r, engine previously held %r",
+            artifact.ref.release_id,
+            recorded,
+            served,
+        )
         return runtime_load_id
 
 
