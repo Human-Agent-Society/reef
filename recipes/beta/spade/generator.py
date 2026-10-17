@@ -8,20 +8,26 @@ results in the prompt as SPADE's experience section. A task with ``solution/hint
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
 and removes it again: the generated-task recipe writes the valid task once more to play it.
 
-``record_results`` closes the generation. It reports each proposal's regret against the Designer's
-receipt (0 for a refused one) and keeps the generation report under ``state_dir``.
-Eval tasks receive no Designer report and do not enter the experience.
-The recipe owns the cumulative split manifest.
-A restart reads the last report to continue with the next generation and the last experience.
+``generate`` keeps the open generation, its proposals and refusals, in ``open-<generation>.json`` under
+``state_dir``, named by the recipe's generation number. ``record_results`` closes it, also after later
+generations started or after a restart. It reports each proposal's regret against the Designer's receipt
+(0 for a refused one) and keeps the generation report under ``state_dir``. Eval tasks and tasks that could
+not run receive no Designer report and do not enter the experience. A second call for a closed generation
+does nothing. The recipe owns the cumulative split manifest.
+A restart reads the last report for the experience, and continues numbering after the reports and open
+generations.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Self
+
+from pydantic import TypeAdapter
 
 from recipes.beta.spade.generation import (
     RECORDED_EXCERPT_CHARS,
@@ -66,6 +72,7 @@ DEFAULT_HINT_PLAYS = 2
 HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 HINT_ARM = "hint"
+OPEN_PREFIX = "open-"
 CONFIG_KEYS = frozenset(
     {
         "generator_url",
@@ -84,11 +91,26 @@ CONFIG_KEYS = frozenset(
 
 @dataclass(frozen=True)
 class PendingProposal:
-    """A proposal of the open generation that became a task; its result has not come back yet."""
+    """A proposal of an open generation that became a task; its result has not come back yet."""
 
     index: int
     skill: str | None
     designer_record_id: str
+
+
+@dataclass(frozen=True)
+class OpenGeneration:
+    """What ``generate`` made and ``record_results`` has not closed yet: SPADE's number for it and its proposals."""
+
+    number: int
+    refused: tuple[ProposalRecord, ...]
+    pending: dict[str, PendingProposal]
+    error: str = ""
+    #: The Designer report ID of each proposal already reported, by proposal index.
+    reports: dict[int, str] = field(default_factory=dict)
+
+
+OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 
 class SpadeTaskGenerator(TaskGenerator):
@@ -131,11 +153,12 @@ class SpadeTaskGenerator(TaskGenerator):
         self.experience: tuple[PlayRecord, ...] = (
             load_experience(report_path_for(state_dir, recorded[-1])) if recorded else ()
         )
-        self.generation = recorded[-1] + 1 if recorded else 0
-        # The open generation: what generate made and record_results has not closed yet.
-        self.refused: list[ProposalRecord] = []
-        self.pending: dict[str, PendingProposal] = {}
-        self.error = ""
+        self.experience_generation = recorded[-1] if recorded else -1
+        open_numbers = [
+            OPEN_GENERATION.validate_json(path.read_bytes()).number
+            for path in sorted(state_dir.glob(f"{OPEN_PREFIX}*.json"))
+        ]
+        self.generation = max((*recorded, *open_numbers), default=-1) + 1
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -177,16 +200,18 @@ class SpadeTaskGenerator(TaskGenerator):
         """One generation: ``count`` Designer proposals; a failed service call ends it with what ran."""
         if any(record.scenario != self.scenario for record in request.source_records):
             raise ValueError("source records must belong to the generator's scenario")
-        self.refused, self.pending, self.error = [], {}, ""
+        refused: list[ProposalRecord] = []
+        pending: dict[str, PendingProposal] = {}
+        error = ""
         tasks: list[GeneratedTask] = []
         try:
             for index in range(self.count):
                 skill = self.skills[index % len(self.skills)] if self.skills else None
                 proposed = await self.propose(request, skill=skill, index=index)
                 if proposed.task is None:
-                    self.refused.append(ProposalRecord(index, skill, proposed.record_id, None, proposed.refusal))
+                    refused.append(ProposalRecord(index, skill, proposed.record_id, None, proposed.refusal))
                     continue
-                self.pending[proposed.task.name] = PendingProposal(index, skill, proposed.record_id)
+                pending[proposed.task.name] = PendingProposal(index, skill, proposed.record_id)
                 arms = (
                     (PlayArm(HINT_ARM, self.hint_plays, (HINT_FILE,)),)
                     if self.hint_plays and HINT_NAME in proposed.task.solution
@@ -194,9 +219,22 @@ class SpadeTaskGenerator(TaskGenerator):
                 )
                 tasks.append(GeneratedTask(proposed.task, arms))
         except GeneratorError as exc:
-            self.error = str(exc)
+            error = str(exc)
             logger.error("SPADE generation %d stopped: %s", self.generation, exc)
+        self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
+        self.generation += 1
         return tuple(tasks)
+
+    def open_path(self, generation: int) -> Path:
+        return self.state_dir / f"{OPEN_PREFIX}{generation:05d}.json"
+
+    def save_open(self, generation: int, state: OpenGeneration) -> None:
+        """Keep an open generation under the state directory, replacing the file whole."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.open_path(generation)
+        partial = path.with_name(f"{path.name}.partial")
+        partial.write_bytes(OPEN_GENERATION.dump_json(state))
+        os.replace(partial, path)
 
     async def propose(self, request: TaskGenerationRequest, *, skill: str | None, index: int) -> ProposedTask:
         """Ask the Designer for one task, with the experience section for its skill; keep its receipt."""
@@ -218,6 +256,14 @@ class SpadeTaskGenerator(TaskGenerator):
             model=self.served_model,
         )
 
+    def save_error(self, task_name: str, error: str) -> None:
+        """Name an error in the report of the open generation that holds the task."""
+        for path in sorted(self.state_dir.glob(f"{OPEN_PREFIX}*.json")):
+            state = OPEN_GENERATION.validate_json(path.read_bytes())
+            if task_name in state.pending:
+                self.save_open(int(path.stem[len(OPEN_PREFIX) :]), replace(state, error=error))
+                return
+
     async def validate(self, task: HarborTask) -> TaskValidationResult:
         """Harbor's oracle and nop agents on a written copy: the reference solution scores 1, doing nothing below 1."""
         try:
@@ -227,7 +273,7 @@ class SpadeTaskGenerator(TaskGenerator):
         try:
             oracle = await self.service.check(written.path)
         except GeneratorError as exc:
-            self.error = str(exc)
+            self.save_error(task.name, str(exc))
             raise
         await self.service.delete_task(task.name)
         return TaskValidationResult(() if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",))
@@ -243,11 +289,17 @@ class SpadeTaskGenerator(TaskGenerator):
             await self.service.delete_task(task.name)
             return await self.service.write_task(task)
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Save the generation report and training experience, and report Designer rewards for train tasks."""
-        proposals: list[tuple[ProposalRecord, TaskMeasure | None]] = [(proposal, None) for proposal in self.refused]
+    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+        """Close an open generation: save its report and experience, and report Designer rewards for train tasks."""
+        path = self.open_path(generation)
+        if not path.is_file():
+            logger.info("SPADE generation %d of scenario %r is already closed", generation, self.scenario)
+            return
+        state = OPEN_GENERATION.validate_json(path.read_bytes())
+        pending_proposals = dict(state.pending)
+        proposals: list[tuple[ProposalRecord, TaskMeasure | None]] = [(proposal, None) for proposal in state.refused]
         for result in results:
-            pending = self.pending.pop(result.task.name, None)
+            pending = pending_proposals.pop(result.task.name, None)
             if pending is None:
                 continue
             proposal = ProposalRecord(pending.index, pending.skill, pending.designer_record_id, None, result.error)
@@ -255,7 +307,7 @@ class SpadeTaskGenerator(TaskGenerator):
                 proposals.append((replace(proposal, task_name=result.task.name, split="eval"), None))
                 continue
             if not result.is_played:
-                proposals.append((proposal, None))
+                proposals.append((replace(proposal, infrastructure_failure=result.infrastructure_failure), None))
                 continue
             plain = result.training_rewards
             hint = result.measurement_rewards.get(HINT_ARM, ())
@@ -276,27 +328,42 @@ class SpadeTaskGenerator(TaskGenerator):
             )
             proposals.append((replace(proposal, task_name=result.task.name), measure))
         proposals.sort(key=lambda entry: entry[0].index)
-        reported = [await self.reported(proposal, measure) for proposal, measure in proposals]
+        reported: list[ProposalRecord] = []
+        for entry, entry_measure in proposals:
+            # A delivery that stopped part way already reported some proposals; they are not reported again.
+            report_id = state.reports.get(entry.index)
+            if report_id is not None:
+                reported.append(replace(entry, designer_report_id=report_id))
+                continue
+            entry = await self.reported(entry, entry_measure, generation=state.number)
+            reported.append(entry)
+            if entry.designer_report_id:
+                state = replace(state, reports={**state.reports, entry.index: entry.designer_report_id})
+                self.save_open(generation, state)
         measures = tuple(measure for _, measure in proposals if measure is not None)
-        generation_record = GenerationRecord(self.generation, tuple(reported), measures, None, self.error)
+        generation_record = GenerationRecord(state.number, tuple(reported), measures, None, state.error)
         report_path = write_generation_report(self.state_dir, generation_record)
         logger.info(
             "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",
-            self.generation,
+            state.number,
             self.scenario,
             len(measures),
             len(reported),
             report_path,
         )
-        self.experience = generation_record.experience
-        self.generation += 1
-        self.refused, self.pending = [], {}
+        # Generations can close out of order; the experience is the newest closed one's.
+        if state.number > self.experience_generation:
+            self.experience = generation_record.experience
+            self.experience_generation = state.number
+        path.unlink()
 
-    async def reported(self, proposal: ProposalRecord, measure: TaskMeasure | None) -> ProposalRecord:
+    async def reported(
+        self, proposal: ProposalRecord, measure: TaskMeasure | None, *, generation: int
+    ) -> ProposalRecord:
         """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
-        if not self.is_reporting_designer or proposal.split == "eval":
+        if not self.is_reporting_designer or proposal.split == "eval" or proposal.infrastructure_failure:
             return proposal
-        metadata: dict[str, object] = {"generation": self.generation, **skill_tag(proposal.skill)}
+        metadata: dict[str, object] = {"generation": generation, **skill_tag(proposal.skill)}
         if measure is None:
             score = 0.0
             metadata["refusal"] = proposal.refusal

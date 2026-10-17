@@ -6,11 +6,35 @@ from abc import ABC, abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass
 
+from reef.core.batches import TaskItem
 from reef.core.records_types import AgentRecord
 
 
 @dataclass(frozen=True, kw_only=True)
-class RecordSet(ABC):
+class PoolItem(ABC):
+    """An item that a pool holds and orders: a record set, or a saved task waiting to run.
+
+    The pool and the selection policies read only these fields:
+
+    * ``set_id`` identifies the item in the pool.
+    * ``arrival_index`` tells when the stage received the item.
+    * ``group_key`` names the group of an item that belongs to one.
+    """
+
+    set_id: Hashable
+    arrival_index: int
+    group_key: Hashable | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TaskSet(PoolItem):
+    """One saved task waiting to run. ``set_id`` is the task name, and it holds no records."""
+
+    item: TaskItem
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecordSet(PoolItem):
     """Records that are used together, such as one record, a report with its inferences, or a ready group.
 
     A stage forms record sets, and its pool holds and orders them. The pool
@@ -21,10 +45,6 @@ class RecordSet(ABC):
       uses the index of its oldest member.
     * ``group_key`` names the group of a set that is a group.
     """
-
-    set_id: Hashable
-    arrival_index: int
-    group_key: Hashable | None = None
 
     @abstractmethod
     def record_ids(self) -> tuple[str, ...]:

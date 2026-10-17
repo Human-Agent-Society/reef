@@ -315,7 +315,9 @@ class TrainingPipeline:
             return
         if result.status is TaskStatus.READY:
             self.tasks[record_set.set_id] = result.tasks
-        self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
+        self.record2record.settle(
+            record_set, result.status, producing_runtime_load_ids(result.tasks), tasks=result.tasks
+        )
 
     def ingest(self, item: AgentRecord) -> None:
         """Read one record. Training instructions stay here; every other record goes through the record stage."""

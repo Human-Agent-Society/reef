@@ -16,10 +16,12 @@ from reef.record2record import (
     ArrivalOrder,
     GroupKeyOrder,
     InferenceRecord2Record,
+    Pool,
     RecordSet,
     RecordSetPool,
     SelectionPolicy,
     SingleRecordSet,
+    TaskSet,
     TaskStatus,
 )
 from reef.record2record.staleness import producing_runtime_load_ids, stale_sets
@@ -153,3 +155,12 @@ def test_a_serving_version_of_another_incarnation_restarts_the_served_versions()
     for version in ("e:1", "e:2", "e:2", "f:0"):
         stage.observe_serving_runtime_load_id(version)
     assert stage.served_runtime_load_ids == ["f:0"]
+
+
+def test_a_pool_of_saved_tasks_reserves_them_in_arrival_order() -> None:
+    pool: Pool[TaskSet] = Pool()
+    for name in ("first", "second", "third"):
+        pool.put(TaskSet(set_id=name, arrival_index=pool.next_arrival_index(), item=TaskItem(Path(name))))
+    assert [task_set.set_id for task_set in pool.reserve(2)] == ["first", "second"]
+    assert [task_set.item.task_path.name for task_set in pool.consume_reserved()] == ["first", "second"]
+    assert [task_set.set_id for task_set in pool.sets()] == ["third"]
