@@ -7,7 +7,7 @@ const docsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const repoRoot = resolve(docsRoot, "..");
 
 function read(path) {
-  return readFileSync(resolve(repoRoot, path), "utf8");
+  return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n/g, "\n");
 }
 
 const configSource = read("recipes/basic/local-sglang.yaml");
@@ -216,7 +216,7 @@ const repositoryFiles = new Set(
     encoding: "utf8",
   }).split("\0").filter(Boolean),
 );
-const terminologyCheckPath = relative(repoRoot, fileURLToPath(import.meta.url));
+const terminologyCheckPath = relative(repoRoot, fileURLToPath(import.meta.url)).replaceAll("\\", "/");
 for (const path of repositoryFiles) {
   // This file defines the rejected spellings. Dependency lockfiles describe
   // external packages whose names are outside Reef's control.
@@ -225,7 +225,7 @@ for (const path of repositoryFiles) {
   if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) continue;
   const contents = readFileSync(absolutePath);
   if (contents.includes(0)) continue;
-  const lines = terminologySource(path, contents.toString("utf8")).split("\n");
+  const lines = terminologySource(path, contents.toString("utf8").replace(/\r\n/g, "\n")).split("\n");
   for (const [name, pattern] of simplifiedTerminology) {
     if (pattern.test(path)) {
       failures.push(`${path} uses unclear terminology ${name} in its filename`);
