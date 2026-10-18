@@ -226,17 +226,17 @@ reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test fi
 
 ## 📚 Recipes 与示例
 
-根据工作负载的**任务类型**和希望**进化的对象**（模型权重或 Agent 的 harness）来选择
+根据**何时学习**和希望**进化的对象**（模型权重或 Agent 的 harness）来选择
 recipe。进化权重的 recipe 需要 GPU 训练栈，而 harness recipe 只需要一个模型端点。下表中每个
 recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Recipe 目录](https://reefinfra.ai/docs/user-guide/recipes/)
 还列出了每个 recipe 的代码和示例。Reefine 随 `reef-infra` 内置提供，其他实现位于本仓库的
 `recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
 
-| 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
+| 何时学习 | 含义 | 进化模型 | 进化 harness | 标准 benchmark |
 |---|---|---|---|---|
-| 科学发现 | 对一个有可度量目标的难题反复尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
-| 任务流上的持续学习 | 由校验器逐个打分的独立任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract)、[IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results)、[CEO-Bench](recipes/sao/examples/ceobench/README.md#results)、[Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results)。 |
-| 从使用中学习 | 没有人上报分数或反馈延迟到达的真实交互 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[GSM8K 任务流上的模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
+| 发现 | 对同一个难题反复尝试，产物就是答案，没有部署环节。发现是一个任务类型，而不是一个时机。 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
+| 构建期 | 对一个固定任务集做离线搜索，搜索完成后才部署 | 暂无 | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Meta-Harness](recipes/meta_harness/README.md) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract)、[Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results)。 |
+| 运行期 | 已在对外服务，并从实时流量或使用中学习 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/)、[OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/)、[SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results)、[CEO-Bench](recipes/sao/examples/ceobench/README.md#results)、[GSM8K 任务流上的模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
 反馈、候选修改和发布流程，可以从[编程 harness 教程](tutorials/evolve-your-harness/README.md)开始。
