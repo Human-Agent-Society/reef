@@ -63,6 +63,11 @@ from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
+from reef.service.deploy.routing_containers import ContainerCommandError, DockerComposeRuntime
+from reef.service.deploy.routing_control import RoutingControlError
+from reef.service.deploy.routing_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing_policy import RouterPolicyError
+from reef.service.deploy.routing_registry import RoutingOwnershipError
 from reef.service.deploy.service_config import (
     normalize_service_config,
     service_config_arguments,
@@ -103,6 +108,7 @@ class _Stack:
         ready_timeout_default: int,
         config_path: str | Path,
         source_root: Path | None = None,
+        routing_controller: RoutingDeploymentController | None = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         self.services = services
@@ -112,6 +118,7 @@ class _Stack:
         # Where the deployment's dotted recipe package lives (see
         # ``recipe_source_root``); every service gets it on ``PYTHONPATH``.
         self.source_root = source_root
+        self.routing_controller = routing_controller
         self._executors: dict[str, Executor] = {}
         self._log_offsets: dict[str, int] = {}
         self._stopping = threading.Event()
@@ -138,7 +145,7 @@ class _Stack:
             print(content, end="", flush=True)
 
     def _wait_ready(self, service: Mapping[str, Any], executor: Executor, deadline: float) -> None:
-        while not self._stopping.is_set():
+        while not self._stopping.is_set() and not self.stop_requested:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timeout = service.get("ready_timeout", self.ready_timeout_default)
@@ -218,10 +225,10 @@ class _Stack:
     def _start_service(self, service: Mapping[str, Any], config: dict[str, Any]) -> None:
         name = service["name"]
         executor = self._executors[name]
-        if self._stopping.is_set():
+        if self._stopping.is_set() or self.stop_requested:
             raise InterruptedError("stack stopped during startup")
         executor.rpc(0, "prepare", args=(config,), timeout=30)
-        if self._stopping.is_set():
+        if self._stopping.is_set() or self.stop_requested:
             raise InterruptedError("stack stopped during startup")
         deadline = time.monotonic() + float(service.get("ready_timeout", self.ready_timeout_default))
         executor.rpc(0, "start", timeout=30)
@@ -234,6 +241,8 @@ class _Stack:
 
     def start(self) -> None:
         try:
+            if self.routing_controller is not None:
+                self.routing_controller.begin_start()
             # Launch/readiness tasks never mutate the deployment config. The
             # coordinator alone publishes addresses and unlocks dependents.
             with ThreadPoolExecutor(max_workers=max(1, len(self.services)), thread_name_prefix="reef-start") as pool:
@@ -242,7 +251,7 @@ class _Stack:
                     running: dict[Future[None], str] = {}
                     ready: set[str] = set()
                     while pending or running:
-                        if self._stopping.is_set():
+                        if self._stopping.is_set() or self.stop_requested:
                             raise InterruptedError("stack stopped during startup")
                         eligible = [svc for svc in pending if ready.issuperset(svc.get("depends_on", []))]
                         self._prepare_services(eligible)
@@ -264,6 +273,8 @@ class _Stack:
                     # Join first so none can create a process after cleanup.
                     self._stopping.set()
                     raise
+            if self.routing_controller is not None:
+                self.routing_controller.complete_start()
         except BaseException:
             self.shutdown()
             raise
@@ -290,6 +301,8 @@ class _Stack:
                     _log(f"{name}: exited; bringing down the stack")
                     self._unexpected_exit.set()
                     self._stopping.set()
+                    if self.routing_controller is not None:
+                        self.routing_controller.request_stop()
                     return
             self._stopping.wait(_WATCHDOG_INTERVAL)
 
@@ -300,9 +313,15 @@ class _Stack:
             if self.stop_requested:
                 self.force_stop_requested = True
             self.stop_requested = True
+            if self.routing_controller is not None:
+                self.routing_controller.request_stop(force=self.force_stop_requested)
 
         signal.signal(signal.SIGTERM, _request_stop)
         signal.signal(signal.SIGINT, _request_stop)
+        # A routed deployment's SIGHUP (policy reload) is handled by _run_orchestrator for the whole lifecycle.
+        self.run_until_stopped()
+
+    def run_until_stopped(self) -> None:
         watcher = threading.Thread(target=self._watchdog, daemon=True)
         watcher.start()
         while not self._stopping.is_set():
@@ -310,6 +329,24 @@ class _Stack:
                 _log("received signal, shutting down (press Ctrl-C again to skip the grace period)")
                 self._stopping.set()
                 break
+            if self.routing_controller is not None:
+                try:
+                    self.routing_controller.tick()
+                except InterruptedError:
+                    if not self.routing_controller.stop_requested:
+                        self._unexpected_exit.set()
+                    self._stopping.set()
+                except (
+                    RoutingDeploymentError,
+                    RoutingControlError,
+                    RouterPolicyError,
+                    RoutingOwnershipError,
+                    ContainerCommandError,
+                    OSError,
+                ) as exc:
+                    _log(f"routing deployment failed: {exc}")
+                    self._unexpected_exit.set()
+                    self._stopping.set()
             self._stopping.wait(timeout=0.1)
         watcher.join(timeout=15)
 
@@ -318,6 +355,15 @@ class _Stack:
             return
         self._closed = True
         self._stopping.set()
+        if self.routing_controller is not None:
+            try:
+                self.routing_controller.request_stop(force=self.force_stop_requested)
+                self.routing_controller.shutdown()
+                if self.routing_controller.failed:
+                    self._unexpected_exit.set()
+            except Exception as exc:
+                _log(f"routing cleanup incomplete: {exc}")
+                self._unexpected_exit.set()
         ordered = list(reversed(self._executors.items()))
         # Signal every dependent before its dependencies, with one grace window.
         for name, executor in ordered:
@@ -494,10 +540,48 @@ def _run_orchestrator(
     services = validate_services(config, resolved_config_path)
     if local_model_required(config):
         resolve_model_paths(config)
-    # Children read the resolved layout, never the public file.
-    temp_config_path = _write_resolved_config(config)
-    resolved_config_path = temp_config_path
+    temp_config_path: Path | None = None
+    routing_controller: RoutingDeploymentController | None = None
+    reef_section = config.get("reef", {})
+    # Routing is always owned by this process: it runs the router container and the REEF child together.
+    if isinstance(reef_section, Mapping) and reef_section.get("routing_manifest"):
+        settings = service_config_from_mapping(config)
+        if any(service_executor_selection(config, service).settings.backend != "uni" for service in services):
+            raise DeployConfigError("managed routing requires uni execution for every native service")
+        if len(services) != 1 or services[0]["name"] != "reef":
+            raise DeployConfigError("managed routing requires a record-only REEF service with external providers")
+        routing_controller = RoutingDeploymentController(settings, DockerComposeRuntime())
+    preparation_sigterm = signal.getsignal(signal.SIGTERM)
+    preparation_sigint = signal.getsignal(signal.SIGINT)
+    # Ordinary deployments never touch SIGHUP, which some platforms lack.
+    preparation_sighup = signal.getsignal(signal.SIGHUP) if routing_controller is not None else signal.SIG_DFL
+
+    def stop_routing_preparation(signum: int, frame: FrameType | None) -> None:
+        if routing_controller is not None:
+            routing_controller.request_stop(force=routing_controller.stop_requested)
+
+    def request_policy_reload(signum: int, frame: FrameType | None) -> None:
+        # Intent only. The controller applies a reload once the deployment is ready, and never after a stop.
+        # Owning SIGHUP from preparation to the last cleanup keeps its default action from killing the owner.
+        if routing_controller is not None:
+            routing_controller.request_reload()
+
+    if routing_controller is not None:
+        signal.signal(signal.SIGTERM, stop_routing_preparation)
+        signal.signal(signal.SIGINT, stop_routing_preparation)
+        signal.signal(signal.SIGHUP, request_policy_reload)
     try:
+        if routing_controller is not None:
+            routing_controller.prepare()
+            if routing_controller.stop_requested:
+                raise DeployStartupError("routing deployment interrupted during preparation")
+            config["reef"]["routing_manifest"] = str(routing_controller.directory / "manifest.yaml")
+            services[0].setdefault("env", {})["REEF_ROUTING_CONTROL_FILE"] = str(
+                routing_controller.directory / "control.json"
+            )
+        # Children read the resolved layout, never the public file; a routed child reads the rendered manifest.
+        temp_config_path = _write_resolved_config(config)
+        resolved_config_path = temp_config_path
         run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
         run_dir.mkdir(parents=True, exist_ok=True)
         ready_timeout_default = int(config_value(config, "ready_timeout", default="3600") or "3600")
@@ -509,16 +593,24 @@ def _run_orchestrator(
             ready_timeout_default,
             resolved_config_path,
             source_root=source_root,
+            **({"routing_controller": routing_controller} if routing_controller is not None else {}),
         )
 
         def interrupt_startup(signum: int, frame: FrameType | None) -> None:
-            _log("received signal during startup, shutting down")
-            raise KeyboardInterrupt
+            if routing_controller is not None:
+                stack.force_stop_requested = stack.stop_requested
+                stack.stop_requested = True
+                routing_controller.request_stop(force=stack.force_stop_requested)
+            else:
+                _log("received signal during startup, shutting down")
+                raise KeyboardInterrupt
 
         # block() installs the steady-state handler only after every service is
         # ready. Until then, interruption must unwind start() and stop its peers.
         previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
         previous_sigint = signal.getsignal(signal.SIGINT)
+        if routing_controller is not None:
+            signal.signal(signal.SIGINT, interrupt_startup)
         try:
             try:
                 stack.start()
@@ -538,7 +630,23 @@ def _run_orchestrator(
                 signal.signal(signal.SIGINT, previous_sigint)
         return stack.exit_code
     finally:
-        temp_config_path.unlink(missing_ok=True)
+        try:
+            if routing_controller is not None and not routing_controller.closed:
+                routing_controller.shutdown()
+        finally:
+            if routing_controller is not None:
+                # The REEF child has stopped by now; its control socket directory can go.
+                try:
+                    routing_controller.release_control_directory()
+                except (OSError, RoutingDeploymentError) as exc:
+                    _log(f"routing control directory cleanup incomplete: {exc}")
+                finally:
+                    # Only after the last routing cleanup do these signals act on the process as before.
+                    signal.signal(signal.SIGTERM, preparation_sigterm)
+                    signal.signal(signal.SIGINT, preparation_sigint)
+                    signal.signal(signal.SIGHUP, preparation_sighup)
+            if temp_config_path is not None:
+                temp_config_path.unlink(missing_ok=True)
 
 
 #: ``--model <provider>/<model>``: the upstream URL and the key a provider prefix stands for. A key of None
@@ -656,9 +764,32 @@ def run_service(config_path: str | Path | None = None) -> int:
         raise SystemExit("[reef] ERROR: internal service requires REEF_CONFIG")
     settings = service_config_from_mapping(load_config(selected_config))
     from reef.service.assembly import build_app
+    from reef.service.lifecycle import LifecycleSettings
 
-    app = build_app(settings)
+    control_file = os.environ.get("REEF_ROUTING_CONTROL_FILE")
+    lifecycle = LifecycleSettings.load(Path(control_file)) if control_file else None
+    if settings.routing_manifest is not None and lifecycle is None:
+        raise ValueError("managed REEF HTTP service requires its orchestrator control file")
+    app = build_app(settings, lifecycle=lifecycle)
     from aiohttp import web
 
-    web.run_app(app, host=settings.host, port=settings.port)
+    if lifecycle is None:
+        web.run_app(app, host=settings.host, port=settings.port)
+        return 0
+    import asyncio
+
+    from reef.service.app import CONTROL_APPLICATION
+    from reef.service.lifecycle import serve_managed
+
+    # Private control on its Unix socket first, then the public listener; requests cancel on disconnect.
+    asyncio.run(
+        serve_managed(
+            app,
+            app[CONTROL_APPLICATION],
+            host=settings.host,
+            port=settings.port,
+            control_socket=Path(lifecycle.control_socket),
+            shutdown_timeout_seconds=settings.routing_deployment.finalization_timeout_seconds,
+        )
+    )
     return 0

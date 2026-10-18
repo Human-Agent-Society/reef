@@ -34,6 +34,9 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
+from reef.service.lifecycle import LifecycleSettings
+from reef.service.routing import RoutingAdapter
+from reef.service.routing_preview import PreviewSettings
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -382,6 +385,7 @@ def build_app(
     environ: Mapping[str, str] | None = None,
     connector: Any = None,
     inference_handler: InferenceHandler | None = None,
+    lifecycle: LifecycleSettings | None = None,
 ) -> web.Application:
     """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
 
@@ -390,7 +394,31 @@ def build_app(
     inference request; the caller owns it and releases it after the app stops.
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
+    With ``reef.routing_manifest``, ``lifecycle`` is required: ``reef serve`` starts this service as the
+    closed child of a managed routing deployment and hands it the router's selection credential.
     """
+    routing = None
+    preview = None
+    if settings.routing_manifest is not None:
+        if lifecycle is None or not lifecycle.selection_token or not lifecycle.control_socket:
+            raise ValueError(
+                "reef.routing_manifest runs only as a managed routing deployment started by reef serve, which "
+                "supplies the Semantic Router selection credential and control socket"
+            )
+        policy = settings.routing_deployment
+        if settings.port == policy.sr_management_port:
+            raise ValueError("reef.port must differ from routing sr_management_port")
+        routing = RoutingAdapter.from_manifest(
+            settings.routing_manifest,
+            router_config_hash=lifecycle.router_config_hash or None,
+            environ=environ,
+            timeout_s=settings.inference_timeout_s,
+        )
+        preview = PreviewSettings(
+            f"http://127.0.0.1:{policy.sr_management_port}",
+            lifecycle.selection_token,
+            policy.selection_timeout_seconds,
+        )
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,
@@ -422,6 +450,9 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            routing=routing,
+            lifecycle=lifecycle,
+            preview=preview,
         )
     except BaseException:
         with suppress(Exception):

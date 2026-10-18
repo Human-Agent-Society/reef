@@ -8,8 +8,10 @@ from typing import Any
 from aiohttp import web
 
 from reef.runtime.interfaces import MULTIMODAL_ROUTES, InferenceHandler
+from reef.service.lifecycle import ADMITTED_ROUTING
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.routing import RoutingDecision
 from reef.service.streaming import (
     SSEFrameDecoder,
     chat_completion_chunk_identity,
@@ -91,10 +93,11 @@ async def _relay_inference_stream(
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
     evaluated: str | None = None,
+    decision: RoutingDecision | None = None,
 ) -> web.StreamResponse:
     """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent."""
     upstream, pending = await request_service.start_stream(
-        headers, payload, path, inference_handler, record=record, evaluated=evaluated
+        headers, payload, path, inference_handler, record=record, evaluated=evaluated, decision=decision
     )
     response_headers = {
         name: value
@@ -137,10 +140,12 @@ async def _relay_inference_stream(
             else:
                 record_attempted = True
                 # Off the loop: recording takes the scenario's lock, which a commit may hold for a while.
-                item = await asyncio.to_thread(
-                    request_service.record_stream,
-                    pending,
-                    stream_record(upstream, bytes(body), complete=True),
+                item = await request_service.persist(
+                    asyncio.to_thread(
+                        request_service.record_stream,
+                        pending,
+                        stream_record(upstream, bytes(body), complete=True),
+                    )
                 )
                 frames = (
                     receipt_sse_events(path, relay.chat_identity, relay.terminal, item.agent_record_id)
@@ -172,10 +177,12 @@ async def _relay_inference_stream(
             await upstream.close()
         finally:
             if not record_attempted:
-                await asyncio.to_thread(
-                    request_service.record_stream,
-                    pending,
-                    stream_record(upstream, bytes(body), complete=complete, error=error),
+                await request_service.persist(
+                    asyncio.to_thread(
+                        request_service.record_stream,
+                        pending,
+                        stream_record(upstream, bytes(body), complete=complete, error=error),
+                    )
                 )
     return response
 
@@ -189,25 +196,46 @@ def register_inference_routes(
     async def serve(
         request: web.Request, headers: Mapping[str, str], path: str, *, record: bool, evaluated: str | None = None
     ) -> web.StreamResponse:
-        payload = await read_object(request)
-        if payload.get("stream") is True:
-            return await _relay_inference_stream(
-                request,
-                payload,
-                headers=headers,
-                path=path,
-                record=record,
-                request_service=request_service,
-                inference_handler=inference_handler,
-                evaluated=evaluated,
-            )
-        response_payload, item = await request_service.infer_with_data(
-            headers, payload, path, inference_handler, record=record, evaluated=evaluated
+        # Read before the first await. A managed deployment captured the policy when it admitted the request.
+        routing = request.get(ADMITTED_ROUTING, request_service.routing) if record else None
+        decision: RoutingDecision | None = None
+        handler = inference_handler
+        # A JSON answer returns from its own branch; a stream continues to the shared relay below.
+        if routing is None:
+            payload = await read_object(request)
+            if payload.get("stream") is not True:
+                response_payload, item = await request_service.infer_with_data(
+                    headers, payload, path, handler, record=record, evaluated=evaluated
+                )
+                response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
+                if record:
+                    response_headers.update(await _release_header(request_service, headers))
+                return web.json_response(response_payload, headers=response_headers)
+        else:
+            scenario = routing.check_request(request.headers.items(), path)
+            client_payload = await read_object(request, strict=True)
+            decision = await request_service.select_route(routing, scenario, client_payload)
+            # The target and its handler stay fixed for the provider call and every retry.
+            handler = routing.handler_for(decision)
+            payload = {**client_payload, "model": decision.target.provider_model}
+            if payload.get("stream") is not True:
+                response_payload, routed_item = await request_service.infer_routed(
+                    headers, payload, path, decision, handler
+                )
+                return web.json_response(
+                    response_payload, headers={"x-reef-agent-record-id": routed_item.agent_record_id}
+                )
+        return await _relay_inference_stream(
+            request,
+            payload,
+            headers=headers,
+            path=path,
+            record=record,
+            request_service=request_service,
+            inference_handler=handler,
+            evaluated=evaluated,
+            decision=decision,
         )
-        response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
-        if record:
-            response_headers.update(await _release_header(request_service, headers))
-        return web.json_response(response_payload, headers=response_headers)
 
     async def inference(request: web.Request) -> web.StreamResponse:
         return await serve(request, request.headers, request.path, record=True)

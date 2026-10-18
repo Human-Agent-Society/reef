@@ -30,6 +30,7 @@ from reef.service.deploy.service_config import (
         ("upstream_model", "00123", "00123"),
         ("upstream_model", "true", "true"),
         ("upstream_model", "null", "null"),
+        ("routing_manifest", "routing/manifest.yaml", "routing/manifest.yaml"),
         ("allow_implicit_scenario_creation", False, "false"),
         ("tokens", ["first", "second"], '["first", "second"]'),
         ("tokens", [], "[]"),
@@ -51,7 +52,7 @@ def test_yaml_and_cli_use_the_same_field_types(name, yaml_value, cli_value):
 def test_parser_defaults_come_from_settings():
     defaults = parse_service_arguments({})
     for argument in service_config_arguments():
-        if argument.name in {"token", "recipe"}:
+        if argument.name in {"token", "recipe", "routing_deployment"}:
             continue
         field = next(field for field in fields(ServiceConfig) if field.name == argument.name)
         assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)

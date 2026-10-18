@@ -4,3 +4,6 @@
 [submodule "third_party/reef-client"]
 	path = third_party/reef-client
 	url = https://github.com/Human-Agent-Society/reef-client.git
+[submodule "third_party/semantic-router"]
+	path = third_party/semantic-router
+	url = https://github.com/vllm-project/semantic-router.git

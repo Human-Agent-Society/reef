@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +24,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.core import AgentRecord, RequestType
 from reef.runtime.interfaces import InferenceStream
 from reef.service.routes.inference import register_inference_routes
+from reef.service.routing import RoutingDecision
 from reef.service.streaming import frame_for_codex
 
 #: One OpenRouter web search item, in the shape the OpenRouter SDK documents:
@@ -133,7 +134,13 @@ class _RecordingRequestService:
 
     def __init__(self, harness_adapter: str | None) -> None:
         self.recorded: list[Mapping[str, Any]] = []
+        #: What each opened stream was asked for: whether it keeps a record, its evaluated component, its decision.
+        self.started: list[tuple[bool, str | None, RoutingDecision | None]] = []
         self.dispatcher = SimpleNamespace(recipe=SimpleNamespace(harness_adapter=harness_adapter))
+        self.routing = None
+
+    async def persist(self, write: Awaitable[AgentRecord]) -> AgentRecord:
+        return await write
 
     async def _upstream(self) -> InferenceStream:
         async def chunks() -> AsyncIterator[bytes]:
@@ -152,7 +159,9 @@ class _RecordingRequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        decision: RoutingDecision | None = None,
     ) -> tuple[InferenceStream, Any]:
+        self.started.append((record, evaluated, decision))
         pending = SimpleNamespace(
             item=AgentRecord.create(scenario="reef-codex", request_type=RequestType.INFERENCE, payload=dict(payload)),
             record=record,
@@ -228,5 +237,26 @@ def test_non_codex_deployment_reads_the_raw_item() -> None:
         assert completed["reef"]["agent_record_id"]
         # Reef's record and the client both see the raw stream.
         assert "openrouter:web_search" in request_service.recorded[0]["body"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_evaluation_stream_names_its_component_and_carries_no_receipt() -> None:
+    async def run() -> None:
+        client, request_service = _relay_client("pi")
+        async with client:
+            response = await client.post(
+                "/reef/scenarios/reef-codex/components/harness/evaluation/v1/responses",
+                json={"stream": True, "model": "anthropic/claude", "input": []},
+            )
+            assert response.status == 200
+            assert "x-reef-agent-record-id" not in response.headers
+            body = await response.text()
+
+        # The stream opens without a record or a routing decision, for the evaluated component only.
+        assert request_service.started == [(False, "harness", None)]
+        completed = next(payload for payload in _frames(body) if payload.get("type") == "response.completed")
+        assert "reef" not in completed
 
     asyncio.run(run())
