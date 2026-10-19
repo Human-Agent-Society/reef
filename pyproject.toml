@@ -27,7 +27,7 @@ dependencies = [
     "huggingface_hub",
     # Harbor's environment contract backs reef.sandbox; the terminus runner, the task player and the generator
     # service play Harbor tasks with reef-eval.
-    "harbor>=0.20,<0.21",
+    "harbor>=0.20,<0.25",
     "pyyaml",
     "reef-client>=0.2.0",
     "reef-eval>=0.1.1",
