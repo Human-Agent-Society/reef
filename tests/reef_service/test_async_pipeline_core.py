@@ -267,11 +267,10 @@ def _wait_for_error(dispatcher: Dispatcher) -> str:
 
 @pytest.mark.unit
 def test_empty_checkpoint_result_fails_closed() -> None:
-    # The invariant lives on the result type, so a completed job that cannot
-    # name its exported checkpoint cannot be constructed at all -- it can never
-    # reach the committer and be published as a durable version.
-    with pytest.raises(ValueError, match="must report the checkpoint path"):
+    # A job names its saved checkpoint, or None if it saved no checkpoint. An empty path is not correct.
+    with pytest.raises(ValueError, match="checkpoint_path must be a non-empty string"):
         TrainingJobResult(outcome="complete", runtime_load_id="v1", checkpoint_path="")
+    assert TrainingJobResult(outcome="complete", runtime_load_id="v1").checkpoint_path is None
 
 
 @pytest.mark.unit
@@ -376,7 +375,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
-    _, committed = scenario.artifact_with_metrics()
+    _, committed = scenario.release_queries.artifact_with_metrics()
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["selected"] is True
@@ -401,7 +400,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     produced = scenario.current_artifact_ref()
-    _, committed = scenario.artifact_with_metrics(produced.release_id)
+    _, committed = scenario.release_queries.artifact_with_metrics(produced.release_id)
 
     assert committed is not None
     assert committed["experiment/provider"] == "test"
@@ -471,7 +470,7 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
 
 @pytest.mark.unit
 def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, monkeypatch) -> None:
-    monkeypatch.setattr("reef.dispatcher.Dispatcher.storage_retry_seconds", 0.01)
+    monkeypatch.setattr("reef.dispatcher.training_loop.DispatchedTrainingLoop.storage_retry_seconds", 0.01)
     runtime, dispatcher = start_dispatcher(block_storage=True)
     _submit_pair(dispatcher)
     assert runtime.started.wait(1)
@@ -524,7 +523,7 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     assert final["runtime/weight_sync/completed_total"] == 2
     assert final["training/failed_attempts_total"] == 0
     assert tracker.closed
-    assert not dispatcher._lifecycle.metrics_thread.is_alive()
+    assert not dispatcher.background_threads.metrics_thread.is_alive()
 
 
 def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher, monkeypatch) -> None:
@@ -544,7 +543,7 @@ def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher
     assert sample["training/error"] == 1
     assert not tracker.events
     monkeypatch.setattr(runtime, "train_candidate", train_candidate)
-    dispatcher._training.ready.set()
+    dispatcher.training_loop.ready.set()
     _wait_for_step(dispatcher, 1)
     dispatcher.record_operational_metrics()
     final = [metrics for namespace, metrics in tracker.loggers["math"].logged if namespace == "operations"][-1]
@@ -555,7 +554,7 @@ def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher
 
 def test_disabled_tracking_does_not_start_periodic_sampling(start_dispatcher) -> None:
     _, dispatcher = start_dispatcher()
-    assert dispatcher._lifecycle.metrics_thread is None
+    assert dispatcher.background_threads.metrics_thread is None
 
 
 def test_periodic_metrics_observe_incomplete_weight_sync(start_dispatcher, monkeypatch) -> None:

@@ -188,10 +188,16 @@ def _validate_marker(value: dict[str, Any], path: Path) -> None:
     if status == "HEAD_COMMITTED" and commit_acknowledged is not True:
         raise RuntimeError(f"training marker state requires a commit acknowledgement: {path}")
     if status != "RUNNING":
-        checkpoint = value.get("checkpoint_path")
-        if not isinstance(checkpoint, str) or not checkpoint:
+        # A null path records a job without a checkpoint (a checkpoint interval larger than 1).
+        if "checkpoint_path" not in value:
             raise RuntimeError(f"training marker has no checkpoint: {path}")
-        if Path(checkpoint).is_symlink() or not Path(checkpoint).is_dir():
+        checkpoint = value["checkpoint_path"]
+        if checkpoint is not None and (
+            not isinstance(checkpoint, str)
+            or not checkpoint
+            or Path(checkpoint).is_symlink()
+            or not Path(checkpoint).is_dir()
+        ):
             raise RuntimeError(f"training marker has no checkpoint: {path}")
     if status in PUBLISHED_STATES and not _is_non_empty_string(value.get("runtime_load_id")):
         raise RuntimeError(f"invalid training marker: {path}")
@@ -242,7 +248,7 @@ def marker_result(marker: Mapping[str, Any], *, metrics: Mapping[str, Any] | Non
     return TrainingJobResult(
         outcome="complete",
         runtime_load_id=str(marker["runtime_load_id"]),
-        checkpoint_path=str(marker["checkpoint_path"]),
+        checkpoint_path=marker["checkpoint_path"],
         metrics=merged_metrics or None,
         training_job_id=str(marker["job_id"]),
     )
@@ -253,7 +259,7 @@ def marker_checkpoint_result(marker: Mapping[str, Any]) -> TrainingJobResult:
     return TrainingJobResult(
         outcome="checkpoint",
         runtime_load_id=str(marker.get("runtime_load_id", "pending")),
-        checkpoint_path=str(marker["checkpoint_path"]),
+        checkpoint_path=marker["checkpoint_path"],
         metrics=_marker_metrics(marker) or None,
         training_job_id=str(marker["job_id"]),
     )

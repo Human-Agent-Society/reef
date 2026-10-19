@@ -48,7 +48,6 @@ from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
 from reef.train.cordis_backend.strategies import Promoter, Proposer
@@ -271,9 +270,6 @@ class CordisRecipe(Recipe):
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
-    #: What a result becomes when another component's commit replaced its base while it was evaluated:
-    #: merged onto the release served now, evaluated again, or refused and proposed again.
-    on_stale: StaleResultPolicy = "merge"
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     #: Default proposal inbox root, with one directory per scenario.
     proposals_dir: str = ".reef/proposals"
@@ -318,8 +314,6 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
-        if self.on_stale not in STALE_RESULT_POLICIES:
-            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -405,9 +399,6 @@ class CordisRecipe(Recipe):
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
-        on_stale = evolution.get("on_stale", "merge")
-        if on_stale not in STALE_RESULT_POLICIES:
-            raise RecipeConfigError(f"evolution.on_stale must be one of {STALE_RESULT_POLICIES}")
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
@@ -566,7 +557,6 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
-            "on_stale": on_stale,
             "forbid_residue": forbid_residue,
             **budgets,
             "floor_score": float(floor_score),
@@ -714,7 +704,6 @@ class CordisRecipe(Recipe):
             "score_episode": self.score_episode,
             "tasks": self.tasks,
             "models": self.model_bindings(scenario),
-            "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
             "episode_repeats": self.episode_repeats,

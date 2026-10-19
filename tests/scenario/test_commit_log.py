@@ -1297,7 +1297,7 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=agent_record_dir,
     )
-    dispatcher._registry.set_training_scenario_callback(lambda scenario: None)
+    monkeypatch.setattr(dispatcher.training_loop, "start", lambda: None)
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
@@ -1369,7 +1369,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
-    reload_scenario = dispatcher._registry.reload
+    reload_scenario = dispatcher.registry.reload
 
     def fail_release(self, record_ids) -> None:
         del self, record_ids
@@ -1384,7 +1384,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     original.trainer.pipeline.release_records = fail_release.__get__(
         original.trainer.pipeline, type(original.trainer.pipeline)
     )
-    dispatcher._registry.reload = blocking_reload
+    dispatcher.registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 

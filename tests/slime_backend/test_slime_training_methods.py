@@ -229,6 +229,20 @@ def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tm
 
 
 @pytest.mark.unit
+def test_a_job_between_checkpoints_continues_the_schedule_and_writes_it_with_the_next_save(tmp_path) -> None:
+    stack = Stack(tmp_path, checkpoint_interval=2)
+    stack.run(TrainingMethod("sft", WARMUP), step=0)
+    assert stack.group.save_calls == []
+    assert not (tmp_path / LEARNING_RATE_SCHEDULES_FILENAME).exists()
+    stack.run(TrainingMethod("sft", WARMUP), step=1)
+    continued = stack.worker_switch(1)
+    assert continued is not None
+    assert continued["learning_rate_schedule_state"]["completed_steps"] == 2
+    record = json.loads((tmp_path / LEARNING_RATE_SCHEDULES_FILENAME).read_text())
+    assert record == {"schedules": {"": {"rollout_id": 1, **LearningRateScheduleState(WARMUP, 4).to_dict()}}}
+
+
+@pytest.mark.unit
 def test_a_schedule_with_decoupled_lr_is_refused_before_training(tmp_path) -> None:
     stack = Stack(tmp_path, args=worker_args(decoupled_lr=1e-5))
     with pytest.raises(RuntimeError, match="decoupled-lr"):

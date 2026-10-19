@@ -78,6 +78,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-pi-session
+          retention-days: 7
           path: ${{ runner.temp }}/real-pi-session.jsonl
           if-no-files-found: error
 
@@ -108,6 +109,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: real-codex-session
+          retention-days: 7
           path: ${{ runner.temp }}/real-codex-session.jsonl
           if-no-files-found: error
 

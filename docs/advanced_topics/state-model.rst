@@ -134,42 +134,38 @@ durable store, the order is:
 
 Every trainer is bound to a release component (``records`` when the recipe
 serves none). With several trainers, every commit record names the
-``component`` that made it and the ``base_release_id`` its batch was reserved
-against; a scenario of one trainer names neither, so its records, checkpoint
-metadata and drop receipts keep the format they had before components. A scenario whose
-recipe builds one trainer per component runs those trainers as separate
-workers that meet at this commit boundary, where the scenario lock
-serializes their commits. Local workers of one scenario take turns for a
-whole cycle, prepare and commit together, so they never overtake each
-other. When a dispatched commit fails, the training thread rebuilds the
-scenario from durable state at once; a local cycle still running on the
-old instance keeps that instance open until it ends, then commits nothing
-and looks again on the rebuilt instance, which holds its rows unread. A
-local cycle whose scenario is deleted under it ends without a commit too.
-A local result whose base a dispatched commit has replaced goes
-the way its backend's ``stale_result_policy`` says: ``merge`` commits it
-onto the release served now (the harness backend's default, since each
-of its episode pairings compared candidate and current under the same
-conditions when it ran; the commit metrics then name the release in
-``merged_onto``), ``reevaluate`` keeps the candidate and runs its evaluation again
-against the new release, and ``refuse`` (the default for a backend that
-says nothing) drops the result and prepares the batch again; a refused
-worker reports its refusals in ``/reef/status`` and after a few in a row
-waits for its next wake instead of spinning. The batch prepared again keeps
-the rows the first attempt took from the processor, so the commit that lands
-acknowledges them once. A step that prepared no candidate (a skip) publishes
-nothing, so it is never stale and commits as it is. A dispatched result is always
-merged: the backend published its weights
-before the result arrived and its job can only be finished, so the step
-lands on the release served now and the record's ``base_release_id`` shows
-what the batch was reserved against. A lone trainer is never refused: only
-its own retried attempt can have moved the head. A commit retires no row,
-so the trainers share every stored row and each keeps its own consumption:
-a row one trainer consumed is still there for the others. A batch a trainer
-drops as stale goes on a consumption receipt that names its component. On
-restart each trainer recovers its state and read cursor from its own commits
-and skips the rows its own commits and receipts name, which needs durable
-commit storage.
+``component`` that made it. A scenario of one trainer names none, so its
+records, checkpoint metadata and drop receipts keep the format they had
+before components.
+
+A scenario runs one training step at a time, whatever the number of its
+trainers:
+
+- A local cycle holds the scenario's cycle lock from preparation to commit.
+- The training thread holds the same lock for a dispatched turn, from the
+  reservation of the batch to the acknowledgement of the job. While a local
+  cycle holds the lock, the training thread skips the scenario. The end of
+  the cycle wakes the thread again.
+- A local cycle prepares nothing while a dispatched batch is reserved, for
+  example while checkpoint storage blocks the job.
+- A rollback or a promote refuses to run while any batch is reserved.
+
+Thus the head does not move under a step, and every step commits on the
+release that it was prepared against.
+
+When a commit fails, Reef rebuilds the scenario from durable state at once.
+A failed local cycle rebuilds it itself, and the training thread rebuilds it
+after a failed turn. A local cycle that still runs on the old instance keeps
+that instance open until it ends. Then it commits nothing and looks again on
+the rebuilt instance, which has not read its rows. A local cycle whose
+scenario is deleted under it also ends without a commit.
+
+A commit retires no row, so the trainers share every stored row and each
+keeps its own consumption: a row one trainer consumed is still there for the
+others. A batch that a trainer drops as stale goes on a consumption receipt
+that names its component. On restart each trainer recovers its state and
+read cursor from its own commits and skips the rows its own commits and
+receipts name, which needs durable commit storage.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore

@@ -212,10 +212,18 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
 
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
+    reef = config.get("reef", {})
+    artifact_interval = reef.get("checkpoint_every_n_versions") or 1
+    if artifact_interval % args.reef_checkpoint_interval:
+        # The committer imports a saved checkpoint for each artifact version. A version without a checkpoint
+        # has nothing to import.
+        raise RuntimeError(
+            f"reef.checkpoint_every_n_versions ({artifact_interval}) must be a multiple of "
+            f"--reef-checkpoint-interval ({args.reef_checkpoint_interval})"
+        )
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
     from reef.train.slime_backend.inference import inference_config
 
-    reef = config.get("reef", {})
     inference_backend = reef.get("inference_backend") or "sglang"
     training = SlimeTrainingService(
         args,

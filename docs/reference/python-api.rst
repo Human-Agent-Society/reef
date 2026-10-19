@@ -131,6 +131,7 @@ Recipe
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
    from reef.recipe.cordis import CordisRecipe
    from reef.recipe.reefine import ReefineRecipe
+   from reef.recipe.sft import SFTRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
 for every scenario in a deployment.
@@ -139,6 +140,7 @@ for every scenario in a deployment.
 
    Recipe                       record-only by default   reef.recipe
    ├── WeightTrainingRecipe     training objective, loss family, separate runtimes
+   │   ├── SFTRecipe                                        reef.recipe.sft
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
@@ -801,8 +803,11 @@ record2task=..., task2batch=...)``):
   on ``ReportTasks`` that assembles valid reports; computed feedback supplies
   a ``JudgedTasks`` after an asynchronous ``judge`` derives new feedback.
 - ``task2batch``: the task-to-batch stage (``reef.task2batch.Task2Batch``).
-  Its ``make_batch(tasks, batch_number)`` shapes the tasks of the selected
-  sets into a batch.
+  Its ``make_batch(tasks, batch_id)`` shapes the tasks of the selected
+  sets into a batch with the ID ``batch_id``. The pipeline assigns the ID.
+  An automatic batch gets ``<scenario>:batch:<number>``. An instruction's
+  batch gets ``<scenario>:instruction:<request id>``. The number counts the
+  batches of one pipeline. It is not a training step.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
@@ -855,8 +860,8 @@ A reported-feedback recipe implements these hooks:
    * - ``ReportTasks.make_sample(context) -> TrainDataItem | SkippedReport``
      - Assemble one valid report and its resolved inferences; raise on data errors. Return
        ``SkippedReport(reason)`` for a valid report that cannot train; the stage releases it.
-   * - ``Task2Batch.make_batch(tasks, batch_number) -> TrainingBatch``
-     - Shape the flat tuple of selected tasks into a batch.
+   * - ``Task2Batch.make_batch(tasks, batch_id) -> TrainingBatch``
+     - Shape the flat tuple of selected tasks into a batch with the ID ``batch_id``.
 
 The recipe owns the report policy. Its record stage is a subclass of
 ``ReportRecord2Record(context, grouping, *, exclusive_sources=False,
@@ -929,7 +934,7 @@ the judged samples into batches.
 | ``JudgedTasks.make_sample(record,``      | a ``TrajectoryItem``, or ``None`` |
 | ``judgment)``                            | to retire the record              |
 +------------------------------------------+-----------------------------------+
-| ``make_batch(tasks, batch_number)``      | the declared batch type           |
+| ``make_batch(tasks, batch_id)``          | the declared batch type           |
 +------------------------------------------+-----------------------------------+
 | ``required_request_types``               | optionally restrict which record  |
 |                                          | types reach the pipeline          |

@@ -21,7 +21,7 @@ def test_a_catalog_read_waiting_for_the_scenario_lock_leaves_the_loop_free(tmp_p
     release = threading.Event()
 
     def hold() -> None:
-        with dispatcher._registry.lock_for("agent"):
+        with dispatcher.registry.lock_for("agent"):
             held.set()
             release.wait(10)
 

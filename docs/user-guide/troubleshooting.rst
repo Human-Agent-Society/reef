@@ -67,6 +67,8 @@ Reports and training
 
 **After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``checkpoint_every_n_versions`` at 1 unless you can afford to lose live versions.
 
+**After a restart, the training of the last jobs is lost.** With ``--reef-checkpoint-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. To lose fewer jobs, decrease the interval.
+
 **A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
 
 - the marker's rollout, ``N`` below
@@ -81,6 +83,8 @@ The preflight also refuses a copy whose marker says ``REJECTING`` or ``REJECTED`
 For a first job, empty the checkpoint root, including the hidden ``.reef-retention`` directory. The preflight refuses a checkpoint record left in it. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
 
 *Full-weight run, the job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. A marker written by an earlier release has no copy, so recover it by hand.
+
+*Full-weight run, the job before it saved no checkpoint.* With ``--reef-checkpoint-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again.
 
 Recover by hand only when all of these hold:
 

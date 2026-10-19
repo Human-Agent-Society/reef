@@ -179,10 +179,10 @@ storage.
 - ``hybrid`` batches on either, and a queued instruction goes first. The
   instruction's batch takes the sets that an automatic batch would.
 
-The pipeline attaches the instruction to ``batch.request`` and replaces the
-batch id with ``<scenario>:instruction:<request id>``, the oldest instruction
-first, one per step. Acknowledgement also consumes the instruction. Batch
-construction must not call models or perform training.
+The pipeline runs the oldest instruction first, one per step. It gives the
+instruction's batch the id ``<scenario>:instruction:<request id>`` and attaches
+the instruction to ``batch.request``. Acknowledgement also consumes the
+instruction. Batch construction must not call models or perform training.
 
 The trainer gives TRAIN records to the pipeline when ``RequestType.TRAIN`` is
 in the ``Task2Batch``'s ``required_request_types``. The pipeline queues them
@@ -235,9 +235,10 @@ A reported-feedback recipe writes:
   its record-to-task stage: assemble an ATIF trajectory or Harbor task
   directly. Use ``context.require_score()`` when the method needs a reward.
   The stage attaches the source and report ids to the returned item.
-- ``make_batch(tasks, batch_number)`` on a ``Task2Batch`` subclass: assemble
-  the flat tuple of selected tasks into a batch. The pipeline tracks
-  consumption by set, including tasks that the recipe removes from training.
+- ``make_batch(tasks, batch_id)`` on a ``Task2Batch`` subclass: assemble
+  the flat tuple of selected tasks into a batch with the ID ``batch_id``.
+  The pipeline tracks consumption by set, including tasks that the recipe
+  removes from training.
 
 ``exclusive_sources`` makes a terminal report own its referenced inference
 records outright, and ``ordered_groups`` batches ready groups in key order.

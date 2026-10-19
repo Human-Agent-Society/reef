@@ -292,7 +292,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
         return MARKER
 
     person = [{"name": "TWILIO_SID", "kind": "env"}]
-    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=person)
+    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     b = backend(tmp_path, extending)
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
         result = run_backend_step(b, TrainingBatch("demo:instruction:ask-1", (), request=request), b.initial_state())
@@ -423,7 +423,6 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
             "evaluate": "demo_floor:Evaluate",
             "tasks": ["t"],
             "binary": str(make_binary(tmp_path)),
-            "on_stale": "reevaluate",
         },
     }
     recipe = CordisRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
@@ -443,7 +442,6 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
         component.model_binding("agent").base_url
         == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
     )
-    assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
     # A scenario with its own model binds through the same route, whether resolved at build or at every step.
     from reef.inference.model_config import ModelConfig
     from reef.recipe.cordis import _ScenarioModels
@@ -460,5 +458,3 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
     assert resolved.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
     assert resolved.model == "other-model" and resolved.api_key == "reef-local"
     assert overridden.model_bindings().served.base_url == "http://other.test"
-    with pytest.raises(RecipeConfigError, match=r"evolution\.on_stale must be one of"):
-        CordisRecipe.from_environment({}, config={**config, "evolution": {**config["evolution"], "on_stale": "later"}})

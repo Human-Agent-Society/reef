@@ -53,6 +53,7 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.verify_lora_base_weights is True
     assert args.reef_executor_backend == "auto"
     assert args.reef_rollout_executor_backend == "auto"
+    assert args.reef_checkpoint_interval == 1
 
 
 @pytest.mark.unit
@@ -185,6 +186,49 @@ def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
 def test_finalize_arguments_rejects_nonpositive_critic_save_interval(interval: int) -> None:
     with pytest.raises(ValueError, match="critic-save-interval"):
         finalize_reef_slime_args(slime_args(critic_save_interval=interval), [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("interval", [0, -1])
+def test_finalize_arguments_rejects_nonpositive_checkpoint_interval(interval: int) -> None:
+    with pytest.raises(ValueError, match="reef-checkpoint-interval"):
+        finalize_reef_slime_args(slime_args(reef_checkpoint_interval=interval), [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "refusal"),
+    [
+        ({}, None),
+        ({"release_train": True}, "--release-train"),
+        ({"megatron_lora_rank": 32}, "not LoRA"),
+    ],
+)
+def test_a_checkpoint_interval_needs_full_weight_training_that_keeps_its_workers(overrides, refusal) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    values = {
+        "compute_advantages_and_returns": False,
+        "num_rollout": 1,
+        "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
+        "save": "/tmp/megatron",
+        "debug_train_only": False,
+        "debug_rollout_only": False,
+        "rollout_num_gpus": 1,
+        "rollout_external": False,
+        "colocate": True,
+        "offload_train": True,
+        "offload_rollout": True,
+        "megatron_lora_rank": 0,
+        "keep_lora_base_resident": False,
+        "reef_checkpoint_interval": 4,
+        **overrides,
+    }
+    if refusal is None:
+        validate_bridge_args(SlimeArguments(**values), None)
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            validate_bridge_args(SlimeArguments(**values), None)
 
 
 @pytest.mark.unit

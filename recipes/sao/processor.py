@@ -107,5 +107,5 @@ class SAOBatches(Task2Batch):
     ) -> Self:
         return cls(context, SAOBatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:sao:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)

@@ -20,7 +20,11 @@ driver is running — only the `services` listed in your config run.
 The default image pins the SGLang revision carrying Reef's adapter receiver,
 so LoRA training (`--megatron-lora-rank`) works on any weight-training recipe
 without a separate image. Override the revision with
-`--build-arg SGLANG_COMMIT=<sha>`.
+`--build-arg SGLANG_COMMIT=<sha>`. The build also applies
+`docker/patch/sglang_qwen3_5_mrope_rope.patch`, which fixes how Qwen3.5
+vision-language models rotate image tokens (sgl-project/sglang#34446). It
+skips the patch when the revision already has the fix. If the revision has
+no fix and the patch does not apply to it, the build fails.
 
 The image also replaces the base's FlashInfer with 0.7.0. Earlier releases
 can compute wrong attention in SGLang's default `flashinfer` backend (upstream

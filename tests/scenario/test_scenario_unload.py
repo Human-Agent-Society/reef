@@ -329,9 +329,9 @@ def test_unload_returns_without_waiting_for_scenario_locks(tmp_path, held_lock) 
     try:
         dispatcher.get_or_create_scenario("math")
         if held_lock == "registry":
-            lock = dispatcher._registry.lock_for("math")
+            lock = dispatcher.registry.lock_for("math")
         else:
-            lock = dispatcher.workers.cycle_lock("math")
+            lock = dispatcher.local_workers.cycle_lock("math")
         with ThreadPoolExecutor(max_workers=1) as pool:
             with lock:
                 assert pool.submit(dispatcher.unload_if_idle, "math").result(timeout=2) is False

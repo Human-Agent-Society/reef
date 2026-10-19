@@ -2962,7 +2962,7 @@ def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one
             assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            committed = scenario.entries_for_version(manifest["release_id"])
+            committed = scenario.release_queries.entries_for_version(manifest["release_id"])
             assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
             assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
         finally:
@@ -3003,7 +3003,7 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
             # The entries live in the commit log, where the proposals route and the step's proposer read them.
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
-            entries = scenario.entries_for_version(manifest["release_id"])
+            entries = scenario.release_queries.entries_for_version(manifest["release_id"])
             assert entries is not None and list(entries) == [notice, *ENTRIES_V1]
             assert tree_files(get_adapter("pi"), entries) == {}
         finally:

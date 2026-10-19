@@ -60,8 +60,8 @@ class SampleTasks(ReportTasks):
 
 
 class SampleBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"batch:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class SamplePipeline(TrainingPipeline):
@@ -368,9 +368,9 @@ def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
 
 def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> None:
     class SelectedBatches(SampleBatches):
-        def make_batch(self, tasks, batch_number):
+        def make_batch(self, tasks, batch_id):
             assert [task.source_agent_record_ids for task in tasks] == [("i1", "r1"), ("i2", "r2")]
-            return super().make_batch(tasks[:1], batch_number)
+            return super().make_batch(tasks[:1], batch_id)
 
     processor = GroupPipeline(batches=SelectedBatches)
     for index in (1, 2):

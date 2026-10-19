@@ -247,7 +247,7 @@ def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
             dispatcher.get_or_create_scenario("math")
-        assert dispatcher._registry.get_optional("math") is None
+        assert dispatcher.registry.get_optional("math") is None
         assert len(factory.sessions) == 1
         assert factory.sessions[0].close_count == 1
     finally:
@@ -280,7 +280,7 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
             else:
                 patch.setattr(Trainer, "restore_record_progress", fail_restore)
             with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
-                dispatcher._registry.reload("math")
+                dispatcher.registry.reload("math")
         assert dispatcher.get_or_create_scenario("math") is current
         assert len(closed_trainers) == 1
         assert closed_trainers[0] is not current.trainer

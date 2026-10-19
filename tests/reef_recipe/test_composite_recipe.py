@@ -518,7 +518,6 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
 
         rows = scenario.releases()
         assert rows[0]["component"] == "harness"
-        assert rows[0]["base_release_id"] == rows[1]["release_id"]
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's, naming the rows it consumed.
         assert scenario.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})

@@ -176,6 +176,12 @@ class TrainingExecution:
         marker = self._store.read() if self._store is not None else None
         if marker is not None and marker["status"] == "RUNNING":
             raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+        if marker is not None and marker["checkpoint_path"] is None:
+            # The trainer starts from the last saved checkpoint. Thus the weights of this job are lost. The startup
+            # check of the backend deletes such a marker before the coordinator starts.
+            raise RuntimeError(
+                f"training job {marker['job_id']} saved no checkpoint. Its weights are lost. Delete its marker."
+            )
         return marker
 
     def execute(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -210,7 +216,7 @@ class TrainingExecution:
         payload: Mapping[str, Any],
         prior_marker: Mapping[str, Any] | None,
     ) -> TrainingJobResult:
-        """Train and checkpoint one job, recording RUNNING then CHECKPOINT."""
+        """Train one job and save its checkpoint when it is due, recording RUNNING then CHECKPOINT."""
         checkpoint = prepared.checkpoint
         # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
         running: dict[str, Any] = {
@@ -238,13 +244,16 @@ class TrainingExecution:
             if self._publisher is not None:
                 self._publisher.prepare_training()
             metrics = prepared.train()
-            self._state.phase = "checkpointing"
-            prepared.save_checkpoint()
-            if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
-                raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
+            if checkpoint.writes_checkpoint:
+                self._state.phase = "checkpointing"
+                prepared.save_checkpoint()
+                if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
+                    raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
             # Replay must see all telemetry with the checkpoint, even if
             # the process dies immediately after this transition.
-            updates: dict[str, Any] = {"checkpoint_path": str(checkpoint.path)}
+            updates: dict[str, Any] = {
+                "checkpoint_path": str(checkpoint.path) if checkpoint.writes_checkpoint else None
+            }
             if metrics.durable:
                 updates["metrics"] = dict(metrics.durable)
             if metrics.training:

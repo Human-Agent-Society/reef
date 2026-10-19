@@ -279,10 +279,8 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
         required_request_types = frozenset(RequestType)
         output_schema = ExampleBatch
 
-        def make_batch(self, tasks, batch_number):
-            return ExampleBatch(
-                f"{self.scenario}:{batch_number}", values=tuple(source_record_id(task) for task in tasks)
-            )
+        def make_batch(self, tasks, batch_id):
+            return ExampleBatch(batch_id, values=tuple(source_record_id(task) for task in tasks))
 
     def instruction_pipeline(context, batch_size=1):
         return TrainingPipeline(context, task2batch=InstructionBatches(context, batch_size))
@@ -314,8 +312,8 @@ def test_pipeline_context_keeps_mode_when_recipe_takes_instructions():
 
 def test_missing_mode_implementation_fails_at_processor_initialization():
     class AutoOnlyBatches(Task2Batch):
-        def make_batch(self, tasks, batch_number):
-            return TrainingBatch(f"{self.scenario}:{batch_number}", tasks)
+        def make_batch(self, tasks, batch_id):
+            return TrainingBatch(batch_id, tasks)
 
     for mode in ("manual", "hybrid"):
         context = PipelineContext("s", training_mode=mode)
@@ -329,8 +327,8 @@ def test_manual_instruction_batch_never_falls_back_to_auto():
     class TraceOnlyBatches(Task2Batch):
         supported_training_modes = frozenset({"auto", "manual"})
 
-        def make_batch(self, tasks, batch_number):
-            return TrainingBatch(f"{self.scenario}:{batch_number}", tasks)
+        def make_batch(self, tasks, batch_id):
+            return TrainingBatch(batch_id, tasks)
 
     context = PipelineContext("s", training_mode="manual")
     pipeline = TrainingPipeline(
@@ -361,8 +359,8 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     """
 
     class CountedBatches(Task2Batch):
-        def make_batch(self, tasks, batch_number):
-            return TrainingBatch(f"{self.scenario}:{batch_number}", tasks)
+        def make_batch(self, tasks, batch_id):
+            return TrainingBatch(batch_id, tasks)
 
     stage = InferenceRecord2Record()
     context = PipelineContext("s", training_mode="auto")
@@ -387,8 +385,8 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
         supported_training_modes = frozenset({"auto", "hybrid"})
         required_request_types = frozenset(RequestType)
 
-        def make_batch(self, tasks, batch_number):
-            return TrainingBatch(f"{self.scenario}:{batch_number}", tasks)
+        def make_batch(self, tasks, batch_id):
+            return TrainingBatch(batch_id, tasks)
 
     context = PipelineContext("s", training_mode="hybrid")
     pipeline = TrainingPipeline(context, task2batch=HybridOnlyBatches(context, 1))
@@ -408,8 +406,8 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
         output_schema = ExampleBatch
 
-        def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> ExampleBatch:
-            return ExampleBatch("custom-batch", values=tuple(source_record_id(task) for task in tasks))
+        def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> ExampleBatch:
+            return ExampleBatch(batch_id, values=tuple(source_record_id(task) for task in tasks))
 
     def trajectory_pipeline(context, batch_size):
         return TrainingPipeline(
@@ -434,6 +432,9 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         assert isinstance(backend.batches[0], ExampleBatch)
         assert backend.batches[0].values == expected_values
         assert (backend.batches[0].request is None) == (mode == "auto")
+        # The pipeline assigns the ID of each batch, and the hook uses it.
+        expected_id = "s:batch:1" if mode == "auto" else "s:instruction:use-the-trajectory"
+        assert backend.batches[0].batch_id == expected_id
         prepared = trainer.prepare_commit(result)
         expected = set(expected_values) | ({"use-the-trajectory"} if mode != "auto" else set())
         assert prepared.consumed_ids == frozenset(expected)
@@ -663,10 +664,10 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, caplog):
         scenario = dispatcher.get_or_create_scenario("s")
         assert dispatcher.set_training_mode("s", "manual") == {"scenario": "s", "training_mode": "manual"}
         assert scenario.trainer.pipeline.training_mode == "manual"
-        reloaded = dispatcher._registry.reload("s")
+        reloaded = dispatcher.registry.reload("s")
         assert reloaded is not scenario and reloaded.trainer.pipeline.training_mode == "manual"
         assert dispatcher.set_training_mode("s", "auto")["training_mode"] == "auto"
-        assert dispatcher._registry.reload("s").trainer.pipeline.training_mode == "auto"
+        assert dispatcher.registry.reload("s").trainer.pipeline.training_mode == "auto"
         dispatcher.set_training_mode("s", "manual")
         dispatcher.accept_record(instruction("one"))
         assert _wait(lambda: _committed_skip(dispatcher, "one") == "no proposal")
@@ -1225,7 +1226,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
     processor.ingest(inference("a"))
     processor.ingest(report("a"))
     batch = processor.build_batch()
-    assert batch.batch_id == "s:harness_evolve:1"
+    assert batch.batch_id == "s:batch:1"
     assert batch.request is None
     assert [source_record_id(sample) for sample in batch.items] == ["a"]
     assert processor.acknowledge(batch.batch_id) == frozenset({"a", "report-a"})

@@ -242,7 +242,7 @@ def test_failed_artifact_fork_does_not_leave_runtime(tmp_path) -> None:
     with pytest.raises(ArtifactError, match="cannot fork math"):
         dispatcher.get_or_create_scenario("math")
 
-    assert dispatcher._registry.get_optional("math") is None
+    assert dispatcher.registry.get_optional("math") is None
 
 
 @pytest.mark.unit
@@ -676,7 +676,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
         candidate_path = tmp_path / "candidate"
         candidate_path.mkdir()
         (candidate_path / "model.txt").write_text("trained")
-        dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate_path)))
         new_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
@@ -729,7 +729,7 @@ def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_
         candidate = tmp_path / f"candidate-{version}"
         candidate.mkdir()
         (candidate / "model.txt").write_text(f"v{version}")
-        dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
 
         runtime = dispatcher.get_or_create_scenario("chat")
         selected = dispatcher.current_artifact("chat")
@@ -770,7 +770,7 @@ def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
         dispatcher = weight_dispatcher(tmp_path, initial)
         dispatcher.get_or_create_scenario("chat")
         checkpoint = dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
-        dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
         runtime = dispatcher.get_or_create_scenario("chat")
         assert runtime.repository.current_artifact.release_id.startswith("live:")
         assert runtime.repository.checkpoint_artifact == checkpoint
@@ -817,7 +817,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
         dispatcher.get_or_create_scenario("chat")
-        dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
         head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
         assert isinstance(head, LiveWeightArtifactRef)
         assert head.runtime_load_id == "sglang-v1"
@@ -869,7 +869,7 @@ def test_completed_inference_with_mismatched_runtime_load_id_fails_loudly(tmp_pa
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
         dispatcher.get_or_create_scenario("chat")
-        dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
 
         client = TestClient(
             TestServer(
@@ -961,7 +961,7 @@ def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> 
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
         dispatcher.get_or_create_scenario("chat")
-        dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
 
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
@@ -999,7 +999,7 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     (candidate / "model.txt").write_text("v1")
-    first_dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
     assert first_dispatcher.get_or_create_scenario("chat").repository.current_artifact != checkpoint
 
     second_dispatcher = build_default_dispatcher(
@@ -1054,7 +1054,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-    dispatcher._commit_result("math", TrainStepResult(state="no artifact"))
+    dispatcher.registry.get("math").commit(TrainStepResult(state="no artifact"))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head or consult the checkpoint
     # strategy: there is no candidate to checkpoint.
@@ -1066,7 +1066,7 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
-        dispatcher._commit_result(scenario, TrainStepResult(state=version, artifact=Artifact.local(candidate)))
+        dispatcher.registry.get(scenario).commit(TrainStepResult(state=version, artifact=Artifact.local(candidate)))
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
     assert dispatcher.get_or_create_scenario("code").scenario_step == 2
@@ -1108,7 +1108,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path, failure
 
     error = RuntimeError if failure_source == "strategy" else ArtifactPublicationError
     with pytest.raises(error, match=f"{failure_source} failed"):
-        dispatcher._commit_result("chat", TrainStepResult(state="new", artifact=Artifact.local(candidate)))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state="new", artifact=Artifact.local(candidate)))
 
     assert (
         runtime.repository.current_artifact,
@@ -1288,7 +1288,7 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
                 candidate.mkdir()
                 (candidate / "AGENTS.md").write_text(f"v{version}")
                 result = TrainStepResult(state=None, artifact=Artifact.local(candidate))
-            dispatcher._commit_result("chat", result)
+            dispatcher.registry.get("chat").commit(result)
             releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
         assert len(set(releases)) == 3
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))

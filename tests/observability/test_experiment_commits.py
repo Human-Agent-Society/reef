@@ -13,7 +13,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.observability.commits import CommitExperimentObserver, LoadedExperimentReports
+from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStore, RecordObserver
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -95,7 +95,7 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
     correlation = observer.prepare(
         context, source_runtime_load_id="load-0", produced_runtime_load_id="load-1", checkpoint_path="/checkpoint/1"
     )
-    record = replace(training_record(), metrics={**correlation, "score": 0.8, "merged_onto": "seed"})
+    record = replace(training_record(), metrics={**correlation, "score": 0.8})
     commit_step = inner.commit_step
 
     def fail_commit(*, expected_step: int, commit: CommitRecord) -> CommitRecord:
@@ -107,10 +107,12 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         monkeypatch.setattr(inner, "commit_step", fail_commit)
         with pytest.raises(OSError, match="lost storage acknowledgment"):
             store.commit_step(expected_step=0, commit=record)
+        observer.reports.flush()
         assert tracker.events == []
         monkeypatch.setattr(inner, "commit_step", commit_step)
         landed = store.commit_step(expected_step=0, commit=record)
         store.commit_step(expected_step=0, commit=record)
+        observer.reports.flush()
         (event,) = tracker.events
         assert event.context == context
         assert event.metrics == landed.metrics
@@ -162,6 +164,7 @@ def test_rollback_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp
         store.commit_step(expected_step=2, commit=training_record(3))
         # Retrying an earlier step after a later one must not move tracking backwards.
         store.commit_step(expected_step=0, commit=first)
+        observer.reports.flush()
         assert len(store.history()) == 3
         assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [(0, 0), (2, 0)]
         (event,) = tracker.rollbacks
@@ -193,6 +196,7 @@ def test_pending_and_rejected_commits_keep_the_served_source_and_resume_without_
     try:
         store.commit_step(expected_step=0, commit=pending)
         store.commit_step(expected_step=1, commit=rejected)
+        observer.reports.flush()
         assert [event.produced_artifact_ref for event in tracker.events] == [seed, seed]
         assert tracker.events[-1].outcome == "rejected"
         assert tracker.events[-1].context.source_artifact_ref == seed
@@ -210,118 +214,58 @@ def test_pending_and_rejected_commits_keep_the_served_source_and_resume_without_
     store = resumed.store
     try:
         store.commit_step(expected_step=1, commit=rejected)
+        resumed.reports.flush()
         assert len(tracker.events) == 2
         store.commit_step(expected_step=2, commit=training_record(3))
+        resumed.reports.flush()
         assert tracker.events[-1].context.run_step == 2
     finally:
         store.close()
         storage.close()
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("recovering", [False, True])
-def test_nested_loads_deliver_in_commit_order_after_all_scopes_exit(tmp_path, recovering):
-    from contextlib import nullcontext
-
-    storage = SQLiteScenarioStorage(tmp_path)
-    tracker = RecordingTracker()
-    reports = LoadedExperimentReports()
-    delivery = reports.delivery_for("math", tracker)
-    first = CommitExperimentObserver(
-        tracker,
-        scenario="math",
-        recipe="recipe",
-        source_artifact_ref=ArtifactRef("seed", "seed", None),
-        scenario_step=0,
-        store=storage.open("math"),
-        delivery=delivery,
+def training_event(step: int) -> TrainingExperimentEvent:
+    ref = training_record(step).artifact_ref
+    return TrainingExperimentEvent(
+        context=TrainingExperimentContext(scenario="math", recipe="recipe", step=step, source_artifact_ref=ref),
+        produced_artifact_ref=ref,
+        metrics={},
+        outcome="committed",
     )
-    second = None
+
+
+@pytest.mark.unit
+def test_the_report_queue_sends_in_order_on_its_own_thread_and_goes_on_after_a_failure(monkeypatch):
+    from threading import current_thread
+
+    tracker = RecordingTracker()
+    threads: list[str] = []
+
+    def record(event):
+        threads.append(current_thread().name)
+        tracker.events.append(event)
+        if event.context.step == 1:
+            raise ConnectionError("tracker unavailable")
+
+    monkeypatch.setattr(tracker, "record", record)
+    reports = ExperimentReportQueue(tracker)
     try:
-        # Recovery can nest a load under an existing commit's reporting scope.
-        with first.reporting() if recovering else nullcontext():
-            with reports.scope():
-                if not recovering:
-                    reports.defer(first)
-                first.store.commit_step(expected_step=0, commit=training_record(1))
-                second = CommitExperimentObserver(
-                    tracker,
-                    scenario="math",
-                    recipe="recipe",
-                    source_artifact_ref=training_record(1).artifact_ref,
-                    scenario_step=1,
-                    store=storage.open("math"),
-                    delivery=reports.delivery_for("math", tracker),
-                )
-                with reports.scope():
-                    reports.defer(second)
-                    second.store.commit_step(expected_step=1, commit=training_record(2))
-                assert tracker.events == []
-            if recovering:
-                assert tracker.events == []
+        reports.put(training_event(1))
+        reports.put(training_event(2))
+        reports.flush()
         assert [event.context.step for event in tracker.events] == [1, 2]
-        delivery.flush()
-        assert [event.context.step for event in tracker.events] == [1, 2]
+        assert threads == ["reef-experiment-reports"] * 2
     finally:
-        first.store.close()
-        if second is not None:
-            second.store.close()
-        storage.close()
+        reports.close()
 
 
 @pytest.mark.unit
-def test_delivery_index_releases_observers_after_their_lifetime(tmp_path):
-    import gc
-    import weakref
-
-    storage = SQLiteScenarioStorage(tmp_path)
-    tracker = RecordingTracker()
-    reports = LoadedExperimentReports()
-    first = CommitExperimentObserver(
-        tracker,
-        scenario="math",
-        recipe="recipe",
-        source_artifact_ref=ArtifactRef("seed", "seed", None),
-        scenario_step=0,
-        store=storage.open("math"),
-        delivery=reports.delivery_for("math", tracker),
-    )
-    second = CommitExperimentObserver(
-        tracker,
-        scenario="math",
-        recipe="recipe",
-        source_artifact_ref=ArtifactRef("seed", "seed", None),
-        scenario_step=0,
-        store=storage.open("math"),
-        delivery=reports.delivery_for("math", tracker),
-    )
-    delivery_ref = weakref.ref(first.delivery)
-    assert second.delivery is first.delivery
-    first.store.close()
-    del first
-    gc.collect()
-    assert delivery_ref() is second.delivery
-    second.store.close()
-    del second
-    gc.collect()
-    assert delivery_ref() is None
-    assert "math" not in reports.deliveries
-    storage.close()
-
-
-@pytest.mark.unit
-def test_delivery_index_keeps_in_flight_events_until_reporting_finishes(monkeypatch):
-    import gc
-    import weakref
+def test_close_sends_the_queued_events_and_a_later_event_goes_at_once(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
 
     tracker = RecordingTracker()
-    reports = LoadedExperimentReports()
-    delivery = reports.delivery_for("math", tracker)
-    delivery_ref = weakref.ref(delivery)
-    entered, release, ready = Event(), Event(), Event()
-    ready.set()
+    entered, release = Event(), Event()
 
     def record(event):
         if event.context.step == 1:
@@ -329,31 +273,18 @@ def test_delivery_index_keeps_in_flight_events_until_reporting_finishes(monkeypa
             assert release.wait(10)
         tracker.events.append(event)
 
-    def event(step):
-        ref = training_record(step).artifact_ref
-        return TrainingExperimentEvent(
-            context=TrainingExperimentContext(scenario="math", recipe="recipe", step=step, source_artifact_ref=ref),
-            produced_artifact_ref=ref,
-            metrics={},
-            outcome="committed",
-        )
-
     monkeypatch.setattr(tracker, "record", record)
-    delivery.enqueue(event(1), ready)
+    reports = ExperimentReportQueue(tracker)
+    reports.put(training_event(1))
+    reports.put(training_event(2))
+    assert entered.wait(5)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        pending = pool.submit(delivery.flush)
+        closing = pool.submit(reports.close)
         try:
-            assert entered.wait(5)
-            del delivery
-            gc.collect()
-            replacement = reports.delivery_for("math", tracker)
-            assert replacement is delivery_ref()
-            replacement.enqueue(event(2), ready)
-            del replacement
+            assert not closing.done()
         finally:
             release.set()
-        pending.result(timeout=5)
+        closing.result(timeout=5)
     assert [event.context.step for event in tracker.events] == [1, 2]
-    gc.collect()
-    assert delivery_ref() is None
-    assert "math" not in reports.deliveries
+    reports.put(training_event(3))
+    assert [event.context.step for event in tracker.events] == [1, 2, 3]

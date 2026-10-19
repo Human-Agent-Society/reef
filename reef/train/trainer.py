@@ -48,10 +48,6 @@ class _PendingStep:
     prepared_commit: PreparedCommit | None = None
     # Set once the pipeline has the batch back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
-    #: The release served when the batch was reserved: what the step was prepared against.
-    base_release_id: str | None = None
-    #: The prepared step behind ``result``; kept across a stale refusal when the candidate is evaluated again.
-    prepared: PreparedStep | None = None
     #: The values ``result`` held before commit metrics replaced it: a caller may still hold one.
     earlier_results: tuple[TrainStepResult, ...] = ()
 
@@ -265,12 +261,6 @@ class Trainer:
         return self._data_offset
 
     @property
-    def pending_base_release_id(self) -> str | None:
-        """The release the reserved batch was prepared against, if a batch is reserved."""
-        with self._lock:
-            return None if self._pending is None else self._pending.base_release_id
-
-    @property
     def pending_batch(self) -> TrainingBatch | None:
         with self._lock:
             return None if self._pending is None else self._pending.batch
@@ -367,7 +357,6 @@ class Trainer:
         self,
         scenario_step: int = 0,
         *,
-        base_release_id: str | None = None,
         serving_runtime_load_id: str | None = None,
     ) -> TrainStepResult | None:
         """Consume available data and, with a candidate backend, prepare one step.
@@ -375,9 +364,8 @@ class Trainer:
         Returns ``None`` when this trainer has no candidate backend (it
         only advances record consumption, because a non-training scenario still
         has to advance its record cursor) or when the pipeline is not yet
-        ready to produce a batch. ``base_release_id`` names the release served
-        now; a batch reserved by this call is prepared against it.
-        ``serving_runtime_load_id`` is the version that serves the scenario now, for the staleness check.
+        ready to produce a batch. ``serving_runtime_load_id`` is the version
+        that serves the scenario now, for the staleness check of the pipeline.
         """
         if self.dispatched:
             raise RuntimeError("dispatched candidate backends must reserve a batch before execution")
@@ -387,33 +375,20 @@ class Trainer:
                 return None
             if self._pending is not None and self._pending.result is not None:
                 return self._pending.result
-            kept = None if self._pending is None else self._pending.prepared
-            batch = self.reserve_batch(base_release_id, serving_runtime_load_id)
+            batch = self.reserve_batch(serving_runtime_load_id)
             if batch is None:
                 return None
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
-            execution = self.reevaluate(kept) if kept is not None else self._execute_backend_step(batch, scenario_step)
+            execution = self._execute_backend_step(batch, scenario_step)
         if execution.outcome != "commit" or execution.result is None:
             raise RuntimeError(f"inline candidate backend returned {execution.outcome!r}")
         with self._lock:
             if self._pending is None or self._pending.batch_id != batch.batch_id:
                 raise RuntimeError("inline trainer reservation changed while its backend was executing")
             self._pending.result = execution.result
-            self._pending.prepared = execution.prepared
             return execution.result
-
-    def reevaluate(self, prepared: PreparedStep) -> StepExecution:
-        """Evaluate a kept candidate against the release served now and settle it again."""
-        backend = self._candidate_backend
-        if backend is None:
-            raise RuntimeError("cannot evaluate a candidate without a backend")
-        prepared = backend.prepare_reevaluation(prepared)
-        candidate = prepared.candidate
-        if not isinstance(candidate, UpdateCandidate):
-            raise TypeError("a kept step must carry an UpdateCandidate")
-        return self.settle_candidate(backend, prepared, candidate)
 
     def _execute_backend_step(self, batch: TrainingBatch, scenario_step: int) -> StepExecution:
         backend = self._candidate_backend
@@ -446,7 +421,7 @@ class Trainer:
         """Evaluate ``prepared``'s candidate and settle the step; a failure aborts it at the backend."""
         try:
             decision = self._evaluate_candidate(candidate)
-            return StepExecution("commit", backend.settle_step(prepared, decision), prepared=prepared)
+            return StepExecution("commit", backend.settle_step(prepared, decision))
         except BaseException:
             backend.abort_step(prepared)
             raise
@@ -473,25 +448,20 @@ class Trainer:
             raise ValueError("candidate evaluator must retain the evaluation result supplied by Reef")
         return decision
 
-    def reserve_training_batch(
-        self, *, base_release_id: str | None = None, serving_runtime_load_id: str | None = None
-    ) -> TrainingBatch | None:
-        """Reserve one batch for a dispatched backend, prepared against the release served now."""
+    def reserve_training_batch(self, *, serving_runtime_load_id: str | None = None) -> TrainingBatch | None:
+        """Reserve one batch for a dispatched backend."""
         if not self.dispatched:
             raise RuntimeError("trainer has no dispatched candidate backend")
         with self._lock:
-            return self.reserve_batch(base_release_id, serving_runtime_load_id)
+            return self.reserve_batch(serving_runtime_load_id)
 
-    def reserve_batch(self, base_release_id: str | None, serving_runtime_load_id: str | None) -> TrainingBatch | None:
+    def reserve_batch(self, serving_runtime_load_id: str | None) -> TrainingBatch | None:
         """Return the reserved batch, or reserve the next one when the pipeline is ready. The caller holds the lock.
 
-        The reservation is prepared against ``base_release_id`` unless it already names a release.
         ``serving_runtime_load_id`` is the version that serves the scenario now.
         The staleness check of the pipeline measures the lag of each held set against it.
         """
         if self._pending is not None:
-            if self._pending.base_release_id is None:
-                self._pending.base_release_id = base_release_id
             return self._pending.batch
         if serving_runtime_load_id is not None:
             self._pipeline.observe_serving_runtime_load_id(serving_runtime_load_id)
@@ -499,46 +469,8 @@ class Trainer:
         if not self._pipeline.ready():
             return None
         batch = self._build_validated_batch()
-        self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
+        self._pending = _PendingStep(batch=batch, result=None)
         return batch
-
-    def retry_pending(self, *, keep_candidate: bool = False) -> None:
-        """Keep the reserved batch but forget its result, so the next step prepares it again.
-
-        The scenario calls this when a result was prepared against a release
-        that another component's commit has since replaced: the batch is still
-        the right data, and the backend must evaluate it against the release
-        served now. ``keep_candidate`` keeps the prepared candidate too, so the
-        next step evaluates it again instead of proposing anew. A batch the
-        pipeline already took back (an earlier attempt acknowledged it and its
-        commit failed) stays taken: the next step prepares it again and records
-        the rows that attempt consumed, and never acknowledges it twice.
-        """
-        with self._lock:
-            pending = self._pending
-            if pending is None:
-                return
-            taken = pending.consumed_ids
-            if taken is None and pending.prepared_commit is not None:
-                taken = pending.prepared_commit.consumed_ids
-            self._pending = _PendingStep(
-                batch=pending.batch,
-                result=None,
-                consumed_ids=taken,
-                prepared=pending.prepared if keep_candidate else None,
-            )
-
-    @property
-    def pending_has_candidate(self) -> bool:
-        """Whether the pending result carries a candidate its backend evaluated against a release: a skip (no
-        proposal, a failed instruction) and a dispatched result carry none, so a moved head cannot make them stale."""
-        with self._lock:
-            return self._pending is not None and self._pending.prepared is not None
-
-    def result_on_record(self, result: TrainStepResult) -> bool:
-        """Whether ``result`` was this trainer's pending step and a commit put it on record."""
-        with self._lock:
-            return any(result is recorded for recorded in self.recorded_results)
 
     @property
     def pending_prepared_commit(self) -> PreparedCommit | None:
@@ -612,7 +544,6 @@ class Trainer:
                 released_ids=released,
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
-                base_release_id=self._pending.base_release_id,
             )
             self._pending.prepared_commit = prepared
             return prepared

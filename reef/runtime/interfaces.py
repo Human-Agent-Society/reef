@@ -327,17 +327,22 @@ def learning_rate_metrics(
 
 @dataclass(frozen=True, kw_only=True)
 class ModelCandidate(UpdateCandidate):
-    """A checkpointed model update that has not changed serving weights."""
+    """A trained model update that has not changed serving weights.
+
+    ``checkpoint_path`` is None if the backend saved no checkpoint for this
+    job. That occurs with a checkpoint interval larger than 1.
+    """
 
     training_job_id: str
-    checkpoint_path: str
+    checkpoint_path: str | None
     current_runtime_load_id: str | None
     training_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         _require_non_empty(self.training_job_id, "training_job_id")
-        _require_non_empty(self.checkpoint_path, "checkpoint_path")
+        if self.checkpoint_path is not None:
+            _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if self.current_runtime_load_id is not None and (
             not isinstance(self.current_runtime_load_id, str) or not self.current_runtime_load_id
         ):
@@ -374,11 +379,9 @@ class TrainingJobResult:
     training_job_id: str | None = None
 
     def __post_init__(self) -> None:
-        # Fail closed at the boundary: a completed job that cannot name the
-        # checkpoint it exported would otherwise reach the committer and
-        # be published as a durable version pointing at nothing.
-        if self.outcome in {"complete", "checkpoint"} and not self.checkpoint_path:
-            raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported")
+        # None: the backend saved no checkpoint for this job. The committer publishes its version as live weights.
+        if self.checkpoint_path is not None:
+            _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if not self.runtime_load_id:
             raise ValueError("a training job result must report a runtime load ID")
         if self.training_job_id is not None and (
@@ -418,6 +421,9 @@ class TrainingCheckpoint:
     path: Path
     scenario_step: int
     scenario: str | None = None
+    #: False if the backend saves no checkpoint for this job (a checkpoint interval larger than 1). Then the job
+    #: records no checkpoint path. A restart continues from the last saved checkpoint.
+    writes_checkpoint: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.rollout_id, int) or isinstance(self.rollout_id, bool) or self.rollout_id < 0:
@@ -876,7 +882,8 @@ class PreparedTrainingJob(ABC):
 
     ``train`` may change model/optimizer state and returns all training metrics.
     ``save_checkpoint`` synchronously persists every required model/optimizer
-    checkpoint and backend recovery metadata. Neither method may publish serving
+    checkpoint and backend recovery metadata. Reef calls it only when
+    ``checkpoint.writes_checkpoint`` is true. Neither method may publish serving
     weights or advance Reef's job marker.
     """
 

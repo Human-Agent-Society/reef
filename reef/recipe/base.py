@@ -266,8 +266,8 @@ class Recipe:
         The default builds the one trainer :meth:`build` returns and binds it
         to the surface's only component (``records`` when the surface serves
         none). A recipe whose surface declares several components overrides
-        this to return one trainer per component; the scenario runs them as
-        independent workers that meet at the commit boundary, and
+        this to return one trainer per component. The scenario runs them as
+        separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
         component name.
         """

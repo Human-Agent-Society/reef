@@ -5,10 +5,10 @@ and Slime backend, and trains only on the student's recorded samples.
 """
 
 from recipes.opd.objective import OpdObjective
-from recipes.opd.processor import OPDBatches, OPDSettings, OPDTasks
+from recipes.opd.processor import OPDSettings, OPDTasks
 from recipes.opd.recipe import OPDRecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("opd", "recipes.opd.slime:OpdAlgorithm")
 
-__all__ = ["OPDBatches", "OPDRecipe", "OPDSettings", "OPDTasks", "OpdObjective"]
+__all__ = ["OPDRecipe", "OPDSettings", "OPDTasks", "OpdObjective"]

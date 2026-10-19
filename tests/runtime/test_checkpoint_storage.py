@@ -15,6 +15,7 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
     CheckpointStorageError,
     RetentionConfig,
+    checkpoint_due,
     critic_checkpoint_due,
 )
 
@@ -107,6 +108,12 @@ def test_complete_requires_the_critic_asset_only_on_its_save_commits(tmp_path: P
 
 
 @pytest.mark.unit
+def test_checkpoint_cadence_counts_scenario_versions_from_the_first() -> None:
+    assert all(checkpoint_due(scenario_step, 1) for scenario_step in range(4))
+    assert [scenario_step for scenario_step in range(9) if checkpoint_due(scenario_step, 4)] == [3, 7]
+
+
+@pytest.mark.unit
 def test_critic_checkpoint_cadence_counts_from_the_first_commit(tmp_path: Path) -> None:
     assert all(critic_checkpoint_due(rollout_id, 1) for rollout_id in range(4))
     assert [rollout_id for rollout_id in range(17) if critic_checkpoint_due(rollout_id, 8)] == [7, 15]
@@ -163,6 +170,26 @@ class TestCheckpointStorage:
         )
 
         assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    @pytest.mark.parametrize(("saves_optimizer", "reservation"), [(True, 80), (False, 20)])
+    def test_cold_start_reserves_the_optimizer_only_when_it_is_saved(
+        self, tmp_path: Path, saves_optimizer: bool, reservation: int
+    ) -> None:
+        # With --no-save-optim a pair is the HF export and the Megatron model. An
+        # estimate that included the optimizer blocked a 27B model on a 500 GB disk.
+        root, source_hf = tmp_path / "checkpoints", tmp_path / "source-hf"
+        _write_bytes(source_hf, 10)
+        storage = CheckpointStorage(
+            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            hf_template=str(root / "hf" / "{rollout_id}"),
+            megatron_root=root / "megatron",
+            source_hf=source_hf,
+            measure=_logical_bytes,
+            disk_usage=lambda path: Usage(1000, 0, 1000),
+            saves_optimizer=saves_optimizer,
+        )
+
+        assert storage.validate_capacity()["reservation_bytes"] == reservation
 
     def test_megatron_source_alone_stands_in_for_the_pair(self, tmp_path: Path) -> None:
         root, source_megatron = tmp_path / "checkpoints", tmp_path / "source-megatron"
@@ -666,3 +693,61 @@ def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, ca
         prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank, load=load), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) == running
+
+
+def write_unsaved(storage: CheckpointStorage, running: bool) -> dict:
+    """Rollout 0 has a checkpoint. The job of rollout 1 has no checkpoint. With ``running``, the job of rollout 2 stopped."""
+    unsaved = committed_marker(storage, 1, checkpoint_path=None)
+    if running:
+        return write_running(storage, unsaved, rollout_id=2, scenario_step=2, parent_runtime_load_id="load-1")
+    durable_io.write_marker(storage.marker_path, unsaved)
+    return unsaved
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("running", [False, True])
+def test_preflight_deletes_the_marker_of_a_job_without_a_checkpoint(tmp_path: Path, capsys, running: bool) -> None:
+    storage = _storage(tmp_path)
+    _complete(storage, 0)
+    write_unsaved(storage, running)
+
+    prepare_checkpoint_storage(checkpoint_args(storage), RetentionConfig())
+
+    assert durable_io.read_marker(storage.marker_path) is None
+    assert "job job-1 (rollout 1) saved no checkpoint. Training continues from the checkpoint of rollout 0." in (
+        capsys.readouterr().err
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("running", [False, True])
+@pytest.mark.parametrize("case", ["per-scenario-lora", "load-other-checkpoint", "newer-record", "tracker-not-before"])
+def test_preflight_keeps_the_marker_of_a_job_without_a_checkpoint_when_it_cannot_prove_safety(
+    tmp_path: Path, running: bool, case: str
+) -> None:
+    storage = _storage(tmp_path)
+    _complete(storage, 0)
+    megatron_lora_rank = 0
+    load: str | None | object = _LOAD_SAME_AS_SAVE
+    if case == "per-scenario-lora":
+        megatron_lora_rank = 8
+    elif case == "load-other-checkpoint":
+        other = tmp_path / "other-megatron"
+        other.mkdir()
+        (other / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
+        load = str(other)
+    elif case == "newer-record":
+        storage.records_root.joinpath(f"{5:020d}.json").write_text(
+            storage._record_path(0).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    else:
+        (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+    marker = write_unsaved(storage, running)
+
+    match = (
+        f"ambiguous training job {INTERRUPTED_JOB_ID}" if running else r"job job-1 \(rollout 1\) saved no checkpoint"
+    )
+    with pytest.raises(RuntimeError, match=match):
+        prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank, load=load), RetentionConfig())
+
+    assert durable_io.read_marker(storage.marker_path) == marker

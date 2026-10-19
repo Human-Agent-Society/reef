@@ -31,20 +31,14 @@ HARNESS = "harness"
 class _ComponentBackend(CandidateBackend):
     """A local candidate cycle publishing one file for its component per step."""
 
-    def __init__(self, component: str, artifact_dir: Path, *, stale_policy: str = "refuse") -> None:
+    def __init__(self, component: str, artifact_dir: Path) -> None:
         self.component = component
         self.artifact_dir = artifact_dir
-        self.stale_policy = stale_policy
         self.prepared = 0
         self.evaluated = 0
-        self.reevaluations = 0
         self.reject_next = False
         self.hold_next = False
         self.result: TrainStepResult | None = None
-
-    @property
-    def stale_result_policy(self) -> str:
-        return self.stale_policy
 
     def unblock(self) -> None:
         """Let go of any step the test holds, so the dispatcher can close."""
@@ -68,10 +62,6 @@ class _ComponentBackend(CandidateBackend):
         )
         self.hold_next = False
         return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
-
-    def prepare_reevaluation(self, prepared):
-        self.reevaluations += 1
-        return prepared
 
     def evaluate(self, candidate):
         self.evaluated += 1
