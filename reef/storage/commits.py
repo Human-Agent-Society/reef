@@ -95,8 +95,6 @@ class CommitRecord:
     #: The release component whose trainer committed this step; ``None`` for a
     #: flat scenario and for rollback or promote commits.
     component: str | None = None
-    #: The release the committed batch was reserved against.
-    base_release_id: str | None = None
     #: The content id of every component the published release binds, by
     #: name; ``None`` for a flat release and for a step that published none.
     components: Mapping[str, str] | None = None
@@ -114,10 +112,6 @@ class CommitRecord:
             )
         ):
             raise CommitLogError("commit record components must map component names to content ids")
-        if self.base_release_id is not None and (
-            not isinstance(self.base_release_id, str) or not self.base_release_id
-        ):
-            raise CommitLogError("commit record base_release_id must be a non-empty string or null")
         if self.operation != "training" and self.component is not None:
             raise CommitLogError("only training commits may carry component")
         for name, value in (
@@ -184,8 +178,6 @@ class CommitRecord:
             value["training_job_id"] = self.training_job_id
         if self.component is not None:
             value["component"] = self.component
-        if self.base_release_id is not None:
-            value["base_release_id"] = self.base_release_id
         if self.components is not None:
             value["components"] = dict(self.components)
         return value
@@ -244,7 +236,6 @@ class CommitRecord:
             metrics=value.get("metrics"),
             training_job_id=value.get("training_job_id"),
             component=value.get("component"),
-            base_release_id=value.get("base_release_id"),
             components=value.get("components"),
         )
 
@@ -273,7 +264,6 @@ def scenario_metadata_for(
     operation: str = "training",
     rollback_target_release_id: str | None = None,
     component: str | None = None,
-    base_release_id: str | None = None,
 ) -> dict[str, object]:
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
@@ -294,17 +284,12 @@ def scenario_metadata_for(
         metadata["rollback_target_release_id"] = rollback_target_release_id
     elif rollback_target_release_id is not None:
         raise ValueError("training scenario metadata must not carry rollback_target_release_id")
-    # The trainer that made the checkpoint and the release its batch was reserved
-    # against: a checkpoint adopted from the artifact head after the commit log
-    # is lost must still be attributed to its component's trainer.
+    # The trainer that made the checkpoint: a checkpoint adopted from the artifact head
+    # after the commit log is lost must still be attributed to its component's trainer.
     if component is not None:
         if not isinstance(component, str) or not component:
             raise ValueError("scenario metadata component must be a non-empty string or None")
         metadata["component"] = component
-    if base_release_id is not None:
-        if not isinstance(base_release_id, str) or not base_release_id:
-            raise ValueError("scenario metadata base_release_id must be a non-empty string or None")
-        metadata["base_release_id"] = base_release_id
     if algorithm_state is not None:
         metadata["algorithm_state"] = dict(algorithm_state)
     if record_progress is not None:
@@ -373,9 +358,6 @@ def parse_scenario_metadata(
         raise ValueError("scenario metadata component must be a non-empty string or null")
     if component is not None and operation in ("rollback", "promote"):
         raise ValueError("rollback scenario metadata cannot carry component")
-    base_release_id = value.get("base_release_id")
-    if base_release_id is not None and (not isinstance(base_release_id, str) or not base_release_id):
-        raise ValueError("scenario metadata base_release_id must be a non-empty string or null")
     if scenario_step == 0:
         return scenario, base_artifact, None
     if record_progress is None:
@@ -395,7 +377,6 @@ def parse_scenario_metadata(
         operation_verified=operation is not None,
         rollback_target_release_id=rollback_target_release_id,
         component=component,
-        base_release_id=base_release_id,
         components=components,
     )
     return scenario, base_artifact, commit

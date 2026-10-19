@@ -18,6 +18,7 @@
 # delegated one subsystem at a time as the maintainer group grows.
 /reef/service/ @BobbyZhouZijian @quao627
 /reef/scenario/ @BobbyZhouZijian @quao627
+/reef/dispatcher/ @BobbyZhouZijian @hanfeiyu
 /reef/core/ @BobbyZhouZijian @quao627
 /recipes/basic/ @BobbyZhouZijian @quao627
 /third_party/ @BobbyZhouZijian @Benjamin-eecs
@@ -44,7 +45,6 @@
 /reef/train/ @hanfeiyu @MikeZheng777
 /reef/runtime/ @hanfeiyu @MikeZheng777
 /reef/artifact/ @hanfeiyu @MikeZheng777
-/reef/dispatcher.py @hanfeiyu @MikeZheng777
 /recipes/openclawrl/examples/openclawrl/serve.yaml @hanfeiyu @MikeZheng777
 
 # Documentation defaults to these owners. Domain references override it.

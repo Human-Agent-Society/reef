@@ -103,17 +103,7 @@ def source_records_from_document(fields: Mapping[str, object], *, scenario: str)
 
 def task_document(task: HarborTask) -> dict[str, object]:
     """A task as JSON: every field of :class:`HarborTask`, the digest beside them."""
-    return {
-        "name": task.name,
-        "instruction": task.instruction,
-        "tests": dict(task.tests),
-        "environment": dict(task.environment),
-        "solution": dict(task.solution),
-        "config": {table: dict(values) for table, values in task.config.items()},
-        "metadata": dict(task.metadata),
-        "source_agent_record_ids": list(task.source_agent_record_ids),
-        "digest": task.digest,
-    }
+    return {**task.document(), "digest": task.digest}
 
 
 def task_from_document(document: object) -> HarborTask:

@@ -64,7 +64,7 @@ from reef.record2record.reports import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2record.rounds import RoundGrouping, RoundRecord2Record
+from reef.record2record.rounds import RoundGrouping, RoundRecord2Record, RoundSet
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder, SelectionPolicy
 from reef.record2record.sets import RecordSet, SingleRecordSet
 
@@ -87,6 +87,7 @@ __all__ = [
     "ReportRecord2Record",
     "RoundGrouping",
     "RoundRecord2Record",
+    "RoundSet",
     "SelectionPolicy",
     "SingleRecordSet",
     "TaskStatus",

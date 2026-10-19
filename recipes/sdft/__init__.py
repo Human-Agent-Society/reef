@@ -6,7 +6,7 @@
   its ``teacher_context``.
 - ``processor`` — ``SDFTTasks``, the shared ``DistillTasks`` with the
   demonstration appended to the recorded request, the reference's layout:
-  one rollout with its demonstration, one batch unit; and ``SDFTBatches``.
+  one rollout with its demonstration, one batch unit.
 - ``objective`` — the backend-agnostic training objective.
 - ``slime`` — the Slime loss family: a thin family on the backend's
   distillation base (``reef.train.slime_backend.distill``), which runs the
@@ -16,10 +16,10 @@
 """
 
 from recipes.sdft.objective import SdftObjective
-from recipes.sdft.processor import SDFTBatches, SDFTTasks
+from recipes.sdft.processor import SDFTTasks
 from recipes.sdft.recipe import SDFTRecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sdft", "recipes.sdft.slime:SdftAlgorithm")
 
-__all__ = ["SDFTBatches", "SDFTRecipe", "SDFTTasks", "SdftObjective"]
+__all__ = ["SDFTRecipe", "SDFTTasks", "SdftObjective"]

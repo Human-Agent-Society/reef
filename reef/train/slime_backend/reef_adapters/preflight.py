@@ -13,7 +13,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.recovery import COMMITTED_MARKER_KEY, marker_committed, marker_rollouts, read_marker, write_marker
+from reef.runtime.recovery import (
+    COMMITTED_MARKER_KEY,
+    fsync_dir,
+    marker_committed,
+    marker_rollouts,
+    read_marker,
+    write_marker,
+)
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
@@ -66,6 +73,13 @@ def validate_bridge_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> N
     save = args.save
     if not isinstance(save, str) or not save.strip():
         raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
+    if args.reef_checkpoint_interval > 1:
+        # --release-train loads the workers from --save before each job. Thus the workers lose the jobs without a checkpoint.
+        if args.release_train:
+            raise ValueError("--reef-checkpoint-interval above 1 cannot run with --release-train")
+        # LoRA starts each scenario again from its last saved adapter. Thus LoRA needs a save after each job.
+        if args.megatron_lora_rank > 0:
+            raise ValueError("--reef-checkpoint-interval above 1 requires full-weight training, not LoRA")
 
 
 def configure_megatron_runtime(args: SlimeArguments) -> None:
@@ -131,8 +145,11 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
         source_megatron=args.load,
         lora=bool(args.megatron_lora_rank),
         critic_save_interval=args.critic_save_interval,
+        saves_optimizer=not args.no_save_optim,
     )
     marker = read_marker(storage.marker_path)
+    if marker is not None:
+        marker = clear_unsaved_marker(storage, marker, args.megatron_lora_rank)
     if marker is not None and marker["status"] == "RUNNING":
         settled = committed_marker_to_restore(storage, marker, args.megatron_lora_rank)
         if settled is None:
@@ -202,6 +219,68 @@ def load_resolves_to_save(storage: CheckpointStorage) -> bool:
         return source.expanduser().resolve() == storage.megatron_root.expanduser().resolve()
     except OSError:
         return False
+
+
+def clear_unsaved_marker(
+    storage: CheckpointStorage, marker: dict[str, Any], megatron_lora_rank: int
+) -> dict[str, Any] | None:
+    """Delete the marker if it names a job that saved no checkpoint. Return the marker that stays.
+
+    With ``--reef-checkpoint-interval`` above 1, a job between two saves
+    keeps no checkpoint. Its marker, or the copy of its marker in a
+    ``RUNNING`` marker, has a null ``checkpoint_path``. The workers load the
+    last saved rollout ``T``.
+
+    The preflight deletes the marker and does not restore an older marker.
+    Reef committed versions after ``T``, and an older marker would use their
+    runtime load IDs again. Without a marker, the start publishes the
+    weights of ``T`` with a new runtime load ID.
+
+    The preflight deletes the marker only if these conditions are true:
+
+    - The run trains all weights, and ``--load`` is equal to ``--save``.
+    - The tracker names ``T``, and ``T`` is before the job without a checkpoint.
+    - For a ``RUNNING`` marker, ``T`` is before the stopped job, and that job wrote no files.
+    - The newest checkpoint record is the record of ``T``.
+
+    If a condition is false, the preflight stops the start.
+    """
+    unsaved = marker.get(COMMITTED_MARKER_KEY) if marker["status"] == "RUNNING" else marker
+    if not isinstance(unsaved, Mapping) or unsaved.get("checkpoint_path", "") is not None:
+        return marker
+    _, tracker_iteration, _ = tracker_iteration_state(storage)
+    records = sorted(storage.records_root.glob("*.json"))
+    safe = (
+        megatron_lora_rank == 0
+        and load_resolves_to_save(storage)
+        and tracker_iteration is not None
+        and tracker_iteration < unsaved["rollout_id"]
+        and (
+            marker["status"] != "RUNNING"
+            or (tracker_iteration < marker["rollout_id"] and not rollout_paths(storage, marker["rollout_id"]))
+        )
+        and bool(records)
+        and records[-1] == storage.records_root / f"{tracker_iteration:020d}.json"
+    )
+    if not safe:
+        if marker["status"] == "RUNNING":
+            raise RuntimeError(running_job_message(storage, marker, megatron_lora_rank))
+        raise RuntimeError(
+            f"training job {unsaved['job_id']} (rollout {unsaved['rollout_id']}) saved no checkpoint. "
+            f"The checkpoints under {storage.root} do not show the saved rollout that the workers load. "
+            "Restore that directory from a copy."
+        )
+    print(
+        f"[reef] training job {unsaved['job_id']} (rollout {unsaved['rollout_id']}) saved no checkpoint. "
+        f"Training continues from the checkpoint of rollout {tracker_iteration}. "
+        f"The jobs after rollout {tracker_iteration} do not train again. "
+        f"Deleted marker: {json.dumps(dict(marker), sort_keys=True)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    storage.marker_path.unlink()
+    fsync_dir(storage.marker_path.parent)
+    return None
 
 
 def committed_marker_to_restore(

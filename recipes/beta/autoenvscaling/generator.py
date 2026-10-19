@@ -4,8 +4,9 @@
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
 on a copy under the generator service's tasks root. ``record_results`` places each played task against the band
-``[band_low, band_high]`` and writes the manifest and the generation's report. It reports nothing to the Designer,
-which is not trained here. A cursor under the state directory lets a restart continue with the next session.
+``[band_low, band_high]`` and writes the generation report. An eval task is not played and gets no band position.
+The generator reports nothing to the Designer, which is not trained here. A cursor under the state directory lets
+a restart continue with the next session.
 """
 
 from __future__ import annotations
@@ -54,7 +55,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_COUNT = 8
 DEFAULT_BAND_LOW = 0.25
 DEFAULT_BAND_HIGH = 0.75
-DEFAULT_EVAL_FRACTION = 0.25
 DEFAULT_MAX_CHECKS = 6
 DEFAULT_MAX_MODEL_CALLS = 250
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700.0
@@ -107,6 +107,7 @@ STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate ref
 STAGE_PLAY = "play"  # the recipe could not play the task
 STAGE_BAND = "band"  # the task played, and its pass rate is outside the band
 STAGE_UNREACHED = "unreached"  # the round ended before it played the task
+STAGE_HELD_OUT = "held_out"  # the task is in the eval split, so the recipe did not play it
 # Where a pass rate falls against the band.
 BAND_BELOW = "below"
 BAND_INSIDE = "inside"
@@ -120,8 +121,6 @@ CONFIG_KEYS = frozenset(
         "count",
         "band_low",
         "band_high",
-        "eval_fraction",
-        "seed",
         "max_checks",
         "agent_model",
         "agent_api",
@@ -436,8 +435,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
         band_low: float | None = DEFAULT_BAND_LOW,
         band_high: float | None = DEFAULT_BAND_HIGH,
         max_checks: int = DEFAULT_MAX_CHECKS,
-        eval_fraction: float = DEFAULT_EVAL_FRACTION,
-        seed: int = 0,
         task_checks: tuple[TaskCheck, ...] = (),
     ) -> None:
         if count < 1 or max_checks < 1:
@@ -447,8 +444,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 raise ValueError(f"{label} must be in [0, 1] or null")
         if band_low is not None and band_high is not None and band_low > band_high:
             raise ValueError("band_low must not exceed band_high")
-        if not 0 <= eval_fraction < 1:
-            raise ValueError("eval_fraction must be in [0, 1)")
         self.scenario = scenario
         self.service = service
         self.author = author
@@ -458,8 +453,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.band_low = band_low
         self.band_high = band_high
         self.max_checks = max_checks
-        self.eval_fraction = eval_fraction
-        self.seed = seed
         self.task_checks: tuple[TaskCheck, ...] = (OracleCheck(service), *task_checks)
         # Only a refusing review may fail the agent's own check.
         self.tool_reviewer = next(
@@ -480,9 +473,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.validation_stages: dict[str, str] = {}
         # Where validate wrote each task; the recipe writes it again under the same name to play it.
         self.task_paths: dict[str, Path] = {}
-        # The generation's error for its report; is_service_failed says the generator service failed in validate.
+        # The generation's error for its report.
         self.error = ""
-        self.is_service_failed = False
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -514,8 +506,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 band_low=band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low"),
                 band_high=band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high"),
                 max_checks=int(config.get("max_checks", DEFAULT_MAX_CHECKS)),
-                eval_fraction=float(config.get("eval_fraction", DEFAULT_EVAL_FRACTION)),
-                seed=int(config.get("seed", 0)),
                 task_checks=() if review is None else (review,),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
@@ -539,7 +529,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.generation = self.cursor.next_generation
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
         self.save_cursor(replace(self.cursor, next_generation=self.generation + 1))
-        self.refused, self.pending, self.error, self.is_service_failed = [], {}, "", False
+        self.refused, self.pending, self.error = [], {}, ""
         self.check_results, self.validation_stages, self.task_paths = {}, {}, {}
         if request.source_records:
             self.error = "AutoEnvScalingGenerator takes its sessions from its sources file, not from source records"
@@ -619,7 +609,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ProposalRefused(
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
-        return replace(task, source_agent_record_ids=(record_id, source.record_id))
+        return replace(
+            task,
+            source_agent_record_ids=(record_id, source.record_id),
+            metadata={**task.metadata, "designer_record_id": record_id},
+        )
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:
         """The task checks on a written copy, which is removed again; a duplicate or a taken name is invalid.
@@ -650,7 +644,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     break
         except GeneratorError as exc:
             self.error = f"the check of {task.name} could not run: {exc}"
-            self.is_service_failed = True
             raise
         finally:
             self.check_results[task.name] = tuple(results)
@@ -659,14 +652,18 @@ class AutoEnvScalingGenerator(TaskGenerator):
         return TaskValidationResult(errors)
 
     async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Close the generation: each task's pass rate and band, the manifest and the report.
+        """Close the generation: each played task's pass rate and band position, and the report.
 
-        A task outside the band stays under the tasks root and out of the manifest; the report keeps its path.
+        An eval task gets the stage ``held_out``. The band is only recorded in the report. It does not change the
+        recipe's task store.
         """
         proposals = list(self.refused)
         outcomes: dict[str, TaskOutcome] = {}
         for result in results:
             proposal = self.pending.pop(result.task.name)
+            if result.split == "eval":
+                proposals.append(replace(proposal, stage=STAGE_HELD_OUT))
+                continue
             if not result.is_played:
                 stage = self.validation_stages[result.task.name] or STAGE_PLAY
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
@@ -700,25 +697,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
             for proposal in self.pending.values()
         )
         proposals.sort(key=lambda proposal: proposal.index)
-        kept = [outcome.name for outcome in outcomes.values() if outcome.band == BAND_INSIDE]
-        manifest_path: Path | None = None
-        manifest_error = ""
-        # A service that failed in validate writes no manifest. One that cannot write it must not cost the report,
-        # the only record of the generation's plays.
-        if kept and not self.is_service_failed:
-            try:
-                manifest_path = await self.service.write_manifest(
-                    generation=self.generation, names=kept, eval_fraction=self.eval_fraction, seed=self.seed
-                )
-            except GeneratorError as exc:
-                manifest_error = str(exc)[:ERROR_CHARS]
-                logger.warning("AutoEnvScaling generation %d wrote no manifest: %s", self.generation, exc)
         document = {
             "generation": self.generation,
             "error": self.error,
             "band": {"low": self.band_low, "high": self.band_high},
-            "manifest": str(manifest_path) if manifest_path is not None else None,
-            "manifest_error": manifest_error,
             "next_position": self.cursor.next_position,
             "proposals": [
                 {**asdict(proposal), "checks": self.checks_document(proposal.task_name)} for proposal in proposals
@@ -733,7 +715,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             "AutoEnvScaling generation %d on scenario %r: %d tasks inside the band of %d played, %d sessions; %s",
             self.generation,
             self.scenario,
-            len(kept),
+            sum(outcome.band == BAND_INSIDE for outcome in outcomes.values()),
             len(outcomes),
             len(proposals),
             report_path,

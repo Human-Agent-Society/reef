@@ -50,7 +50,8 @@ How Reef implements it
 SDFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
 ``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTTasks``
-turns each report into a task. ``SDFTBatches`` batches ``batch_size`` tasks.
+turns each report into a task. The shared ``DistillBatches`` stage puts
+``batch_size`` tasks into each batch.
 
 ``SDFTTasks`` extends the shared ``DistillTasks``. ``DistillTasks`` turns every
 ``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the

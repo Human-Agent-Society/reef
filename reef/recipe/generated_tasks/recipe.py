@@ -24,6 +24,9 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     and the source sessions in ``record2record``, and the batch size in
     ``task2batch``. Without that section, no round runs and the recipe trains
     on the training arm's reports only.
+
+    Enabled rounds save each task and its train/eval split in the scenario's task store before play.
+    Eval tasks stay in the store without plays or training feedback.
     """
 
     name: str = "generated-tasks"

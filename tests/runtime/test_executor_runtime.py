@@ -12,6 +12,7 @@ from tests.support.runtime_stubs import ExecutorRuntimeFixture, runtime_bindings
 
 from reef.artifact import GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.training_loop import DispatchedTrainingLoop
 from reef.inference.runtime import ExecutorInferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
@@ -326,7 +327,7 @@ def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_pat
     )
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
-    dispatcher._registry.reload("math")
+    dispatcher.registry.reload("math")
     assert events == []
 
     def track_close(scenario):
@@ -368,7 +369,7 @@ def test_dispatchers_close_their_runtimes_without_stopping_external_workers(tmp_
 def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monkeypatch):
     # This ownership-only fake recipe has no training backend. Do not let a
     # background training failure reload the scenario before close is tested.
-    monkeypatch.setattr(Dispatcher, "_start_training", lambda *args: None)
+    monkeypatch.setattr(DispatchedTrainingLoop, "start", lambda *args: None)
     worker = Coordinator()
     runtime = ExecutorRuntimeFixture(
         train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))

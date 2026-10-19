@@ -483,7 +483,7 @@ class _SavedArtifactBackend(CandidateBackend):
 class _SavedArtifactRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         del experiment_logger
         return Trainer.build(
             scenario,
@@ -624,7 +624,7 @@ class ProtectAllPipeline(TrainingPipeline):
 
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -988,7 +988,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface()
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None) -> Trainer:
         candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
@@ -1297,7 +1297,7 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=agent_record_dir,
     )
-    dispatcher._registry.set_training_scenario_callback(lambda scenario: None)
+    monkeypatch.setattr(dispatcher.training_loop, "start", lambda: None)
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
@@ -1369,7 +1369,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
-    reload_scenario = dispatcher._registry.reload
+    reload_scenario = dispatcher.registry.reload
 
     def fail_release(self, record_ids) -> None:
         del self, record_ids
@@ -1384,7 +1384,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     original.trainer.pipeline.release_records = fail_release.__get__(
         original.trainer.pipeline, type(original.trainer.pipeline)
     )
-    dispatcher._registry.reload = blocking_reload
+    dispatcher.registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 

@@ -1,17 +1,16 @@
 """Split generated tasks into a train split and an eval split by the records they came from.
 
 Two tasks made from a shared agent record go to the same split, so nothing
-the train split saw reappears, reworded, in the gate. The split is a
-function of the task names, their sources and a seed, and the result is
-written as a manifest the gate reads.
+the train split saw comes back, reworded, in the evaluation. A task keeps its
+split after it gets one. A split can be saved as a manifest file, which the
+task player and the Cordis evaluation read.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-import math
 import os
-import random
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -27,6 +26,10 @@ MANIFEST_KEYS = ("version", "seed", "eval_fraction", "train", "eval")
 
 class TaskSplitError(ReefError):
     """A split request or manifest that cannot be honored."""
+
+
+class TaskSplitConflict(TaskSplitError):
+    """New tasks share source records with tasks in the train split and with tasks in the eval split."""
 
 
 @dataclass(frozen=True)
@@ -67,17 +70,8 @@ def checked_split(split: str, names: object) -> tuple[str, ...]:
     return tuple(sorted(listed))
 
 
-def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Assign each group of tasks that share a source record to one split; the seed fixes the draw.
-
-    ``sources`` maps a task name to the agent record ids it was made from.
-    Groups are drawn in seeded random order into the eval split until it
-    holds at least ``eval_fraction`` of the tasks, then the rest train.
-    """
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        raise TaskSplitError("seed must be an integer")
-    if isinstance(eval_fraction, bool) or not isinstance(eval_fraction, (int, float)) or not 0 <= eval_fraction <= 1:
-        raise TaskSplitError("eval_fraction must be a number between 0 and 1")
+def checked_source_records(sources: Mapping[str, Iterable[str]]) -> dict[str, tuple[str, ...]]:
+    """Check that ``sources`` maps task names to record ids, and return each task's ids as a tuple."""
     if not isinstance(sources, Mapping) or any(not isinstance(name, str) or not name for name in sources):
         raise TaskSplitError("sources must map non-empty task names to their record ids")
     record_ids_by_task: dict[str, tuple[str, ...]] = {}
@@ -89,23 +83,7 @@ def split_by_source(sources: Mapping[str, Iterable[str]], *, eval_fraction: floa
         if isinstance(record_ids, str) or any(not isinstance(record_id, str) or not record_id for record_id in listed):
             raise TaskSplitError(f"sources of {name!r} must be a sequence of non-empty record ids")
         record_ids_by_task[name] = listed
-    names = list(record_ids_by_task)
-    order = sorted(task_groups(record_ids_by_task), key=lambda group: group[0])
-    random.Random(seed).shuffle(order)
-    # ceil with a small slack absorbs float noise such as 7.000000000000001; any positive fraction holds a group.
-    target = 0 if eval_fraction == 0 else max(1, math.ceil(eval_fraction * len(names) - 1e-9))
-    held: list[str] = []
-    for group in order:
-        if len(held) >= target:
-            break
-        held.extend(group)
-    eval_names = frozenset(held)
-    return TaskSplit(
-        train=tuple(sorted(name for name in names if name not in eval_names)),
-        eval=tuple(sorted(eval_names)),
-        seed=seed,
-        eval_fraction=float(eval_fraction),
-    )
+    return record_ids_by_task
 
 
 def write_split_manifest(path: Path, split: TaskSplit) -> None:
@@ -202,3 +180,52 @@ def manifest_task_paths(manifest_path: Path, root: Path, split: str) -> tuple[Pa
             raise TaskSplitError(f"{manifest_path}: {split} task {name!r}: {exc}") from exc
         paths.append(path)
     return tuple(paths)
+
+
+def extend_split_by_source(
+    *,
+    previous: TaskSplit,
+    previous_sources: Mapping[str, Iterable[str]],
+    sources: Mapping[str, Iterable[str]],
+) -> TaskSplit:
+    """Assign new tasks to a split and keep the split of each assigned task.
+
+    Tasks that share a source record form a group. A group with assigned
+    tasks in one split adds its new tasks to that split. A group with assigned
+    tasks in both splits raises ``TaskSplitConflict``. A group with no
+    assigned task goes to eval when a seeded hash of its record ids falls
+    below ``eval_fraction``. The hash does not depend on the other groups, so
+    a split that grows one task at a time keeps the expected eval fraction.
+    """
+    existing_names = set(previous.train) | set(previous.eval)
+    if set(previous_sources) != existing_names:
+        raise TaskSplitError("previous_sources must describe exactly the previously assigned tasks")
+    if existing_names & set(sources):
+        raise TaskSplitError("new sources must not replace an existing task's source references")
+    combined = checked_source_records(sources={**previous_sources, **sources})
+    training = set(previous.train)
+    evaluation = set(previous.eval)
+    for group in task_groups(combined):
+        new_names = set(group) - existing_names
+        if not new_names:
+            continue
+        has_training = bool(training.intersection(group))
+        has_evaluation = bool(evaluation.intersection(group))
+        if has_training and has_evaluation:
+            raise TaskSplitConflict(f"split conflict: tasks {sorted(new_names)} connect train and eval sources")
+        if has_evaluation:
+            evaluation.update(new_names)
+        elif has_training:
+            training.update(new_names)
+        else:
+            references = sorted({reference for name in group for reference in combined[name]})
+            identity = {"seed": previous.seed, "sources": references, "task": group[0] if not references else None}
+            digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).digest()
+            draw = int.from_bytes(digest, byteorder="big") / (1 << (len(digest) * 8))
+            if draw < previous.eval_fraction:
+                evaluation.update(new_names)
+            else:
+                training.update(new_names)
+    return TaskSplit(
+        train=tuple(training), eval=tuple(evaluation), seed=previous.seed, eval_fraction=previous.eval_fraction
+    )

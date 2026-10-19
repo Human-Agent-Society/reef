@@ -52,7 +52,7 @@ def test_new_scenario_is_created_for_every_request_type(path: str) -> None:
             )
 
             assert response.status == 200
-            assert dispatcher._registry.get_optional("new-scenario") is not None
+            assert dispatcher.registry.get_optional("new-scenario") is not None
         finally:
             await client.close()
 
@@ -87,7 +87,7 @@ def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
             )
 
             assert response.status == 200
-            assert dispatcher._registry.get_optional("new-scenario") is not None
+            assert dispatcher.registry.get_optional("new-scenario") is not None
         finally:
             await client.close()
 
@@ -124,7 +124,7 @@ def test_registered_scenario_keeps_its_binding_for_every_request_type(path: str)
             )
 
             assert response.status == 200
-            assert dispatcher._registry.get_optional("registered") is not None
+            assert dispatcher.registry.get_optional("registered") is not None
         finally:
             await client.close()
 
@@ -163,20 +163,20 @@ def test_request_recovers_durable_scenario_without_resubmission(
         request_type=RequestType.REPORT,
     )
 
-    assert restarted_dispatcher._registry.get_optional("durable") is not None
+    assert restarted_dispatcher.registry.get_optional("durable") is not None
 
 
 @pytest.mark.unit
 def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
     dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-    load_or_create = dispatcher._registry._scenario_factory.load_or_create
+    load_or_create = dispatcher.registry._scenario_factory.load_or_create
     entered = Barrier(2)
 
     def load_or_create_together(scenario, release_id, *, model_config):
         entered.wait(timeout=2)
         return load_or_create(scenario, release_id, model_config=model_config)
 
-    monkeypatch.setattr(dispatcher._registry._scenario_factory, "load_or_create", load_or_create_together)
+    monkeypatch.setattr(dispatcher.registry._scenario_factory, "load_or_create", load_or_create_together)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = (

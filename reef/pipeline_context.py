@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
+from reef.storage.tasks import TaskStorage
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class PipelineContext:
     admitted_report_type: type[ReportBase] | None = None
     #: How many versions a sample may lag behind and still train; the recipe's ``max_staleness``.
     max_staleness: int = 0
+    #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
+    task_storage: TaskStorage | None = None
     #: The most unreserved sets the record stage holds, or None for no limit. The pipeline bounds the
     #: held sets in manual mode, where batches follow instructions instead of sets.
     held_set_limit: int | None = None

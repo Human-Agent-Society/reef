@@ -80,6 +80,5 @@ class TraceBatches(DistillBatches):
     reads the request beside them; in ``manual`` it runs alone.
     """
 
-    batch_label = "harness_evolve"
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)

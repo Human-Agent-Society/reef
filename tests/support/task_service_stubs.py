@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, HarborTaskConflict, read_harbor_task, write_harbor_task, write_split_manifest
+from reef.core.tasks import HarborTask, HarborTaskConflict, read_harbor_task, write_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.record2task.generator import (
     DesignerRequest,
@@ -19,7 +19,6 @@ from reef.record2task.generator import (
     TaskNameConflict,
     WrittenTask,
     content_hash,
-    split_generation,
 )
 
 DOCUMENT = {
@@ -95,7 +94,6 @@ class StandInGenerator(Generator):
         self.plays: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
         self.deleted: list[str] = []
-        self.manifests: list[dict[str, object]] = []
         self.episodes = 0
 
     async def propose(
@@ -188,14 +186,3 @@ class StandInGenerator(Generator):
                 )
             )
         return tuple(rows)
-
-    async def write_manifest(self, *, generation, names: Sequence[str], eval_fraction, seed) -> Path:
-        self.manifests.append(
-            {"generation": generation, "names": list(names), "eval_fraction": eval_fraction, "seed": seed}
-        )
-        split = split_generation(
-            [read_harbor_task(self.root / name) for name in names], eval_fraction=eval_fraction, seed=seed
-        )
-        path = self.root / f"manifest-{generation:05d}.json"
-        write_split_manifest(path, split)
-        return path

@@ -44,6 +44,8 @@ from reef.recipe.generated_tasks.processor import (
     rewards_of,
 )
 from reef.record2record import GroupDecision, ReportContext
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrainingBatch, trajectory_groups
@@ -143,7 +145,7 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
     played(p, "harbor-00000-001", 1, 1.0)
     assert p.ready()
     batch = p.build_batch()
-    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:generated-tasks:1"
+    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:batch:1"
     groups = trajectory_groups(batch)
     assert [[sample.group_id for sample in group] for group in groups] == [
         ["harbor-00000-000", "harbor-00000-000"],
@@ -259,6 +261,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (), {"hint": [1.0]}), "tuples"),
+        (lambda: TaskPlayResult(task=task_for("t-a", "r", 1), training_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
 )
@@ -393,6 +396,11 @@ class DeferredWorker(BackgroundJobWorker):
         self.generation = None
 
 
+def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
+    """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
+    return SQLiteScenarioStorage(tmp_path / "records").open(scenario).tasks
+
+
 def rounds(
     tmp_path: Path,
     task_generator: ScriptedGenerator,
@@ -403,7 +411,7 @@ def rounds(
 ) -> tuple[TrainingPipeline, StandInGenerator]:
     player = player if player is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     group_settings, round_settings, batch_settings = stage_settings(
         {
             "tasks_per_step": 2,
@@ -476,6 +484,78 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     assert document["tasks"][0]["training_rewards"] == [0.25, 0.25]
     assert document["tasks"][0]["measurement_rewards"] == {"hint": [0.75]}
     assert p.operational_metrics()["rounds_completed"] == 1
+
+
+@pytest.mark.unit
+def test_eval_tasks_are_saved_without_training_or_measurement_plays(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    pipeline, player = rounds(tmp_path, task_generator, eval_fraction=1.0)
+    assert not looked(pipeline)
+    assert player.plays == [] and player.writes == []
+    assert all(
+        result.split == "eval" and not result.is_played and not result.error for result in task_generator.results[0]
+    )
+    assert pipeline.status()["task_store"] == {"train": 0, "eval": 2, "rejected": 0, "pending": 0}
+    assert pipeline.record2task.task_store.generation(0).is_complete
+    pipeline.close()
+
+
+@pytest.mark.unit
+def test_a_round_retry_uses_saved_candidates_and_validation_outcomes(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)], failing="harbor-00000-001")
+    pipeline, _ = rounds(tmp_path, task_generator)
+    assert not looked(pipeline)
+    assert len(task_generator.requests) == 1
+    assert pipeline.record2task.task_store.generation(0).pending_indices == (1,)
+    task_generator.failing = None
+    asyncio.run(pipeline.record2task.run_round(RoundJob(receipt="round-00000", round_number=0)))
+    assert len(task_generator.requests) == 1
+    assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-001"]
+    assert pipeline.record2task.task_store.generation(0).is_complete
+    pipeline.close()
+
+
+def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> GeneratedTask:
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    task = task_for(name, record_ids[0], port)
+    metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
+    return GeneratedTask(dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata))
+
+
+@pytest.mark.unit
+def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits_is_refused(tmp_path: Path) -> None:
+    follower = sourced("follower", "designer-1", "eval-source", port=9102, designer_record_id="designer-1")
+    bridge = sourced("bridge", "train-source", "eval-source", port=9103)
+    renamed = sourced("train-task", "other-source", port=9104)
+    task_generator = ScriptedGenerator([(follower, bridge, renamed)])
+    pipeline, player = rounds(tmp_path, task_generator)
+    store = pipeline.record2task.task_store
+    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    earlier = (
+        sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
+        sourced("eval-task", "eval-source", port=9101),
+    )
+    store.begin_generation(generation=100, source_record_ids=())
+    store.save_candidates(generation=100, candidates=earlier)
+    store.publish_task(generation=100, index=0, split="train")
+    store.publish_task(generation=100, index=1, split="eval")
+    store.complete_generation(generation=100)
+
+    assert not looked(pipeline)
+
+    results = {result.task.name: result for result in task_generator.results[0]}
+    assert results["follower"].split == "eval" and not results["follower"].error
+    assert "split conflict" in results["bridge"].error
+    assert "other files" in results["train-task"].error
+    assert player.writes == []
+    assert {task.generated.task.name: task.split for task in store.tasks()} == {
+        "train-task": "train",
+        "eval-task": "eval",
+        "follower": "eval",
+    }
+    assert store.path(store.tasks(split="train")[0]).joinpath("instruction.md").is_file()
+    assert pipeline.status()["task_store"] == {"train": 1, "eval": 2, "rejected": 2, "pending": 0}
+    pipeline.close()
 
 
 def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_path: Path) -> None:
@@ -633,6 +713,17 @@ def test_a_round_that_played_no_task_does_not_block_the_next_one(tmp_path: Path)
     assert [job.round_number for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
 
 
+def test_a_round_whose_job_failed_waits_for_batches_instead_of_starting_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    worker.finished.append(Failed("round-00000"))
+    assert not looked(p) and [job.round_number for job in worker.submitted] == [0]
+    assert (
+        not p.background_jobs_running() and "round-00000 did not finish" in p.status()["task_generation"]["last_error"]
+    )
+
+
 def test_a_restarted_processor_carries_on_from_the_round_summaries(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), rounds=2)
     assert not looked(p) and p.status()["task_generation"]["completed"] == 1
@@ -666,15 +757,17 @@ def test_a_generator_failure_ends_the_round_with_what_ran(
     assert summary(tmp_path, 0)["error"] == error
 
 
-def test_a_round_that_never_finishes_is_named_in_the_status(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
-    p.close()
-    assert not looked(p)
+def test_a_worker_that_refuses_a_round_stops_the_rounds_with_the_reason(tmp_path: Path) -> None:
+    worker = InlineWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, rounds=2)
+    worker.close()
+    assert not looked(p) and not p.background_jobs_running()
+    assert [job.round_number for job in worker.submitted] == [0], "no round is tried after the refusal"
     assert "no further round runs" in p.status()["task_generation"]["last_error"]
 
 
 def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) -> None:
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
     generation = GeneratedTaskTasks(
         context,
@@ -796,7 +889,7 @@ def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str
         processor(**config)
 
 
-def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> None:
+def test_rounds_need_a_description_a_state_dir_the_generator_service_and_task_storage() -> None:
     def built(**config: object) -> GeneratedTaskTasks:
         context = PipelineContext("tasks")
         group_settings, round_settings, _ = stage_settings({"rounds": 1, **config})
@@ -809,6 +902,8 @@ def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> No
         built(description="x", state_dir="s")
     with pytest.raises(ValueError, match="generator_url"):
         built(description="x", state_dir="s", generator_url="${endpoints.generator}")
+    with pytest.raises(ValueError, match="task storage"):
+        built(description="x", state_dir="s", generator_url="http://g:8910")
 
 
 # ------------------------------------------------------------------------------------------------- the recipe
@@ -870,7 +965,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
         },
     )
     ScriptedGenerator.built.clear()
-    built = recipe.build_pipeline(PipelineContext("one"))
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=task_storage(tmp_path, "one")))
     assert isinstance(built.record2task, GeneratedTaskTasks)
     assert isinstance(built.record2task.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]

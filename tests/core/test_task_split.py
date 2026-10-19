@@ -6,119 +6,99 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import (
-    TaskSplit,
-    TaskSplitError,
-    manifest_task_paths,
-    read_split_manifest,
-    split_by_source,
-    write_split_manifest,
-)
+from reef.core.tasks import TaskSplit, TaskSplitError, manifest_task_paths, read_split_manifest, write_split_manifest
+from reef.core.tasks.split import TaskSplitConflict, extend_split_by_source
 
-SOURCES = {
-    "t1": ["r1", "r2"],
-    "t2": ["r2"],
-    "t3": ["r3"],
-    "t4": ["r4", "r5"],
-    "t5": ["r5"],
-    "t6": [],
-    "t7": ["r7"],
-    "t8": ["r8"],
-}
+SPLIT = TaskSplit(train=("t1", "t2", "t6"), eval=("t3", "t4", "t5"), seed=11, eval_fraction=0.5)
 
 
-def test_tasks_sharing_a_record_land_on_the_same_side() -> None:
-    for seed in range(20):
-        split = split_by_source(SOURCES, eval_fraction=0.5, seed=seed)
-        for pair in (("t1", "t2"), ("t4", "t5")):
-            in_eval = {name in split.eval for name in pair}
-            assert len(in_eval) == 1, (seed, pair, split)
+def first_split(sources: dict[str, object], eval_fraction: float = 0.5) -> TaskSplit:
+    """Split new tasks when no task has a split yet."""
+    previous = TaskSplit(train=(), eval=(), seed=0, eval_fraction=eval_fraction)
+    return extend_split_by_source(previous=previous, previous_sources={}, sources=sources)
 
 
-def test_every_task_lands_on_exactly_one_side() -> None:
-    split = split_by_source(SOURCES, eval_fraction=0.4, seed=7)
-    assert sorted(split.train + split.eval) == sorted(SOURCES)
-    assert not set(split.train) & set(split.eval)
-
-
-def test_the_seed_fixes_the_draw_and_a_new_seed_changes_it() -> None:
-    a = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
-    b = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
-    assert a == b
-    draws = {split_by_source(SOURCES, eval_fraction=0.5, seed=seed).eval for seed in range(30)}
-    assert len(draws) > 1
-
-
-def test_the_order_of_the_input_does_not_change_the_draw() -> None:
-    reversed_sources = dict(reversed(list(SOURCES.items())))
-    assert split_by_source(SOURCES, eval_fraction=0.5, seed=3) == split_by_source(
-        reversed_sources, eval_fraction=0.5, seed=3
+@pytest.mark.unit
+def test_incremental_splits_keep_existing_placements_and_follow_shared_sources() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    previous_sources = {"train-task": ("train-source",), "eval-task": ("eval-source",)}
+    extended = extend_split_by_source(
+        previous=previous,
+        previous_sources=previous_sources,
+        sources={"new-task": ("train-source", "new-source")},
     )
+    assert extended.train == ("new-task", "train-task")
+    assert extended.eval == previous.eval
 
 
-def test_the_eval_side_holds_at_least_the_fraction() -> None:
-    for seed in range(10):
-        split = split_by_source(SOURCES, eval_fraction=0.25, seed=seed)
-        assert len(split.eval) >= 2
-        # One whole group can overshoot the target, never more than the largest group.
-        assert len(split.eval) <= 2 + 1
+@pytest.mark.unit
+def test_incremental_split_refuses_a_train_eval_bridge_without_changing_placements() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    previous_sources = {"train-task": ("train-source",), "eval-task": ("eval-source",)}
+    with pytest.raises(TaskSplitConflict, match="split conflict"):
+        extend_split_by_source(
+            previous=previous,
+            previous_sources=previous_sources,
+            sources={"bridge": ("train-source", "eval-source")},
+        )
+    assert previous.train == ("train-task",)
+    assert previous.eval == ("eval-task",)
+    assert set(previous_sources) == {"train-task", "eval-task"}
 
 
-def test_zero_and_one_are_the_two_trivial_splits() -> None:
-    nothing = split_by_source(SOURCES, eval_fraction=0, seed=0)
-    assert nothing.eval == () and nothing.train == tuple(sorted(SOURCES))
-    everything = split_by_source(SOURCES, eval_fraction=1, seed=0)
-    assert everything.train == () and everything.eval == tuple(sorted(SOURCES))
+@pytest.mark.unit
+def test_incremental_split_detects_a_transitive_bridge() -> None:
+    previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
+    with pytest.raises(TaskSplitConflict, match="split conflict"):
+        extend_split_by_source(
+            previous=previous,
+            previous_sources={"train-task": ("train-source",), "eval-task": ("eval-source",)},
+            sources={"first": ("train-source", "shared"), "second": ("shared", "eval-source")},
+        )
 
 
-def test_no_tasks_is_an_empty_split() -> None:
-    assert split_by_source({}, eval_fraction=0.5, seed=0) == TaskSplit((), (), 0, 0.5)
-
-
-def test_one_group_goes_whole() -> None:
-    linked = {"a": ["r"], "b": ["r"], "c": ["r"]}
-    assert split_by_source(linked, eval_fraction=0.1, seed=5).eval == ("a", "b", "c")
+@pytest.mark.unit
+@pytest.mark.parametrize("fraction", [0.0, 0.5, 1.0])
+def test_incremental_split_is_repeatable_and_respects_the_fraction_extremes(fraction: float) -> None:
+    previous = TaskSplit(train=(), eval=(), seed=7, eval_fraction=fraction)
+    sources = {"a": ("one",), "b": ("one",), "c": ("two",)}
+    first = extend_split_by_source(previous=previous, previous_sources={}, sources=sources)
+    assert first == extend_split_by_source(
+        previous=previous, previous_sources={}, sources=dict(reversed(list(sources.items())))
+    )
+    assert ("a" in first.eval) == ("b" in first.eval)
+    if fraction == 0.0:
+        assert first.eval == ()
+    if fraction == 1.0:
+        assert first.train == ()
 
 
 @pytest.mark.parametrize(
-    ("sources", "fraction", "seed", "message"),
+    ("sources", "message"),
     [
-        (SOURCES, 1.5, 0, "between 0 and 1"),
-        (SOURCES, -0.1, 0, "between 0 and 1"),
-        (SOURCES, True, 0, "between 0 and 1"),
-        (SOURCES, 0.5, "0", "seed must be an integer"),
-        (SOURCES, 0.5, True, "seed must be an integer"),
-        ({"": ["r"]}, 0.5, 0, "non-empty task names"),
-        ({"t": "r1"}, 0.5, 0, "sequence of non-empty record ids"),
-        ({"t": [""]}, 0.5, 0, "sequence of non-empty record ids"),
+        ({"": ["r"]}, "non-empty task names"),
+        ({"t": "r1"}, "sequence of non-empty record ids"),
+        ({"t": None}, "sequence of non-empty record ids"),
+        ({"t": 3}, "sequence of non-empty record ids"),
+        ({"t": [""]}, "sequence of non-empty record ids"),
+        ({"t": [1]}, "sequence of non-empty record ids"),
     ],
 )
-def test_a_bad_request_is_refused(sources: dict[str, list[str]], fraction: object, seed: object, message: str) -> None:
+def test_sources_that_are_not_task_names_and_record_ids_are_refused(sources: dict[str, object], message: str) -> None:
     with pytest.raises(TaskSplitError, match=message):
-        split_by_source(sources, eval_fraction=fraction, seed=seed)  # type: ignore[arg-type]
+        first_split(sources)
+
+
+def test_tasks_that_share_a_record_in_any_iterable_get_one_split() -> None:
+    linked = {"a": iter(["r"]), "b": map(str, ["r"]), "c": {"r"}, "d": {"r": 1}.keys()}
+    split = first_split(linked)
+    assert split.eval in ((), ("a", "b", "c", "d"))
+    assert sorted(split.train + split.eval) == ["a", "b", "c", "d"]
 
 
 def test_a_task_in_both_splits_is_refused() -> None:
     with pytest.raises(TaskSplitError, match="both the train split and the eval split"):
         TaskSplit(("a",), ("a",), 0, 0.5)
-
-
-def test_one_shot_source_iterables_still_group() -> None:
-    linked = {"a": iter(["r"]), "b": map(str, ["r"]), "c": (x for x in ["r"])}
-    split = split_by_source(linked, eval_fraction=0.34, seed=0)  # one shot iterables, materialized once
-    assert split.eval in ((), ("a", "b", "c"))
-    assert split.eval == ("a", "b", "c")
-
-
-@pytest.mark.parametrize("value", [None, 3, "r1", [""], [1]])
-def test_a_source_value_that_is_not_a_sequence_of_ids_is_refused(value: object) -> None:
-    with pytest.raises(TaskSplitError, match="sequence of non-empty record ids"):
-        split_by_source({"a": value, "b": ["r"]}, eval_fraction=0.5, seed=0)  # type: ignore[dict-item]
-
-
-def test_a_tiny_positive_fraction_still_holds_one_group() -> None:
-    split = split_by_source(SOURCES, eval_fraction=1e-12, seed=0)
-    assert len(split.eval) >= 1
 
 
 def test_a_split_normalizes_and_checks_itself() -> None:
@@ -140,9 +120,8 @@ def test_a_split_normalizes_and_checks_itself() -> None:
 
 
 def test_the_manifest_round_trips(tmp_path: Path) -> None:
-    split = split_by_source(SOURCES, eval_fraction=0.5, seed=11)
-    write_split_manifest(tmp_path / "split.json", split)
-    assert read_split_manifest(tmp_path / "split.json") == split
+    write_split_manifest(tmp_path / "split.json", SPLIT)
+    assert read_split_manifest(tmp_path / "split.json") == SPLIT
     text = (tmp_path / "split.json").read_text()
     assert text.endswith("\n")
     assert '"version": 1' in text
@@ -201,13 +180,8 @@ def test_a_manifest_with_keys_reef_did_not_write_is_refused(tmp_path: Path) -> N
         read_split_manifest(tmp_path / "split.json")
 
 
-def test_sets_and_dict_views_are_accepted_as_sources() -> None:
-    split = split_by_source({"a": {"r"}, "b": {"r": 1}.keys()}, eval_fraction=0.5, seed=0)
-    assert split.eval == ("a", "b")
-
-
 def test_a_manifest_write_that_fails_keeps_the_old_manifest_and_raises_a_split_error(tmp_path: Path) -> None:
-    first = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
+    first = SPLIT
     write_split_manifest(tmp_path / "split.json", first)
     write_split_manifest(tmp_path / "missing" / "split.json", first)
     assert read_split_manifest(tmp_path / "missing" / "split.json") == first
@@ -222,8 +196,8 @@ def test_a_manifest_write_that_fails_keeps_the_old_manifest_and_raises_a_split_e
 
 
 def test_a_manifest_keeps_its_mode_and_its_symlink_when_replaced(tmp_path: Path) -> None:
-    first = split_by_source(SOURCES, eval_fraction=0.5, seed=1)
-    second = split_by_source(SOURCES, eval_fraction=0.5, seed=2)
+    first = SPLIT
+    second = TaskSplit(train=SPLIT.eval, eval=SPLIT.train, seed=2, eval_fraction=0.5)
     real = tmp_path / "runs" / "42" / "split.json"
     real.parent.mkdir(parents=True)
     write_split_manifest(real, first)

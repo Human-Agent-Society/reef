@@ -98,7 +98,7 @@ def test_root_attempts_group_together():
     processor.ingest(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
     assert processor.ready()
     batch = processor.build_batch()
-    assert ROOT_GROUP in batch.batch_id
+    assert {item.group_id for item in batch.items} == {ROOT_GROUP}
 
 
 def test_groups_do_not_mix_across_parents():

@@ -87,7 +87,7 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         _feed(dispatcher, "code", 2, "w2")
         wait_for_step(dispatcher, 2, scenario="code")
 
-        assert dispatcher._registry.training_scenario_names == ("math", "code")
+        assert dispatcher.registry.training_scenario_names == ("math", "code")
         assert runtime.scenarios == ["math", "code", "code"], "every job names the scenario whose adapter it trains"
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")

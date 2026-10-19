@@ -49,21 +49,30 @@ def recorded_request(payload: Mapping[str, Any]) -> tuple[list[Any], list[Any] |
     return messages, list(tools) if isinstance(tools, list) and tools else None
 
 
-def recorded_response(payload: Mapping[str, Any]) -> str:
-    """The text of a recorded inference's response: the final assistant message, or empty when it has none."""
+def recorded_response_message(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Return the final assistant message of a recorded inference's response, or None if there is no message.
+
+    For a completion choice without a message, return an assistant message with the text of the choice.
+    """
     message = recorded_training(payload).get("response_message")
     if isinstance(message, Mapping):
-        return flatten_content(message.get("content"))
+        return message
     response = payload.get("response")
     if not isinstance(response, Mapping):
-        return ""
+        return None
     choices = response.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
         message = choices[0].get("message")
         if isinstance(message, Mapping):
-            return flatten_content(message.get("content"))
-        return flatten_content(choices[0].get("text"))
-    return ""
+            return message
+        return {"role": "assistant", "content": flatten_content(choices[0].get("text"))}
+    return None
+
+
+def recorded_response(payload: Mapping[str, Any]) -> str:
+    """The text of a recorded inference's response: the final assistant message, or empty when it has none."""
+    message = recorded_response_message(payload)
+    return "" if message is None else flatten_content(message.get("content"))
 
 
 def flatten_content(content: Any) -> str:

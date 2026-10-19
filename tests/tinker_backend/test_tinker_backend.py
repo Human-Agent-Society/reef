@@ -516,7 +516,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         base = scenario.current_artifact_ref().release_id
         response = asyncio.run(
             runtime.inference.inference_handler.inference(
-                scenario.artifact_for_version(base),
+                scenario.release_queries.artifact_for_version(base),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hello"}]},
             )
@@ -549,7 +549,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         assert scenario.committed_training_job_id
         assert runtime.inference.inference_admission_status["open"]
         assert (
-            runtime.inference.snapshot(scenario.artifact_for_version(published.release_id))[0]
+            runtime.inference.snapshot(scenario.release_queries.artifact_for_version(published.release_id))[0]
             == "tinker://update-1/sampler"
         )
         assert runtime.training.incumbent.state_path == "tinker://update-1/state"
@@ -563,13 +563,13 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         assert scenario.scenario_step == 1
         assert scenario.trainer.state == {"steps": 1}
         assert (
-            restored.inference.snapshot(scenario.artifact_for_version(published.release_id))[1]
+            restored.inference.snapshot(scenario.release_queries.artifact_for_version(published.release_id))[1]
             == restored.inference.current_runtime_load_id()
         )
         assert restored.training.incumbent.state_path == "tinker://update-1/state"
         scenario.rollback(base)
         assert scenario.scenario_step == 2
-        current = scenario.artifact_for_version(scenario.current_artifact_ref().release_id)
+        current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)
         assert restored.inference.snapshot(current)[0] is None
         assert restored.training.incumbent.state_path == "tinker://base/state"
     finally:

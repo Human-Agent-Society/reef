@@ -69,7 +69,7 @@ class _LocalBackend(CandidateBackend):
 class _LocalRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -165,10 +165,10 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
             # A queued writer must wait on the operation lock without first
             # taking the publication lock and starving the read-side callers.
             catalog = executor.submit(scenario.releases)
-            latest = executor.submit(scenario.artifact_with_metrics)
-            historical = executor.submit(scenario.artifact_with_metrics, initial_ref.release_id)
-            version = executor.submit(scenario.artifact_for_version, current_ref.release_id)
-            old_version = executor.submit(scenario.artifact_for_version, initial_ref.release_id)
+            latest = executor.submit(scenario.release_queries.artifact_with_metrics)
+            historical = executor.submit(scenario.release_queries.artifact_with_metrics, initial_ref.release_id)
+            version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.release_id)
+            old_version = executor.submit(scenario.release_queries.artifact_for_version, initial_ref.release_id)
 
             assert catalog.result(timeout=2) == expected_releases
             artifact, metrics = latest.result(timeout=2)
@@ -192,7 +192,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
         if operation == "commit":
             assert writer.result(timeout=2) == {"steps": 2}
             assert scenario.scenario_step == 2
-            assert scenario.artifact_with_metrics()[1] == {"score": 2.0}
+            assert scenario.release_queries.artifact_with_metrics()[1] == {"score": 2.0}
         else:
             with pytest.raises(ReefError, match="pending commit"):
                 writer.result(timeout=2)
@@ -235,15 +235,15 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_latest():
         readers_started[1].set()
-        return scenario.artifact_with_metrics()
+        return scenario.release_queries.artifact_with_metrics()
 
     def read_historical():
         readers_started[2].set()
-        return scenario.artifact_with_metrics(previous_ref.release_id)
+        return scenario.release_queries.artifact_with_metrics(previous_ref.release_id)
 
     def read_version():
         readers_started[3].set()
-        return scenario.artifact_for_version(previous_ref.release_id)
+        return scenario.release_queries.artifact_for_version(previous_ref.release_id)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         writer = (

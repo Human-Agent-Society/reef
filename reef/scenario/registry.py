@@ -5,8 +5,10 @@ Owns the scenario dict, per-scenario RLocks, the scenario factory, and the
 training-binding invariant (at most one training scenario per process). All
 table access goes through this registry; the dispatcher delegates scenario
 resolution and uses the registry for lookups. Before the registry creates or
-loads a scenario, it asks its ``ScenarioAdmission``. To free a load slot, it
-asks its ``ScenarioUnloader`` (the dispatcher) to unload an idle scenario.
+loads a scenario, it asks its ``ScenarioAdmission``. Its owner (the
+dispatcher) implements ``ScenarioLifecycle``: the registry tells it when a
+scenario loads or a reload replaces an instance, and asks it to unload an
+idle scenario to free a load slot.
 """
 
 from __future__ import annotations
@@ -14,9 +16,10 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
+from enum import Enum
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
@@ -29,7 +32,7 @@ from reef.artifact.repository import (
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.observability.commits import LoadedExperimentReports
+from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ScenarioFactory
@@ -39,22 +42,20 @@ from reef.storage.scenario import ScenarioStorage
 logger = logging.getLogger(__name__)
 
 
-class ReplacedScenarioCloser(ABC):
-    """Closes the instance a reload replaced, now or once nothing runs on it any more."""
+class ScenarioLifecycle(ABC):
+    """The registry owner's part in loading, replacing and unloading scenarios."""
 
     @abstractmethod
-    def close_replaced(self, instance: Scenario) -> None: ...
+    def scenario_loaded(self, instance: Scenario) -> None:
+        """React to a scenario that the registry loaded from durable state or created.
 
+        The registry calls this method after ``instance`` enters its table,
+        outside the registry's own lock. A reload does not call it.
+        """
 
-class CloseReplacedAtOnce(ReplacedScenarioCloser):
-    """The registry's own closer: the replaced instance closes as the reload returns."""
-
+    @abstractmethod
     def close_replaced(self, instance: Scenario) -> None:
-        instance.close()
-
-
-class ScenarioUnloader(ABC):
-    """Unloads an idle scenario to free its load slot."""
+        """Close the instance that a reload replaced, now or once nothing runs on it any more."""
 
     @abstractmethod
     def unload_if_idle(self, scenario: str) -> bool:
@@ -64,11 +65,30 @@ class ScenarioUnloader(ABC):
         """
 
 
-class NeverUnload(ScenarioUnloader):
-    """The default unloader of the registry. Without a dispatcher, the registry cannot know that a scenario is idle."""
+class StandaloneLifecycle(ScenarioLifecycle):
+    """The lifecycle of a registry without an owner: replaced instances close at once, and nothing unloads.
+
+    Without a dispatcher, the registry cannot know that a scenario is idle.
+    """
+
+    def scenario_loaded(self, instance: Scenario) -> None:
+        return None
+
+    def close_replaced(self, instance: Scenario) -> None:
+        instance.close()
 
     def unload_if_idle(self, scenario: str) -> bool:
         return False
+
+
+class InstanceState(Enum):
+    """Whether a scenario instance is still the one in the registry's table."""
+
+    CURRENT = "current"
+    #: A reload loaded a new instance of the scenario.
+    REPLACED = "replaced"
+    #: The scenario was deleted or unloaded.
+    REMOVED = "removed"
 
 
 class ScenarioRegistry:
@@ -91,17 +111,20 @@ class ScenarioRegistry:
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
+        lifecycle: ScenarioLifecycle | None = None,
     ) -> None:
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
-        self.loaded_experiment_reports = LoadedExperimentReports()
+        tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        #: Delivers the experiment events of every scenario in this registry.
+        self.experiment_reports = ExperimentReportQueue(tracker)
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
-            loaded_experiment_reports=self.loaded_experiment_reports,
-            experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
+            experiment_reports=self.experiment_reports,
+            experiment_tracker=tracker,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -111,13 +134,11 @@ class ScenarioRegistry:
         #: Every training scenario in binding order; the first is the one a single-scenario runtime binds.
         self._training_scenarios: list[str] = []
         self._preload_errors: dict[str, str] = {}
-        self.replaced_closer: ReplacedScenarioCloser = CloseReplacedAtOnce()
+        self.lifecycle = lifecycle if lifecycle is not None else StandaloneLifecycle()
         self._allow_implicit_creation = allow_implicit_creation
-        self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
         self.admission = admission if admission is not None else ScenarioLimits()
         #: Makes admission serial, so that two loads cannot both take the last load slot.
         self.admission_lock = Lock()
-        self.unloader: ScenarioUnloader = NeverUnload()
         #: The ``time.monotonic()`` value of the last request, record or local cycle of each loaded scenario.
         self.last_used_at: dict[str, float] = {}
         #: The scenarios that admission let load and that are not loaded yet. Each one holds a load slot.
@@ -158,17 +179,6 @@ class ScenarioRegistry:
         with self._lock:
             self._preload_errors[scenario] = error
 
-    def set_training_scenario_callback(self, callback: Callable[[Scenario], None]) -> None:
-        self._on_training_scenario_resolved = callback
-
-    def set_replaced_closer(self, closer: ReplacedScenarioCloser) -> None:
-        """Who closes the instance a reload replaced: a local cycle may still evaluate on it."""
-        self.replaced_closer = closer
-
-    def set_unloader(self, unloader: ScenarioUnloader) -> None:
-        """Set the unloader that frees a load slot for admission."""
-        self.unloader = unloader
-
     def touch(self, scenario: str) -> None:
         """Record a use of a loaded scenario. A scenario that is not loaded is ignored."""
         with self._lock:
@@ -197,6 +207,29 @@ class ScenarioRegistry:
             return None
         with self._lock:
             return self._scenarios.get(scenario)
+
+    def instance_state(self, instance: Scenario) -> InstanceState:
+        """Whether ``instance`` is still the loaded instance of its scenario.
+
+        Without the scenario's lock the answer can change at once; see :meth:`lock_instance`.
+        """
+        loaded = self.get_optional(instance.name)
+        if loaded is instance:
+            return InstanceState.CURRENT
+        if loaded is None:
+            return InstanceState.REMOVED
+        return InstanceState.REPLACED
+
+    @contextmanager
+    def lock_instance(self, instance: Scenario) -> Iterator[InstanceState]:
+        """Take the lock of ``instance``'s scenario and yield whether ``instance`` is still loaded.
+
+        Use it after work that ran outside the lock on ``instance``: a reload,
+        a delete or an unload may have taken the instance out of the table
+        meanwhile, and the state stays the same while the lock is held.
+        """
+        with self.lock_for(instance.name):
+            yield self.instance_state(instance)
 
     def get_or_create(
         self,
@@ -265,7 +298,7 @@ class ScenarioRegistry:
 
     @contextmanager
     def lock_for(self, scenario: str, *, blocking: bool = True) -> Iterator[bool]:
-        """Yield whether access was acquired; report loaded commits after the outermost lock exits.
+        """Yield whether the scenario's lock was acquired.
 
         With ``blocking=False``, a busy scenario yields ``False`` without waiting.
         """
@@ -274,13 +307,12 @@ class ScenarioRegistry:
             if lock is None:
                 lock = RLock()
                 self._scenario_locks[scenario] = lock
-        with self.loaded_experiment_reports.scope():
-            acquired = lock.acquire(blocking=blocking)
-            try:
-                yield acquired
-            finally:
-                if acquired:
-                    lock.release()
+        acquired = lock.acquire(blocking=blocking)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                lock.release()
 
     def set_training_mode(self, scenario: str, training_mode: str) -> Scenario:
         """Select an existing scenario's mode and store it, so reloads and restarts apply it again."""
@@ -317,7 +349,7 @@ class ScenarioRegistry:
         """Rebuild a scenario from durable state after a training failure.
 
         Accepts and inference reach the new instance at once; the replaced
-        instance goes to the registry's closer (see ``set_replaced_closer``).
+        instance goes to the lifecycle's ``close_replaced``.
         """
         with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(
@@ -332,7 +364,7 @@ class ScenarioRegistry:
                 # Close outside the state lock: teardown may join processor
                 # worker threads. Accepts reach the recovered instance, so
                 # nothing observes the dropped instance mid-close.
-                self.replaced_closer.close_replaced(dropped)
+                self.lifecycle.close_replaced(dropped)
             return recovered
 
     def remove(self, scenario: str) -> Scenario | None:
@@ -448,8 +480,7 @@ class ScenarioRegistry:
                 self._training_scenarios.append(scenario)
             self._scenarios[scenario] = current
             self.last_used_at[scenario] = time.monotonic()
-        if training_runtime is not None and self._on_training_scenario_resolved is not None:
-            self._on_training_scenario_resolved(current)
+        self.lifecycle.scenario_loaded(current)
         return current
 
     def check_creation(self, scenario: str) -> None:
@@ -473,8 +504,8 @@ class ScenarioRegistry:
         too few, it raises ``ScenarioCapacityFull``.
 
         Lock order: the lock of ``scenario``, then the admission lock. The
-        unloader only tries the locks of other scenarios and never waits for
-        them, so no deadlock can occur.
+        lifecycle's ``unload_if_idle`` only tries the locks of other scenarios
+        and never waits for them, so no deadlock can occur.
         """
         with self.admission_lock:
             now = time.monotonic()
@@ -492,7 +523,7 @@ class ScenarioRegistry:
             for candidate in load_admission.candidates:
                 if unloaded_count == load_admission.unload_count:
                     break
-                if self.unloader.unload_if_idle(candidate):
+                if self.lifecycle.unload_if_idle(candidate):
                     unloaded_count += 1
             if unloaded_count < load_admission.unload_count:
                 logger.warning("refused to load scenario %r: too few loaded scenarios are idle", scenario)

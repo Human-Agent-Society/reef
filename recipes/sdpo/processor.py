@@ -245,8 +245,6 @@ class SDPOBatches(Task2Batch):
     step instead of dropping part of the grid.
     """
 
-    batch_label = "sdpo"
-
     def __init__(self, context: PipelineContext, settings: SDPODemonstrationSettings, record2task: SDPOTasks) -> None:
         self.renderer = record2task.renderer
         self.max_teacher_prompt_tokens = record2task.max_teacher_prompt_tokens
@@ -289,8 +287,8 @@ class SDPOBatches(Task2Batch):
             return THINKING_BLOCK.sub("", response) if self.remove_thinking_from_demonstration else response
         return None
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        batch = TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        batch = TrainingBatch(batch_id, items)
         samples = sorted(
             trajectories(batch), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
         )

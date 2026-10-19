@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -56,31 +56,6 @@ class _ArtifactHeadSync:
     error: str | None = None
 
 
-class SettledTrainingResultError(ReefError):
-    """A trainer's result is on record already: another trainer's commit settled its durable record first.
-
-    The caller read the result before that commit landed. Committing it again
-    would publish a second step with nothing behind it, so the caller looks
-    again instead; the step it would have made is in the log.
-    """
-
-
-class StaleTrainingResultError(ReefError):
-    """A local result was prepared against a release that another component's commit has since replaced.
-
-    The result is not attached to the newer combination. ``policy`` says what
-    the caller does with the batch: ``reevaluate`` keeps the prepared
-    candidate and evaluates it again against the release served now,
-    ``refuse`` keeps the batch alone and prepares it again. A backend whose
-    policy is ``merge``, and every dispatched backend, is never refused: see
-    :meth:`ScenarioCommitter.commit`.
-    """
-
-    def __init__(self, message: str, *, policy: str = "refuse") -> None:
-        super().__init__(message)
-        self.policy = policy
-
-
 class ScenarioCommitter:
     """Order one scenario's commit, rollback, and retry effects; delegate release queries."""
 
@@ -116,12 +91,13 @@ class ScenarioCommitter:
         self._lock = RLock()
         # A lone trainer's preparation holds the operation lock across proposer
         # calls and evaluation episodes, neither of which changes committed
-        # releases; with several trainers a preparation runs outside it and its
-        # result meets the commits made meanwhile at the commit boundary.
+        # releases. With several trainers a preparation runs outside it; the
+        # dispatcher still runs one step of the scenario at a time.
         # Readers share only the publication lock with commit and rollback.
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
-        self._releases = ScenarioReleases(
+        #: Read-only release queries. They share the publication lock with commit and rollback.
+        self.release_queries = ScenarioReleases(
             name=name,
             artifacts=artifacts,
             store=store,
@@ -171,14 +147,6 @@ class ScenarioCommitter:
             raise ValueError(f"scenario step must advance from {self._step} to {self._step + 1}")
         self._step = step
         self._commit_status = (step, self._latest_training_record, self._artifact_head_sync)
-
-    def releases(self) -> tuple[dict[str, Any], ...]:
-        with self._publication_lock:
-            return self._releases.releases(self._step)
-
-    def creation_components(self, scenario_step: int) -> Mapping[str, str] | None:
-        """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
-        return self._releases.creation_components(scenario_step)
 
     def bound_trainer(self, component: str | None) -> ComponentTrainer:
         """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
@@ -252,7 +220,7 @@ class ScenarioCommitter:
             return recorded.artifact_ref.content_id != served_id
         served_entry = next((entry.components[loaded] for entry in earlier if entry.components is not None), None)
         if served_entry is None:
-            creation = self._releases.creation_components(self._step, retry=True)
+            creation = self.release_queries.creation_components(self._step, retry=True)
             served_entry = None if creation is None else creation.get(loaded)
         recorded_entry = None if recorded.components is None else recorded.components.get(loaded)
         if recorded_entry is None or served_entry is None:
@@ -348,11 +316,11 @@ class ScenarioCommitter:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self.experiment_reporting(), self._lock, self._publication_lock:
+        with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if current_ref.release_id == release_id:
                 return current_ref
-            target = self._releases.find_release(release_id)
+            target = self.release_queries.find_release(release_id)
             if target is None:
                 raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
             target_ref, target_checkpoint = target
@@ -496,8 +464,8 @@ class ScenarioCommitter:
         if record.components is None or parent_id is None:
             return None
         carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
-        if carried is None and self._releases.creation_artifact.release_id == parent_id:
-            carried = self._releases.creation_components(self._step, retry=retry)
+        if carried is None and self.release_queries.creation_artifact.release_id == parent_id:
+            carried = self.release_queries.creation_components(self._step, retry=retry)
         if carried is None:
             return None
         return [name for name, content_id in record.components.items() if carried.get(name) != content_id]
@@ -510,7 +478,7 @@ class ScenarioCommitter:
         served at once rather than held for review for the same reason. Returns the
         new head, or ``None`` when the served release already carries the content.
         """
-        with self.experiment_reporting(), self._lock, self._publication_lock:
+        with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if isinstance(current_ref, LiveWeightArtifactRef):
                 return None
@@ -549,66 +517,18 @@ class ScenarioCommitter:
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
 
-        Several trainers of one scenario meet here: the scenario lock serializes
-        their commits. A result whose batch was reserved against a release
-        that another trainer has since replaced goes the way its backend's
-        ``stale_result_policy`` says: merged onto the release served now, with
-        the record's ``base_release_id`` naming the release the batch was
-        reserved against, or refused as :class:`StaleTrainingResultError` so
-        the caller evaluates the candidate again or prepares the batch again.
-        A dispatched result is always merged: the backend published its
-        weights before the result arrived and its job marker only moves
-        forward, so refusing it would leave that job unfinished and inference
-        admission paused for good.
+        The trainers of one scenario run one step at a time, so no other
+        trainer's commit lands while this step runs. The head is the release
+        that the step was prepared against.
         """
-        with self.experiment_reporting(), self._lock:
+        with self._lock:
             with self._publication_lock:
                 bound = self.bound_trainer(component)
                 trainer, component = bound.trainer, bound.component
-                self.settle_sibling_record(component)
-                if trainer.result_on_record(result):
-                    # A sibling's commit settled this trainer's durable record after the caller read the result.
-                    raise SettledTrainingResultError(
-                        f"scenario {self._name!r} component {component!r}: its result is on record already"
-                    )
                 next_step = self._step + 1
-                # Refuse a stale base before the trainer acknowledges its batch, so
-                # the batch stays whole for another preparation; a batch an earlier
-                # attempt acknowledged stays taken, and its retry records what that
-                # attempt consumed. Only another trainer can move the head under a
-                # reserved batch: a lone trainer finds its own failed attempt's
-                # head, and a step already in the log is a retry after a lost
-                # acknowledgment. Neither is stale. A result with no candidate (a
-                # skip) was not evaluated against any release, so it never is.
+                # A step that is in the log already is a retry after a lost acknowledgment.
                 records = self._store.history()
                 retrying = bool(records) and records[-1].step == next_step
-                base = trainer.pending_base_release_id
-                served = self._artifacts.current.release_id
-                if (
-                    not retrying
-                    and len(self.trainers) > 1
-                    and base is not None
-                    and base != served
-                    and trainer.pending_has_candidate
-                ):
-                    # A pending candidate comes from a local backend: a dispatched result carries none.
-                    backend = trainer.candidate_backend
-                    policy = "merge" if backend is None else backend.stale_result_policy
-                    if policy != "merge":
-                        raise StaleTrainingResultError(
-                            f"scenario {self._name!r} component {component!r} prepared its result against release "
-                            f"{base!r} but {served!r} is served now",
-                            policy=policy,
-                        )
-                    logger.info(
-                        "scenario %r component %r: merging a result reserved against release %r onto %r",
-                        self._name,
-                        component,
-                        base,
-                        served,
-                    )
-                    # The record names the base its batch was reserved against; the metrics say what it landed on.
-                    result = trainer.add_commit_metrics(result, {"merged_onto": served})
             # The operation lock keeps the step and source stable while tracker
             # I/O runs; published artifact readers need only the publication lock.
             if not retrying:
@@ -663,11 +583,6 @@ class ScenarioCommitter:
                         result, publication, prepared, trainer, component, checkpointed=checkpointed
                     )
                 return result.state
-
-    def experiment_reporting(self) -> AbstractContextManager[None]:
-        if self.experiment_observer is None:
-            return nullcontext()
-        return self.experiment_observer.reporting()
 
     def prepare_experiment(
         self, result: TrainStepResult, trainer: Trainer, step: int, component: str | None
@@ -831,7 +746,6 @@ class ScenarioCommitter:
             operation=operation,
             rollback_target_release_id=rollback_target_release_id,
             component=self.component_on_record(component),
-            base_release_id=self.base_release_on_record(prepared) if operation == "training" else None,
         )
         return {
             **dict(artifact.metadata),
@@ -947,37 +861,12 @@ class ScenarioCommitter:
         records = self._store.history()
         previous = next(
             (prior.artifact_ref for prior in reversed(records[:-1]) if not prior.pending),
-            self._releases.creation_artifact,
+            self.release_queries.creation_artifact,
         )
         self.finish_committed_step(
             prepared, record, trainer, expected=previous, expected_checkpoint=self._artifacts.checkpoint
         )
         return record
-
-    def settle_sibling_record(self, component: str | None) -> None:
-        """Settle another trainer's commit that reached the log but not memory, before ``component`` commits.
-
-        A commit can fail after its record is durable (a lost fsync
-        acknowledgment, a failed install); while a dispatched job is reserved
-        the failed trainer's reload waits, so the log holds a step the
-        committer has not advanced to. The failed trainer still holds the
-        prepared commit that record names: settling it here is the retry that
-        trainer would make, so the next commit takes the step after it.
-        """
-        records = self._store.history()
-        if not records or records[-1].step != self._step + 1:
-            return
-        record = records[-1]
-        if record.operation != "training" or self.own_record(record, component):
-            return
-        for bound in self.trainers:
-            if bound.component == component or not self.own_record(record, bound.component):
-                continue
-            prepared = bound.trainer.pending_prepared_commit
-            if prepared is None or not self._record_matches_prepared(record, prepared):
-                return
-            self.finish_recorded_retry(record, prepared, bound.trainer)
-            return
 
     def recorded_retry(
         self,
@@ -1043,34 +932,9 @@ class ScenarioCommitter:
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
-            base_release_id=self.base_release_on_record(prepared) if operation == "training" else None,
             components=components,
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 
-    def base_release_on_record(self, prepared: PreparedCommit) -> str | None:
-        """The release a batch was reserved against, recorded only where another trainer can replace it."""
-        return prepared.base_release_id if len(self.trainers) > 1 else None
 
-    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        return self._releases.entries_for_version(release_id)
-
-    def artifact_for_version(self, release_id: str) -> Artifact:
-        return self._releases.artifact_for_version(release_id)
-
-    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
-        with self._publication_lock:
-            found = self._releases.find_release(release_id)
-        return None if found is None else found[0]
-
-    def artifact_with_metrics(
-        self,
-        release_id: str | None = None,
-    ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        return self._releases.artifact_with_metrics(release_id)
-
-
-__all__ = [
-    "ScenarioCommitter",
-    "StaleTrainingResultError",
-]
+__all__ = ["ScenarioCommitter"]

@@ -47,6 +47,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
+from reef.storage.tasks import SplitSettings, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
 
@@ -103,6 +104,17 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
             f"{path}.runtime is not accepted: every component shares the deployment's runtime, set by recipe.runtime"
         )
     return settings
+
+
+class ComponentTaskStorage(TaskStorage):
+    """Opens the task stores of one component under ``<component>/<name>``, so components never share a store."""
+
+    def __init__(self, storage: TaskStorage, component: str) -> None:
+        self.storage = storage
+        self.component = component
+
+    def open(self, name: str, *, split: SplitSettings) -> TaskStore:
+        return self.storage.open(f"{self.component}/{name}", split=split)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -305,6 +317,7 @@ class CompositeRecipe(Recipe):
         surface: Surface,
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
@@ -316,6 +329,7 @@ class CompositeRecipe(Recipe):
                 records,
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
+                task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)

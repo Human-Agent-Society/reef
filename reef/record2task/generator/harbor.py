@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, TaskSplit, primary_reward, split_by_source
+from reef.core.tasks import HarborTask, primary_reward
 from reef.record2task.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -473,14 +473,3 @@ def oracle_check(
             reason = f"{reason}; the trial ended with {nop.exception}"
         return OracleResult(is_solvable=False, reason=reason, oracle_reward=oracle.reward, nop_reward=nop.reward)
     return OracleResult(is_solvable=True, reason="", oracle_reward=oracle.reward, nop_reward=nop.reward)
-
-
-def split_generation(tasks: Sequence[HarborTask], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Split one generation's tasks so that every task of one designer call lands in one split."""
-    names = [task.name for task in tasks]
-    repeated = sorted({name for name in names if names.count(name) > 1})
-    if repeated:
-        raise ValueError(f"tasks share a name: {', '.join(repeated)}")
-    return split_by_source(
-        {task.name: task.source_agent_record_ids for task in tasks}, eval_fraction=eval_fraction, seed=seed
-    )

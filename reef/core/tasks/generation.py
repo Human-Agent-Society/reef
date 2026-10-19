@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from reef.core.plugins import Plugin
 from reef.core.records_types import AgentRecord
@@ -152,12 +152,14 @@ class TaskPlayResult:
     episode that ran and returned no reward counts as 0. ``error`` is not
     empty when the task was not played: it failed validation, the task player
     refused it, or the agent could not start on it.
+    An eval task has no rewards and is not played, even with an empty error.
     """
 
     task: HarborTask
     training_rewards: tuple[float, ...] = ()
     measurement_rewards: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
     error: str = ""
+    split: Literal["train", "eval"] = "train"
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, HarborTask):
@@ -178,10 +180,14 @@ class TaskPlayResult:
             raise TypeError("error must be text")
         if self.error and (self.training_rewards or self.measurement_rewards):
             raise ValueError("a task that was not played has no rewards")
+        if self.split not in ("train", "eval"):
+            raise ValueError("task result split must be train or eval")
+        if self.split == "eval" and (self.training_rewards or self.measurement_rewards):
+            raise ValueError("an eval task result cannot contain rollout rewards")
 
     @property
     def is_played(self) -> bool:
-        return not self.error
+        return self.split == "train" and not self.error
 
 
 class TaskGenerator(Plugin, ABC):

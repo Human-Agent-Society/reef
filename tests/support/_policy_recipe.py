@@ -16,6 +16,7 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.interfaces import InferenceRuntime, TrainingMethod, TrainingRuntime
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.train.algos import StepScheduling
 from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 from reef.train.trainer import Trainer
@@ -51,6 +52,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         if experiment_logger is not None:
             experiment_logger.log({"batch_size": self.batch_size}, namespace="recipe")

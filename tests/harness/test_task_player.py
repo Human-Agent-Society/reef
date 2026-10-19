@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import HarborTask, read_split_manifest, split_by_source, write_harbor_task, write_split_manifest
+from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
@@ -432,7 +432,7 @@ def test_main_plays_one_side_of_a_manifest_and_prints_a_line_per_task(
     root = tmp_path / "tasks"
     for name, record in (("t1", "r1"), ("t2", "r2"), ("t3", "r3"), ("t4", "r4")):
         written_task(root, name, record)
-    split = split_by_source({"t1": ["r1"], "t2": ["r2"], "t3": ["r3"], "t4": ["r4"]}, eval_fraction=0.5, seed=3)
+    split = TaskSplit(train=("t1", "t3"), eval=("t2", "t4"), seed=3, eval_fraction=0.5)
     manifest = tmp_path / "manifest.json"
     write_split_manifest(manifest, split)
     train_names = list(read_split_manifest(manifest).train)

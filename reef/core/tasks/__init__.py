@@ -22,7 +22,6 @@ from reef.core.tasks.split import (
     TaskSplitError,
     manifest_task_paths,
     read_split_manifest,
-    split_by_source,
     write_split_manifest,
 )
 
@@ -43,7 +42,6 @@ __all__ = [
     "primary_reward",
     "read_harbor_task",
     "read_split_manifest",
-    "split_by_source",
     "write_harbor_task",
     "write_split_manifest",
 ]

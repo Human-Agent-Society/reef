@@ -93,6 +93,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         rollout_external=mode == "external",
         keep_lora_base_resident=mode == "lora-colocate-keep-base",
         disjoint_prefix_sharing=False,
+        reef_checkpoint_interval=1,
     )
 
     class Algorithm:
@@ -136,3 +137,54 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
     assert plan.training.weight_transfer_protocol is not None
+
+
+@pytest.mark.parametrize(
+    ("artifact_interval", "checkpoint_interval", "refused"),
+    [(None, 1, False), (8, 4, False), (None, 4, True), (6, 4, True)],
+)
+def test_the_artifact_cadence_must_be_a_multiple_of_the_checkpoint_interval(
+    monkeypatch, artifact_interval, checkpoint_interval, refused
+):
+    from types import SimpleNamespace
+
+    from reef.train.slime_backend import driver
+    from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
+
+    class Algorithm:
+        def parse_driver_options(self, arguments):
+            return None, arguments
+
+        def apply_driver_options(self, args, config):
+            pass
+
+        def validate_backend_args(self, args, recipe):
+            pass
+
+    class PreparedBridge(Exception):
+        pass
+
+    def prepare_bridge(*args, **kwargs):
+        raise PreparedBridge
+
+    monkeypatch.setenv("RAY_ADDRESS", "external")
+    monkeypatch.setattr(driver, "resolve_loss_family", lambda name: Algorithm())
+    monkeypatch.setattr(
+        driver, "_parse_slime_args", lambda arguments: SimpleNamespace(reef_checkpoint_interval=checkpoint_interval)
+    )
+    for name in (
+        "_configure_executors",
+        "_validate_tracking_args",
+        "_apply_bridge_resume_fallback",
+        "_apply_unsaved_optimizer_resume",
+        "_stamp_loss_family_reference",
+    ):
+        monkeypatch.setattr(driver, name, lambda *args: None)
+    monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda *args: None)
+    monkeypatch.setattr(bridge, "prepare_bridge", prepare_bridge)
+    reef = {} if artifact_interval is None else {"checkpoint_every_n_versions": artifact_interval}
+
+    with pytest.raises(RuntimeError if refused else PreparedBridge) as raised:
+        driver.create_training_plan({"reef": reef}, loss_family="loss")
+    if refused:
+        assert "must be a multiple of --reef-checkpoint-interval" in str(raised.value)
