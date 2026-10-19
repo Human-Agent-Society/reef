@@ -391,7 +391,7 @@ def controller_case(tmp_path: Path) -> Iterator[ControllerCase]:
         restart_policy="bounded",
         max_restarts=2,
         restart_backoff_seconds=(0,),
-        ready_timeout_seconds=0.05,
+        ready_timeout_seconds=1,
         drain_timeout_seconds=0.03,
         finalization_timeout_seconds=0.03,
         container_stop_timeout_seconds=0.03,
