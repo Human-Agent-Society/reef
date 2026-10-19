@@ -68,7 +68,7 @@ class DeploymentRegistry:
         self.lock_owner_pid: int | None = None
 
     def acquire(self) -> None:
-        # External-mode imports remain usable without this POSIX-only facility.
+        # Delay the POSIX-only import so this module can be imported on other platforms.
         import fcntl
 
         if self.lock_descriptor is not None:

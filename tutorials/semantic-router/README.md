@@ -50,8 +50,14 @@ Run every command from the repository root.
 ## 1. Build the Semantic Router image
 
 `third_party/semantic-router` pins the upstream source at commit
-`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified. Build it into a local
-image and note its digest:
+`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified.
+
+The example manifest pins the local image used for the real-inference test:
+`reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1`.
+This is not a published image. On another host, build the pinned source below
+and replace the example reference with your image's repository digest.
+
+Build the pinned source into a local image and note its digest:
 
 ```bash
 PIN=c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59
@@ -74,6 +80,12 @@ keeps no repository digest for local builds. Then push the image to a registry
 you control, for example a local `registry:2`, and use the digest that the push
 reports. `reef serve` never pulls or builds the image; it must already be
 present on the host.
+
+Before creating a container, including during recovery, Reef checks that the
+image's `org.opencontainers.image.revision` label exactly matches the pinned
+source commit above. A missing or different label prevents startup. Keep the
+label when building your image. This checks the image's declared source version;
+it does not prove that the binaries were built from that source.
 
 ## 2. Start the model services
 

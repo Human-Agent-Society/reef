@@ -6,12 +6,16 @@ import signal
 import subprocess
 import sys
 import textwrap
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import yaml
 
 from reef.service.deploy import orchestrator
+from reef.service.deploy.routing_containers import ContainerRuntime
+from reef.service.deploy.service_config import ServiceConfig
 
 pytestmark = pytest.mark.unit
 
@@ -142,7 +146,7 @@ LIFECYCLE_EVENTS = ["prepare", "start", "steady", "stopping", "shutdown", "clean
 
 
 @pytest.mark.parametrize("phase", LIFECYCLE_EVENTS)
-def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path, phase):
+def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path: Path, phase: str) -> None:
     owner = run_managed_owner(tmp_path, phase, "default")
     # The owner survives and completes every cleanup step; the signal became one reload request.
     assert owner["code"] == 0
@@ -154,7 +158,7 @@ def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path, 
     assert owner["restored"] is True
 
 
-def test_managed_owner_restores_a_custom_sighup_handler_it_never_calls(tmp_path):
+def test_managed_owner_restores_a_custom_sighup_handler_it_never_calls(tmp_path: Path) -> None:
     owner = run_managed_owner(tmp_path, "prepare", "custom")
     assert owner["reloads"] == ["prepare"]
     assert owner["restored"] is True
@@ -162,15 +166,17 @@ def test_managed_owner_restores_a_custom_sighup_handler_it_never_calls(tmp_path)
     assert owner["previous_calls"] == [signal.SIGHUP]
 
 
-def test_an_ordinary_deployment_never_installs_a_sighup_handler(tmp_path, monkeypatch):
+def test_an_ordinary_deployment_never_installs_a_sighup_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     installed = []
     monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: installed.append(signum))
 
     class Stack(orchestrator._Stack):
-        def start(self):
+        def start(self) -> None:
             pass
 
-        def run_until_stopped(self):
+        def run_until_stopped(self) -> None:
             pass
 
     monkeypatch.setattr(orchestrator, "_Stack", Stack)
@@ -189,41 +195,53 @@ def test_an_ordinary_deployment_never_installs_a_sighup_handler(tmp_path, monkey
     assert signal.SIGHUP not in installed
 
 
-def test_managed_object_config_prepares_controller_and_private_child(tmp_path, monkeypatch):
+def test_managed_object_config_prepares_controller_and_private_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     observed = {}
 
     class Controller:
-        def __init__(self, settings, runtime):
+        def __init__(self, settings: ServiceConfig, runtime: ContainerRuntime) -> None:
             observed["deployment_id"] = settings.routing_deployment.deployment_id
             self.directory = tmp_path / "generation"
             self.stop_requested = False
             self.closed = False
 
-        def prepare(self):
+        def prepare(self) -> None:
             observed["prepared"] = True
 
-        def shutdown(self):
+        def shutdown(self) -> None:
             self.closed = True
             observed["closed"] = True
 
-        def release_control_directory(self):
+        def release_control_directory(self) -> None:
             # Only after the stack, and so the REEF child, has stopped.
             observed["control_released_after_close"] = self.closed
 
     class Stack:
-        def __init__(self, config, services, run_dir, timeout, path, *, source_root, routing_controller):
+        def __init__(
+            self,
+            config: dict[str, dict[str, object]],
+            services: Sequence[dict[str, object]],
+            run_dir: Path,
+            timeout: int,
+            path: str | Path,
+            *,
+            source_root: Path | None,
+            routing_controller: Controller,
+        ) -> None:
             observed["manifest"] = config["reef"]["routing_manifest"]
             observed["control_file"] = services[0]["env"]["REEF_ROUTING_CONTROL_FILE"]
             observed["controller"] = routing_controller
             self.exit_code = 0
 
-        def start(self):
+        def start(self) -> None:
             observed["started"] = True
 
-        def block(self):
+        def block(self) -> None:
             pass
 
-        def shutdown(self):
+        def shutdown(self) -> None:
             pass
 
     monkeypatch.setattr(orchestrator, "RoutingDeploymentController", Controller)
@@ -262,8 +280,10 @@ def test_managed_object_config_prepares_controller_and_private_child(tmp_path, m
         ({"restart_policy": "always"}, "restart_policy must be fail_stop or bounded"),
     ],
 )
-def test_invalid_routing_settings_stop_before_any_process_starts(tmp_path, monkeypatch, invalid, message):
-    def forbidden(*args, **kwargs):
+def test_invalid_routing_settings_stop_before_any_process_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: dict[str, str | int], message: str
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> NoReturn:
         pytest.fail("an invalid routing configuration reached the controller or stack")
 
     monkeypatch.setattr(orchestrator, "RoutingDeploymentController", forbidden)
@@ -286,7 +306,7 @@ def test_invalid_routing_settings_stop_before_any_process_starts(tmp_path, monke
         orchestrator._run_orchestrator(str(path))
 
 
-def test_managed_child_existing_runtime_config_becomes_private(tmp_path):
+def test_managed_child_existing_runtime_config_becomes_private(tmp_path: Path) -> None:
     import stat
 
     from reef.service.deploy.process import ProcessWorker
@@ -314,24 +334,24 @@ def test_managed_child_existing_runtime_config_becomes_private(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_unexpected_routing_cleanup_exception_still_stops_native_executor(tmp_path):
+def test_unexpected_routing_cleanup_exception_still_stops_native_executor(tmp_path: Path) -> None:
     actions = []
 
     class Controller:
-        def request_stop(self, **kwargs):
+        def request_stop(self, *, force: bool = False) -> None:
             actions.append("routing-stop")
 
-        def shutdown(self):
+        def shutdown(self) -> NoReturn:
             raise ValueError("malformed dependency reply")
 
     class Executor:
-        def rpc(self, worker, method, **kwargs):
+        def rpc(self, worker: int, method: str, **kwargs: object) -> tuple[str, int] | bool:
             actions.append(method)
             if method == "read_log":
                 return "", 0
             return False
 
-        def shutdown(self):
+        def shutdown(self) -> None:
             actions.append("executor-shutdown")
 
     stack = orchestrator._Stack({}, [], tmp_path, 1, tmp_path / "config", routing_controller=Controller())
@@ -341,15 +361,15 @@ def test_unexpected_routing_cleanup_exception_still_stops_native_executor(tmp_pa
     assert stack.exit_code == 1
 
 
-def test_watchdog_child_exit_interrupts_routing_recovery(tmp_path):
+def test_watchdog_child_exit_interrupts_routing_recovery(tmp_path: Path) -> None:
     stopped = []
 
     class Controller:
-        def request_stop(self):
+        def request_stop(self) -> None:
             stopped.append(True)
 
     class Executor:
-        def rpc(self, worker, method, **kwargs):
+        def rpc(self, worker: int, method: str, **kwargs: object) -> tuple[str, int] | dict[str, int]:
             return ("", 0) if method == "read_log" else {"reef": 1}
 
     stack = orchestrator._Stack({}, [], tmp_path, 1, tmp_path / "config", routing_controller=Controller())

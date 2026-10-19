@@ -10,10 +10,11 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientSession, web
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.routing_fakes import (
     ROUTER_HASH,
@@ -27,6 +28,7 @@ from tests.reef_service.routing_fakes import (
 )
 from yarl import URL
 
+from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
 from reef.service.lifecycle import (
@@ -41,6 +43,7 @@ from reef.service.lifecycle import (
 )
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.wire import RequestHeaders
 
 pytestmark = pytest.mark.unit
 
@@ -78,10 +81,10 @@ class ManagedClients:
     def route(self, path: str | URL) -> TestClient:
         return self.control if path == "/reef/lifecycle" else self.public
 
-    async def get(self, path: str | URL, **options: object):
+    async def get(self, path: str | URL, **options: object) -> ClientResponse:
         return await self.route(path).get(path, **options)
 
-    async def post(self, path: str | URL, **options: object):
+    async def post(self, path: str | URL, **options: object) -> ClientResponse:
         return await self.route(path).post(path, **options)
 
 
@@ -89,11 +92,11 @@ def client_for(acceptance: RequestAcceptance) -> ManagedClients:
     return ManagedClients(acceptance)
 
 
-def settings(**overrides) -> LifecycleSettings:
-    return LifecycleSettings("deployment", "generation", "control", "snapshot", **overrides)
+def settings() -> LifecycleSettings:
+    return LifecycleSettings("deployment", "generation", "control", "snapshot")
 
 
-def command(action: str, revision: int = 0, **overrides) -> dict[str, object]:
+def command(action: str, revision: int = 0, **overrides: object) -> dict[str, object]:
     return {
         "deployment_id": "deployment",
         "generation": "generation",
@@ -165,7 +168,7 @@ def test_an_admitted_upload_counts_toward_the_drain(action: str) -> None:
         body_finish = asyncio.Event()
         calls = []
 
-        async def upload():
+        async def upload() -> AsyncIterator[bytes]:
             yield b'{"model":'
             body_started.set()
             await body_finish.wait()
@@ -379,12 +382,14 @@ def test_cancelled_record_write_is_retained_and_submitted_once() -> None:
     asyncio.run(run())
 
 
-def test_cancelled_scenario_initialization_remains_in_finalization(tmp_path: Path, monkeypatch) -> None:
+def test_cancelled_scenario_initialization_remains_in_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     started = threading.Event()
     finish = threading.Event()
     original = RequestService.inference_scenario
 
-    def initialize(service, parsed, *, record):
+    def initialize(service: RequestService, parsed: RequestHeaders, *, record: bool) -> Scenario:
         started.set()
         if not finish.wait(5):
             raise TimeoutError("test initialization was not released")
@@ -736,7 +741,8 @@ def test_managed_server_keeps_control_on_its_socket_and_never_dispatches_for_a_g
                 loaded = dispatcher.loaded_scenario("coding")
                 assert loaded is None or loaded.records.replay("coding") == ()
             finally:
-                os.kill(os.getpid(), signal.SIGTERM)
+                if not server.done():
+                    os.kill(os.getpid(), signal.SIGTERM)
                 await asyncio.wait_for(server, 10)
         # The server unlinked only its own socket; the private directory is the owner's to remove.
         assert not control_socket.exists() and directory.exists()

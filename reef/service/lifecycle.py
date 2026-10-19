@@ -27,14 +27,16 @@ import signal
 import stat
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar, cast
 
 from aiohttp import web
+from aiohttp.typedefs import Middleware
 
+from reef.service.deploy.routing_control import MAX_SOCKET_PATH_BYTES
 from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")
@@ -73,7 +75,8 @@ class LifecycleSettings:
         if self.router_config_hash and not is_router_config_hash(self.router_config_hash):
             raise ValueError("lifecycle router_config_hash must be 64 lowercase hexadecimal characters")
         if self.control_socket and (
-            not Path(self.control_socket).is_absolute() or len(os.fsencode(self.control_socket)) > 103
+            not Path(self.control_socket).is_absolute()
+            or len(os.fsencode(self.control_socket)) > MAX_SOCKET_PATH_BYTES
         ):
             raise ValueError("lifecycle control_socket must be a short absolute path")
 
@@ -363,7 +366,7 @@ class RequestAcceptance:
 REQUEST_ACCEPTANCE = web.AppKey("reef_request_acceptance", RequestAcceptance)
 
 
-def create_acceptance_middleware(acceptance: RequestAcceptance):
+def create_acceptance_middleware(acceptance: RequestAcceptance) -> Middleware:
     @web.middleware
     async def manage_request(
         request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -530,7 +533,7 @@ def configure_owner_watch(app: web.Application, acceptance: RequestAcceptance, o
     if owner_fd < 0:
         raise ValueError("owner pipe descriptor must be nonnegative")
 
-    async def watch_owner(app: web.Application):
+    async def watch_owner(app: web.Application) -> AsyncIterator[None]:
         loop = asyncio.get_running_loop()
         lost = asyncio.Event()
         os.set_blocking(owner_fd, False)

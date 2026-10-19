@@ -19,11 +19,13 @@ class UnixHTTPServer(ThreadingUnixStreamServer):
 
 
 @pytest.mark.parametrize(("status", "retryable"), [(200, None), (302, False), (409, True), (503, True)])
-def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(monkeypatch, status, retryable):
+def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
+    monkeypatch: pytest.MonkeyPatch, status: int, retryable: bool | None
+) -> None:
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
+        def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers["Content-Length"]))
             requests.append((self.path, self.headers["Authorization"], body))
             self.send_response(status)
@@ -33,10 +35,10 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(mon
             self.end_headers()
             self.wfile.write(b'{"accepting":false}')
 
-        def address_string(self):
+        def address_string(self) -> str:
             return "control-socket"
 
-        def log_message(self, format, *args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     with tempfile.TemporaryDirectory(prefix="reef-ctl-") as directory:
@@ -88,6 +90,6 @@ def test_the_client_never_connects_over_tcp(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("body", [b"invalid", b"\xff", b"[]"])
-def test_invalid_control_json_is_a_typed_error(body):
+def test_invalid_control_json_is_a_typed_error(body: bytes) -> None:
     with pytest.raises(RoutingControlError):
         json_object(body)

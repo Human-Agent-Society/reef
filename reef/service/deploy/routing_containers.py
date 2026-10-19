@@ -20,8 +20,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from reef.runtime.recovery import fsync_dir
 from reef.service.deploy.routing_registry import DeploymentOwnership, RoutingOwnershipError
+
+# Kept in sync with the submodule gitlink by the source dependency test; wheels need no Git checkout.
+SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"
 
 
 class ContainerCommandError(RuntimeError):
@@ -402,6 +407,16 @@ class DockerComposeRuntime(ContainerRuntime):
         inventory = self.inspect(ownership)
         if inventory.containers or inventory.network_ids:
             raise ContainerCommandError("routing resources already exist; reconcile before creating a new group")
+        # The private Compose file comes from our renderer and already has a validated digest reference.
+        image = yaml.safe_load(compose_file.read_text())["services"]["semantic-router"]["image"]
+        try:
+            labels = json.loads(self.run(["image", "inspect", "--format", "{{json .Config.Labels}}", image]))
+        except json.JSONDecodeError:
+            raise ContainerCommandError("invalid Docker image revision metadata") from None
+        if not isinstance(labels, dict) or labels.get("org.opencontainers.image.revision") != SEMANTIC_ROUTER_REVISION:
+            raise ContainerCommandError(
+                f"SR image revision must match the pinned submodule commit {SEMANTIC_ROUTER_REVISION}"
+            )
         self.mutate(
             [
                 "compose",

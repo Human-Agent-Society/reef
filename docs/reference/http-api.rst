@@ -156,7 +156,7 @@ This tag is separate from ``x-reef-release-id``, which binds a scenario to its
 starting release.
 
 Routed external-model requests
------------------------------
+------------------------------
 
 When `Scenario routing <configuration.rst#scenario-routing-between-students-and-teachers>`__
 is enabled, clients send ``POST /v1/chat/completions`` directly to Reef with a

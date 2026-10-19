@@ -32,8 +32,6 @@ from reef.service.deploy.routing_containers import (
 )
 from reef.service.deploy.routing_control import MAX_SOCKET_PATH_BYTES, ReefLifecycleClient, RoutingControlError
 from reef.service.deploy.routing_policy import (
-    ACTIVATION_ACTIVE,
-    ACTIVATION_FAILED,
     PolicyStateStore,
     RouterManagementClient,
     RouterPolicyError,
@@ -52,6 +50,9 @@ from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
 #: Consecutive failed router readiness checks before the router counts as failed.
 READINESS_FAILURE_LIMIT = 3
+#: The router's activation states (``pkg/apiserver/config_activation.go`` at the pinned commit).
+ACTIVATION_ACTIVE = "active"
+ACTIVATION_FAILED = "failed"
 
 
 class RoutingDeploymentError(RuntimeError):

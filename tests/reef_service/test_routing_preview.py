@@ -1,8 +1,8 @@
 """Contract tests for the routing preview client.
 
 Every server here is a fake Semantic Router on loopback. These tests check
-what the client sends and how it judges replies; they say nothing about the
-real router, which the M0 harness checks.
+what the client sends and how it validates replies. They do not verify the
+real router's behavior.
 """
 
 from __future__ import annotations

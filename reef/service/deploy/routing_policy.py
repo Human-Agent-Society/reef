@@ -19,10 +19,6 @@ from pathlib import Path
 
 from reef.runtime.recovery import fsync_dir, write_json
 
-#: The router's activation states (``pkg/apiserver/config_activation.go`` at the pinned commit).
-ACTIVATION_ACTIVE = "active"
-ACTIVATION_FAILED = "failed"
-
 
 class RouterPolicyError(RuntimeError):
     """The router's configuration cannot be confirmed as this owner's committed or candidate document.

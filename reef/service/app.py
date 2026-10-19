@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -53,7 +53,9 @@ def get_dispatcher(app: web.Application) -> Dispatcher:
 
 
 @web.middleware
-async def routed_routes_only(request: web.Request, handler):
+async def routed_routes_only(
+    request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+) -> web.StreamResponse:
     """Answer 404 for every route a routed deployment does not serve, before the route runs."""
     if (request.method, request.path) not in ROUTED_PUBLIC_ROUTES:
         raise web.HTTPNotFound(text=f"{request.method} {request.path} is not served by a routed deployment")
@@ -194,7 +196,7 @@ def create_app(
     )
     if routing is not None and preview_client is not None:
 
-        async def run_selection(app: web.Application):
+        async def run_selection(app: web.Application) -> AsyncIterator[None]:
             # One reusable router session for the app's lifetime, closed after requests have drained.
             await preview_client.start()
             try:

@@ -707,7 +707,7 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
 
 
 @pytest.mark.parametrize("kind", ["rejected", "unchanged"])
-def test_diagnostic_policy_outcome_keeps_following_reload_live(case, kind):
+def test_diagnostic_policy_outcome_keeps_following_reload_live(case: PolicyCase, kind: str) -> None:
     if kind == "rejected":
         write_source(case.source, revision="unsupported-revision-change")
     reload(case)
@@ -720,7 +720,7 @@ def test_diagnostic_policy_outcome_keeps_following_reload_live(case, kind):
 
 
 @pytest.mark.parametrize("kind", ["rejected", "unchanged"])
-def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case, kind):
+def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case: PolicyCase, kind: str) -> None:
     if kind == "rejected":
         write_source(case.source, revision="unsupported-revision-change")
     reload(case)

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import yaml
@@ -184,7 +185,7 @@ def test_print_config_for_a_provider_needs_no_training_imports(tmp_path):
 
 
 @pytest.mark.parametrize("token_key", ["client_token", "client-token"])
-def test_an_unknown_routing_credential_is_refused_without_repeating_it(tmp_path, token_key):
+def test_an_unknown_routing_credential_is_refused_without_repeating_it(tmp_path: Path, token_key: str) -> None:
     raw = {
         "reef": {"routing_deployment": {"deployment_id": "test-routing", token_key: "routing-client-secret"}},
         "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "student"},
@@ -196,8 +197,10 @@ def test_an_unknown_routing_credential_is_refused_without_repeating_it(tmp_path,
 
 
 @pytest.mark.usefixtures("idle_stack")
-def test_print_config_reports_a_cli_routing_object_without_creating_a_deployment(tmp_path, monkeypatch, capsys):
-    def must_not_run(*args, **kwargs):
+def test_print_config_reports_a_cli_routing_object_without_creating_a_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def must_not_run(*args: object, **kwargs: object) -> NoReturn:
         pytest.fail("--print-config must not create a routing deployment")
 
     monkeypatch.setattr(orchestrator, "RoutingDeploymentController", must_not_run)

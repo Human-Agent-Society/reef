@@ -109,6 +109,12 @@ and a routed Reef child; there is no separately launched mode. This requires
 Linux, a local Docker daemon with Compose, and the local ``uni`` service
 executor. External model services remain independently managed. The SR image
 must already be available locally and pinned by digest in the manifest.
+Before starting or recreating the container, Reef checks that the image's
+``org.opencontainers.image.revision`` label matches the SR commit pinned by
+this Reef release. A missing or different label prevents container creation.
+This checks declared source metadata, not the binaries themselves. See the
+`image build instructions <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__
+for the required commit and label.
 
 .. code-block:: yaml
 

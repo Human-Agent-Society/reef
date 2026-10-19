@@ -1,8 +1,8 @@
 schema_version: 2
 automatic_model: auto
 deployment:
-  # The official SR image, pinned by digest (for example <repository>@sha256:090b8160...).
-  semantic_router_image: REPLACE_WITH_UPSTREAM_SR_REPOSITORY_AND_DIGEST
+  # Local image used for the real-inference test; see README.md to build it on another host.
+  semantic_router_image: reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1
 targets:
   code-student:
     provider_model: code-student

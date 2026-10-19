@@ -6,9 +6,10 @@ import asyncio
 import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import yaml
@@ -28,6 +29,7 @@ from reef.service.deploy.routing_config import RoutingDeploymentSettings
 from reef.service.deploy.routing_containers import ContainerEvent
 from reef.service.deploy.routing_control import RoutingControlError
 from reef.service.deploy.routing_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing_registry import DeploymentOwnership
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
 
@@ -59,24 +61,35 @@ def deployment_config(directory: Path, *, managed: bool = False) -> Path:
     return path
 
 
-def test_unrouted_deployment_does_not_construct_controller_or_touch_docker(tmp_path: Path, monkeypatch) -> None:
+def test_unrouted_deployment_does_not_construct_controller_or_touch_docker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     actions = []
 
-    def forbidden(*args, **kwargs):
+    def forbidden(*args: object, **kwargs: object) -> NoReturn:
         pytest.fail("a deployment without routing reached a managed Docker/controller boundary")
 
     class NativeStack:
-        def __init__(self, config, services, run_dir, timeout, path, *, source_root):
+        def __init__(
+            self,
+            config: dict[str, object],
+            services: Sequence[dict[str, object]],
+            run_dir: Path,
+            timeout: int,
+            path: str | Path,
+            *,
+            source_root: Path | None,
+        ) -> None:
             assert all("REEF_ROUTING_CONTROL_FILE" not in service.get("env", {}) for service in services)
             self.exit_code = 0
 
-        def start(self):
+        def start(self) -> None:
             actions.append("start")
 
-        def block(self):
+        def block(self) -> None:
             actions.append("block")
 
-        def shutdown(self):
+        def shutdown(self) -> None:
             actions.append("shutdown")
 
     monkeypatch.setattr(orchestrator, "DockerComposeRuntime", forbidden)
@@ -105,7 +118,9 @@ def test_unrouted_app_does_not_register_private_lifecycle(tmp_path: Path) -> Non
         dispatcher.close()
 
 
-def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_force(tmp_path: Path, monkeypatch) -> None:
+def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     actions = []
     runtime = FakeRuntime(actions)
     policy = RoutingDeploymentSettings(
@@ -126,23 +141,23 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
     original_start, original_remove = runtime.start, runtime.remove
     previous_term, previous_int = signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)
 
-    def slow_create(*args):
+    def slow_create(compose_file: Path, ownership: DeploymentOwnership, timeout_seconds: float) -> None:
         actions.append("create-entered")
         created.set()
         if not released.wait(5):
             raise TimeoutError("test did not release container creation")
-        original_start(*args)
+        original_start(compose_file, ownership, timeout_seconds)
         actions.append("create-completed")
 
-    def second_signal_then_remove(*args):
+    def second_signal_then_remove(ownership: DeploymentOwnership, stop_timeout_seconds: float) -> None:
         handler = signal.getsignal(signal.SIGINT)
         assert callable(handler)
         handler(signal.SIGINT, None)
         actions.append("second-signal")
         assert controller.force_stop_requested
-        original_remove(*args)
+        original_remove(ownership, stop_timeout_seconds)
 
-    def signal_during_create():
+    def signal_during_create() -> None:
         if not created.wait(5):
             return
         try:
@@ -155,10 +170,22 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
             released.set()
 
     class RoutingOnlyStack(orchestrator._Stack):
-        def __init__(self, config, services, run_dir, timeout, path, **kwargs):
+        def __init__(
+            self,
+            config: dict[str, object],
+            services: Sequence[dict[str, object]],
+            run_dir: Path,
+            timeout: int,
+            path: str | Path,
+            *,
+            source_root: Path | None,
+            routing_controller: RoutingDeploymentController,
+        ) -> None:
             # Exercise real startup/rollback, while native child readiness is
             # represented by the fixture's private control endpoint.
-            super().__init__(config, [], run_dir, timeout, path, **kwargs)
+            super().__init__(
+                config, [], run_dir, timeout, path, source_root=source_root, routing_controller=routing_controller
+            )
 
     monkeypatch.setattr(controller, "prepare", lambda: None)
     monkeypatch.setattr(runtime, "start", slow_create)
@@ -197,7 +224,9 @@ def test_event_reconnect_waits_for_write_completion_and_rechecks_open_conflict(
     attempts = []
     status_after_conflict = []
 
-    def request(action=None, *, cancel_active=False, publication=None):
+    def request(
+        action: str | None = None, *, cancel_active: bool = False, publication: dict[str, str] | None = None
+    ) -> dict[str, object]:
         if action is None:
             if attempts:
                 status_after_conflict.append(True)
@@ -223,13 +252,17 @@ def test_event_reconnect_waits_for_write_completion_and_rechecks_open_conflict(
         assert time.monotonic() >= release_at
 
 
-def test_reconnect_open_conflict_never_retries_a_changed_generation(case: ControllerCase, monkeypatch) -> None:
+def test_reconnect_open_conflict_never_retries_a_changed_generation(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     opened(case)
     case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=1)
     original_request = case.control.request
     attempts = []
 
-    def request(action=None, *, cancel_active=False, publication=None):
+    def request(
+        action: str | None = None, *, cancel_active: bool = False, publication: dict[str, str] | None = None
+    ) -> dict[str, object]:
         if action == "open":
             attempts.append(True)
             case.control.generation = "different-generation"

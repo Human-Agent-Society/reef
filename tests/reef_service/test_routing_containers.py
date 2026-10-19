@@ -12,14 +12,19 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+import yaml
+from tests.reef_service.routing_fakes import routing_manifest
 
+from reef.service.deploy.routing_config import RoutingDeploymentSettings
 from reef.service.deploy.routing_containers import (
+    SEMANTIC_ROUTER_REVISION,
     ContainerCommandError,
     DockerComposeRuntime,
     DockerEventStream,
     GuardedCommand,
 )
 from reef.service.deploy.routing_registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
+from reef.service.deploy.routing_renderer import ManagedRoutingRender, generate
 
 pytestmark = pytest.mark.unit
 
@@ -38,9 +43,12 @@ class FakeDocker(DockerComposeRuntime):
         self.networks = {"routing-network"}
         self.foreign = False
         self.paused = False
+        self.image_labels = json.dumps({"org.opencontainers.image.revision": SEMANTIC_ROUTER_REVISION})
 
     def run(self, arguments: Sequence[str], timeout_seconds: float = 5, *, mutation: bool = False) -> str:
         self.commands.append(list(arguments))
+        if arguments[:2] == ["image", "inspect"]:
+            return self.image_labels
         if arguments[:2] == ["container", "ls"]:
             return "\n".join(self.containers)
         if arguments[:2] == ["network", "ls"]:
@@ -152,6 +160,97 @@ def test_start_refuses_unreconciled_existing_resources(ownership: DeploymentOwne
     with pytest.raises(ContainerCommandError, match="reconcile"):
         runtime.start(ownership.configuration_directory / "compose.yaml", ownership, 5)
     assert all(command[0] != "compose" for command in runtime.commands)
+
+
+def test_start_inspects_the_image_from_the_generated_compose(ownership: DeploymentOwnership) -> None:
+    manifest_path = ownership.configuration_directory / "input.yaml"
+    manifest = routing_manifest("http://127.0.0.1:8101")
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    output = ownership.configuration_directory / "generated"
+    generate(
+        manifest_path,
+        output,
+        ManagedRoutingRender(
+            RoutingDeploymentSettings(deployment_id=ownership.deployment_id),
+            ownership.deployment_id,
+            ownership.owner_id,
+            ownership.generation,
+        ),
+    )
+    runtime = FakeDocker(ownership)
+    runtime.containers.clear()
+    runtime.networks.clear()
+    runtime.start(output / "compose.yaml", ownership, 5)
+    image = yaml.safe_load(manifest_path.read_text())["deployment"]["semantic_router_image"]
+    assert ["image", "inspect", "--format", "{{json .Config.Labels}}", image] in runtime.commands
+    assert any(command[0] == "compose" for command in runtime.commands)
+
+
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {"org.opencontainers.image.revision": SEMANTIC_ROUTER_REVISION},
+        {},
+        {"org.opencontainers.image.revision": "f" * 40},
+        {"org.opencontainers.image.revision": SEMANTIC_ROUTER_REVISION[:12]},
+        {"org.opencontainers.image.revision": None},
+        None,
+        [],
+    ],
+)
+def test_start_checks_the_digest_image_revision_before_creating_resources(
+    ownership: DeploymentOwnership, labels: dict[str, str | None] | list[object] | None
+) -> None:
+    runtime = FakeDocker(ownership)
+    runtime.containers.clear()
+    runtime.networks.clear()
+    runtime.image_labels = json.dumps(labels)
+    image = "example/router@sha256:" + "a" * 64
+    compose = ownership.configuration_directory / "compose.yaml"
+    compose.write_text(yaml.safe_dump({"services": {"semantic-router": {"image": image}}}))
+    if labels == {"org.opencontainers.image.revision": SEMANTIC_ROUTER_REVISION}:
+        runtime.start(compose, ownership, 5)
+        create = next(command for command in runtime.commands if command[0] == "compose")
+        assert create[-5:] == ["up", "--detach", "--no-build", "--pull", "never"]
+        assert runtime.commands.index(create) > next(
+            index for index, command in enumerate(runtime.commands) if command[:2] == ["image", "inspect"]
+        )
+    else:
+        with pytest.raises(ContainerCommandError, match="revision") as error:
+            runtime.start(compose, ownership, 5)
+        assert not error.value.outcome_unknown
+        assert not any(command[0] == "compose" for command in runtime.commands)
+    assert [command for command in runtime.commands if command[:2] == ["image", "inspect"]] == [
+        ["image", "inspect", "--format", "{{json .Config.Labels}}", image]
+    ]
+    assert not runtime.mutation_pending(ownership)
+
+
+@pytest.mark.parametrize("failure", ["missing-image", "malformed-labels", "timeout"])
+def test_image_inspection_failure_never_submits_container_creation(
+    ownership: DeploymentOwnership, failure: str
+) -> None:
+    class UnavailableImage(FakeDocker):
+        def run(self, arguments: Sequence[str], timeout_seconds: float = 5, *, mutation: bool = False) -> str:
+            if arguments[:2] == ["image", "inspect"]:
+                if failure == "malformed-labels":
+                    return "secret-marker not JSON"
+                raise ContainerCommandError(failure)
+            return super().run(arguments, timeout_seconds, mutation=mutation)
+
+    runtime = UnavailableImage(ownership)
+    runtime.containers.clear()
+    runtime.networks.clear()
+    compose = ownership.configuration_directory / "compose.yaml"
+    compose.write_text(
+        yaml.safe_dump({"services": {"semantic-router": {"image": "example/router@sha256:" + "a" * 64}}})
+    )
+    with pytest.raises(ContainerCommandError) as error:
+        runtime.start(compose, ownership, 5)
+    assert not error.value.outcome_unknown
+    assert "secret-marker" not in str(error.value)
+    assert not any(command[0] == "compose" for command in runtime.commands)
+    assert not runtime.mutation_pending(ownership)
 
 
 def test_unknown_mutation_never_echoes_command_output() -> None:
