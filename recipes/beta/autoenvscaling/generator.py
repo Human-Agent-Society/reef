@@ -561,7 +561,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 self.refused.append(replace(proposal, stage=STAGE_OUTAGE, refusal=self.error))
             else:
                 self.pending[task.name] = replace(
-                    proposal, designer_record_id=task.source_agent_record_ids[0], task_name=task.name
+                    proposal, designer_record_id=str(task.metadata["designer_record_id"]), task_name=task.name
                 )
                 tasks.append(GeneratedTask(task))
             # The session is taken; a restart continues with the next one. A cancelled run takes none.
@@ -619,7 +619,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ProposalRefused(
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
-        return replace(task, source_agent_record_ids=(record_id, source.record_id))
+        # The session is the task's source, as for history tasks; the Designer's receipt goes in the metadata.
+        return replace(
+            task,
+            source_agent_record_ids=(source.record_id,),
+            metadata={**task.metadata, "designer_record_id": record_id},
+        )
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:
         """The task checks on a written copy, which is removed again; a duplicate or a taken name is invalid.

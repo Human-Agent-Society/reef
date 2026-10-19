@@ -85,7 +85,7 @@ Three kinds of failure end differently:
 
 ### The report and the manifest
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each played task (its path under the tasks root, training rewards, pass rate, band position and check results). Unless the generator service failed in `validate`, the service splits the tasks inside the band by source record into `manifest-<n>.json` under the tasks root.
+`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each played task (its path under the tasks root, training rewards, pass rate, band position and check results). Unless the generator service failed in `validate`, the service splits the tasks inside the band by source record into `manifest-<n>.json` under the tasks root. In the task pool workflow [below](#time-per-session-and-training-from-a-task-pool), nothing trains while the rounds generate, so the eval side of `manifest-<n>.json` stays held out. When the rounds train while they generate, that manifest comes after the plays, and its eval side can hold tasks that trained. The held out set is then the eval side of the recipe's `split-manifest.json` in `<state_dir>/<scenario>`, where `state_dir` and `eval_fraction` are set under `pipeline.record2task.config`. The recipe's split hashes the task's one source record, its session, so about `eval_fraction` of the sessions are held out, and every rebuild of a session lands in the same split.
 
 The generator's `config` keys:
 

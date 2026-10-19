@@ -1174,9 +1174,46 @@ groups them:
    pipeline.record2task.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
    pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
    pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
-   pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
+   pipeline.record2task.config.state_dir | where each scenario keeps its round summaries and its split manifest. Required with rounds.
    pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
    pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+   pipeline.record2task.config.eval_fraction | 0 | share of source records whose tasks are held out of training; at least 0 and below 1. With 0, every task trains.
+   pipeline.record2task.config.split_seed | 0 | seed of the keyed hash that places each task in a split
+
+The stage places each valid task in the train or the eval split before any
+play, with one rule for every generator. A keyed hash of ``split_seed`` and a
+source record ID puts about ``eval_fraction`` of the records in eval. A source
+session that the round gave the generator counts as one record, its report.
+A task is in eval when any of its source records is, and a task without
+source records hashes its own name. So a train task never comes from an eval
+record, and tasks made from the same records share a split. Two tasks that
+share only some records can land in different splits, and the eval one then
+holds a record that a train task also comes from.
+
+A task made from ``k`` records is in eval with a probability of
+``1 - (1 - eval_fraction) ** k``. When the generator service makes tasks from
+the round's source sessions, each task holds all of them, so the whole round
+shares one split: with two sessions a round and ``eval_fraction`` 0.1, about
+19% of the rounds are held out. AutoEnvScaling gives each task one record, its
+session, so about ``eval_fraction`` of the sessions are held out, and every
+rebuild of a session lands in the same split.
+
+An eval task plays ``plays_per_task`` times on the arm ``heldout`` instead of
+``plain``, and with ``eval_fraction`` above 0 no measurement arm may take that
+name. The record stage releases these plays without training them, and the
+generator still gets their rewards. A round that played no train task is
+followed at once. So is a round whose eval tasks left fewer train groups than
+the next round waits for: ``batches_per_round`` batches of ``tasks_per_step``
+groups. With ``eval_fraction`` above 0, each round summary records each task's
+split and the round's ``eval_fraction`` and ``split_seed``, and after each
+round the stage writes ``state_dir/<scenario>/split-manifest.json``, a split
+manifest of every played task. Its task names are directories under
+``generator.tasks-root``, so ``evolution.task_manifest`` can name it, with
+``evolution.tasks_root`` set to that directory. The stage logs a warning while
+the manifest has no eval task. The split depends only on the task, the seed
+and the fraction, so a restart places each task in the same split. A restart
+with another ``eval_fraction`` or ``split_seed`` than the round summaries
+record is refused: keep both for the life of a ``state_dir``.
 
 ``GeneratedTaskBatches`` batches complete task groups:
 

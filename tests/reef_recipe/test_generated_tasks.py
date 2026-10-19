@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -16,6 +17,7 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import (
     GeneratedTask,
@@ -24,7 +26,10 @@ from reef.core.tasks import (
     TaskGenerationRequest,
     TaskGenerator,
     TaskPlayResult,
+    TaskSplit,
     TaskValidationResult,
+    read_split_manifest,
+    source_split,
 )
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
@@ -259,6 +264,8 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (), {"hint": [1.0]}), "tuples"),
+        (lambda: TaskPlayResult(task_for("t-a", "r", 1), split="test"), "split must be train, eval"),  # type: ignore[arg-type]
+        (lambda: TaskPlayResult(task_for("t-a", "r", 1), error="refused", split="eval"), "no split"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
 )
@@ -419,12 +426,11 @@ def rounds(
     generation = GeneratedTaskTasks(
         context, round_settings, stage, task_generator=task_generator, task_player=player, worker=worker
     )
-    built = TrainingPipeline(
-        context,
-        record2record=stage,
-        record2task=generation,
-        task2batch=GeneratedTaskBatches(context, batch_settings),
+    # Built as a deployment builds it, so the batch stage tells the rounds its tasks_per_step.
+    batches = GeneratedTaskBatches.from_config(
+        dataclasses.asdict(batch_settings), context=context, record2record=stage, record2task=generation, environ={}
     )
+    built = TrainingPipeline(context, record2record=stage, record2task=generation, task2batch=batches)
     worker.generation = generation
     return built, player
 
@@ -491,14 +497,32 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert p.status()["task_generation"]["tasks_played"] == 1
 
 
-def test_a_measurement_arm_with_the_training_arms_name_is_refused_unplayed(tmp_path: Path) -> None:
-    clashing = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm("plain", 1),))
+@pytest.mark.parametrize(
+    ("arm", "role", "eval_fraction"),
+    [("plain", "training", 0.0), ("plain", "training", 0.5), ("heldout", "held out", 0.5)],
+)
+def test_a_measurement_arm_with_the_name_of_the_training_or_held_out_arm_is_refused(
+    tmp_path: Path, arm: str, role: str, eval_fraction: float
+) -> None:
+    clashing = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm(arm, 1),))
     task_generator = ScriptedGenerator([(clashing, *generated(0, 1))])
-    p, player = rounds(tmp_path, task_generator)
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    seed = seed_placing({"designer-1": "train"})
+    p, _ = rounds(tmp_path, task_generator, player, eval_fraction=eval_fraction, split_seed=seed)
     assert not looked(p)
     assert task_generator.validated == ["harbor-00000-001"] and player.writes == ["harbor-00000-001"]
     (results,) = task_generator.results
-    assert results[0].error == "the measurement arm 'plain' has the name of the training arm"
+    assert results[0].error == f"the measurement arm {arm!r} has the name of the {role} arm"
+
+
+def test_without_an_eval_fraction_a_measurement_arm_may_be_named_heldout(tmp_path: Path) -> None:
+    task = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm("heldout", 1),))
+    task_generator = ScriptedGenerator([(task,)])
+    p, player = rounds(tmp_path, task_generator, StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS))
+    assert not looked(p)
+    assert [(call["arm"], call["plays"]) for call in player.plays] == [("plain", 2), ("heldout", 1)]
+    (results,) = task_generator.results
+    assert results[0].is_played and results[0].split == "train" and set(results[0].measurement_rewards) == {"heldout"}
 
 
 def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp_path: Path) -> None:
@@ -701,6 +725,214 @@ def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) ->
         p.close()
 
 
+# ------------------------------------------------------------------------------------------- the splits
+
+#: The task player's reward on each arm; the held out arm plays as the training arm does.
+SPLIT_REWARDS = {"plain": 0.25, "heldout": 0.5, "hint": 0.75}
+
+
+def seed_placing(splits: Mapping[str, str], eval_fraction: float = 0.5) -> int:
+    """The first seed that places a task made from each record in the split given for it."""
+    return next(
+        seed
+        for seed in range(1000)
+        if all(
+            source_split(seed, "unused", (record,), eval_fraction=eval_fraction) == split
+            for record, split in splits.items()
+        )
+    )
+
+
+def test_an_eval_task_plays_on_the_held_out_arm_and_never_reaches_a_batch(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    seed = seed_placing({"designer-0": "eval", "designer-1": "train"})
+    p, _ = rounds(
+        tmp_path, task_generator, player, worker=worker, eval_fraction=0.5, split_seed=seed, tasks_per_step=1
+    )
+    assert not p.ready()
+    worker.finish()
+    assert not p.ready(), "round 0 lands; its train task makes a batch to wait for"
+    assert [job.round_number for job in worker.submitted] == [0]
+    assert [(call["task"], call["arm"], call["is_reporting"], call["tags"]) for call in player.plays] == [
+        ("harbor-00000-000", "heldout", True, {"round": "0"}),
+        ("harbor-00000-000", "hint", True, {"round": "0"}),
+        ("harbor-00000-001", "plain", True, {"round": "0"}),
+        ("harbor-00000-001", "hint", True, {"round": "0"}),
+    ]
+    stage = p.record2record
+    assert isinstance(stage, GeneratedTaskRecord2Record)
+    assert stage.task_grouping.reported_plays == {"harbor-00000-001": 2}, "an eval task's plays are not counted"
+    assert [task["reported_plays"] for task in summary(tmp_path, 0)["tasks"]] == [None, 2]
+
+    played(p, "harbor-00000-000", 0, 1.0, arm="heldout")
+    played(p, "harbor-00000-000", 1, 0.0, arm="heldout")
+    assert not p.ready(), "the held out plays form no group"
+    held_out = {f"{kind}-harbor-00000-000-{index}" for kind in ("rep", "rec") for index in range(2)}
+    assert held_out <= p.releasable_record_ids()
+    played(p, "harbor-00000-001", 0, 1.0)
+    played(p, "harbor-00000-001", 1, 0.0)
+    assert p.ready()
+    groups = trajectory_groups(p.build_batch())
+    assert [[sample.group_id for sample in group] for group in groups] == [["harbor-00000-001", "harbor-00000-001"]]
+
+    (results,) = task_generator.results
+    assert [(result.task.name, result.split, result.training_rewards) for result in results] == [
+        ("harbor-00000-000", "eval", (0.5, 0.5)),
+        ("harbor-00000-001", "train", (0.25, 0.25)),
+    ]
+    assert results[0].measurement_rewards == {"hint": (0.75,)}
+    assert [task["split"] for task in summary(tmp_path, 0)["tasks"]] == ["eval", "train"]
+
+
+@pytest.mark.parametrize("config", [{}, {"eval_fraction": 0.0, "split_seed": 5}])
+def test_without_an_eval_fraction_every_task_trains_as_before(tmp_path: Path, config: dict[str, Any]) -> None:
+    worker = DeferredWorker()
+    task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 0)])
+    p, player = rounds(tmp_path, task_generator, worker=worker, **config)
+    assert not p.ready()
+    worker.finish()
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0], "round 1 waits for a batch"
+    assert [(call["arm"], call["is_reporting"], call["tags"]) for call in player.plays] == [
+        ("plain", True, {"round": "0"}),
+        ("hint", True, {"round": "0"}),
+        ("plain", True, {"round": "0"}),
+        ("hint", True, {"round": "0"}),
+    ]
+    for task in ("harbor-00000-000", "harbor-00000-001"):
+        played(p, task, 0, 1.0)
+        played(p, task, 1, 0.0)
+    assert p.ready()
+    p.acknowledge(p.build_batch().batch_id)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0, 1]
+    assert [result.split for result in task_generator.results[0]] == ["train", "train"]
+    assert not (tmp_path / "state" / "tasks" / "split-manifest.json").exists()
+    document = summary(tmp_path, 0)
+    assert set(document) == {"round", "error", "source_record_ids", "tasks"}
+    assert set(document["tasks"][0]) == {"name", "error", "training_rewards", "measurement_rewards", "reported_plays"}
+
+
+def test_tasks_made_from_the_same_records_land_in_one_split(tmp_path: Path) -> None:
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    tasks = tuple(
+        GeneratedTask(task_for(f"harbor-00000-{index:03d}", record, 9000 + index))
+        for index, record in enumerate(("session-a", "session-b", "session-a", "session-b"))
+    )
+    task_generator = ScriptedGenerator([tasks])
+    seed = seed_placing({"session-a": "eval", "session-b": "train"})
+    p, _ = rounds(tmp_path, task_generator, player, eval_fraction=0.5, split_seed=seed)
+    assert not looked(p)
+    assert [result.split for result in task_generator.results[0]] == ["eval", "train", "eval", "train"]
+    assert [call["arm"] for call in player.plays] == ["heldout", "plain", "heldout", "plain"]
+
+
+def test_a_round_of_eval_tasks_only_does_not_block_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    seed = seed_placing({"designer-0": "eval"})
+    p, _ = rounds(
+        tmp_path, ScriptedGenerator([generated(0, 0)]), player, worker=worker, eval_fraction=0.5, split_seed=seed
+    )
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    worker.finish()
+    assert not p.ready(), "round 0 lands with only an eval task, and round 1 starts on the same look"
+    assert [job.round_number for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
+    assert p.status()["task_generation"]["tasks_played"] == 1
+
+
+def test_the_split_manifest_lists_every_played_task_and_a_restart_places_tasks_the_same_way(tmp_path: Path) -> None:
+    state = tmp_path / "state" / "tasks"
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    seed = seed_placing({"designer-0": "eval", "designer-1": "train"})
+    # One train group fills a batch, so no round follows at once.
+    config: dict[str, Any] = {"eval_fraction": 0.5, "split_seed": seed, "tasks_per_step": 1}
+    task_generator = ScriptedGenerator([generated(0, 0, 1, 2)], invalid={"harbor-00000-002": "oracle check refused"})
+    first, _ = rounds(tmp_path, task_generator, player, **config)
+    assert not looked(first)
+    first.close()
+    manifest = read_split_manifest(state / "split-manifest.json")
+    assert manifest == TaskSplit(("harbor-00000-001",), ("harbor-00000-000",), seed, 0.5)
+    assert (summary(tmp_path, 0)["eval_fraction"], summary(tmp_path, 0)["split_seed"]) == (0.5, seed)
+
+    restarted_generator = ScriptedGenerator([generated(1, 0, 1)])
+    restarted, _ = rounds(tmp_path, restarted_generator, player, **config)
+    assert not looked(restarted)
+    assert [(result.task.name, result.split) for result in restarted_generator.results[0]] == [
+        ("harbor-00001-000", "eval"),
+        ("harbor-00001-001", "train"),
+    ], "tasks from the records of round 0 go where round 0 placed them"
+    manifest = read_split_manifest(state / "split-manifest.json")
+    assert manifest == TaskSplit(
+        ("harbor-00000-001", "harbor-00001-001"), ("harbor-00000-000", "harbor-00001-000"), seed, 0.5
+    )
+
+
+def test_a_restart_with_other_split_settings_is_refused(tmp_path: Path) -> None:
+    seed = seed_placing({"designer-0": "eval"})
+    first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), eval_fraction=0.5, split_seed=seed)
+    assert not looked(first)
+    first.close()
+    changed: tuple[dict[str, Any], ...] = ({"eval_fraction": 0.5, "split_seed": seed + 1}, {"eval_fraction": 0.25}, {})
+    for config in changed:
+        with pytest.raises(PluginConfigError, match="keeps both for the life of its state_dir"):
+            rounds(tmp_path, ScriptedGenerator(), **config)
+    rounds(tmp_path, ScriptedGenerator(), eval_fraction=0.5, split_seed=seed)[0].close()
+
+
+def test_a_summary_without_split_settings_counts_as_no_eval_fraction(tmp_path: Path) -> None:
+    state = tmp_path / "state" / "tasks"
+    state.mkdir(parents=True)
+    old_tasks = [{"name": "harbor-old-000", "error": ""}, {"name": "harbor-old-001", "error": "oracle check refused"}]
+    (state / "round-00000.json").write_text(json.dumps({"round": 0, "error": "", "tasks": old_tasks}))
+    with pytest.raises(PluginConfigError, match=r"eval_fraction 0\.0 and split_seed None, not 0\.5"):
+        rounds(tmp_path, ScriptedGenerator(), eval_fraction=0.5)
+    # Without an eval fraction the seed places nothing, so it may change.
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(1, 0)]), split_seed=9)
+    assert not looked(p)
+    assert summary(tmp_path, 1)["tasks"][0]["name"] == "harbor-00001-000"
+
+
+def test_a_split_cannot_start_on_rounds_that_trained_without_one(tmp_path: Path) -> None:
+    first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
+    assert not looked(first)
+    first.close()
+    with pytest.raises(PluginConfigError, match=r"round 0 under .* eval_fraction 0\.0 and split_seed None, not 0\.5"):
+        rounds(tmp_path, ScriptedGenerator(), eval_fraction=0.5)
+
+
+def test_a_split_with_no_eval_task_yet_logs_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    seed = seed_placing({"designer-0": "train"})
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), eval_fraction=0.5, split_seed=seed)
+    with caplog.at_level(logging.WARNING, logger="reef.recipe.generated_tasks.processor"):
+        assert not looked(p)
+    assert "has no eval task yet: none of its 1 played tasks hashed to eval" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("indices", "eval_fraction", "follows"),
+    [((0, 1, 2, 3), 0.0, False), ((0, 1, 2, 3), 0.5, True), ((0, 1, 2), 0.5, False)],
+)
+def test_a_round_its_eval_tasks_left_short_of_the_batches_is_followed_at_once(
+    tmp_path: Path, indices: tuple[int, ...], eval_fraction: float, follows: bool
+) -> None:
+    # Two batches of two groups: four train groups make the batches the next round waits for.
+    worker = DeferredWorker()
+    seed = seed_placing({"designer-0": "eval", "designer-1": "train", "designer-2": "train", "designer-3": "train"})
+    task_generator = ScriptedGenerator([generated(0, *indices)])
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    config: dict[str, Any] = {"eval_fraction": eval_fraction, "split_seed": seed, "batches_per_round": 2}
+    p, _ = rounds(tmp_path, task_generator, player, worker=worker, **config)
+    p.ready()
+    worker.finish()
+    assert not p.ready()
+    splits = [result.split for result in task_generator.results[0]]
+    assert splits == ["eval" if eval_fraction and index == 0 else "train" for index in indices]
+    # Three train groups of four tasks cannot fill the batches. Three tasks could not without an eval task either,
+    # so that round waits for batches, as before.
+    assert [job.round_number for job in worker.submitted] == ([0, 1] if follows else [0])
+
+
 # --------------------------------------------------------------------------------------- source sessions
 
 SOURCES = {"source_tag": "Source=session", "source_records_per_round": 2}
@@ -762,6 +994,21 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
 
 
+def test_a_source_session_takes_part_in_the_split_as_its_report(tmp_path: Path) -> None:
+    # The draw of each session's report places the task; the draw of a model call in the session does not.
+    seed = seed_placing({"rep-a": "train", "rec-a": "eval", "rep-b": "eval", "rec-b": "train"})
+    whole = dataclasses.replace(task_for("harbor-00000-000", "x", 9000), source_agent_record_ids=("rec-a", "rep-a"))
+    call = dataclasses.replace(task_for("harbor-00000-001", "x", 9001), source_agent_record_ids=("rec-b",))
+    task_generator = ScriptedGenerator([(GeneratedTask(whole), GeneratedTask(call))])
+    player = StandInGenerator(tmp_path / "tasks", rewards=SPLIT_REWARDS)
+    config: dict[str, Any] = {**SOURCES, "eval_fraction": 0.5, "split_seed": seed}
+    p, _ = rounds(tmp_path, task_generator, player, **config)
+    sessions(p, "a", "b")
+    assert not looked(p)
+    assert source_ids(task_generator.requests[0]) == ["rec-a", "rep-a", "rec-b", "rep-b"]
+    assert [result.split for result in task_generator.results[0]] == ["train", "eval"]
+
+
 def test_without_a_share_of_sessions_the_rounds_read_only_the_description(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator()
     p, _ = rounds(tmp_path, task_generator, rounds=1, source_tag="source=session")
@@ -789,6 +1036,8 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
         ({"rounds": 1, "description": "x", "state_dir": "s"}, "pipeline.record2task.config.generator"),
         ({"source_records_per_round": 1}, "needs a source_tag"),
         ({"source_tag": "session"}, "name=value"),
+        ({"eval_fraction": 1.0}, "eval_fraction must be at least 0 and below 1"),
+        ({"eval_fraction": -0.1}, "eval_fraction must be at least 0 and below 1"),
     ],
 )
 def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str, int], message: str) -> None:
@@ -861,6 +1110,8 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
                     "description": "shell tasks",
                     "state_dir": str(tmp_path / "state"),
                     "generator": generator,
+                    "eval_fraction": 0.25,
+                    "split_seed": 7,
                 },
             },
             "task2batch": {
@@ -876,7 +1127,8 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
     assert built.record2task.plays_per_task == 3, "the plays come from the record stage's groups"
     assert built.record2task.state_dir == tmp_path / "state" / "one"
-    assert built.batch_size == 2
+    assert (built.record2task.eval_fraction, built.record2task.split_seed) == (0.25, 7)
+    assert built.batch_size == 2 and built.record2task.tasks_per_step == 2, "the batch stage tells the rounds"
     assert recipe.scenario_state_dirs("one") == (tmp_path / "state" / "one",)
     built.close()
 

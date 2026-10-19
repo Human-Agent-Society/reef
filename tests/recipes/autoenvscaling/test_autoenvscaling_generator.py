@@ -89,7 +89,8 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
     assert service.deleted == [f"{name}-check-1" for name in NAMES]
     assert [item.task.name for item in tasks] == NAMES
     task = tasks[0].task
-    assert task.source_agent_record_ids == ("agent-2", "session-1")
+    assert task.source_agent_record_ids == ("session-1",)
+    assert task.metadata["designer_record_id"] == "agent-2"
     assert "RUN set -e; cd /app; if [ -d .git ]" in task.environment["Dockerfile"], "the source's history step"
     assert task.solution["hint.txt"]
     # A slow build or verifier fails the task's oracle trial, inside the service's bound on that trial; a trial past
@@ -518,7 +519,8 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert len(calls) == 1 and calls[0]["headers"]["x-reef-tag-index"] == "0"
     assert service.checks == [tmp_path / "tasks" / NAMES[0]], "the prompt Designer checks no candidate"
     task = read_harbor_task(tmp_path / "tasks" / NAMES[0])
-    assert task.source_agent_record_ids == ("rec-1", "session-1")
+    assert task.source_agent_record_ids == ("session-1",)
+    assert task.metadata["designer_record_id"] == "rec-1"
     assert task.config["environment"]["build_timeout_sec"] == 1200
     assert task.instruction == DOCUMENT["instruction"] + "\n"
     # Every play passed: outside the default band, inside with the band off.
