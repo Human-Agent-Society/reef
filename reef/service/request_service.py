@@ -80,7 +80,7 @@ def install_service_url(headers: Mapping[str, str]) -> str | None:
     return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
 
 
-def _inference_aborted(response: Mapping[str, Any]) -> bool:
+def inference_aborted(response: Mapping[str, Any]) -> bool:
     def aborted(value: Any) -> bool:
         return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
 
@@ -298,7 +298,7 @@ class RequestService:
                         raise InferenceRetryTimeout(timeout_error) from exc
                     finally:
                         remaining_budget -= loop.time() - started
-                    interrupted = _inference_aborted(response)
+                    interrupted = inference_aborted(response)
                     if not interrupted:
                         # A completed response with invalid runtime-load-ID information is a
                         # handler contract error, not a retryable inference abort.
@@ -438,6 +438,11 @@ class RequestService:
         succeeded = False
         try:
             payload = dict(pending.item.payload)
+            response = dict(response)
+            # A stream cannot restart after it sent frames, so an engine-aborted
+            # stream keeps no training block, like a token-by-token stream that ended early.
+            if inference_aborted(response):
+                response.pop("training", None)
             # A token-native streaming handler fills record_response only when
             # the upstream generation finishes. Validate that final capture
             # here, after the route has drained the stream but before it can

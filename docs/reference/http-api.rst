@@ -616,7 +616,12 @@ The receipt identifies the stored record:
 | Anthropic SSE | the same field on ``message_stop``                        |
 +---------------+-----------------------------------------------------------+
 
-Streams carry it only after the record is stored.
+Streams carry it only after the record is stored. A stream that ends without
+its terminal event carries no receipt. A stream from Reef's SGLang or vLLM
+backend that the engine aborts also carries no receipt, because Reef cannot
+restart a stream after it sent frames. In both cases a harness that reports by
+receipt does not reference the record. Reef stores it as an incomplete delivery
+record, and an aborted stream's record has no training tensors.
 
 On a scenario that serves harness files, every inference response also
 carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when

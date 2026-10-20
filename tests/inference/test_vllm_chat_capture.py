@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact, LiveWeightArtifactRef
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
+from reef.service.request_service import inference_aborted
 
 
 class FakeTokenizer:
@@ -321,6 +322,22 @@ def test_vllm_facade_streams_anthropic_messages_from_the_buffered_turn() -> None
         assert stream.record_response["training"]["request_messages"] == [{"role": "user", "content": "hello"}]
 
     asyncio.run(_serve(_generate_response(stamps=["engine:6", "engine:6"]), run))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_vllm_facade_streams_an_engine_abort_that_the_service_detects(path) -> None:
+    async def run(base_url, received):
+        backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
+        stream = await backend.inference_stream(
+            _live_artifact(),
+            path,
+            {"model": "served-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 2},
+        )
+        [frame async for frame in stream.chunks]
+        assert inference_aborted(stream.record_response)
+
+    asyncio.run(_serve(_generate_response(stamps=["engine:6", "engine:6"], finish_reason="abort"), run))
 
 
 @pytest.mark.unit
