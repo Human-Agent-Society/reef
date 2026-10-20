@@ -365,9 +365,12 @@ class RequestService:
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
-                    if prepared.hooks is not None:
-                        prepared.hooks.verify_response(prepared.artifact, path, record_response)
-                    self._stamp_durable_runtime_load_id(prepared, payload, record_response)
+                    # An engine-aborted generation may carry no runtime-load ID; the route
+                    # ends its stream without a receipt or a training block, so skip the checks.
+                    if not inference_aborted(record_response):
+                        if prepared.hooks is not None:
+                            prepared.hooks.verify_response(prepared.artifact, path, record_response)
+                        self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                     # Buffered streaming backends have already finished model
                     # execution. Downstream client backpressure must not leave a
                     # stale admission handle across the colocated pause lifecycle.

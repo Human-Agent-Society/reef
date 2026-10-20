@@ -855,9 +855,10 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
 class StreamRecordHandler(InferenceHandler):
     """Streams fixed frames and the record response of one turn.
 
-    With ``record_before_terminal`` the record response arrives with the last frames, before the
-    terminal event, as SGLang's token-by-token stream does. Otherwise it arrives with the stream,
-    as a stream served from a buffered result (vLLM) does.
+    ``frames`` is a nonempty tuple of byte frames, sent in order; the constructor rejects an
+    empty tuple. With ``record_before_terminal`` the record response is set after every frame
+    but the last is sent, as SGLang's token-by-token stream does. Otherwise it is set when the
+    stream is created, as a stream served from a buffered result (vLLM) is.
     """
 
     def __init__(
@@ -868,6 +869,8 @@ class StreamRecordHandler(InferenceHandler):
         record_before_terminal: bool,
         content_type: str = "text/event-stream",
     ) -> None:
+        if not frames:
+            raise ValueError("StreamRecordHandler needs at least one frame")
         self.record_response = record_response
         self.frames = frames
         self.record_before_terminal = record_before_terminal
@@ -972,6 +975,56 @@ def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
             assert metrics["serve/request/completed_total"] == 0
             assert metrics["serve/request/active"] == 0
             assert metrics["ingest/accepted_total"] == 1
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_stream_record_handler_needs_a_frame() -> None:
+    with pytest.raises(ValueError, match="at least one frame"):
+        StreamRecordHandler(chat_stream_record("stop"), (), record_before_terminal=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+@pytest.mark.parametrize(
+    ("path", "record_response", "frames"),
+    [
+        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
+        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
+    ],
+    ids=["chat", "messages"],
+)
+def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
+    tmp_path, path, record_response, frames, record_before_terminal
+) -> None:
+    """An engine abort before the first sampled token reports no runtime-load ID; it is not a 409."""
+
+    async def run() -> None:
+        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        (initial / "model.txt").write_text("base")
+        dispatcher = weight_dispatcher(tmp_path, initial)
+        try:
+            dispatcher.get_or_create_scenario("chat")
+            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+            status, _, body = await post_stream(dispatcher, handler, path)
+            assert status == 200
+            assert body == b"".join(frames)
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert "training" not in recorded
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/version_mismatch_total"] == 0
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/active"] == 0
         finally:
             dispatcher.close()
 
