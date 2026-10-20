@@ -11,9 +11,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.batches import TrajectoryItem
+from reef.core.errors import ImageContentNotSupported
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
+from reef.core.trajectories import has_image_content
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
@@ -47,6 +49,16 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     report may reference before they are stored.
     """
     try:
+        # Reef does not store an image that it will not train on. An identical retry of a record stored
+        # before this check still gets its receipt.
+        if (
+            item.request_type is RequestType.INFERENCE
+            and current.refuses_image_content
+            and has_image_content(item.payload)
+        ):
+            if (existing := current.records.existing_receipt(item)) is not None:
+                return existing
+            raise ImageContentNotSupported(item.scenario, agent_record_id=item.agent_record_id)
         if item.request_type is RequestType.TRAIN:
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing

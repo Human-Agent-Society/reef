@@ -15,8 +15,9 @@ from typing import Any
 
 from reef.core.artifact_ref import LiveWeightArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.batches import TrajectoryItem
+from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord
-from reef.core.trajectories import make_trajectory
+from reef.core.trajectories import has_image_content, make_trajectory
 
 #: One response position's sampler top-k: token ids and their log-probs.
 TopkRow = tuple[list[int], list[float]]
@@ -160,8 +161,16 @@ def make_policy_trajectory(
     for harnesses that already ship exact policy data. Missing tensors stay empty and are
     rejected at the training boundary; Reef never reconstructs sampled ids from
     decoded text.
+
+    A record with image content raises ``ReefError``: no policy sample
+    supports images yet.
     """
     payload = item.payload
+    if has_image_content(payload):
+        raise ReefError(
+            f"inference record {item.agent_record_id!r} of scenario {item.scenario!r} carries image content. "
+            "Policy samples do not support images, and Reef does not train on the text without them."
+        )
     training = recorded_training(payload)
 
     def field(name: str) -> Any:

@@ -22,6 +22,7 @@ from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightT
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.sft import SFTRecipe
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import NoBatches
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
@@ -477,3 +478,21 @@ def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
     assert recipe.training_runtime is runtime
     assert recipe.checkpoint_strategy == EveryNVersions(20)
     assert recipe.build_pipeline(PipelineContext("math")).task2batch.batch_size == 4
+
+
+@pytest.mark.unit
+def test_only_a_weight_training_recipe_without_image_support_refuses_image_content() -> None:
+    @dataclass(frozen=True, kw_only=True)
+    class ImageSAORecipe(SAORecipe):
+        """An SAO recipe that declares image support."""
+
+        @property
+        def supports_images(self) -> bool:
+            return True
+
+    weights = SAORecipe(**runtime_bindings(StubTrainingRuntime()))
+    assert Recipe().supports_images is False
+    assert Recipe().refuses_image_content is False
+    assert weights.refuses_image_content is True
+    assert SFTRecipe(**runtime_bindings(StubTrainingRuntime())).refuses_image_content is True
+    assert ImageSAORecipe(**runtime_bindings(StubTrainingRuntime())).refuses_image_content is False

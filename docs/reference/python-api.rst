@@ -225,7 +225,19 @@ Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
 adapter a client installs its harness tree with (``None``, the default, for a
 recipe with no harness tree; ``CordisRecipe`` names ``evolution.adapter``).
-The scenario list names it for every scenario. Every recipe declares
+The scenario list names it for every scenario.
+
+A recipe may also declare ``supports_images``, whether it trains on image
+content (``False`` by default). A recipe that trains weights (a
+``WeightTrainingRecipe``, or a composite with such a component) and does not
+support images refuses image content: Reef answers HTTP 400 to a recorded
+inference request or an inference record with image content, and stores
+neither. Evaluation calls are not recorded and are not checked. A recipe that
+does not train weights keeps image content in its records. In this release a
+built-in weight-training recipe raises ``ReefError`` when it builds a training
+sample from a stored record with image content.
+
+Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add ``training_spec()``,
 which binds the registered or dotted training objective, which declares the

@@ -94,6 +94,19 @@ class Recipe:
     batches. Specialized recipes are frozen dataclasses over this base: they
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
+
+    Values: a frozen value with ``name`` (a str), ``runtime`` (an
+    ``InferenceRuntime`` or ``None``), ``training_runtime`` (a
+    ``TrainingRuntime`` or ``None``), ``checkpoint_strategy`` (a
+    ``CheckpointStrategy``), ``training_mode`` (``"auto"``, ``"manual"`` or
+    ``"hybrid"``) and ``pipeline_stages`` (a ``PipelineConfig``, or ``None``
+    for the stage classes of :meth:`pipeline_spec` with no config).
+    ``__post_init__`` checks ``training_mode`` and that the stage classes
+    load. The other field domains are the annotations, which mypy checks.
+    By convention, a subclass adds fields and conditions and removes none.
+    Purpose: ``build_recipe`` makes the deployment's recipe from its config.
+    ``ScenarioFactory`` reads it to make the surface, the trainers and the
+    binding of each scenario.
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -234,6 +247,42 @@ class Recipe:
         runtime capability, not a dataclass field or recipe configuration.
         """
         return None
+
+    @property
+    def supports_images(self) -> bool:
+        """Whether the samples that this recipe builds may carry image content. The default is ``False``.
+
+        This is a runtime capability, not a dataclass field or recipe
+        configuration. :attr:`refuses_image_content` of this recipe reads it.
+        A ``CompositeRecipe`` builds no samples itself: the values of its
+        components apply, and its own value is not read.
+
+        No built-in sample builder supports images in this release:
+        ``make_policy_trajectory`` and ``SFTTasks.make_sample`` raise
+        ``ReefError`` for a record with image content, whatever this value
+        is. A recipe that returns ``True`` must build its samples with its own
+        builder. Otherwise ``True`` only turns off the refusal, and its image
+        records stop training with that error.
+        """
+        return False
+
+    @property
+    def refuses_image_content(self) -> bool:
+        """Whether Reef refuses recorded inference requests and records with image content for this recipe.
+
+        Value: ``True`` if and only if the recipe trains model weights through
+        a part that does not support images. For a recipe without components,
+        the part is the recipe itself:
+        ``isinstance(self, WeightTrainingRecipe) and not self.supports_images``.
+        A ``CompositeRecipe`` refuses if and only if a component refuses.
+        When the value is ``True``, the request check and the record check
+        refuse a recorded request or an inference record in which
+        ``has_image_content`` finds an image, so Reef stores none of them.
+        Shapes that it does not read are not refused (see
+        ``has_image_content``). A recipe that does not train weights keeps
+        the images in its records.
+        """
+        return isinstance(self, WeightTrainingRecipe) and not self.supports_images
 
     def build(
         self,

@@ -119,7 +119,22 @@ class ComponentTaskStorage(TaskStorage):
 
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
-    """Bind one recipe per release component; the scenario runs their trainers side by side."""
+    """Bind one recipe per release component; the scenario runs their trainers side by side.
+
+    Values: a ``Recipe`` whose ``components`` maps at least two component
+    names to recipes. Each name is a valid component name and is not in
+    ``RESERVED_COMPONENT_NAMES``. Each component is a ``Recipe`` and not a
+    ``CompositeRecipe``, and has the composite's ``training_mode``. At most
+    one component is a ``WeightTrainingRecipe``. ``__post_init__`` checks
+    these conditions and sets ``checkpoint_strategy`` to
+    ``EveryNVersions(1)``.
+    Purpose: ``build_recipe`` makes it from a deployment config that lists
+    the components under ``components``.
+    ``ScenarioFactory`` builds one trainer per component and one release
+    surface for all of them. Each property that combines the components, such
+    as ``report_type`` or ``refuses_image_content``, is defined from the
+    values of the components.
+    """
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
@@ -275,6 +290,16 @@ class CompositeRecipe(Recipe):
         refuses only a report no component would take.
         """
         return self.report_contract
+
+    @property
+    def refuses_image_content(self) -> bool:
+        """``True`` if and only if a component refuses image content.
+
+        By the default rule, only a ``WeightTrainingRecipe`` component refuses,
+        and ``__post_init__`` allows at most one. So the value is the value of
+        that component, or ``False`` without one.
+        """
+        return any(recipe.refuses_image_content for recipe in self.components.values())
 
     @cached_property
     def report_contract(self) -> type[ReportBase] | None:

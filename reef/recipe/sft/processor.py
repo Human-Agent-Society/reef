@@ -15,9 +15,10 @@ from typing import Any, Self, cast
 
 from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
+from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
-from reef.core.trajectories import make_trajectory
+from reef.core.trajectories import has_image_content, make_trajectory
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
 from reef.record2task import ReportTasks, SkippedReport
@@ -76,6 +77,8 @@ class SFTTasks(ReportTasks):
     ``target: response``, the target is the recorded response message with
     its tool calls, for example an imported dataset example. The stage skips
     a sample longer than ``max_tokens`` and counts it in ``sft_overflow_reports``.
+    A recorded request with image content raises ``ReefError``: SFT samples
+    do not support images yet.
     """
 
     def __init__(self, settings: SFTSettings) -> None:
@@ -153,6 +156,11 @@ class SFTTasks(ReportTasks):
                 f"{context.report.agent_record_id} references {len(context.inferences)}"
             )
         inference = context.inferences[0]
+        if has_image_content(inference.payload):
+            raise ReefError(
+                f"inference record {inference.agent_record_id!r} of scenario {inference.scenario!r} carries image "
+                "content. SFT samples do not support images, and Reef does not train on the text without them."
+            )
         messages, tools = recorded_request(inference.payload)
         conversation = normalize_messages_for_template([*messages, self.target_message(inference.payload, parsed)])
         tokens, target_length = self.sequence_ids(conversation, tools)

@@ -1056,6 +1056,7 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         repository = None
         surface = create_weight_surface()
         inference_handler = None
+        refuses_image_content = False
 
         def __init__(self) -> None:
             self.runtime = runtime.inference_runtime
@@ -1153,6 +1154,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         repository = None
         surface = create_weight_surface()
         inference_handler = None
+        refuses_image_content = False
 
         @staticmethod
         def current_artifact_ref():

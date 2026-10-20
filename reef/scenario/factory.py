@@ -405,6 +405,7 @@ class ScenarioFactory:
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
                     report_type=recipe.report_type,
+                    refuses_image_content=recipe.refuses_image_content,
                 ),
                 repository=repository,
                 checkpoint_strategy=recipe.checkpoint_strategy,

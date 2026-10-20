@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from tests.train.test_reef_trainer_contracts import ExampleBackend
 
+from recipes.sao.recipe import SAORecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
@@ -26,6 +28,8 @@ from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskItem
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
+IMAGE_URL_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+ANTHROPIC_IMAGE_BLOCK = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
 
 
 def inference_payload(text):
@@ -391,6 +395,268 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
             assert response.status == 413
             assert scenario.records.get("s", "large") is None
             assert not dispatcher.recipe.batches
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+@dataclass(frozen=True, kw_only=True)
+class ImageRefusingRecipe(LearningRecipe):
+    """Test double that overrides the refusal rule: it refuses image content without training weights.
+
+    So it breaks the base definition of ``Recipe.refuses_image_content`` on purpose. It is only for tests of
+    the refusal path: it isolates the service and ingress checks from the ``WeightTrainingRecipe`` rule.
+    ``REFUSING_RECIPES`` also runs the real ``SAORecipe``, so the rule itself is covered too.
+    """
+
+    @property
+    def refuses_image_content(self):
+        return True
+
+
+#: Recipes that refuse image content: one that overrides the property, and a real weight-training recipe, whose
+#: refusal comes from the WeightTrainingRecipe rule through the scenario factory and binding.
+REFUSING_RECIPES = {
+    "image-refusing": ImageRefusingRecipe,
+    "sao": lambda: SAORecipe(**runtime_bindings(StubTrainingRuntime())),
+}
+
+
+def deeply_nested_image(depth):
+    """An image part under ``depth`` levels of nested lists."""
+    content = [IMAGE_URL_PART]
+    for _ in range(depth):
+        content = [content]
+    return content
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "body"),
+    (
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": [IMAGE_URL_PART]}]}),
+        ("/v1/chat/completions", {"stream": True, "messages": [{"role": "user", "content": [IMAGE_URL_PART]}]}),
+        ("/v1/messages", {"max_tokens": 8, "messages": [{"role": "user", "content": [ANTHROPIC_IMAGE_BLOCK]}]}),
+        ("/v1/messages/count_tokens", {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE_BLOCK]}]}),
+        (
+            "/v1/messages",
+            {
+                "max_tokens": 8,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call-1", "content": [ANTHROPIC_IMAGE_BLOCK]}
+                        ],
+                    }
+                ],
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "input": [
+                    {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}
+                ]
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "stream": True,
+                "input": [
+                    {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]}
+                ],
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "input": [
+                    {
+                        "type": "computer_call_output",
+                        "call_id": "call-1",
+                        "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AAAA"},
+                    }
+                ]
+            },
+        ),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": deeply_nested_image(1000)}]}),
+    ),
+    ids=(
+        "openai",
+        "openai-stream",
+        "anthropic",
+        "anthropic-count-tokens",
+        "anthropic-tool-result",
+        "responses",
+        "responses-stream",
+        "responses-computer-screenshot",
+        "openai-deeply-nested",
+    ),
+)
+@pytest.mark.parametrize("recipe", sorted(REFUSING_RECIPES))
+def test_a_recorded_image_request_is_refused_when_the_recipe_refuses_image_content(tmp_path, recipe, endpoint, body):
+    dispatcher = dispatcher_for(tmp_path, REFUSING_RECIPES[recipe]())
+    handler = EchoHandler()
+
+    async def run():
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
+        ) as client:
+            response = await client.post(endpoint, headers=HEADERS, json={"model": "example-model", **body})
+            assert response.status == 400
+            assert "does not support images" in await response.text()
+            assert handler.calls == 0
+            assert dispatcher.get_or_create_scenario("s").records.replay("s") == ()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_an_image_evaluation_call_is_served_because_it_stores_nothing(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, ImageRefusingRecipe())
+    handler = EchoHandler()
+    messages = [{"role": "user", "content": [IMAGE_URL_PART]}]
+
+    async def run():
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
+        ) as client:
+            scenario = dispatcher.get_or_create_scenario("s")
+            response = await client.post(
+                "/reef/scenarios/s/evaluation/v1/chat/completions",
+                headers=HEADERS,
+                json={"model": "example-model", "messages": messages},
+            )
+            assert response.status == 200, await response.text()
+            assert handler.calls == 1
+            assert scenario.records.replay("s") == ()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_recipe_that_does_not_train_weights_keeps_image_requests_unchanged(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    handler = EchoHandler()
+    messages = [{"role": "user", "content": [{"type": "text", "text": "look"}, IMAGE_URL_PART]}]
+
+    async def run():
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions", headers=HEADERS, json={"model": "example-model", "messages": messages}
+            )
+            assert response.status == 200, await response.text()
+            assert handler.calls == 1
+            [record] = dispatcher.get_or_create_scenario("s").records.replay("s")
+            assert record.payload["messages"] == messages
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def image_record_payloads():
+    in_messages = inference_payload("look")
+    in_messages["messages"] = [{"role": "user", "content": [{"type": "text", "text": "look"}, IMAGE_URL_PART]}]
+    in_training = inference_payload("look")
+    in_training["response"] = {
+        **in_training["response"],
+        "training": {"request_messages": [{"role": "user", "content": [IMAGE_URL_PART]}]},
+    }
+    deeply_nested = inference_payload("look")
+    deeply_nested["messages"] = [{"role": "user", "content": deeply_nested_image(1000)}]
+    in_document = inference_payload("look")
+    document = {"type": "document", "source": {"type": "content", "content": [ANTHROPIC_IMAGE_BLOCK]}}
+    in_document["messages"] = [{"role": "user", "content": [document]}]
+    return {
+        "messages": in_messages,
+        "training-request-messages": in_training,
+        "deeply-nested": deeply_nested,
+        "anthropic-document": in_document,
+    }
+
+
+@pytest.mark.parametrize("recipe", sorted(REFUSING_RECIPES))
+@pytest.mark.parametrize("shape", ("messages", "training-request-messages", "deeply-nested", "anthropic-document"))
+@pytest.mark.parametrize("bulk", (False, True))
+def test_an_image_record_is_refused_and_not_stored_when_the_recipe_refuses_image_content(
+    tmp_path, bulk, shape, recipe
+):
+    dispatcher = dispatcher_for(tmp_path, REFUSING_RECIPES[recipe]())
+    payload = image_record_payloads()[shape]
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            if bulk:
+                # A batch is atomic: the text-only record before the refused one is not stored either.
+                records = [imported("text-only"), imported("with-image", payload)]
+                response = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
+            else:
+                response = await client.post("/reef/records", headers=HEADERS, json=imported("with-image", payload))
+            assert response.status == 400
+            assert "record 'with-image' carries image content" in await response.text()
+            scenario = dispatcher.get_or_create_scenario("s")
+            assert scenario.records.replay("s") == ()
+            assert scenario.operations.snapshot()["ingest/rejected_request_total"] == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_record_whose_part_type_is_not_a_string_is_checked_without_a_server_error(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, ImageRefusingRecipe())
+    payload = inference_payload("look")
+    payload["messages"] = [{"role": "user", "content": [{"type": ["image"]}, {"type": {"name": "image"}}]}]
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            response = await client.post("/reef/records", headers=HEADERS, json=imported("odd-type", payload))
+            # Not an image part type, so the image check does not refuse it.
+            assert response.status == 200, await response.text()
+            assert len(dispatcher.get_or_create_scenario("s").records.replay("s")) == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("bulk", (False, True))
+def test_an_identical_retry_of_a_stored_image_record_keeps_its_receipt(tmp_path, bulk):
+    from reef.core import AgentRecord, RequestType
+
+    dispatcher = dispatcher_for(tmp_path, ImageRefusingRecipe())
+    payload = image_record_payloads()["messages"]
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            # A record stored before the check, written to the store directly.
+            scenario = dispatcher.get_or_create_scenario("s")
+            scenario.records.append(
+                AgentRecord.create(
+                    scenario="s", request_type=RequestType.INFERENCE, agent_record_id="with-image", payload=payload
+                )
+            )
+            if bulk:
+                response = await client.post(
+                    "/reef/records/batch", headers=HEADERS, json={"records": [imported("with-image", payload)]}
+                )
+            else:
+                response = await client.post("/reef/records", headers=HEADERS, json=imported("with-image", payload))
+            assert response.status == 200, await response.text()
+            assert len(scenario.records.replay("s")) == 1
 
     try:
         asyncio.run(run())

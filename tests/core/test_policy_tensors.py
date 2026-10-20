@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from reef.core import AgentRecord, RequestType
+from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.core.trajectories import has_image_content, source_record_id, trajectory_reward
 from reef.record2task.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 from reef.service.request_service import client_inference_response
 
@@ -357,3 +359,68 @@ def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
         _turn("i2", [9, 9, 9, 9, 9, 6], [1], [-0.3]),
     ]
     assert make_multi_turn_policy_trajectory(forked, 1.0, source_agent_record_id="r1", scaffold_tolerance=2) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    (
+        ({"messages": [{"role": "user", "content": "hi"}]}, False),
+        ({"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]}, False),
+        ({"messages": [{"role": "user", "content": [{"type": ["image"]}, {"type": {"name": "image"}}]}]}, False),
+        ({"messages": [{"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}]}, False),
+        ({"input": "hi", "response": {"content": [{"type": "image"}]}}, False),
+        ({"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}]}, True),
+        ({"messages": [{"role": "user", "content": [{"type": "tool_result", "content": [{"type": "image"}]}]}]}, True),
+        (
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "document", "source": {"type": "content", "content": [{"type": "image"}]}}
+                        ],
+                    }
+                ]
+            },
+            True,
+        ),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "document", "source": {"type": "text", "data": "hi"}}]}
+                ]
+            },
+            False,
+        ),
+        ({"input": [{"type": "function_call_output", "output": [{"type": "input_image"}]}]}, True),
+        ({"input": [{"type": "computer_call_output", "output": {"type": "computer_screenshot"}}]}, True),
+        ({"response": {"training": {"request_messages": [{"role": "user", "content": [{"type": "image"}]}]}}}, True),
+        ({"response": {"training": {"request_messages": [{"role": "user", "content": "hi"}]}}}, False),
+    ),
+)
+def test_has_image_content_reads_request_messages_and_nested_content(payload, expected) -> None:
+    assert has_image_content(payload) is expected
+
+
+@pytest.mark.unit
+def test_policy_samples_refuse_an_image_record_instead_of_training_on_its_text() -> None:
+    text_turn = _turn("turn-1", [1, 2, 3], [1], [-0.1])
+    image_turn = _turn("turn-2", [1, 2, 3, 4, 5], [1], [-0.2])
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    image_turn = replace(
+        image_turn, payload={**image_turn.payload, "messages": [{"role": "user", "content": [image]}]}
+    )
+    with pytest.raises(ReefError, match="'turn-2' of scenario 's' carries image content"):
+        make_policy_trajectory(image_turn, 1.0)
+    with pytest.raises(ReefError, match="carries image content"):
+        make_multi_turn_policy_trajectory((text_turn, image_turn), 1.0, source_agent_record_id="turn-2")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("has_image", (True, False))
+def test_has_image_content_reads_deeply_nested_content(has_image) -> None:
+    content: list = [{"type": "image_url"} if has_image else {"type": "text", "text": "hi"}]
+    for _ in range(1000):
+        content = [content]
+    assert has_image_content({"messages": [{"role": "user", "content": content}]}) is has_image
