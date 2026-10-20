@@ -9,6 +9,14 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ServedComposition:
+    """The published harness composition used as the evaluation baseline."""
+
+    release_id: str
+    entries: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True)
 class UpdateCandidate:
     """One update that has been produced but not selected for serving.
 
@@ -56,6 +64,8 @@ class SelectionDecision:
     reason: str
     evaluation: EvaluationResult
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    #: A selected candidate waits for a person's review before it is served, as the reason explains.
+    requires_review: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.selected, bool):
@@ -64,6 +74,10 @@ class SelectionDecision:
             raise ValueError("policy must be a non-empty string")
         if not isinstance(self.reason, str) or not self.reason:
             raise ValueError("reason must be a non-empty string")
+        if not isinstance(self.requires_review, bool):
+            raise ValueError("requires_review must be a boolean")
+        if self.requires_review and not self.selected:
+            raise ValueError("only a selected candidate can require review")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +86,7 @@ class SelectionDecision:
             "reason": self.reason,
             "evaluation": self.evaluation.to_dict(),
             "metrics": dict(self.metrics),
+            "requires_review": self.requires_review,
         }
 
 

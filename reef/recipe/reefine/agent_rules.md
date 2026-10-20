@@ -31,7 +31,9 @@ Write `design.md` before the entries:
 2. What triggers the behavior and what state the harness must know, and where each comes from: a command the
    user runs, a session event, an environment variable, a check. A request that names a state (away, busy,
    offline, focused, ...) needs an explicit way for the user to turn it on and off, a command or a tool; never a
-   rule that assumes the state holds.
+   rule that assumes the state holds. When the change starts another agent of this same harness, such as a
+   reviewer run through `pi -p`, that agent loads the same entries: give it one plain job, tell it not to start
+   another agent, and give any step that repeats, such as reviewing again after a fix, a point where it stops.
 3. What only the user can provide (a phone number, a credential, a permission, an account): each is a requires
    item.
 4. How the user discovers, invokes and sees the result of the change through the harness's existing UI, and
@@ -169,7 +171,8 @@ candidate is saved for diagnosis, not automatically published.
   change and fix what it refuses.
 - `harness_trial` runs the changed harness for real on a task you give it and shows what happened, including
   every image or speech call and the provider's error when one failed. A change you never tried is not done:
-  try the behavior the request asks for, read the result, fix and try again until it works.
+  try the behavior the request asks for, read the result, fix and try again until it works. A trial that times
+  out is a finding: find out why, such as agents that keep starting each other, before you try again or finish.
 - For commands, modes and restrictions, use `harness_trial` with `script` instead of asking a model to operate
   the UI. A script runs literal prompts and slash commands in one real pi SDK session, with a fixed local
   model. `{"new_session": true}` starts a fresh session. `expect` checks the actual outgoing tool set and

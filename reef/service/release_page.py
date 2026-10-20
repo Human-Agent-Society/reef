@@ -28,12 +28,15 @@ from urllib.parse import quote, urlencode
 from reef.core.requirements import required_by
 from reef.harness.step_result import (
     design_sections,
+    evaluation_report,
     floor_tasks_note,
     missed_episode_text,
     missed_episodes,
     reef_installs,
     unscored_failures,
 )
+from reef.service.check_page import STYLE as EVALUATION_STYLE
+from reef.service.check_page import evaluation_html
 from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -446,6 +449,9 @@ def _review(metrics: Mapping[str, Any]) -> str:
         )
     else:
         parts.append('<p class="empty">no review on record</p>')
+    if isinstance(evaluation_report(metrics), Mapping) and isinstance(review, Mapping):
+        # The evaluation decided the result; the notes stay one click away so they do not read as the result.
+        parts = ["<details><summary>Show the proposer's notes</summary>" + "".join(parts) + "</details>"]
     if undeclared:
         parts.append(
             '<div class="failure"><h3>Undeclared variables</h3><p>The extension reads these and no requires item '
@@ -453,7 +459,12 @@ def _review(metrics: Mapping[str, Any]) -> str:
         )
     if dropped:
         parts.append("<h3>Answers written again</h3>" + _listed(dropped, ""))
-    return _card("Review", "".join(parts) + "\n")
+    return _card(
+        "Proposer's own review",
+        '<p class="empty">Written while the change was made. The independent evaluation decides the result.</p>'
+        + "".join(parts)
+        + "\n",
+    )
 
 
 def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -755,7 +766,7 @@ def build_release_page(
     served = served_step(rows)
     return document(
         title=f"Harness v{step}",
-        style=STYLE,
+        style=STYLE + EVALUATION_STYLE,
         breadcrumb="Versions",
         context=link_query.get("scenario", "") if link_query else "",
         state=selection_result,
@@ -766,6 +777,7 @@ def build_release_page(
         home="" if served is None or served == step else step_href(served, link_query),
         body=_steps_nav(step, rows, link_query)
         + '<div class="stack">\n'
+        + evaluation_html(metrics, result=selection_result)
         + _card("Why", f"{_why(row, metrics)}\n")
         + _design(metrics)
         + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")

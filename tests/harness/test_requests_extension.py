@@ -1388,12 +1388,12 @@ def test_a_headless_session_draws_no_spinner(tmp_path: Path) -> None:
         (
             PENDING_ROW,
             f"reef: '{ASK}' is ready as release rel-3333. This release changes an extension, so read it before "
-            "it runs: /versions v1 opens the page, /versions v1 install serves it.",
+            "it runs. /versions v1 opens the page, /versions v1 install serves it.",
         ),
         (
             REJECTED_ROW,
-            f"reef: '{ASK}' did not pass the checks (candidate missed the floor on 1 of 1 tasks). Nothing changed; "
-            "rephrase or split the request. Details: /versions v1.",
+            f"reef: '{ASK}' did not pass the checks. candidate missed the floor on 1 of 1 tasks. Nothing changed. "
+            "The page lists each check; ask again for a new attempt. Details: /versions v1.",
         ),
         (
             SKIPPED_ROW,
@@ -1421,9 +1421,9 @@ def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     kinds = [event["kind"] for event in out["events"]]
     # The filing, then the watch: the catalog read that finds the row ends it, and the report follows.
     assert kinds[:3] == ["fetch", "notify", "status"]
-    # The report is the message and the notice that follow it; an install the settle offers comes after them.
+    # The report is one message; an install the settle offers comes after it.
     report = kinds.index("message")
-    assert kinds[report : report + 2] == ["message", "notify"]
+    assert kinds.count("message") == 1
     (catalog,) = [event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]
     assert catalog["method"] == "GET" and catalog["url"] == "http://reef:8900/reef/harness/releases"
     statuses = _of_kind(out, "status")
@@ -1431,13 +1431,14 @@ def test_the_watch_reports_the_result_and_what_the_review_left_uncovered(
     # The settled step clears both indicators: the footer line and the spinner above the input.
     assert statuses[-1] == {"kind": "status", "key": "reef", "text": None}
     assert _of_kind(out, "widget")[-1] == {"kind": "widget", "key": "reef-harness", "content": None}
-    # The report is a custom message the chat renders and the session keeps, without a turn, then the notice.
+    # The report is a custom message the chat renders and the session keeps, without a turn and without a notice of
+    # the same line, so the chat does not show the report twice.
     assert out["events"][report] == {
         "kind": "message",
         "message": {"customType": "reef-harness", "content": expected, "display": True},
         "options": {"triggerTurn": False},
     }
-    assert out["events"][report + 1] == {"kind": "notify", "message": expected, "type": "info"}
+    assert expected.split("\n")[0] not in [notice["message"] for notice in _notices(out)]
     # The report delivered, the stored filing is dropped.
     assert _stored(tmp_path) == []
 
@@ -1548,8 +1549,8 @@ def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
         TEST_WAIT_MS="150",
     )
     assert out["error"] is None
-    # Two filings, one watch: the second clears the first's indicators, and one poll settles one notice.
-    assert [event["kind"] for event in out["events"]][-2:] == ["message", "notify"]
+    # Two filings, one watch: the second clears the first's indicators, and one poll settles one report.
+    assert [event["kind"] for event in out["events"]][-1:] == ["message"]
     assert [event["method"] for event in _fetches(out)][:2] == ["POST", "POST"]
     assert [event["text"] for event in _of_kind(out, "status")] == [
         "reef: request q-1 queued",
@@ -1662,16 +1663,15 @@ def test_session_start_reports_a_stored_request_that_settled_and_re_arms_the_wat
     # The still-running entry's record is read once (unanswered here: the runner knows no such route) before
     # the watch takes it, so a request the service no longer knows is dropped instead of watched.
     kinds = [event["kind"] for event in out["events"]]
-    assert kinds[:6] == ["fetch", "notify", "message", "notify", "fetch", "status"]
+    assert kinds[:5] == ["fetch", "notify", "message", "fetch", "status"]
     assert out["events"][1] == {"kind": "notify", "message": first, "type": "info"}
     assert out["events"][2] == {
         "kind": "message",
         "message": {"customType": "reef-harness", "content": report, "display": True},
         "options": {"triggerTurn": False},
     }
-    assert out["events"][3] == {"kind": "notify", "message": report, "type": "info"}
-    assert out["events"][4]["url"].endswith("/reef/scenarios/code-repair/records/q-9")
-    assert out["events"][5] == {"kind": "status", "key": "reef", "text": "reef: request q-9 queued"}
+    assert out["events"][3]["url"].endswith("/reef/scenarios/code-repair/records/q-9")
+    assert out["events"][4] == {"kind": "status", "key": "reef", "text": "reef: request q-9 queued"}
     assert len(_of_kind(out, "message")) == 1  # the stale entry's row is in the catalog; it is not reported
     assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) >= 3
     assert [entry["id"] for entry in _stored(tmp_path)] == ["q-9"]
@@ -1765,10 +1765,9 @@ def _settle(
     assert out["error"] is None
     kinds = [event["kind"] for event in out["events"]]
     assert kinds[:3] == ["fetch", "notify", "status"]
-    # The settle: the report, then the notice. What follows them is what the case reads.
+    # The settle: the report. What follows it is what the case reads.
     report = kinds.index("message")
-    assert kinds[report : report + 2] == ["message", "notify"]
-    return out["events"][report + 2 :]
+    return out["events"][report + 1 :]
 
 
 def install_step(tmp_path: Path, agent_dir: Path, row: dict[str, object], **env: str) -> list[dict[str, object]]:

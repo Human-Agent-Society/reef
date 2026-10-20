@@ -33,6 +33,14 @@ everything the shared engines need to drive one harness binary:
   keeps in the installed tree, so a later run finds them; the check of the
   installed files at a session start skips them, except the keys of a
   settings file outside its ``preference_keys``.
+- ``follow_up_messages`` (optional): the binary takes more messages after the
+  ``{prompt}`` argument and sends them in order in the same session, so one
+  episode can play a person's short exchange.
+- ``continue_argv`` (optional): the argv template that sends one more message
+  to the latest session in the episode root. An episode runs it once per
+  further message, after ``argv``, for a binary that takes one message per run.
+- ``offline_env`` (optional): the ``env`` variables that keep an episode
+  offline; an online episode leaves them out.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -321,6 +329,14 @@ class AdapterDescriptor:
     #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
     #: model reads, so a gate can hand the adapter task directories instead of prompts.
     is_prompt_task_directory: bool = False
+    #: True when the binary takes more messages after the ``{prompt}`` argument and sends them in order in the same
+    #: session; an episode appends them right after that argument.
+    follow_up_messages: bool = False
+    #: The argv template that sends one more message, at ``{prompt}``, to the latest session in the episode root;
+    #: an episode runs it once per further message. Empty when the binary cannot continue a session this way.
+    continue_argv: tuple[str, ...] = ()
+    #: The ``env`` variables that keep an episode offline; an online episode leaves them out.
+    offline_env: tuple[str, ...] = ()
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -441,6 +457,17 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_prompt_task_directory = data.get("is_prompt_task_directory", False)
     if not isinstance(is_prompt_task_directory, bool):
         raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
+    follow_up_messages = data.get("follow_up_messages", False)
+    if not isinstance(follow_up_messages, bool):
+        raise DescriptorError(f"{where} 'follow_up_messages' must be a boolean")
+    continue_argv = _str_list(data.get("continue_argv", []), f"{where} 'continue_argv'")
+    if continue_argv and "{prompt}" not in continue_argv:
+        raise DescriptorError(f"{where} 'continue_argv' must contain the {{prompt}} argument")
+    if continue_argv and follow_up_messages:
+        raise DescriptorError(f"{where} sets both 'follow_up_messages' and 'continue_argv'; choose one")
+    offline_env = _str_list(data.get("offline_env", []), f"{where} 'offline_env'")
+    if not set(offline_env) <= set(env):
+        raise DescriptorError(f"{where} 'offline_env' names variables 'env' does not set")
     is_root_bind_mounted = data.get("is_root_bind_mounted", False)
     if not isinstance(is_root_bind_mounted, bool):
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
@@ -470,6 +497,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
+        follow_up_messages=follow_up_messages,
+        continue_argv=continue_argv,
+        offline_env=offline_env,
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,

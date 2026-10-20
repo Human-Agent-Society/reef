@@ -1,10 +1,12 @@
 """Episode lifecycle: render, launch headless, collect, clean up exactly.
 
-One episode is one process of the harness binary inside a throwaway root:
+One episode is one session of the harness binary inside a throwaway root:
 the rendered files land under the root, the descriptor's relocation
 environment points the binary's entire composition at it, the binary runs
 headless in an empty ``workspace/`` working directory, and the trajectory is
-read back before the root is removed. Both surveyed harnesses re-read their
+read back before the root is removed. On an adapter that continues a session
+in a new process, each further message of the session is one more process in
+the same root. Both surveyed harnesses re-read their
 whole composition at process start and accept environment variables that
 relocate their config and session roots, so the inverse of an episode is
 exactly "delete the root" - no shared state survives.
@@ -23,8 +25,10 @@ from __future__ import annotations
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -122,6 +126,12 @@ def run_episode(
     timeout: float = 600.0,
     executor: EpisodeExecutor | None = None,
     keep_dir: Path | None = None,
+    workspace_files: Mapping[str, str] | None = None,
+    initialize_git: bool = False,
+    keep_workspace: bool = False,
+    online: bool = False,
+    task_environment: Mapping[str, str] | None = None,
+    follow_ups: tuple[str, ...] = (),
 ) -> EpisodeResult:
     """Run one headless episode of ``descriptor``'s harness over ``files``.
 
@@ -137,7 +147,19 @@ def run_episode(
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
+    ``workspace_files`` seeds a fresh application workspace; ``initialize_git``
+    commits that fixture for diff-based tasks. ``keep_workspace`` retains the
+    resulting regular files under ``keep_dir/workspace`` with size/count limits.
+    ``online`` leaves out the descriptor's ``offline_env`` and makes the configured
+    binary available to child agents; the default keeps existing offline episodes.
+    ``task_environment`` explicitly forwards operator-selected variables,
+    such as network proxies, without replacing the harness relocation environment.
+    ``follow_ups`` are further messages of the same session, sent after ``prompt``. An adapter with
+    ``follow_up_messages`` takes them in the same run; an adapter with ``continue_argv`` gets one more run per
+    message, which stops at the first run that fails. ``timeout`` covers all the runs together.
     """
+    if follow_ups and not descriptor.follow_up_messages and not descriptor.continue_argv:
+        raise EpisodeError(f"adapter {descriptor.name!r} sends one message per episode")
     executor = executor or LocalExecutor()
     # Adapters can validate a conditional boundary (for example, remote task
     # containers with a sandboxed runner). Otherwise keep the default refusal
@@ -180,6 +202,35 @@ def run_episode(
             written.add(str(relative_path))
         workspace = root / "workspace"
         workspace.mkdir()
+        for relative, text in (workspace_files or {}).items():
+            relative_path = PurePosixPath(relative)
+            if relative_path.is_absolute() or ".." in relative_path.parts or not relative_path.parts:
+                raise EpisodeError(f"workspace path {relative!r} escapes the workspace")
+            target = workspace / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        if initialize_git:
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "add", "."],
+                [
+                    "git",
+                    "-c",
+                    "user.name=Reef evaluation",
+                    "-c",
+                    "user.email=reef@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    "Evaluation fixture",
+                    "--allow-empty",
+                ],
+            ):
+                try:
+                    subprocess.run(command, cwd=workspace, check=True, capture_output=True, timeout=30)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise EpisodeError(f"cannot initialize fixture repository: {exc}") from exc
         writable_paths = tuple(root / PurePosixPath(relative) for relative in descriptor.writable_paths)
         try:
             for path in writable_paths:
@@ -191,6 +242,16 @@ def run_episode(
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
         env.setdefault("HOME", str(root))
+        for name, value in (task_environment or {}).items():
+            if not isinstance(name, str) or not isinstance(value, str) or not name or name in env:
+                raise EpisodeError("task environment must contain string variables outside the harness environment")
+            env[name] = value
+        if online:
+            env = {key: value for key, value in env.items() if key not in descriptor.offline_env}
+            installed_binary = binary or shutil.which(descriptor.binary)
+            if installed_binary is not None:
+                binary_directory = str(Path(installed_binary).absolute().parent)
+                env["PATH"] = os.pathsep.join([binary_directory, os.environ.get("PATH", "")])
         if executor.runs_on_host:
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
             # its explicit env_from.
@@ -198,22 +259,38 @@ def run_episode(
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
                     env[key] = value
-        argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
-        try:
-            outcome = execute(
-                executor,
-                argv,
-                root=root,
-                workspace=workspace,
-                env=env,
-                timeout=timeout,
-                writable_paths=writable_paths,
-                readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),
-            )
-        except EpisodeLaunchError as exc:
-            raise EpisodeError(str(exc)) from exc
-        except EpisodeTimeout as exc:
-            raise EpisodeError(str(exc)) from exc
+        argv = [binary or descriptor.binary]
+        for token in descriptor.argv:
+            argv.append(token.replace("{prompt}", prompt))
+            if token == "{prompt}" and descriptor.follow_up_messages:
+                argv.extend(follow_ups)
+        # An adapter that continues a session in a new process gets one more run per further message.
+        runs = [argv] + [
+            [binary or descriptor.binary, *(token.replace("{prompt}", message) for token in descriptor.continue_argv)]
+            for message in (follow_ups if descriptor.continue_argv else ())
+        ]
+        started = time.monotonic()
+        outputs = []
+        for index, run_argv in enumerate(runs):
+            try:
+                outcome = execute(
+                    executor,
+                    run_argv,
+                    root=root,
+                    workspace=workspace,
+                    env=env,
+                    # A later message gets what the earlier runs left of the episode's timeout.
+                    timeout=max(timeout - (time.monotonic() - started), 1.0) if index else timeout,
+                    writable_paths=writable_paths,
+                    readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),
+                )
+            except EpisodeLaunchError as exc:
+                raise EpisodeError(str(exc)) from exc
+            except EpisodeTimeout as exc:
+                raise EpisodeError(str(exc)) from exc
+            outputs.append(outcome)
+            if outcome.exit_code != 0:
+                break
         trajectory = reader(root / descriptor.trajectory_path)
         residue = tuple(
             sorted(
@@ -225,9 +302,9 @@ def run_episode(
             )
         )
         return EpisodeResult(
-            exit_code=outcome.exit_code,
-            stdout=outcome.stdout,
-            stderr=outcome.stderr,
+            exit_code=outputs[-1].exit_code,
+            stdout="".join(output.stdout for output in outputs),
+            stderr="".join(output.stderr for output in outputs),
             trajectory=trajectory,
             residue=residue,
         )
@@ -235,5 +312,32 @@ def run_episode(
         try:
             if keep_dir is not None:
                 _keep_trajectory(root / descriptor.trajectory_path, keep_dir)
+                if keep_workspace and (root / "workspace").is_dir():
+                    keep_workspace_files(root / "workspace", keep_dir / "workspace")
         finally:
             _remove_episode_root(root)
+
+
+def keep_workspace_files(source: Path, target: Path) -> None:
+    """Retain bounded regular output files; never follow agent-created symlinks."""
+    total_bytes = 0
+    file_count = 0
+    target.mkdir(parents=True, exist_ok=True)
+    for path in source.rglob("*"):
+        relative = path.relative_to(source)
+        # Only links inside the workspace matter; the temporary root may itself sit under a link (macOS /var).
+        if (
+            ".git" in relative.parts
+            or path.is_symlink()
+            or any((source / parent).is_symlink() for parent in relative.parents)
+        ):
+            continue
+        if not path.is_file():
+            continue
+        file_count += 1
+        total_bytes += path.stat().st_size
+        if file_count > 1000 or total_bytes > 50 * 1024 * 1024:
+            raise TrajectoryKeepError("workspace output exceeds 1000 files or 50 MiB")
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, destination)

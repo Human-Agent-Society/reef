@@ -4080,6 +4080,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "reef-client" },
     { name = "reef-eval" },
+    { name = "rich" },
     { name = "sqlalchemy" },
     { name = "tomli-w" },
 ]
@@ -4186,6 +4187,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'sglang'" },
     { name = "requests", marker = "extra == 'slime'" },
     { name = "requests", marker = "extra == 'vllm'" },
+    { name = "rich", specifier = ">=15.0,<16" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.10" },
     { name = "safetensors", marker = "extra == 'slime'" },
     { name = "sglang-router", marker = "extra == 'sglang'", specifier = ">=0.3.2" },

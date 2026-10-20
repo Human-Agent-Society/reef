@@ -137,7 +137,8 @@ def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
 
 def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_session_config() -> None:
     """A reef-codex session reads config.toml: no approval_policy, so Codex asks the person on request, and the
-    tree's web_search. The episode argv overrides both before the prompt."""
+    tree's web_search. The episode argv, and the argv that sends a later message, override both before the
+    prompt; resume takes no --sandbox flag, so the later message sets the sandbox mode as a config."""
     descriptor = get_adapter("codex")
     files = render_composition([("config", {"data": {"web_search": "live"}})], descriptor)
     config = tomllib.loads(files["codex/config.toml"])
@@ -145,6 +146,10 @@ def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_session_c
     argv = list(descriptor.argv)
     overrides = [argv[index + 1] for index, token in enumerate(argv) if token == "--config"]
     assert overrides == ['approval_policy="never"', 'web_search="disabled"'] and argv[-1] == "{prompt}"
+    continue_argv = list(descriptor.continue_argv)
+    overrides = [continue_argv[index + 1] for index, token in enumerate(continue_argv) if token == "--config"]
+    assert continue_argv[:3] == ["exec", "resume", "--last"] and continue_argv[-1] == "{prompt}"
+    assert overrides == ['approval_policy="never"', 'web_search="disabled"', 'sandbox_mode="workspace-write"']
 
 
 def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills_name() -> None:
@@ -1255,9 +1260,12 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
         ("host_env", {"NOT A NAME": ""}, "'host_env' must map variable names"),
         ("host_env", {"PI_CODING_AGENT_DIR": ""}, "'env' already sets: PI_CODING_AGENT_DIR"),
         ("is_root_bind_mounted", "yes", "'is_root_bind_mounted' must be a boolean"),
+        ("continue_argv", ["--continue"], "must contain the {prompt} argument"),
+        ("continue_argv", ["--continue", "{prompt}"], "sets both 'follow_up_messages' and 'continue_argv'"),
+        ("offline_env", ["NOT_SET"], "'offline_env' names variables 'env' does not set"),
     ],
 )
-def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
+def test_descriptor_episode_settings_are_validated(tmp_path, field: str, value, message: str) -> None:
     data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
     data[field] = value
     target = tmp_path / "descriptor.yaml"

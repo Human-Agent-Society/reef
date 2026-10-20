@@ -18,7 +18,6 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
-from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
@@ -27,6 +26,7 @@ from reef.sandbox.e2b import E2BSession, pack
 from reef.sandbox.process import EpisodeTimeout, LocalExecutor, ProcessOutcome
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
+from reef.train.reefine import agent as reefine_agent
 
 REVIEW = {"result": "complete", "covered": ["reads answers aloud"], "uncovered": [], "delivers": True}
 
@@ -416,7 +416,9 @@ def test_a_reply_cut_at_its_token_budget_says_so_rather_than_that_nothing_change
 def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) -> None:
     seen = []
 
-    def text_proposer(nodes, samples, models, *, requests=(), entries=(), adapter="pi"):
+    def text_proposer(
+        nodes, samples, models, *, requests=(), entries=(), adapter="pi", rejected=(), instructions=None
+    ):
         seen.append((tuple(requests), adapter))
         return Mutation("remove", "tone")
 

@@ -174,6 +174,14 @@ def test_the_claude_command_pre_approves_only_the_wrapper_and_opencode_runs_it_a
     assert "keeps it for the session" not in command_text("codex")
 
 
+def test_the_command_hands_a_release_under_review_to_the_person_instead_of_running_update() -> None:
+    """update installs the head, never a release that waits for review: run on one, it reinstalls the old release."""
+    for adapter in ("claude", "codex", "opencode", "hermes", "dsh"):
+        text = command_text(adapter)
+        assert "When the result line says the release waits for review, update does not install it" in text
+        assert "do not run update for it" in text
+
+
 @pytest.mark.parametrize("adapter", ["claude", "codex", "opencode", "hermes", "dsh"])
 def test_the_command_checks_it_runs_under_the_wrapper_except_where_the_check_costs_an_approval(adapter: str) -> None:
     """The check is one more shell call: on Claude Code it asks the person to approve a variable expansion, and the

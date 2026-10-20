@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -531,3 +532,90 @@ def test_opencode_reader_rejects_a_non_object_document(tmp_path: Path) -> None:
     database.close()
     with pytest.raises(TrajectoryError, match=r"part prt_01 .* is not an object"):
         read_opencode_session(tmp_path)
+
+
+def test_online_fixture_episode_keeps_independent_output_and_git_diff(tmp_path: Path) -> None:
+    script = PI_FAKE.replace(
+        'print(json.dumps({"type": "agent_start"}))',
+        "import subprocess\n"
+        'assert os.environ["HTTPS_PROXY"] == "http://proxy.example.invalid"\n'
+        'assert Path("adder.py").read_text() == "broken"\n'
+        'Path("adder.py").write_text("fixed")\n'
+        'assert "adder.py" in subprocess.check_output(["git", "diff"], text=True)\n'
+        'print(json.dumps({"type": "agent_start"}))',
+    )
+    retained = tmp_path / "retained"
+    inputs = {"adder.py": "broken"}
+    result = run_episode(
+        get_adapter("pi"),
+        pi_files(),
+        "fix",
+        binary=fake_binary(tmp_path, script),
+        workspace_files=inputs,
+        initialize_git=True,
+        online=True,
+        keep_dir=retained,
+        keep_workspace=True,
+        task_environment={"HTTPS_PROXY": "http://proxy.example.invalid"},
+    )
+    assert result.trajectory[0]["offline"] is None
+    assert (retained / "workspace" / "adder.py").read_text() == "fixed"
+    assert inputs == {"adder.py": "broken"}
+    assert not Path(result.trajectory[0]["root"]).exists()
+    assert not (retained / "workspace" / ".git").exists()
+
+
+@pytest.mark.parametrize("path", ["../outside", "/absolute"])
+def test_workspace_fixture_cannot_escape_episode(tmp_path: Path, path: str) -> None:
+    with pytest.raises(EpisodeError, match="workspace path"):
+        run_episode(
+            get_adapter("pi"), pi_files(), "task", binary=fake_binary(tmp_path, PI_FAKE), workspace_files={path: "x"}
+        )
+
+
+def test_task_environment_cannot_replace_harness_relocation(tmp_path: Path) -> None:
+    with pytest.raises(EpisodeError, match="outside the harness environment"):
+        run_episode(get_adapter("pi"), pi_files(), "task", task_environment={"HOME": "/outside"})
+
+
+def test_follow_up_messages_follow_the_prompt_on_an_adapter_that_takes_them(tmp_path: Path) -> None:
+    script = PI_FAKE.replace(
+        'prompt = args[args.index("-p") + 1]',
+        'prompt = args[args.index("-p") + 1]\nPath("argv.json").write_text(json.dumps(args))',
+    )
+    retained = tmp_path / "retained"
+    run_episode(
+        get_adapter("pi"),
+        pi_files(),
+        "/mode on",
+        binary=fake_binary(tmp_path, script),
+        follow_ups=("what is new",),
+        keep_dir=retained,
+        keep_workspace=True,
+    )
+    argv = json.loads((retained / "workspace" / "argv.json").read_text())
+    assert argv[argv.index("-p") + 1 :] == ["/mode on", "what is new"]
+    with pytest.raises(EpisodeError, match="one message per episode"):
+        run_episode(get_adapter("dsh"), {}, "/mode on", follow_ups=("what is new",))
+
+
+def test_continue_argv_sends_each_follow_up_in_one_more_run_until_a_run_fails(tmp_path: Path) -> None:
+    script = PI_FAKE.replace(
+        'assert args[:2] == ["--mode", "json"], args',
+        'with Path("runs.jsonl").open("a") as runs:\n    runs.write(json.dumps(args) + "\\n")',
+    )
+    descriptor = replace(get_adapter("pi"), follow_up_messages=False, continue_argv=("--continue", "-p", "{prompt}"))
+    retained = tmp_path / "retained"
+    result = run_episode(
+        descriptor,
+        pi_files(),
+        "/mode on",
+        binary=fake_binary(tmp_path, script),
+        follow_ups=("fail", "never sent"),
+        keep_dir=retained,
+        keep_workspace=True,
+    )
+    runs = [json.loads(line) for line in (retained / "workspace" / "runs.jsonl").read_text().splitlines()]
+    assert runs == [["--mode", "json", "-p", "/mode on"], ["--continue", "-p", "fail"]]
+    assert result.exit_code == 3
+    assert result.stdout.count("agent_start") == 2

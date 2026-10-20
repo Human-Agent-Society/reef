@@ -15,11 +15,16 @@ install:
   version: "0.84.2"
   binary_path: "node_modules/.bin/pi"
 argv: ["--mode", "json", "-p", "{prompt}"]
+# pi takes further messages after the prompt and sends them in order in one session.
+follow_up_messages: true
 env:
   PI_CODING_AGENT_DIR: "{root}/pi-agent"
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
   PI_OFFLINE: "1"
   PI_SKIP_VERSION_CHECK: "1"
+# An online episode, such as a Reefine request task, drops PI_OFFLINE so the
+# changed extensions load as they do for a person.
+offline_env: [PI_OFFLINE]
 # An interactive run through reef-pi: online (it talks to reef), but reef pins
 # pi's version, so pi's own update notice would only mislead.
 client_env:

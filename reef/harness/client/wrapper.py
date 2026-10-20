@@ -232,9 +232,10 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
+from reef.harness.client.check_display import CheckDisplay
 from reef.harness.episodes.vendor_install import version_probe_env
 from reef.harness.episodes.version_check import ships_version_check
-from reef.harness.step_result import design_sections, next_action, rejection_text
+from reef.harness.step_result import design_sections, evaluation_report, next_action, pending_text, rejection_text
 
 
 #: The commands a client reports as on its PATH or not, so a proposer builds for the machine the change runs on,
@@ -1403,7 +1404,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked. For an
     # install that wrote its wrapper beside the record that is the wrapper's own directory, never the tree, where a
     # program a session adds (a node, say) would run in the next session unchecked.
-    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(wrapper.parent), env.get("PATH", "")])
+    env["PATH"] = os.pathsep.join([str(Path(binary).absolute().parent), str(wrapper.parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -1709,10 +1710,7 @@ def result_line(
             if notice
             else f"reef-{adapter} page {step} opens the page"
         )
-        return (
-            f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-            f"runs: {where}. Page: {page}"
-        )
+        return f"'{ask}' is ready as release {release}. {pending_text(metrics)} Next: {where}. Page: {page}"
     if selection_result == "rejected":
         return f"'{ask}' {rejection_text(metrics)}"
     if selection_result == "skipped" and declined_reason(row):
@@ -1780,6 +1778,24 @@ def _await_step(
     timeout_s: float,
     poll_s: float,
 ) -> tuple[int, list[dict[str, Any]]] | str:
+    with CheckDisplay() as display:
+        return await_step_with_display(
+            upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s, display=display
+        )
+
+
+def await_step_with_display(
+    upstream: str,
+    scenario: str,
+    adapter: str,
+    token: str | None,
+    record_id: str,
+    ask: str,
+    *,
+    timeout_s: float,
+    poll_s: float,
+    display: CheckDisplay,
+) -> tuple[int, list[dict[str, Any]]] | str:
     """Poll the catalog until a step has consumed the request: its index and the catalog.
 
     ``"timeout"`` once ``timeout_s`` passes, the step still running, and
@@ -1795,6 +1811,11 @@ def _await_step(
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
         if step is not None:
+            metrics = rows[step].get("metrics") or {}
+            selection_result = (
+                "pending" if rows[step].get("pending") else "selected" if metrics.get("selected") else "rejected"
+            )
+            display.update(selection_result, (evaluation_report(metrics) or {}).get("checks"))
             return step, rows
         if time.monotonic() >= deadline:
             later = (
@@ -1808,6 +1829,7 @@ def _await_step(
         state, reading = _request_state(upstream, scenario, token, record_id)
         if reading:
             progress = reading
+            display.update(str(reading.get("state", "running")), reading.get("checks"), reading.get("activity"))
         if not started:
             missing = missing + 1 if state == "gone" else 0
             if missing >= 2:
@@ -2064,12 +2086,29 @@ def report_request(
     if usage and selection_result in ("selected", "pending"):
         # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
         print(f"reef-{adapter}: how to use: {usage}")
-    if uncovered:
+    report = evaluation_report(rows[step].get("metrics") or {})
+    checks = report.get("checks") if isinstance(report, Mapping) else None
+    for group, heading in (("limit", "not possible on this harness"), ("untested", "not tested here")):
+        # The evaluation's own findings, one point per line, before the proposer's notes.
+        # Each point with its reason, so the list says why without the page.
+        points = [
+            str(check.get("expected")).strip().rstrip(".")
+            + (f" ({str(check.get('reason')).strip().rstrip('.')})" if check.get("reason") else "")
+            for check in (checks if isinstance(checks, list) else [])
+            if isinstance(check, Mapping) and check.get("group") == group
+        ]
+        if points:
+            print(f"reef-{adapter}: {heading}:")
+            for point in points:
+                print(f"  - {point}")
+    # With an evaluation, its checks decide and the page keeps the proposer's notes; printed here they would read as
+    # the result.
+    if uncovered and not isinstance(checks, list):
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
         print(f"reef-{adapter}: {label}: {joined_points(uncovered)}")
     limits = review_points(rows[step], "limits")
-    if limits:
+    if limits and not isinstance(checks, list):
         # One point per line: a point may hold a '; ' of its own.
         print(f"reef-{adapter}: out of reach on this harness:")
         for point in limits:

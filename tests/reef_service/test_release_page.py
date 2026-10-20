@@ -279,7 +279,7 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
         assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
         assert "<pre>Answer briefly, with care.</pre>" in _section(page, "What changed")
         selection_result = _section(page, "Result")
-        assert '<span class="rejected">Not selected</span>' in selection_result
+        assert '<span class="rejected">Rejected</span>' in selection_result
         assert "Did not pass the checks" in selection_result and "The head stayed" in selection_result
         assert "<dt>Wins</dt><dd>0</dd>" in selection_result and "<dt>Losses</dt><dd>1</dd>" in selection_result
         chain = _section(page, "Chain")
@@ -299,7 +299,7 @@ def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_
         assert '<span class="tag operation-create">create</span><span class="node-id">s1</span>' in changed
         assert '<span class="tag">skill</span>' in changed
         assert "<pre># notes</pre>" in changed and "notes" in changed
-        assert '<span class="rejected">Not selected</span>' in _section(page, "Result")
+        assert '<span class="rejected">Rejected</span>' in _section(page, "Result")
         # The trainer writes training_request on every request step's row; an automatic step has none.
         assert "training_request" not in _data(page)["metrics"]
     finally:
@@ -407,7 +407,7 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
     states = {
         "selected": ("selected", "Published"),
-        "rejected": ("rejected", "Not selected"),
+        "rejected": ("rejected", "Rejected"),
         "skipped": ("skipped", "No changes"),
         "pending": ("pending", "Ready for review"),
     }
@@ -745,7 +745,7 @@ def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
         "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
     }
     page = build_release_page(1, [creation, row])
-    review = _section(page, "Review")
+    review = _section(page, "Proposer's own review")
     assert "did not run, so nothing checked whether they deliver it" in review
     assert "carried no result object" in review
 
@@ -769,7 +769,7 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
+    assert _sections(page) == ["Why", "Design", "What changed", "Proposer's own review", "Result", "Setup", "Chain"]
     design = _section(page, "Design")
     assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
     # A design that ends with a How to use section shows it as the card after the design.
@@ -797,7 +797,7 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
         ),
     ):
         assert design_sections({"design": text}) == expected, text
-    review = _section(page, "Review")
+    review = _section(page, "Proposer's own review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (
         '<h3>Covered</h3><ul class="review-list"><li>the /away command toggles the state</li>'
@@ -816,7 +816,8 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     # A complete review with nothing left uncovered says so.
     complete = {"review": {"result": "complete", "covered": ["the command"], "uncovered": []}}
     review = _section(
-        build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]), "Review"
+        build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]),
+        "Proposer's own review",
     )
     assert '<span class="complete">Complete</span>' in review
     assert '<h3>Uncovered</h3><p class="empty">nothing left uncovered</p>' in review
@@ -824,8 +825,8 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> No
     # The review call failed: no result on record, but the undeclared variables still show.
     failed = {"design": "One command.", "undeclared_env": ["TWILIO_SID"]}
     page = build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": failed}}])
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
-    review = _section(page, "Review")
+    assert _sections(page) == ["Why", "Design", "What changed", "Proposer's own review", "Result", "Setup", "Chain"]
+    review = _section(page, "Proposer's own review")
     assert '<p class="empty">no review on record</p>' in review and "<h3>Covered</h3>" not in review
     assert '<span class="id">TWILIO_SID</span>' in review
 

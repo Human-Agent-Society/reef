@@ -15,6 +15,7 @@ tests/core/test_reef_core_package.py
 tests/core/test_task_split.py
 tests/evaluation/test_candidate_evaluation_plugins.py
 tests/evaluation/test_evaluation_worker_pool.py
+tests/evaluation/test_reefine_evaluation.py
 tests/evaluation/test_regression_gate.py
 tests/evaluation/test_selection.py
 tests/evaluation/test_verifier_reward.py
@@ -92,6 +93,7 @@ tests/reef_service/test_artifact_versions.py
 tests/reef_service/test_async_pipeline_core.py
 tests/reef_service/test_auth.py
 tests/reef_service/test_bridge_readiness.py
+tests/reef_service/test_check_page.py
 tests/reef_service/test_client_agent_record_id.py
 tests/reef_service/test_component_config_arguments.py
 tests/reef_service/test_config_layout.py
@@ -126,6 +128,7 @@ tests/reef_service/test_reef_recipe_requests.py
 tests/reef_service/test_reef_removed_lifecycle.py
 tests/reef_service/test_reef_runner.py
 tests/reef_service/test_reef_wire.py
+tests/reef_service/test_reefine_runtime.py
 tests/reef_service/test_release_page.py
 tests/reef_service/test_reports.py
 tests/reef_service/test_request_body_validation.py

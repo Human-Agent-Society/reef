@@ -308,6 +308,79 @@ form. A ``SelectionPlugin`` must both evaluate and select; a selector alone
 is insufficient. Keep publication in the candidate
 selection flow so Reef can revert a rejected change.
 
+Reefine evaluation
+~~~~~~~~~~~~~~~~~~
+
+Reefine binds ``reef.train.reefine`` proposal execution to
+``reef.evaluation.reefine.ReefineEvaluation``. Recipe-owned prompts,
+defaults and configuration live in ``reef.recipe.reefine``. Neither component
+is rendered into the delivered harness. MetaHarness and GEPA keep their own
+method policy in ``recipes/`` and continue to use their existing plugins.
+
+The evaluator implements the existing ``CandidateEvaluationPlugin`` contract:
+``evaluate`` returns measurements. ``decide`` returns a ``SelectionDecision``
+whose ``selected`` flag controls publication. Its ``requires_review`` flag
+holds a selected release for a person's review instead of serving it.
+``ReefineCandidate`` adds the original ``TrainingRequest``, the admitted
+client requirements that will be delivered, and a snapshot of the current
+serving composition. Reviewers inspect those requirements as artifact
+metadata, without the proposer's design notes or conversations. Scenario preparation freezes that snapshot
+from the published release, excluding pending candidates.
+
+The plan reads the original request with
+``ReefineEvaluationBackend.harness_description``: the adapter name, the entry
+kinds a change there may contain, the adapter's harness facts and how many
+messages one task may hold. It returns tasks, limits and untested items. A task
+is the messages a person types in one fresh session and the checks that session
+shows; each task runs and is judged on its own checks. Limits are requested
+behavior that no change of those kinds can deliver on that harness. Untested
+items are behavior a person would get but no task can show here. Limits and
+untested items are recorded and never run.
+
+The report under ``EvaluationResult.metrics.evaluation_report`` has a version,
+request and release IDs, model and scorer identity, task version, a protected
+suite checksum, the request plan and check rows. Each row records its group,
+target, status, expected and observed behavior, scores, reason, duration and
+optional record directory. Check statuses are ``pending``, ``running``,
+``pass``, ``fail``, ``invalid``, ``not_run``, ``unsupported`` and ``untested``.
+Rows in the ``limit`` group have the status ``unsupported`` and rows in the
+``untested`` group the status ``untested``. Every other required group and row,
+one ``request-behavior-<n>`` row per task, must pass before
+``SelectionDecision.selected`` can be true. A selected candidate with limit rows
+sets ``requires_review``. A reviewer reply that is not valid JSON is asked once
+more in a fresh conversation, and long tool output in a trajectory is cut
+before a reviewer reads it.
+
+``RequestVerifier`` is an optional operator-owned ABC. Implement
+``verify(result: EpisodeResult, workspace: Path) -> VerificationResult``.
+It reads the retained application output and returns a boolean and reason.
+Keep trusted test definitions outside the candidate's writable workspace.
+The bug-fix tutorial checks the output against separate arithmetic assertions,
+and checks the actual test/edit/review order in the trajectory.
+
+``run_episode`` accepts optional ``workspace_files``, ``initialize_git``,
+``keep_workspace``, ``online`` and ``task_environment`` inputs. Defaults preserve existing episode
+behavior. Reefine request and protected-task episodes pass ``online``, except
+prompts that start with ``[health]``. An online episode leaves out the
+descriptor's ``offline_env`` variables, such as pi's ``PI_OFFLINE``. Online
+runs put the configured binary directory on ``PATH`` so child sessions use the
+same install. Retention skips symlinks and Git metadata and
+rejects output above 1000 files or 50 MiB. Unavailable trajectories and model
+responses are invalid, and cannot approve publication. Files an episode writes
+outside its workspace, such as tool caches under the episode home, do not
+invalidate it: the request review receives them as ``files_outside_workspace``.
+Operator-selected environment variables are forwarded explicitly, separately
+from the harness relocation environment, and are not included in review inputs.
+
+``StepProgress.checks`` supplies live rows; the selection record persists the
+final report. HTTP progress, terminal and page rendering read these values.
+Older records without a report retain their existing presentation. Request
+failure feedback is recorded separately from the incumbent failure manifest;
+protected-task transcripts are not passed to the proposer.
+
+Configuration and operational limits are described in the
+`Reefine guide <../user-guide/recipes/reefine.rst#independent-evaluation>`__.
+
 Untrusted input
 ~~~~~~~~~~~~~~~
 

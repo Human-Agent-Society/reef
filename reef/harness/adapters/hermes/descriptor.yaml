@@ -23,6 +23,8 @@ install:
   ref: "v2026.8.31"
   binary_path: "venv/bin/hermes"
 argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
+# A further message resumes the latest session in the episode's HERMES_HOME.
+continue_argv: ["chat", "-Q", "--oneshot", "--resume", "latest", "-q", "{prompt}"]
 env:
   HERMES_HOME: "{root}/hermes"
 # --resume, -c and `hermes sessions list` read state.db. It must already be

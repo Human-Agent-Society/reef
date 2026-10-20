@@ -20,6 +20,8 @@ install:
   version: "1.18.18"
   binary_path: "node_modules/.bin/opencode"
 argv: ["run", "--format", "json", "--auto", "{prompt}"]
+# A further message continues the latest session in the episode's data directory.
+continue_argv: ["run", "--format", "json", "--auto", "--continue", "{prompt}"]
 env:
   OPENCODE_CONFIG_DIR: "{root}/opencode"
   XDG_CONFIG_HOME: "{root}/xdg-config"

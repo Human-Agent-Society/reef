@@ -104,7 +104,7 @@ STATUS_LABELS = {
     "settling": "Saving the result",
     "selected": "Published",
     "pending": "Ready for review",
-    "rejected": "Not selected",
+    "rejected": "Rejected",
     "skipped": "No changes",
     "failed": "Failed",
     "complete": "Complete",

@@ -187,7 +187,15 @@ def test_selection_decision_serializes_selected(selected: bool) -> None:
         "reason": "compared candidate scores",
         "evaluation": result.to_dict(),
         "metrics": {"wins": 2, "losses": 1},
+        "requires_review": False,
     }
+
+
+def test_only_a_selected_decision_can_require_review() -> None:
+    held = SelectionDecision(True, "demo", "passed; waits for a person", evaluation(), requires_review=True)
+    assert held.to_dict()["requires_review"] is True
+    with pytest.raises(ValueError, match="only a selected candidate"):
+        SelectionDecision(False, "demo", "rejected", evaluation(), requires_review=True)
 
 
 def test_candidate_identity_is_validated() -> None:

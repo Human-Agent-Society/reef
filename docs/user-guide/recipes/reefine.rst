@@ -62,26 +62,45 @@ How it works
    substitute in its place, such as a rule describing it. When the review
    is partial or finds a substitute, the model writes the answer again with
    the review's findings, up to three answers in all. The step keeps the
-   delivering answer with the fewest uncovered points, and both pages say
-   which answer it kept when it wrote more than one; when no answer
-   delivers, it is skipped with the reason. A point the harness's facts say
+   best answer: a delivering answer before a substitute, then the fewest
+   uncovered points. Both pages say which answer it kept when it wrote more
+   than one. A step is skipped only when no answer has entries. A point the harness's facts say
    no answer there can deliver (a hard tool lockout on a harness whose
    commands cannot take a tool away) is a limit, listed apart from the
    uncovered points: it starts no retry, and the loop ends when only limits
-   remain. The evaluation runs the candidate on the health task: it
-   publishes when the tree still works, and both pages say the health task
-   is no test of the requested behavior, which only the review reads; when
-   every candidate episode fails before it is scored (the runner was not
-   found, say), both pages say the evaluation could not run and quote the
-   cause. The step's page carries the design and the review either way. A
-   review call that answers with no text is asked once more with room for
-   both its reasoning and its reply; when it still gives none, the step
-   records why and both pages say the review did not run, rather than
-   reading like a step that had no review to give.
+   remain. These proposer checks help construct and choose the candidate;
+   they cannot approve or reject publication. An independent evaluator then plans the checks from
+   the original request and the harness's description: the entry kinds a
+   change may contain and the harness's facts. When the request does not say
+   how to type a step, such as how to leave a mode, a task types it as the
+   change's How to use note says; the note never adds a requirement. The plan
+   splits the request into tasks. A task is what a person types in one new
+   session: usually one
+   message, or a short exchange when a person must type several in turn. Each
+   task runs in a fresh session and is judged on its own checks. Requested behavior
+   that the harness cannot deliver is listed as a limit with its reason, and
+   behavior that no task here can show, such as a restart, is listed as not
+   tested. Neither is run. The evaluator also runs protected tasks on both the
+   serving release and the candidate, and a fresh model review of the change.
+   A failed, invalid or unrun required check rejects the candidate. A candidate
+   that passes with limits waits for your review. When the requested behavior
+   passes but the change review finds a problem it does not call unsafe, such
+   as an addition the request did not ask for, the candidate waits for your
+   review with that finding; an unsafe change is rejected. A task whose session
+   does not finish in time fails; the review reads what the session recorded
+   until then, so the reason can say why. A task of several messages
+   does not run on a harness whose adapter sends one message per session
+   (dsh, native and terminus); it is shown as not tested, and a candidate that
+   passes the other checks waits for your review. Other behavior that was not
+   tested is shown and does not change the decision. A request with no task to run is
+   rejected. Both pages show each task, the limits, what was not tested,
+   comparisons and the selection reason.
+
 3. Result. The session that asked reports it in the chat when the step
    settles, and ``reef-pi evolve ... --wait`` prints the same line:
    published as a release, ready but waiting for your review because it
-   changes an extension, rejected by the evaluation, or skipped with the reason,
+   changes an extension or because part of the request is not possible on
+   this harness, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
 4. Read. A release that touches a ``code_extension`` is held back from the
    served head, so it reaches no session on its own. ``/versions
@@ -103,7 +122,9 @@ Behavior and configuration
 --------------------------
 
 * ``training-mode: manual`` runs one step for each accepted instruction on
-  ``POST /reef/train``. Use ``hybrid`` to also learn from failing reports.
+  ``POST /reef/train``. Independent request evaluation requires that original
+  instruction. For report-only steps in ``hybrid`` or automatic mode, select
+  an explicit legacy policy; those steps have no original training request.
 * The agent proposer, or the served model where the host cannot isolate the
   agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.
@@ -115,10 +136,16 @@ Behavior and configuration
   the agent records any unverified interactive checks in its design.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
-* ``evolution.selection: floor`` is the default: the evaluation runs the candidate
-  alone and publishes it when every task scores at least
-  ``evolution.floor_score`` (``1.0``). The current release is not run, and an
-  episode that could not run misses the floor.
+* ``evolution.selection: reefine`` is the default. The requested behavior,
+  the protected tasks and the change review must pass. Request episodes run
+  on every adapter. A limit does not fail the candidate, but it holds a
+  passing release for your review. Request episodes run online, so pi
+  episodes drop ``PI_OFFLINE``. Other adapters run them with their usual
+  episode settings, and Codex episodes
+  keep web search and sandbox network access off. A request that needs the
+  network therefore cannot pass on Codex yet.
+  Explicit ``selection: floor`` retains the old health-only selection for
+  existing deployments; it does not verify a requested behavior.
 * What only you can provide (a phone number, a credential, a permission, an
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when
@@ -132,6 +159,84 @@ Behavior and configuration
   hardcodes it, and its review lists a value the extension asks for or
   stores itself as uncovered. On another adapter the value reaches the
   harness's environment at run time, and the same holds for its entries.
+
+Independent evaluation
+----------------------
+
+Configure evaluation inputs in ``evolution.evaluation``. A request context
+supplies the application task and optional fixture files; it does not change
+the instruction to evolve the harness. Each episode receives its own copy.
+The evaluator interprets the original instruction without proposer history,
+then checks actual tool results and final output. Reviewers receive the actual
+harness implementation to interpret custom tool calls, without proposer
+conversation history or self-reviews. Code alone cannot demonstrate execution. A protected task must pass
+on the candidate and score no lower than the current serving release. Gains
+on other tasks cannot compensate for a failed protected task.
+
+.. code:: yaml
+
+   evolution:
+     selection: reefine
+     evaluation:
+       reviewer_model: reviewer
+       timeout_s: 900
+       max_output_tokens: 8192
+       request_context:
+         prompt: fix the bug in adder.py
+         fixture_dir: examples/adder
+         initialize_git: true
+         version: '1'
+       protected_tasks:
+         - Run the shell command `printf protected-ok` and report its output.
+         - Write note.txt containing protected-note, then read it and report the content.
+     models:
+       reviewer:
+         url: https://reviewer.example.invalid
+         model: reviewer-model
+         api_key_env: REVIEWER_API_KEY
+
+``reviewer_model`` names an ``evolution.models`` binding, or ``served``
+(the default). The tutorials use the served model in fresh review contexts,
+so they need only one model endpoint. This separates proposal and evaluation
+sessions and authority; it does not provide independence between model
+weights. Configure another model for that comparison. The result records the
+model IDs and whether they match. Matching IDs do not verify matching model weights.
+
+``fixture_dir`` contains text files and must exist at startup. Symlinks and
+files larger than 1 MiB are rejected; total input is limited to 1000 files and 50 MiB. ``initialize_git`` commits the fixture
+in an isolated episode repository, so a review can read a relevant diff. Without
+it the task workspace has no repository. A request that needs one, such as a
+review of the diff, then fails, and the reason says to set ``initialize_git``.
+An optional ``request_context.verifier`` names a zero-argument
+``RequestVerifier`` class for trusted checks; the evaluator also performs its
+model review. Without a prompt, the evaluator generates an application task.
+If that task cannot run with available inputs, evaluation cannot approve it.
+
+The 900-second default covers formal evaluation, separately from proposer
+time. Model calls and episodes share the remaining evaluation budget.
+Transient model transport failures and HTTP 408, 429 and selected server errors
+are retried once within that budget; invalid answers and failed behavior are
+not retried. ``evaluation.env_from`` explicitly forwards named host variables
+to episodes, for example ``[HTTPS_PROXY, HTTP_PROXY, NO_PROXY]``. The defaults
+inherit no proxy settings. These values are not included in reviewer inputs
+or evaluation reports.
+``reef-pi evolve ... --wait`` and the tutorial show aligned check rows with
+running indicators on a terminal. Redirected output records state changes
+and a final table. Request and release pages show the same results, including
+checks that did not run. Extension changes still wait for human promotion
+after passing evaluation.
+
+A rejection keeps the serving release. The next evolve request receives the
+recent public request-check findings; it does not receive protected-task
+transcripts. One request still creates one formal candidate. The proposer's
+three internal answer attempts do not retry formal evaluation. A stale
+candidate is re-evaluated against the new serving head before publication.
+
+Model judgments can be wrong, and a small task set cannot establish general
+capability preservation. Use representative protected tasks and trusted
+application checks. Interactive UI behavior is not verified by headless
+sessions. Network or model failures are recorded as invalid evaluations,
+never as successful behavior.
 
 Adapters other than pi
 ----------------------
@@ -390,8 +495,8 @@ deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (``openai-compatible`` has no
 decisions), those routes answer 501. Recipes other than reefine offer none.
 
-The health floor
-----------------
+Health checks and legacy selection
+----------------------------------
 
 The profile's one evaluation task is a health check:
 
@@ -401,11 +506,15 @@ The profile's one evaluation task is a health check:
      - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
        as a plain word alone on the last line.'
 
-The bundled evaluator grades the reply's last line, ``reef-ok`` exactly. The
-floor answers one question: does the tree still work after the change? The
+The bundled health scorer grades the reply's last line, ``reef-ok`` exactly.
+With explicit ``evolution.selection: floor``, this check answers one question:
+does the tree still work after the change? The
 model binding answers, the shell tool runs, every extension loads. It says
-nothing about whether the change does what was asked; the step's design and
-review notes and the person judge that. Set both ``evolution.tasks`` and
+nothing about whether the change does what was asked. With the default
+``selection: reefine``, the evaluation tasks are the default
+``evaluation.protected_tasks``: the serving release and the candidate each run
+them, and the candidate must not do worse.
+Set both ``evolution.tasks`` and
 ``evolution.evaluate`` for a workload of your own, and
 ``evolution.selection: score_comparison`` to require the candidate to beat
 the current release on them instead.

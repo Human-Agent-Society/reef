@@ -533,15 +533,21 @@ export default function requests(pi) {
       );
     }
     if (selectionResult === "pending") {
+      const selection = metrics.selection || {};
+      const why =
+        selection.requires_review === true && selection.reason
+          ? selection.reason
+          : "This release changes an extension, so read it before it runs.";
       return (
-        `reef: '${ask}' is ready as release ${release}. This release changes an extension, so read it before ` +
-        `it runs: /versions v${step} opens the page, /versions v${step} install serves it.`
+        `reef: '${ask}' is ready as release ${release}. ${why} ` +
+        `/versions v${step} opens the page, /versions v${step} install serves it.`
       );
     }
     if (selectionResult === "rejected") {
-      const reason = metrics.selection && metrics.selection.reason ? metrics.selection.reason : "no reason recorded";
+      const reason = `${String(metrics.selection && metrics.selection.reason ? metrics.selection.reason : "no reason recorded").trim().replace(/\.+$/, "")}.`;
       return (
-        `reef: '${ask}' did not pass the checks (${reason}). Nothing changed; rephrase or split the request.` + details
+        `reef: '${ask}' did not pass the checks. ${reason} Nothing changed. The page lists each check; ask again ` +
+        `for a new attempt.` + details
       );
     }
     if (selectionResult === "skipped") {
@@ -579,15 +585,16 @@ export default function requests(pi) {
   const forgetRequest = (recordId) => writeStoredRequests(storedRequests().filter((entry) => entry.id !== recordId));
 
   // The report for a settled step: the result line and what the review left uncovered. It is appended to the
-  // session as a custom message, which the chat renders and the session file keeps, and shown as a notice, the
-  // one line a person sees at once but the next status line may overwrite.
+  // session as a custom message, which the chat renders at once and the session file keeps; a notice of the same
+  // line would show it twice.
   const deliverReport = (step, rows, text, ctx) => {
     const lines = [settledText(step, rows, clip(text.trim(), 60))];
     const uncovered = uncoveredOf(rows[step]);
-    if (uncovered.length) lines.push(`Not covered: ${uncovered.join("; ")}`);
+    // With an evaluation its checks decide, and the page keeps the proposer's notes so they do not read as the result.
+    const evaluated = Boolean(metricsOf(rows[step]).evaluation_report);
+    if (uncovered.length && !evaluated) lines.push(`Not covered: ${uncovered.join("; ")}`);
     const content = lines.join("\n");
     pi.sendMessage({ customType: REPORT_MESSAGE_TYPE, content, display: true }, { triggerTurn: false });
-    ctx.ui.notify(content, "info");
   };
 
   // The wrapper the next steps run through: the one run_agent exported, else the one the install wrote outside
@@ -723,6 +730,14 @@ export default function requests(pi) {
     return typeof answer.release_id === "string" && answer.release_id ? answer.release_id : null;
   };
 
+  // Why a ready release waits for the person: the evaluation's reason when it asked for a review (part of the request
+  // the harness cannot deliver), else the extension it changes, which runs in pi with the person's privileges.
+  const pendingReason = (row, step, rows) => {
+    const selection = (row.metrics || {}).selection || {};
+    if (selection.requires_review === true && selection.reason) return `${selection.reason} Read ${stepPageLink(step, rows)} first.`;
+    return `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`;
+  };
+
   // The install offered the moment a step settles, so a win reaches the session that asked for it without the
   // person going looking. Only a step that produced a tree has one to offer; the rest end at their report.
   const offerSettledInstall = async (step, rows, ctx) => {
@@ -731,7 +746,7 @@ export default function requests(pi) {
     if (selectionResult !== "selected" && selectionResult !== "pending") return;
     const why =
       selectionResult === "pending"
-        ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
+        ? pendingReason(row, step, rows)
         : `Read the change first: ${stepPageLink(step, rows)}`;
     await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
   };
@@ -1359,7 +1374,7 @@ export default function requests(pi) {
         }
         const why =
           selectionResult === "pending"
-            ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
+            ? pendingReason(row, step, rows)
             : `Read the change first: ${stepPageLink(step, rows)}`;
         await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
         return;

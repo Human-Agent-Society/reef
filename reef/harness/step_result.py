@@ -55,10 +55,20 @@ def unscored_failures(metrics: Mapping[str, Any]) -> list[str]:
     return causes
 
 
+def evaluation_report(metrics: Mapping[str, object]) -> Mapping[str, object] | None:
+    """Read the evaluation report from step metrics."""
+    report = metrics.get("evaluation_report")
+    if not isinstance(report, Mapping):
+        return None
+    return report
+
+
 def floor_tasks_note(metrics: Mapping[str, Any]) -> str | None:
     """For a step that answered a request under a floor: its floor tasks were set before the request and check that
     the changed harness still passes them, not what the request asks for, which only the review reads; ``None``
     for any other step."""
+    if evaluation_report(metrics) is not None:
+        return None
     selection = metrics.get("selection")
     if not isinstance(metrics.get("training_request"), Mapping) or not isinstance(selection, Mapping):
         return None
@@ -133,16 +143,29 @@ def rejection_text(metrics: Mapping[str, Any]) -> str:
         )
     selection = metrics.get("selection")
     reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
+    reason = str(reason).strip().rstrip(".") + "."
     missed = missed_episodes(metrics)
     if not missed:
-        return f"did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
+        return (
+            f"did not pass the checks. {reason} Nothing changed. The page lists each check; ask again for a new "
+            "attempt."
+        )
     if any(episode.get("failure") for episode in missed):
         advice = "the episode failed, so the change itself was not judged"
     elif any(episode.get("transcript_read") is False for episode in missed):
         advice = "no transcript was read, so the change itself was not judged"
     else:
-        advice = "rephrase or split the request"
-    return f"did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
+        advice = "ask again for a new attempt"
+    return f"did not pass the checks. {reason} {missed_episode_text(missed[0])}. Nothing changed; {advice}."
+
+
+def pending_text(metrics: Mapping[str, Any]) -> str:
+    """Why a ready release waits for the person: the evaluation's reason when it asked for a review, such as part of
+    the request the harness cannot deliver, else the extension it changes."""
+    selection = metrics.get("selection")
+    if isinstance(selection, Mapping) and selection.get("requires_review") is True and selection.get("reason"):
+        return str(selection["reason"])
+    return "This release changes an extension, so read it before it runs."
 
 
 def reef_installs(adapter: str) -> bool:
@@ -222,10 +245,12 @@ __all__ = [
     "USAGE_HEADING",
     "NextAction",
     "design_sections",
+    "evaluation_report",
     "floor_tasks_note",
     "missed_episode_text",
     "missed_episodes",
     "next_action",
+    "pending_text",
     "reef_installs",
     "rejection_text",
     "unscored_failures",

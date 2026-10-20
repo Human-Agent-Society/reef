@@ -23,6 +23,8 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
+# A further message continues the latest session of the episode's workspace.
+continue_argv: ["-p", "--continue", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"
@@ -161,6 +163,9 @@ cleanup_whitelist:
   # a top-level state file, feature-gate cache, per-session todo lists, and
   # captured shell snapshots. Episode state, not residue.
   - "claude/.claude.json"
+  # Claude Code backs that state file up before it rewrites it, and stamps its periodic cleanup.
+  - "claude/backups/**"
+  - "claude/.last-cleanup"
   - "claude/statsig/**"
   - "claude/todos/**"
   - "claude/shell-snapshots/**"

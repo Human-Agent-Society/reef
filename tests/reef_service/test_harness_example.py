@@ -1508,21 +1508,20 @@ def test_a_short_review_sends_the_request_back_with_its_findings_and_keeps_the_c
     assert '"delivers": true or false' in model.prompts[2]
 
 
-def test_answers_that_never_deliver_skip_the_step_after_the_last_attempt_saying_why(evolution) -> None:
+def test_answers_that_never_deliver_still_reach_the_evaluation_with_the_review(evolution) -> None:
+    """The review improves and chooses answers; it cannot skip the step: the independent evaluation decides."""
     answer = designed(rules("resume", "Resume the last session."))
     model = Model(answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.mutations == ()
-    assert proposal.notes["failure"] == (
-        "the change does not deliver the request: a rule tells the model about the session instead of opening it"
-    )
+    assert [m.id for m in proposal.mutations] == ["resume"]
+    assert "failure" not in proposal.notes and proposal.notes["review"] == SUBSTITUTE
     assert proposal.notes["attempts"] == 3
     assert model.calls == 1 + 2 * 3
     assert "It did not deliver the behavior at all" in model.prompts[-2]
-    # A failed call after a substitute reports the substitute, which says more than the failed call.
+    # A failed call after a substitute keeps the substitute for the evaluation.
     model = Model(answer, json.dumps(SUBSTITUTE), ModelBindingError("endpoint down"))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.mutations == () and proposal.notes["failure"].startswith("the change does not deliver")
+    assert [m.id for m in proposal.mutations] == ["resume"] and "failure" not in proposal.notes
 
 
 def test_the_kept_answer_is_the_delivering_one_with_the_fewest_uncovered_points(evolution) -> None:

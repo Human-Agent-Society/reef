@@ -186,6 +186,20 @@ def test_a_reply_whose_outer_json_broke_is_written_again_not_read_by_a_list_nest
     assert evolution.slipped_json("no json here") is None
 
 
+def test_a_reply_of_objects_one_after_another_is_written_again_not_read_by_a_list_nested_in_one() -> None:
+    """A recorded claude answer wrote each entry as its own object on its own line: the first array found was the
+    allow list nested in one of them, and the step ended with no entry and no retry. The reply is a slip."""
+    whole = json.dumps(CLAUDE_ANSWER)
+    lines = "\n".join(json.dumps(entry) for entry in CLAUDE_ANSWER)
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(lines, whole, review)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="claude")
+    assert [m.id for m in proposal.mutations] == ["chat", "chat-rules", "chat-permissions"]
+    (dropped,) = proposal.notes["dropped_attempts"]
+    assert dropped.startswith("answer 1: the reply holds several JSON objects one after another")
+    assert evolution.slipped_json(json.dumps(CLAUDE_ANSWER[0]) + "\nThat is the entry.") is None
+
+
 def test_a_design_that_says_no_entry_can_deliver_is_answered_with_no_change_and_its_limits() -> None:
     """Off pi, a design with no entry is an answer, not a failure: the review runs on it, so what the harness notes
     put out of reach reaches the pages, and the step records it under declined. A review that finds a point an

@@ -433,14 +433,17 @@ def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
     compose = _make_compose(tmp_path, 1)
     bin_dir = tmp_path / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
-    binary = bin_dir / "pi"
+    binary = tmp_path / "dist" / "cli.py"
+    binary.parent.mkdir()
     seen = tmp_path / "path.txt"
     binary.write_text(f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n')
     binary.chmod(0o755)
+    command = bin_dir / "pi"
+    command.symlink_to(binary)
 
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     with patch.dict(os.environ, env), contextlib.suppress(SystemExit):
-        run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
+        run_agent(str(command), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
 
     entries = seen.read_text().split(os.pathsep)
     assert entries[0] == str(bin_dir.resolve())
@@ -1925,7 +1928,7 @@ def test_a_published_release_that_requires_setup_names_setup_before_update() -> 
             0,
             [
                 "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
-                "extension, so read it before it runs: /versions v1 opens the page, /versions v1 install "
+                "extension, so read it before it runs. Next: /versions v1 opens the page, /versions v1 install "
                 "serves it. Page: {page}",
                 "reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
             ],
@@ -1936,8 +1939,8 @@ def test_a_published_release_that_requires_setup_names_setup_before_update() -> 
             ),
             1,
             [
-                "reef-pi: 'text me when you are blocked' did not pass the checks (candidate missed the floor on 1 of 1 "
-                "tasks). Nothing changed; rephrase or split the request."
+                "reef-pi: 'text me when you are blocked' did not pass the checks. candidate missed the floor on 1 of 1 "
+                "tasks. Nothing changed. The page lists each check; ask again for a new attempt."
             ],
         ),
         (
@@ -2015,8 +2018,8 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
         ),
         (
             {"task": "[health] echo", "score": 0.0, "failure": None, "reply": "hello"},
-            "the task '[health] echo' scored 0.0; the reply graded was 'hello'. Nothing changed; rephrase or split "
-            "the request.",
+            "the task '[health] echo' scored 0.0; the reply graded was 'hello'. Nothing changed; ask again for a new "
+            "attempt.",
         ),
     ]
     for index, (episode, tail) in enumerate(cases):
@@ -2029,8 +2032,8 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
         reef.close()
         out = capsys.readouterr().out.splitlines()
         assert out[-2] == (
-            "reef-pi: 'text me when you are blocked' did not pass the checks (candidate missed the floor on 1 of 1 "
-            f"tasks): {tail}"
+            "reef-pi: 'text me when you are blocked' did not pass the checks. candidate missed the floor on 1 of 1 "
+            f"tasks. {tail}"
         )
         assert out[-1] == "reef-pi: review notes (they did not decide this result): no off switch"
 
@@ -2360,6 +2363,25 @@ def test_wait_names_the_release_how_to_use_and_a_declined_step_is_answered_with_
     out = capsys.readouterr().out.splitlines()
     assert out[2] == "reef-claude: how to use: Type $chat in the session."
     assert out[3] == "reef-claude: not covered: no idle check; two way replies"
+    # With an evaluation its checks decide; the proposer's notes stay on the page so they do not read as the result.
+    untested = {
+        "id": "untested-0",
+        "group": "untested",
+        "status": "untested",
+        "expected": "the mode after a restart",
+        "reason": "no restart happens here.",
+    }
+    metrics = {"selected": True, "proposal_notes": notes, "evaluation_report": {"checks": [untested]}}
+    reef = _FakeReef(answer, rows=[CREATION_ROW, _step_row("rel-2222-selected", metrics)])
+    (tmp_path / "evaluated").mkdir()
+    compose, captures = _claude_ask_tree(tmp_path / "evaluated", reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 0
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    heading = out.index("reef-claude: not tested here:")
+    assert out[heading + 1] == "  - the mode after a restart (no restart happens here)"
+    assert not any("not covered" in line for line in out)
     declined = {"declined": "the design says no entry this harness takes can deliver the request", "design": design}
     row = _step_row("rel-0", {"skipped": "no proposal", "proposal_notes": declined})
     reef = _FakeReef(answer, rows=[CREATION_ROW, row])

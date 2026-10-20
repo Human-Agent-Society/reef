@@ -30,6 +30,22 @@ argv:
   - workspace-write
   - --skip-git-repo-check
   - "{prompt}"
+# A further message resumes the latest session in CODEX_HOME with the same
+# overrides. resume takes no --sandbox flag, so the sandbox mode is a config.
+continue_argv:
+  - exec
+  - resume
+  - --last
+  - --json
+  - --strict-config
+  - --config
+  - approval_policy="never"
+  - --config
+  - web_search="disabled"
+  - --config
+  - sandbox_mode="workspace-write"
+  - --skip-git-repo-check
+  - "{prompt}"
 env:
   CODEX_HOME: "{root}/codex"
 # resume finds a session by scanning the rollouts under sessions/. The state
