@@ -13,7 +13,8 @@ from tests.support.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.dispatcher import Dispatcher, local_error_source
+from reef.dispatcher import Dispatcher
+from reef.dispatcher.errors import local_error_source
 from reef.runtime.interfaces import TrainingRuntime
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
@@ -106,13 +107,13 @@ def test_a_local_cycle_stands_aside_while_admission_is_closed_and_runs_once_it_r
         for record in _records(1):
             scenario.records.append(record)
         training.inference.pause_admission()
-        assert dispatcher._process_local_backend_step("agent", HARNESS) is False
-        assert dispatcher._recipe.backends[HARNESS].prepared == 0
-        assert HARNESS in dispatcher.workers.scenarios["agent"].waiting_for_admission
+        assert dispatcher.local_workers.process_step("agent", HARNESS) is False
+        assert dispatcher.recipe.backends[HARNESS].prepared == 0
+        assert HARNESS in dispatcher.local_workers.scenarios["agent"].waiting_for_admission
         training.inference.resume_admission()
-        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
-        assert dispatcher._recipe.backends[HARNESS].prepared == 1
-        assert HARNESS not in dispatcher.workers.scenarios["agent"].waiting_for_admission
+        assert dispatcher.local_workers.process_step("agent", HARNESS) is True
+        assert dispatcher.recipe.backends[HARNESS].prepared == 1
+        assert HARNESS not in dispatcher.local_workers.scenarios["agent"].waiting_for_admission
     finally:
         dispatcher.close()
 
@@ -126,21 +127,25 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
         scenario = _scenario(dispatcher, training)
         for record in _records(1):
             scenario.records.append(record)
-        dispatcher._record_training_error("agent", "RuntimeError: training marker is UPDATING_WEIGHTS")
-        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
-        assert dispatcher._training_errors() == ["agent: RuntimeError: training marker is UPDATING_WEIGHTS"]
-        dispatcher._record_training_error("agent", "harness away", source=local_error_source(HARNESS))
-        assert sorted(dispatcher._training_errors()) == [
+        dispatcher.errors.record("agent", "RuntimeError: training marker is UPDATING_WEIGHTS")
+        assert dispatcher.local_workers.process_step("agent", HARNESS) is True
+        assert dispatcher.training_status.training_errors() == [
+            "agent: RuntimeError: training marker is UPDATING_WEIGHTS"
+        ]
+        dispatcher.errors.record("agent", "harness away", local_error_source(HARNESS))
+        assert sorted(dispatcher.training_status.training_errors()) == [
             "agent: RuntimeError: training marker is UPDATING_WEIGHTS",
             "agent: harness away",
         ]
         for record in _records(2):
             scenario.records.append(record)
         # The harness cycle clears its own error; the training thread's stays until that thread clears it.
-        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
-        assert dispatcher._training_errors() == ["agent: RuntimeError: training marker is UPDATING_WEIGHTS"]
-        dispatcher._record_training_error("agent", None)
-        assert dispatcher._training_errors() == []
+        assert dispatcher.local_workers.process_step("agent", HARNESS) is True
+        assert dispatcher.training_status.training_errors() == [
+            "agent: RuntimeError: training marker is UPDATING_WEIGHTS"
+        ]
+        dispatcher.errors.clear("agent")
+        assert dispatcher.training_status.training_errors() == []
     finally:
         dispatcher.close()
 
@@ -155,16 +160,16 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
             scenario.records.append(record)
         outcomes: list[bool] = []
         asked_for_the_lock = threading.Event()
-        cycle_lock = dispatcher.workers.cycle_lock
+        cycle_lock = dispatcher.local_workers.cycle_lock
 
         def signalling_lock(name: str):
             asked_for_the_lock.set()
             return cycle_lock(name)
 
-        dispatcher.workers.cycle_lock = signalling_lock  # type: ignore[method-assign]
+        dispatcher.local_workers.cycle_lock = signalling_lock  # type: ignore[method-assign]
         with cycle_lock("agent"):
             worker = threading.Thread(
-                target=lambda: outcomes.append(dispatcher._process_local_backend_step("agent", HARNESS))
+                target=lambda: outcomes.append(dispatcher.local_workers.process_step("agent", HARNESS))
             )
             worker.start()
             # Past the first admission check, waiting for the lock this thread holds.
@@ -172,8 +177,8 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
             training.inference.pause_admission()
         worker.join(10)
         assert outcomes == [False]
-        assert dispatcher._recipe.backends[HARNESS].prepared == 0
-        assert HARNESS in dispatcher.workers.scenarios["agent"].waiting_for_admission
+        assert dispatcher.recipe.backends[HARNESS].prepared == 0
+        assert HARNESS in dispatcher.local_workers.scenarios["agent"].waiting_for_admission
     finally:
         dispatcher.close()
 
@@ -185,7 +190,7 @@ def test_the_retry_of_a_promote_over_the_creation_leaves_held_admission_closed(t
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, training)
-        dispatcher._recipe.backends[HARNESS].hold_next = True
+        dispatcher.recipe.backends[HARNESS].hold_next = True
         _step(scenario, HARNESS, 1)
         held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
         training.inference.pause_admission()
@@ -254,7 +259,7 @@ def test_a_rejected_step_before_the_rollback_does_not_make_its_retry_look_like_a
         scenario = _scenario(dispatcher, training)
         first = _step(scenario, HARNESS, 1)
         _step(scenario, HARNESS, 2)
-        dispatcher._recipe.backends[HARNESS].reject_next = True
+        dispatcher.recipe.backends[HARNESS].reject_next = True
         _step(scenario, HARNESS, 3)
         assert scenario.store.history()[-1].components is None
         training.inference.pause_admission()

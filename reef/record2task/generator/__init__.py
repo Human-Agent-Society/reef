@@ -52,7 +52,6 @@ from reef.record2task.generator.harbor import (
     harbor_task,
     oracle_check,
     reply_errors,
-    split_generation,
 )
 from reef.record2task.generator.service import (
     GeneratorService,
@@ -99,5 +98,4 @@ __all__ = [
     "parse_harbor_reply",
     "readiness_probes",
     "reply_errors",
-    "split_generation",
 ]

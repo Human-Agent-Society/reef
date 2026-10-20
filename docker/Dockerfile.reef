@@ -143,6 +143,25 @@ RUN python -c "from sglang.srt.server_args import ServerArgs; import transformer
 # storage modules without a GPU. A missing core dependency fails the build here.
 RUN reef serve --help > /dev/null
 
+# Qwen3.5's fused Q/K norm + RoPE + gate kernel in the SGLang pin reads only the
+# temporal row of the [3, T] M-RoPE positions, so it rotates image tokens wrong.
+# The patch backports the upstream fix (sgl-project/sglang#34446, e635577431).
+# It is skipped when the call site already passes the axis map, which upstream
+# SGLang does from that commit on. On another SGLang without the fix, git apply
+# can fail. Then rebase the patch to that revision. Remove the patch, this step
+# and tests/inference/test_sglang_qwen3_5_mrope.py when the pin has the fix.
+RUN SGLANG_QWEN3_5=/opt/sglang/python/sglang/srt/models/qwen3_5.py && \
+    if ! grep -q "mrope_axis_map=" "$SGLANG_QWEN3_5"; then \
+        git -C /opt/sglang apply "$PWD/docker/patch/sglang_qwen3_5_mrope_rope.patch"; \
+    fi && \
+    python -c "import inspect, torch; from types import SimpleNamespace; \
+               from sglang.srt.models.qwen3_5 import Qwen3_5AttentionDecoderLayer; \
+               from sglang.srt.layers.rotary_embedding.mrope import MRotaryEmbedding; \
+               assert 'mrope_axis_map=' in inspect.getsource(Qwen3_5AttentionDecoderLayer.forward_prepare_cuda_fused); \
+               rope = SimpleNamespace(mrope_section=[11, 11, 10], rotary_dim=64, mrope_interleaved=True, \
+                                      mrope_interleaved_glm=False, cos_sin_cache=torch.empty(0)); \
+               assert MRotaryEmbedding._build_axis_map(rope).tolist() == [0, 1, 2] * 10 + [0, 1]"
+
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
 # adapters. Earlier slime bases bundled it; newer ones do not (observed

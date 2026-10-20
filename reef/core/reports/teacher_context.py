@@ -1,4 +1,4 @@
-"""The report contract of the distilling recipes: one rollout and the text its teacher sees."""
+"""The report contract of the distilling recipes and SFT: one rollout and the text its teacher sees."""
 
 from dataclasses import dataclass
 
@@ -15,7 +15,9 @@ class TeacherContextReport(ReportBase):
     and ``teacher_context`` is what the teacher reads beyond the student's request:
     for SDFT a demonstration of the response, for SDPO the environment
     feedback the rollout produced. On-policy distillation from a separate
-    teacher reads no privileged text and leaves it empty. ``score`` is optional metadata a
+    teacher reads no privileged text and leaves it empty. SFT trains on the
+    demonstration itself, unless it is configured to train on the recorded
+    response. ``score`` is optional metadata a
     harness may record beside the teacher context; the recipes distil the teacher
     and never train on it.
     """

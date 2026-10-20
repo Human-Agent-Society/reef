@@ -28,12 +28,6 @@ Implementations:
   Each round generates tasks, checks them, and plays them; the training plays
   come back as reports and become tasks.
 
-Generated tasks:
-
-* ``TaskStore`` and ``FileTaskStore`` (``store.py``, which this module does not
-  import): a store that saves generated tasks and their train/eval split before
-  any rollout, so a stage that generates tasks can keep them across restarts.
-
 Shared parts of ``make_sample``:
 
 * ``SampleAssembly`` (``assembly.py``): a report and its inference records into
@@ -50,11 +44,12 @@ The modules in this directory depend only on ``reef.core``,
 them without the generator service.
 """
 
-from reef.record2task.base import NoTasks, Record2Task, TaskResult
+from reef.record2task.base import ImmediateRecord2Task, NoTasks, Record2Task, TaskResult
 from reef.record2task.judged import JudgedTasks
 from reef.record2task.reports import ReportTasks, SkippedReport
 
 __all__ = [
+    "ImmediateRecord2Task",
     "JudgedTasks",
     "NoTasks",
     "Record2Task",

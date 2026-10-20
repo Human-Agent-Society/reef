@@ -6,11 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from recipes.sdft.processor import SDFTBatches, SDFTTasks
+from recipes.sdft.processor import SDFTTasks
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ExclusiveReportRecord2Record
+from reef.task2batch import DistillBatches
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
 
@@ -27,7 +28,7 @@ class SDFTRecipe(WeightTrainingRecipe):
 
     The recipe binds the objective, the step schedule, and the report
     contract. Its stages are ``ExclusiveReportRecord2Record``, ``SDFTTasks``, and
-    ``SDFTBatches``; the deployment's ``pipeline`` section gives their config.
+    ``DistillBatches``; the deployment's ``pipeline`` section gives their config.
     ``pipeline.record2task.config`` takes ``tokenizer_path`` (required: the
     served model's tokenizer renders the teacher prompt),
     ``max_teacher_tokens``, and ``context_template``.
@@ -54,7 +55,9 @@ class SDFTRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ExclusiveReportRecord2Record, record2task=SDFTTasks, task2batch=SDFTBatches)
+        return PipelineSpec(
+            record2record=ExclusiveReportRecord2Record, record2task=SDFTTasks, task2batch=DistillBatches
+        )
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

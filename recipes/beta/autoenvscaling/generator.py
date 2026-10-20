@@ -7,11 +7,9 @@ on a copy under the generator service's tasks root. ``generate`` keeps the open 
 ``open-<generation>.json`` under the state directory, named by the recipe's generation number, and ``validate``
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
 a restart: it places each played task against the band ``[band_low, band_high]`` and writes the generation report.
-A second call for a closed generation does nothing.
-Eval tasks remain unplayed and receive no band measurement. A task that could not run is an outage, not a band
-measurement.
-The recipe owns the split manifest.
-The generator reports nothing to the Designer, which is not trained here. A cursor under the state directory lets a restart continue with the next session.
+A second call for a closed generation does nothing. An eval task is not played and gets no band position. A task
+that could not run is an outage, not a band measurement. The generator reports nothing to the Designer, which is
+not trained here. A cursor under the state directory lets a restart continue with the next session.
 """
 
 from __future__ import annotations
@@ -115,7 +113,7 @@ STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate ref
 STAGE_PLAY = "play"  # the recipe could not play the task
 STAGE_BAND = "band"  # the task played, and its pass rate is outside the band
 STAGE_UNREACHED = "unreached"  # the round ended before it played the task
-STAGE_HELD_OUT = "held_out"
+STAGE_HELD_OUT = "held_out"  # the task is in the eval split, so the recipe did not play it
 # Where a pass rate falls against the band.
 BAND_BELOW = "below"
 BAND_INSIDE = "inside"
@@ -707,9 +705,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         return TaskValidationResult(errors)
 
     async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
-        """Close an open generation: save training pass rates, band measurements and held-out outcomes in its report.
+        """Close an open generation: each played task's pass rate and band position, and the report.
 
-        The band is diagnostic and does not change the store's manifest.
+        An eval task gets the stage ``held_out``. The band is only recorded in the report. It does not change the
+        recipe's task store.
         """
         open_path = self.open_path(generation)
         if not open_path.is_file():
@@ -764,8 +763,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
             "generation": state.number,
             "error": state.error,
             "band": {"low": self.band_low, "high": self.band_high},
-            "manifest": None,
-            "manifest_error": "",
             "next_position": self.cursor.next_position,
             "proposals": [
                 {**asdict(proposal), "checks": checks_document(state, proposal.task_name)} for proposal in proposals

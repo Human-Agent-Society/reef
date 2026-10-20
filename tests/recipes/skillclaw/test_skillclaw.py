@@ -428,11 +428,11 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
 
     processor = harness_stages(3).build(PipelineContext("s"))
     for index, score in enumerate((1.0, 0.0), start=1):
-        processor.ingest(_inference(f"inf-{index}"))
-        processor.ingest(_report(f"rep-{index}", score, f"inf-{index}"))
+        processor.push(_inference(f"inf-{index}"))
+        processor.push(_report(f"rep-{index}", score, f"inf-{index}"))
     assert not processor.ready()  # two of three reports: the day is not done
-    processor.ingest(_inference("inf-3"))
-    processor.ingest(_report("rep-3", 1.0, "inf-3"))
+    processor.push(_inference("inf-3"))
+    processor.push(_report("rep-3", 1.0, "inf-3"))
     assert processor.ready()
     batch = processor.build_batch()
     assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]

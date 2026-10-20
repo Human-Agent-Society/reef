@@ -11,11 +11,10 @@ and removes it again: the generated-task recipe writes the valid task once more 
 ``generate`` keeps the open generation, its proposals and refusals, in ``open-<generation>.json`` under
 ``state_dir``, named by the recipe's generation number. ``record_results`` closes it, also after later
 generations started or after a restart. It reports each proposal's regret against the Designer's receipt
-(0 for a refused one) and keeps the generation report under ``state_dir``. Eval tasks and tasks that could
-not run receive no Designer report and do not enter the experience. A second call for a closed generation
-does nothing. The recipe owns the cumulative split manifest.
-A restart reads the last report for the experience, and continues numbering after the reports and open
-generations.
+(0 for a refused one) and keeps the generation report under ``state_dir``. An eval task and a task that could
+not run get no Designer report and do not go into the experience. A second call for a closed generation
+does nothing. A restart reads the last report for the experience, and continues numbering after the reports
+and open generations.
 """
 
 from __future__ import annotations
@@ -341,7 +340,7 @@ class SpadeTaskGenerator(TaskGenerator):
                 state = replace(state, reports={**state.reports, entry.index: entry.designer_report_id})
                 self.save_open(generation, state)
         measures = tuple(measure for _, measure in proposals if measure is not None)
-        generation_record = GenerationRecord(state.number, tuple(reported), measures, None, state.error)
+        generation_record = GenerationRecord(state.number, tuple(reported), measures, state.error)
         report_path = write_generation_report(self.state_dir, generation_record)
         logger.info(
             "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",

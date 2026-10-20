@@ -26,7 +26,8 @@ prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``;
 and configuration live in ``reef.evaluation``. The recipe chooses and
 configures the policy.
 
-Reefine is bundled; other learning methods live outside the core package. The repository's sibling
+Reefine and supervised fine-tuning (``sft``) are bundled; other learning
+methods live outside the core package. The repository's sibling
 ``recipes`` tree contains cookbook implementations, but Reef neither imports
 them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.

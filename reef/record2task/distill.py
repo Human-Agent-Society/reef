@@ -174,6 +174,7 @@ class DistillTasks(ReportTasks):
     """
 
     def __init__(self, settings: DistillSettings) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
         self.renderer = TeacherRenderer(settings.tokenizer_path)

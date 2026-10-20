@@ -58,7 +58,7 @@ class RecordJudging(BackgroundJobRunner, ABC):
 
 @dataclass(frozen=True, kw_only=True)
 class JudgedSet(RecordSet):
-    """One judged record. ``set_id`` is the record's receipt."""
+    """One judged record that references no other record, with its judgment. ``set_id`` is the record's receipt."""
 
     record: AgentRecord
     judgment: SupportsReceipt
@@ -67,16 +67,8 @@ class JudgedSet(RecordSet):
     def receipt(self) -> str:
         return self.record.agent_record_id
 
-    def record_ids(self) -> tuple[str, ...]:
-        return (self.receipt,)
-
-
-def judged_sets(pool_sets: tuple[RecordSet, ...]) -> tuple[JudgedSet, ...]:
-    """Return pool sets as judged sets. A judging stage puts only judged sets in its pool."""
-    selected = tuple(record_set for record_set in pool_sets if isinstance(record_set, JudgedSet))
-    if len(selected) != len(pool_sets):
-        raise TypeError("the judging stage's pool must hold only judged sets")
-    return selected
+    def records(self) -> tuple[AgentRecord, ...]:
+        return (self.record,)
 
 
 class JudgingRecord2Record(Record2Record):
@@ -98,14 +90,14 @@ class JudgingRecord2Record(Record2Record):
 
     # ------------------------------------------------------------- formation
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         now = time.monotonic()
         # Expiry runs before the record is read, so an expired context can never capture it.
-        self.poll(now)
+        self.advance(now)
         self.judging.observe(record, now, self)
 
-    def poll(self, now: float) -> None:
-        """Retire expired records, then absorb the judgments that the worker finished."""
+    def advance(self, now: float) -> None:
+        """Retire expired records, then form a set of each judgment that the worker finished."""
         for receipt in self.judging.expire(now):
             self.abandon(receipt)
         if self.worker is None:
@@ -118,7 +110,7 @@ class JudgingRecord2Record(Record2Record):
             if isinstance(judgment, Failed):
                 self.retire(judgment.receipt)
                 continue
-            self.formed.append(
+            self.form(
                 JudgedSet(
                     set_id=judgment.receipt,
                     arrival_index=self.pool.next_arrival_index(),
@@ -126,9 +118,6 @@ class JudgingRecord2Record(Record2Record):
                     judgment=judgment,
                 )
             )
-
-    def reject(self, record_set: RecordSet) -> None:
-        self.retire(judged_sets((record_set,))[0].receipt)
 
     # ------------------------------------------------------- the verbs for observe
 
@@ -161,9 +150,6 @@ class JudgingRecord2Record(Record2Record):
 
     # ------------------------------------------------------------ consumption
 
-    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
-        return super().consume(judged_sets(record_sets), trained=trained)
-
     # --------------------------------------------------------- background work
 
     def background_jobs_running(self) -> bool:
@@ -177,7 +163,7 @@ class JudgingRecord2Record(Record2Record):
     # ---------------------------------------------------------------- release
 
     def releasable_record_ids(self) -> frozenset[str]:
-        held = frozenset(judged_set.receipt for judged_set in judged_sets(self.pool.sets()))
+        held = frozenset(key for unit in self.pool.units() for key in unit.consumed_ids())
         protected = frozenset(self.tracked) | frozenset(self.in_flight) | held
         return super().releasable_record_ids() - protected
 
@@ -190,7 +176,7 @@ class JudgingRecord2Record(Record2Record):
             self.producing_runtime_load_ids.pop(agent_record_id, None)
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        reserved = len(self.pool.reserved_sets())
+        reserved = len(self.pool.reserved_units())
         return {
             "tracked_records": len(self.tracked),
             "judging_records": len(self.in_flight),

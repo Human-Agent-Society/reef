@@ -483,7 +483,7 @@ class _SavedArtifactBackend(CandidateBackend):
 class _SavedArtifactRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         del experiment_logger
         return Trainer.build(
             scenario,
@@ -603,7 +603,7 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
 
 
 class ProtectAllPipeline(TrainingPipeline):
-    """Pairs like SFT but never releases a row: every ingested id is protected."""
+    """Pairs like SFT but never releases a row: every pushed id is protected."""
 
     def __init__(self, context, batch_size: int) -> None:
         super().__init__(
@@ -614,9 +614,9 @@ class ProtectAllPipeline(TrainingPipeline):
         )
         self._seen: set[str] = set()
 
-    def ingest(self, item) -> None:
+    def push(self, item) -> None:
         self._seen.add(item.agent_record_id)
-        super().ingest(item)
+        super().push(item)
 
     def releasable_record_ids(self) -> frozenset[str]:
         return frozenset()
@@ -624,7 +624,7 @@ class ProtectAllPipeline(TrainingPipeline):
 
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -640,7 +640,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
     The protect-all pipeline keeps every row physically present, so recovery
-    without the log's high-water mark would page from sequence 0, re-ingest
+    without the log's high-water mark would page from sequence 0, push again
     the consumed pair, and train it again.
     """
     initial = tmp_path / "initial"
@@ -687,13 +687,13 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None:
+def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     """Issue #344: the consumption cursor passes rows whose batches have not trained.
 
     The drain that readies step 1 also consumes the next step's inference, so
     the committed high-water mark covers it while retention keeps it stored.
     Recovery must feed that row back to the rebuilt processor; otherwise the
-    step-2 report waits forever on a reference that can never be ingested
+    step-2 report waits forever on a reference that can never be pushed
     again and training stalls silently. The consumed step-1 pair, compacted
     and so absent from replay, still never trains twice.
     """
@@ -721,7 +721,7 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
 
     second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
-    # The reingested inference pairs with the late report; i1 never retrains.
+    # The replayed inference pairs with the late report; i1 never retrains.
     assert second_runtime.trained_batches == [["i2"]]
     assert recovered.scenario_step == 2
 
@@ -988,7 +988,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface()
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None) -> Trainer:
         candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
@@ -1297,7 +1297,7 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=agent_record_dir,
     )
-    dispatcher._registry.set_training_scenario_callback(lambda scenario: None)
+    monkeypatch.setattr(dispatcher.training_loop, "start", lambda: None)
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
@@ -1369,7 +1369,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
-    reload_scenario = dispatcher._registry.reload
+    reload_scenario = dispatcher.registry.reload
 
     def fail_release(self, record_ids) -> None:
         del self, record_ids
@@ -1384,7 +1384,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     original.trainer.pipeline.release_records = fail_release.__get__(
         original.trainer.pipeline, type(original.trainer.pipeline)
     )
-    dispatcher._registry.reload = blocking_reload
+    dispatcher.registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 

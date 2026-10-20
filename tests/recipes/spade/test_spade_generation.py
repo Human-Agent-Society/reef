@@ -148,7 +148,6 @@ def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience
             ProposalRecord(1, None, "d2", None, "reply refused: no json", "r2"),
         ),
         measures=(measure,),
-        manifest_path=tmp_path / "tasks" / "manifest-00002.json",
     )
     path = write_generation_report(tmp_path / "state", generation)
     assert path == tmp_path / "state" / "generation-00002.json"

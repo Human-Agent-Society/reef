@@ -24,6 +24,7 @@ from reef.recipe.generated_tasks.processor import (
     TaskGroupSettings,
 )
 from reef.record2task.generator import GeneratorError, TaskNameConflict
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -145,7 +146,6 @@ def test_the_results_close_the_generation_with_regret_reports_and_the_next_exper
     assert metadata["regret"] == 0.5 and metadata["skill"] == "inspection" and metadata["generation"] == 0
     assert service.reports[1]["metadata"]["refusal"] == "reply refused: no json"
     names = ["harbor-00000-000-inspection", "harbor-00000-002-inspection"]
-    assert service.manifests == [], "the task store owns the split manifest"
 
     document = report(tmp_path, 0)
     assert document["error"] == "" and [task["name"] for task in document["tasks"]] == names
@@ -171,7 +171,7 @@ def test_an_unplayed_task_scores_zero_with_its_error(tmp_path: Path) -> None:
     )
     assert service.reports[0]["score"] == 0.0
     assert service.reports[0]["metadata"]["refusal"] == "the agent could not play the task"
-    assert service.manifests == [] and report(tmp_path, 0)["tasks"] == []
+    assert report(tmp_path, 0)["tasks"] == []
 
 
 @pytest.mark.unit
@@ -182,7 +182,6 @@ def test_eval_tasks_receive_no_designer_reward_or_training_experience(tmp_path: 
     assert asyncio.run(generator.validate(generated.task)).is_valid
     asyncio.run(generator.record_results((TaskPlayResult(task=generated.task, split="eval"),), generation=0))
     assert service.reports == []
-    assert service.manifests == []
     assert generator.experience == ()
     document = report(tmp_path, 0)
     assert document["tasks"] == []
@@ -211,7 +210,6 @@ def test_a_service_that_goes_away_ends_the_generation_with_what_ran(tmp_path: Pa
     assert document["error"] == "the generator went away" and [t["name"] for t in document["tasks"]] == [
         "harbor-00000-000"
     ]
-    assert service.manifests == [], "a generation that stopped writes no manifest"
 
 
 def test_a_check_that_could_not_run_raises_and_is_named_in_the_report(tmp_path: Path) -> None:
@@ -261,19 +259,19 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    context = PipelineContext("spade")
+    context = PipelineContext("spade", task_storage=SQLiteScenarioStorage(tmp_path / "records").open("spade").tasks)
     generation = GeneratedTaskTasks(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION, state_dir=str(tmp_path / "rounds")),
+        RoundSettings(rounds=1, description=DESCRIPTION),
         GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=2)),
         task_generator=generator,
         task_player=service,
     )
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
-    names = tuple(task.task_path.name for task in generated.tasks)
+    names = generated.train_task_names
     outcome = asyncio.run(generation.run(PlayJob(receipt="play-00000", task_names=names)))
     generation.close()
-    assert outcome.error == "" and outcome.played == 2
+    assert outcome.error == "" and outcome.played_count == 2
     plays = [(call["task"], call["arm"], call["plays"], call["extra"]) for call in service.plays]
     assert plays[:2] == [
         ("harbor-00000-000-inspection", "plain", 2, ()),
@@ -284,8 +282,8 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
         ("designer-2", 0.0),
         ("designer-3", 0.5),
     ]
-    assert service.manifests == [] and report(tmp_path, 0)["error"] == ""
-    assert (tmp_path / "rounds" / "spade" / "store" / "split-manifest.json").is_file()
+    assert report(tmp_path, 0)["error"] == ""
+    assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert read_harbor_task(tmp_path / "tasks" / "harbor-00000-000-inspection").name == "harbor-00000-000-inspection"
 
 

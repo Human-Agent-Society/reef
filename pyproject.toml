@@ -27,9 +27,8 @@ dependencies = [
     "huggingface_hub",
     # Harbor's environment contract backs reef.sandbox; the terminus runner, the task player and the generator
     # service play Harbor tasks with reef-eval.
-    "harbor>=0.20,<0.21",
+    "harbor>=0.20,<0.25",
     "pyyaml",
-    "pydantic>=2,<3",  # Typed task-store checkpoints.
     "reef-client>=0.2.0",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
@@ -90,7 +89,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.16.10",
+    "ruff==0.17.1",
 ]
 
 [dependency-groups]

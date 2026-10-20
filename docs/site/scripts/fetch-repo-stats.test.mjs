@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 function fixture(context) {
   const directory = mkdtempSync(join(tmpdir(), "reef-stats-"));
@@ -40,7 +41,7 @@ function fixture(context) {
     target: join(directory, "lib/repo-stats.generated.json"),
     cache: join(directory, ".next/cache/repo-stats.json"),
     run(failure = "", lifecycle = "prebuild") {
-      return spawnSync(process.execPath, ["--import", hook, script], {
+      return spawnSync(process.execPath, ["--import", pathToFileURL(hook).href, script], {
         encoding: "utf8",
         env: { ...process.env, GITHUB_TOKEN: "test-token", STATS_FAILURE: failure, npm_lifecycle_event: lifecycle },
       });

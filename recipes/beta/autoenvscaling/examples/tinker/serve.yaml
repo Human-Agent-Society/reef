@@ -41,14 +41,13 @@ pipeline:
     config:
       plays_per_task: 4
       batches_per_round: 2
-  # The rounds: one generation of tasks each, played through the generator service.
+  # The rounds: one generation of tasks each. The saved tasks play through the generator service.
   record2task:
     config:
       generator_url: ${endpoints.generator}
       rounds: 20
       # The stage requires a description; the generator takes what the tasks are from its sources file.
       description: coding tasks rebuilt from recorded coding-agent sessions
-      state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/rounds
       # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
       scaffold_tolerance: 8
       # The task generator: count sessions rebuilt for each round, a pass-rate band to mark the tasks in reach.

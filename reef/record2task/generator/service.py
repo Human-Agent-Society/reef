@@ -12,7 +12,6 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   different task under a taken name; ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
 - ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
-- ``POST /manifests``: the split manifest of one generation's tasks under the tasks root.
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
   then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check or play.
@@ -49,7 +48,6 @@ from reef.core.tasks import (
     TaskGenerationRequest,
     read_harbor_task,
     write_harbor_task,
-    write_split_manifest,
 )
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
@@ -68,7 +66,6 @@ from reef.record2task.generator.harbor import (
     content_hash,
     harbor_task,
     oracle_check,
-    split_generation,
 )
 from reef.record2task.generator.wire import (
     WireError,
@@ -499,7 +496,6 @@ class GeneratorService:
                 web.delete("/tasks/{name}", self.delete_task),
                 web.post("/checks", self.check),
                 web.post("/plays", self.play),
-                web.post("/manifests", self.write_manifest),
                 web.get("/jobs/{job_id}", self.job),
             ]
         )
@@ -688,25 +684,6 @@ class GeneratorService:
         except WireError as exc:
             return error_response(400, str(exc))
         return self.submitted(job)
-
-    async def write_manifest(self, request: web.Request) -> web.Response:
-        try:
-            body = await self.body_of(request)
-            generation = checked_count(body.get("generation", 0), "generation")
-            names = body.get("names")
-            if not isinstance(names, list) or not names or any(not isinstance(name, str) for name in names):
-                raise WireError("names must be a non-empty list of task names")
-            eval_fraction = body.get("eval_fraction", 0.0)
-            if isinstance(eval_fraction, bool) or not isinstance(eval_fraction, (int, float)):
-                raise WireError("eval_fraction must be a number")
-            seed = checked_count(body.get("seed", 0), "seed")
-            tasks = [read_harbor_task(self.task_path_for(name)) for name in names]
-            split = split_generation(tasks, eval_fraction=float(eval_fraction), seed=seed)
-        except (WireError, HarborTaskError, ValueError) as exc:
-            return error_response(400, str(exc))
-        path = self.tasks_root / f"manifest-{generation:05d}.json"
-        await asyncio.to_thread(write_split_manifest, path, split)
-        return web.json_response({"path": str(path), "train": list(split.train), "eval": list(split.eval)})
 
     async def job(self, request: web.Request) -> web.Response:
         job = self.jobs.get(request.match_info["job_id"])

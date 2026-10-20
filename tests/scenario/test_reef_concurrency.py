@@ -251,7 +251,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
             candidate = tmp_path / f"candidate-{index}"
             candidate.mkdir()
             (candidate / "model.txt").write_text(f"v{index}")
-            dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
 
     errors = run_workers(thread_count, worker)
 
@@ -307,7 +307,7 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
     candidate.mkdir()
 
     with pytest.raises(ArtifactConflict, match="serving head advanced"):
-        dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
 
     assert scenario.scenario_step == 0
     assert repository.current_artifact.release_id == "live:other:w9:9"

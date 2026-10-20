@@ -278,6 +278,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 return ActivatedModel(candidate.candidate_id, self._version)
             if candidate.current_runtime_load_id not in (None, self._version):
                 raise StaleCandidate
+            if candidate.checkpoint_path is None:
+                raise ValueError("a Tinker candidate must carry a checkpoint")
             sampler_path = checkpoint_sampler_path(Artifact.local(Path(candidate.checkpoint_path)), self._model)
             if sampler_path is None:
                 raise ValueError("a Tinker candidate must carry a checkpoint manifest")

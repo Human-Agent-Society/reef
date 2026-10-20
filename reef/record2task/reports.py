@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 
 from reef.core.batches import TaskItem, TrainDataItem, TrajectoryItem
 from reef.record2record import RecordSet, ReportCandidate, ReportContext
-from reef.record2task.base import Record2Task, TaskResult
+from reef.record2task.base import ImmediateRecord2Task, TaskResult
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class SkippedReport:
     reason: str
 
 
-class ReportTasks(Record2Task, ABC):
+class ReportTasks(ImmediateRecord2Task, ABC):
     """Turn one valid report and its inference records into one task.
 
     A recipe implements ``make_sample``. The stage attaches the report ID and

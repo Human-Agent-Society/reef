@@ -368,7 +368,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
         assert scenario.trainer.candidate_backend._models["judge"].api_key == "scoped-alpha-1"
         config = scenario.model_config
         previous_runtime = config.runtime
-        reloaded = recovered._registry.reload("alpha")
+        reloaded = recovered.registry.reload("alpha")
         assert reloaded is not scenario
         assert reloaded.model_config is config
         recovered.configure_scenario_model("alpha", configure(platform, "alpha", "openai", "2"))
@@ -376,7 +376,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
         assert previous_runtime.api_key == "scoped-alpha-1"
         assert not list(records.glob("*-model.json"))
         recovered.delete_scenario("alpha")
-        assert recovered._storage.read_settings("alpha") == ScenarioSettings()
+        assert recovered.storage.read_settings("alpha") == ScenarioSettings()
         with closing(SQLiteRecordStore(next((records / "archived").glob("*/*.sqlite3")))) as archived:
             assert archived.read_settings().model_config["api_key"] == "scoped-alpha-2"
         recreated = recovered.get_or_create_scenario("alpha")

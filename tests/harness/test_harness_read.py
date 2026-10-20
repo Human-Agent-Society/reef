@@ -118,7 +118,7 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     assert all("adapter" not in row for row in weights.list_scenarios())
     # A registered scenario that is not in memory, as while it loads or after its preload failed, names it too.
     harness.get_or_create_scenario("waiting")
-    harness._registry.remove("waiting")
+    harness.registry.remove("waiting")
     assert [(row["scenario"], row["loaded"], row["adapter"]) for row in harness.list_scenarios()] == [
         ("delivery", True, "claude"),
         ("waiting", False, "claude"),

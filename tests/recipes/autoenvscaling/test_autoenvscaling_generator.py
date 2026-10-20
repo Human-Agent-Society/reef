@@ -59,6 +59,7 @@ from reef.record2task.generator import DuplicateTask, GeneratorError, WrittenTas
 from reef.record2task.generator.harbor import ORACLE_TIMEOUT_S
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 @pytest.fixture(autouse=True)
@@ -197,9 +198,6 @@ def test_sessions_without_a_task_are_recorded_by_stage_and_an_outage_ends_the_ge
         "the source session-1 cannot be rebuilt: the record session-1 holds no session messages"
     )
     assert [entry["designer_record_id"] for entry in document["proposals"]] == ["", "agent-2", ""]
-    # The task store owns the manifest; generator reports retain the outage.
-    assert service.manifests == []
-    assert document["manifest"] is None
     assert document["next_position"] == 3 and cursor(tmp_path)["next_position"] == 3, "the outage's session is taken"
 
     silent = StandInGenerator(tmp_path / "silent")
@@ -256,7 +254,7 @@ def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     )
 
 
-def test_a_check_that_cannot_run_raises_and_the_generation_writes_no_manifest(tmp_path: Path) -> None:
+def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) -> None:
     # Two candidate checks, then the first task's check; the second task's check cannot run.
     service = StandInGenerator(tmp_path / "tasks", check_fail_after=3)
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
@@ -268,7 +266,6 @@ def test_a_check_that_cannot_run_raises_and_the_generation_writes_no_manifest(tm
     assert not (tmp_path / "tasks" / NAMES[1]).exists(), "no copy is left"
     asyncio.run(generator.record_results((TaskPlayResult(first.task, (0.0, 1.0)),), generation=0))
     document = report(tmp_path)
-    assert service.manifests == [] and document["manifest"] is None
     assert document["error"].startswith(f"the check of {NAMES[1]} could not run")
     assert [entry["stage"] for entry in document["proposals"]] == ["", "unreached"]
 
@@ -298,13 +295,13 @@ def test_the_band_keeps_a_played_task_only_when_its_pass_rate_is_inside_it(
     assert task["training_rewards"] == list(training) and task["source_record_id"] == "session-1"
     [proposal] = document["proposals"]
     if position == "inside":
-        assert proposal["stage"] == "" and service.manifests == []
+        assert proposal["stage"] == ""
     else:
         assert (
             proposal["stage"] == "band"
             and proposal["refusal"] == f"outside the solver band: pass rate {pass_rate:.2f}"
         )
-        assert proposal["task_name"] == NAMES[0] and service.manifests == []
+        assert proposal["task_name"] == NAMES[0]
         assert service.deleted == [f"{NAMES[0]}-check-1", NAMES[0]], "the candidate and the validated copy only"
 
 
@@ -319,7 +316,6 @@ def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path:
     assert document["tasks"] == []
     assert document["proposals"][0]["stage"] == "held_out"
     assert document["proposals"][0]["refusal"] == ""
-    assert service.manifests == []
     assert service.reports == []
 
 
@@ -346,8 +342,6 @@ def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> Non
         ("play", "the agent could not play the task: no sandbox"),
     ]
     assert service.reports == [], "the generator sends no Designer report"
-    assert service.manifests == []
-    assert document["manifest"] is None
 
 
 def test_a_request_with_source_records_is_refused_and_named_in_the_report(tmp_path: Path) -> None:
@@ -520,7 +514,6 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert task.instruction == DOCUMENT["instruction"] + "\n"
     # Every play passed: outside the default band, inside with the band off.
     assert [entry["band"] for entry in report(tmp_path)["tasks"]] == ["inside"]
-    assert service.manifests == []
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
 
 
@@ -577,26 +570,26 @@ def test_from_config_refuses_a_config_that_cannot_run(tmp_path: Path, fields: di
 def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
-    context = PipelineContext("autoenvscaling")
+    session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks)
     generation = GeneratedTaskTasks(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION, state_dir=str(tmp_path / "rounds")),
+        RoundSettings(rounds=1, description=DESCRIPTION),
         GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=2)),
         task_generator=generator,
         task_player=service,
     )
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
-    names = tuple(task.task_path.name for task in generated.tasks)
+    names = generated.train_task_names
     outcome = asyncio.run(generation.run(PlayJob(receipt="play-00000", task_names=names)))
-    results = generation.task_store.generation(generation=0).results
+    results = generation.task_store.generation(0).play_results
     generation.close()
     assert outcome.error == "" and [result.training_rewards for result in results] == [(0.5, 0.5)] * 2
     assert [(call["task"], call["arm"], call["plays"]) for call in service.plays] == [
         (NAMES[0], "plain", 2),
         (NAMES[1], "plain", 2),
     ]
-    assert service.manifests == []
-    assert (tmp_path / "rounds" / "autoenvscaling" / "store" / "split-manifest.json").is_file()
+    assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
     assert read_harbor_task(tmp_path / "tasks" / NAMES[0]).name == NAMES[0]
 

@@ -24,7 +24,7 @@ from tests.reef_service.test_harness_recipe import (
 )
 from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
-from reef.evaluation.harness import EpisodeEvaluationWorker, ScoreComparisonPlugin
+from reef.evaluation.harness import EpisodeEvaluationWorker
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
@@ -310,31 +310,6 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     with pytest.raises(FileExistsError):
         CordisBackend._write_record(first, "proposer.json", [])
     assert read_json(first / "proposer.json") == []
-
-
-def test_a_kept_candidate_evaluated_again_lands_in_the_next_attempt_directory(tmp_path: Path) -> None:
-    """A result refused as stale keeps its candidate; its second evaluation writes beside the first, not over it."""
-    b = native_backend(tmp_path, step_record_dir=tmp_path / "record")
-    first = b.prepare_step(batch(), b.initial_state(), 0)
-    assert first.candidate is not None
-    evaluator = ScoreComparisonPlugin(b)
-    b.settle_step(first, evaluator.decide(first.candidate, evaluator.evaluate(first.candidate)))
-    first_dir = tmp_path / "record" / "1"
-    assert (first_dir / "episodes").is_dir() and (first_dir / "proposer.json").is_file()
-    assert b.step_progress is None
-
-    again = b.prepare_reevaluation(first)
-    second_dir = tmp_path / "record" / "1-2"
-    assert again.metrics["step_record"] == str(second_dir)
-    assert read_json(second_dir / "reevaluation.json") == {"first_attempt": str(first_dir)}
-    assert b.step_progress is not None and b.step_progress.phase == "evaluating"
-    assert b.step_progress.step_record == str(second_dir)
-    assert again.candidate is not None
-    result = b.settle_step(again, evaluator.decide(again.candidate, evaluator.evaluate(again.candidate)))
-    assert result.metrics["step_record"] == str(second_dir)
-    assert (second_dir / "episodes").is_dir()
-    assert not (second_dir / "proposer.json").exists()
-    assert sorted(path.name for path in (tmp_path / "record").iterdir()) == ["1", "1-2"]
 
 
 def test_a_recheck_step_writes_episodes_only_and_counts_no_proposer_calls(tmp_path: Path) -> None:

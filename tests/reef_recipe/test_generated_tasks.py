@@ -1,10 +1,9 @@
-"""The generated-task recipe: rounds of generated tasks played and sent back, episodes grouped by task and trained."""
+"""The generated-task recipe: tasks generated, played from the task pool and sent back, episodes trained by task."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,7 +13,6 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingRuntime
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from reef.artifact import InMemoryRepositoryBackend
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -27,11 +25,10 @@ from reef.core.tasks import (
     TaskPlayResult,
     TaskValidationResult,
 )
-from reef.dispatcher import Dispatcher
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
-from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
 from reef.recipe.generated_tasks.processor import (
@@ -49,10 +46,10 @@ from reef.recipe.generated_tasks.processor import (
 )
 from reef.record2record import GroupDecision, ReportContext
 from reef.record2task.generator.client import GeneratorError
-from reef.record2task.store import FileTaskStore, PlayedResult
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import PlayedResult, TaskStorage, TaskStore
 from reef.train.algos.registry import resolve_objective
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrainingBatch, trajectory_groups
 
 MODULE = "tests.reef_recipe.test_generated_tasks"
@@ -123,8 +120,8 @@ def processor(**config: object) -> TrainingPipeline:
 
 
 def played(processor: TrainingPipeline, task: str, index: int, score: float, **fields: Any) -> None:
-    processor.ingest(inference(f"rec-{task}-{index}"))
-    processor.ingest(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
+    processor.push(inference(f"rec-{task}-{index}"))
+    processor.push(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
@@ -150,7 +147,7 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
     played(p, "harbor-00000-001", 1, 1.0)
     assert p.ready()
     batch = p.build_batch()
-    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:generated-tasks:1"
+    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:batch:1"
     groups = trajectory_groups(batch)
     assert [[sample.group_id for sample in group] for group in groups] == [
         ["harbor-00000-000", "harbor-00000-000"],
@@ -161,9 +158,9 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
 
 def test_a_training_report_without_a_task_is_refused_and_keeps_its_report_retryable() -> None:
     p = processor()
-    p.ingest(inference("rec-x"))
+    p.push(inference("rec-x"))
     with pytest.raises(ValueError, match=r"requires metadata\.task\.name"):
-        p.ingest(report("rep-x", "rec-x", None, 1.0))
+        p.push(report("rep-x", "rec-x", None, 1.0))
 
 
 def test_measurement_arms_and_reports_without_an_arm_are_released_not_trained() -> None:
@@ -171,8 +168,8 @@ def test_measurement_arms_and_reports_without_an_arm_are_released_not_trained() 
     played(p, "harbor-00000-000", 0, 0.0, arm="hint")
     played(p, "harbor-00000-000", 1, 1.0, arm="hint")
     assert not p.ready(), "measurement episodes never form a group"
-    p.ingest(inference("rec-generator"))
-    p.ingest(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
+    p.push(inference("rec-generator"))
+    p.push(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
     assert not p.ready()
     released = p.releasable_record_ids()
     assert {"rep-generator", "rec-generator"} <= released
@@ -216,10 +213,10 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
         )
 
     p = processor(tasks_per_step=1)
-    p.ingest(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
-    p.ingest(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
+    p.push(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
+    p.push(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
     payload = {**report("rep-0", "rec-0", "harbor-00000-000", 1.0).payload, "references": ["rec-0", "rec-1"]}
-    p.ingest(
+    p.push(
         AgentRecord.create(scenario="tasks", request_type=RequestType.REPORT, payload=payload, agent_record_id="rep-0")
     )
     played(p, "harbor-00000-000", 1, 0.0)
@@ -330,6 +327,23 @@ class SlowGenerator(ScriptedGenerator):
         return await super().generate(request)
 
 
+class FailingGenerator(ScriptedGenerator):
+    """A generator whose generate call fails to run at once."""
+
+    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+        self.requests.append(request)
+        raise RuntimeError("the generator service is down")
+
+
+class FirstResultsFail(ScriptedGenerator):
+    """A generator that cannot take the results of generation 0."""
+
+    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+        if generation == 0:
+            raise RuntimeError("generation 0 is lost")
+        await super().record_results(results, generation=generation)
+
+
 def generated(round_number: int, *indices: int, hint: bool = True) -> tuple[GeneratedTask, ...]:
     """Tasks of one round; each asks for a hint arm of one play unless ``hint`` is off."""
     arms = (PlayArm("hint", 1, ("solution/hint.txt",)),) if hint else ()
@@ -343,14 +357,14 @@ def generated(round_number: int, *indices: int, hint: bool = True) -> tuple[Gene
 
 
 class Unbound(BackgroundJobRunner):
-    """The runner of a test worker that runs rounds itself. The real worker thread never calls it."""
+    """The runner of a test worker that runs jobs itself. The real worker thread never calls it."""
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
         raise RuntimeError("no processor bound")
 
 
 class InlineWorker(BackgroundJobWorker):
-    """Runs each round the moment it is submitted, on this thread, so a test reads the outcome right away."""
+    """Runs each job the moment it is submitted, on this thread, so a test reads the outcome right away."""
 
     def __init__(self) -> None:
         super().__init__(Unbound(), thread_name="test-rounds", concurrency=1)
@@ -377,7 +391,7 @@ class InlineWorker(BackgroundJobWorker):
 
 
 class DeferredWorker(BackgroundJobWorker):
-    """Takes a round the moment it is submitted and runs it on ``finish``; the outcome lands on the next poll."""
+    """Takes a job the moment it is submitted and runs it on ``finish``; the outcome lands on the next poll."""
 
     def __init__(self) -> None:
         super().__init__(Unbound(), thread_name="test-rounds", concurrency=1)
@@ -407,6 +421,18 @@ class DeferredWorker(BackgroundJobWorker):
         self.generation = None
 
 
+class BrokenPlayer(StandInGenerator):
+    """A generator service whose plays cannot run."""
+
+    async def play(self, task_path, **fields) -> tuple[TaskPlay, ...]:
+        raise GeneratorError("the sandbox provider is down")
+
+
+def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
+    """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
+    return SQLiteScenarioStorage(tmp_path / "records").open(scenario).tasks
+
+
 def rounds(
     tmp_path: Path,
     task_generator: ScriptedGenerator,
@@ -417,14 +443,13 @@ def rounds(
 ) -> tuple[TrainingPipeline, StandInGenerator]:
     player = player if player is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     group_settings, round_settings, batch_settings = stage_settings(
         {
             "tasks_per_step": 2,
             "plays_per_task": 2,
             "rounds": 3,
             "description": DESCRIPTION,
-            "state_dir": str(tmp_path / "state"),
             "served_model": "Qwen/Qwen3-8B",
             **config,
         }
@@ -455,10 +480,11 @@ def generation_numbers(worker: InlineWorker | DeferredWorker) -> list[int]:
     return [job.generation for job in worker.submitted if isinstance(job, GenerationJob)]
 
 
-def generation_document(tmp_path: Path, generation: int) -> dict[str, Any]:
-    return json.loads(
-        (tmp_path / "state" / "tasks" / "store" / "generations" / f"gen-{generation:05d}.json").read_text()
-    )
+def task_store(p: TrainingPipeline) -> TaskStore:
+    """The task store of a pipeline's generated-task stage."""
+    record2task = p.record2task
+    assert isinstance(record2task, GeneratedTaskTasks) and record2task.task_store is not None
+    return record2task.task_store
 
 
 def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
@@ -474,7 +500,7 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     assert not p.background_jobs_running(), "the inline worker finished before ready() returned"
     status = p.status()["task_generation"]
     assert (status["next"], status["completed"]) == (1, 1)
-    assert p.status()["task_store"]["played/train"] == 3
+    assert p.status()["task_store"]["played"] == 3
 
     assert task_generator.requests == [TaskGenerationRequest((), DESCRIPTION)]
     names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
@@ -495,10 +521,12 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     assert results[0].training_rewards == (0.25, 0.25) and results[0].measurement_rewards == {"hint": (0.75,)}
     assert results[2].training_rewards == (0.25, 0.25) and results[2].measurement_rewards == {}
     assert results[2].is_played
-    document = generation_document(tmp_path, 0)
-    assert document["is_delivered"] and [result["task_name"] for result in document["results"]] == names
-    assert document["results"][0]["training_rewards"] == [0.25, 0.25]
-    assert document["results"][0]["measurement_rewards"] == {"hint": [0.75]}
+    state = task_store(p).generation(0)
+    assert state is not None and state.is_delivered
+    assert [result.task_name for result in state.play_results] == names
+    assert state.play_results[0].training_rewards == (0.25, 0.25)
+    assert state.play_results[0].measurement_rewards == {"hint": (0.75,)}
+    assert p.operational_metrics()["rounds_completed"] == 1
 
 
 @pytest.mark.unit
@@ -510,9 +538,9 @@ def test_eval_tasks_are_saved_without_training_or_measurement_plays(tmp_path: Pa
     assert all(
         result.split == "eval" and not result.is_played and not result.error for result in task_generator.results[0]
     )
-    assert pipeline.status()["task_store"] == {"held_out/eval": 2, "rejected": 0, "candidate": 0}
-    assert pipeline.record2task.task_store.generation(generation=0).is_delivered, "no train task waits to play"
-    assert pipeline.record2task.task_store.generation(generation=0).is_complete
+    assert pipeline.status()["task_store"] == {"train": 0, "eval": 2, "played": 0, "rejected": 0, "pending": 0}
+    state = task_store(pipeline).generation(0)
+    assert state is not None and state.is_complete and state.is_delivered, "no train task waits to play"
     pipeline.close()
 
 
@@ -523,14 +551,16 @@ def test_a_check_that_cannot_run_is_retried_from_the_saved_candidates_then_defer
     assert not looked(pipeline)
     assert len(task_generator.requests) == 1, "a retry continues from the saved candidates"
     assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-001"]
-    assert pipeline.record2task.task_store.generation(generation=0).pending_indices == (1,)
+    state = task_store(pipeline).generation(0)
+    assert state is not None and state.pending_indices == (1,)
     assert player.writes == [], "a deferred generation plays none of its tasks"
     assert "the checks could not run" in pipeline.status()["task_generation"]["last_error"]
     task_generator.failing = None
     outcome = asyncio.run(pipeline.record2task.run(GenerationJob(receipt="generation-00000", generation=0)))
-    assert isinstance(outcome, GenerationOutcome) and not outcome.is_deferred and len(outcome.tasks) == 2
+    assert isinstance(outcome, GenerationOutcome) and not outcome.is_deferred and len(outcome.train_task_names) == 2
     assert len(task_generator.requests) == 1
-    assert pipeline.record2task.task_store.generation(generation=0).is_complete
+    state = task_store(pipeline).generation(0)
+    assert state is not None and state.is_complete
     pipeline.close()
 
 
@@ -539,55 +569,54 @@ def test_a_generation_past_its_deadline_is_deferred(tmp_path: Path) -> None:
     task_generator = SlowGenerator([generated(0, 0)])
     pipeline, player = rounds(tmp_path, task_generator, generation_deadline_seconds=0.05)
     assert not looked(pipeline)
-    assert player.writes == [] and pipeline.record2task.task_store.generation(generation=0).candidates is None
+    state = task_store(pipeline).generation(0)
+    assert player.writes == [] and state is not None and state.candidates is None
     assert pipeline.status()["task_generation"]["last_error"]
     pipeline.close()
 
 
+def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> GeneratedTask:
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    task = task_for(name, record_ids[0], port)
+    metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
+    return GeneratedTask(dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata))
+
+
 @pytest.mark.unit
-def test_legacy_rounds_are_preserved_and_do_not_resume_into_a_fresh_store(tmp_path: Path) -> None:
-    legacy = tmp_path / "state" / "tasks" / "round-00000.json"
-    legacy.parent.mkdir(parents=True)
-    contents = '{"round": 0, "tasks": []}\n'
-    legacy.write_text(contents)
-    pipeline, player = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), rounds=1)
-    assert pipeline.status()["task_generation"]["next"] == 0
+def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits_is_refused(tmp_path: Path) -> None:
+    follower = sourced("follower", "designer-1", "eval-source", port=9102, designer_record_id="designer-1")
+    bridge = sourced("bridge", "train-source", "eval-source", port=9103)
+    renamed = sourced("train-task", "other-source", port=9104)
+    task_generator = ScriptedGenerator([(follower, bridge, renamed)])
+    pipeline, player = rounds(tmp_path, task_generator)
+    store = task_store(pipeline)
+    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    earlier = (
+        sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
+        sourced("eval-task", "eval-source", port=9101),
+    )
+    store.begin_generation(generation=100, source_record_ids=())
+    store.save_candidates(generation=100, candidates=earlier)
+    store.publish_task(generation=100, index=0, split="train")
+    store.publish_task(generation=100, index=1, split="eval")
+    store.complete_generation(generation=100)
+
     assert not looked(pipeline)
-    assert legacy.read_text() == contents
-    assert player.writes == ["harbor-00000-000"]
+
+    results = {result.task.name: result for result in task_generator.results[0]}
+    assert task_generator.result_generations[0] == 101, "the round's generation follows the saved ones"
+    assert results["follower"].split == "eval" and not results["follower"].error
+    assert "split conflict" in results["bridge"].error
+    assert "already published in generation 100" in results["train-task"].error
+    assert player.writes == []
+    assert {task.generated.task.name: task.split for task in store.tasks()} == {
+        "train-task": "train",
+        "eval-task": "eval",
+        "follower": "eval",
+    }
+    assert store.path(store.tasks(split="train")[0]).joinpath("instruction.md").is_file()
+    assert pipeline.status()["task_store"] == {"train": 1, "eval": 2, "played": 0, "rejected": 2, "pending": 0}
     pipeline.close()
-
-
-@pytest.mark.integration
-def test_deleting_a_scenario_archives_its_task_store_and_preserves_other_scenarios(tmp_path: Path) -> None:
-    state_root = tmp_path / "state"
-    for scenario in ("first", "other"):
-        with FileTaskStore(root=state_root / scenario / "store", eval_fraction=0.0, seed=0) as store:
-            store.begin_generation(generation=0, source_record_ids=())
-            store.save_candidates(generation=0, candidates=generated(0, 0))
-            store.publish_task(generation=0, index=0)
-            store.complete_generation(generation=0)
-    stages = PipelineConfig.from_setting(
-        {"record2task": {"config": {"state_dir": str(state_root)}}},
-        spec=GeneratedTaskRecipe.pipeline_spec(),
-        environ={},
-    )
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    dispatcher = Dispatcher(
-        recipe=Recipe(pipeline_stages=stages),
-        backend_factory=InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(None),
-    )
-    try:
-        dispatcher.get_or_create_scenario(scenario="first")
-        archived = dispatcher.delete_scenario(scenario="first")["archived"]
-        assert not (state_root / "first").exists()
-        assert any((Path(path) / "store" / "generations" / "gen-00000.json").is_file() for path in archived)
-        assert (state_root / "other" / "store" / "tasks" / "harbor-00000-000").is_dir()
-    finally:
-        dispatcher.close()
 
 
 def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_path: Path) -> None:
@@ -600,7 +629,7 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     (results,) = task_generator.results
     assert results[0].error == "oracle check refused: the oracle scored 0" and results[0].training_rewards == ()
     assert results[1].is_played
-    assert p.status()["task_store"]["played/train"] == 1
+    assert p.status()["task_store"]["played"] == 1
 
 
 def test_a_measurement_arm_with_the_training_arms_name_is_refused_unplayed(tmp_path: Path) -> None:
@@ -619,6 +648,7 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     p, _ = rounds(tmp_path, task_generator, taken)
     assert not looked(p)
     assert task_generator.results[0][0].error.startswith("refused: a different task holds the name harbor-00000-000")
+    assert not task_generator.results[0][0].infrastructure_failure
     assert taken.plays == []
 
     unplayable = StandInGenerator(tmp_path / "second" / "tasks", play_error="Failed to start tmux session.")
@@ -627,7 +657,18 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     assert not looked(p)
     assert [call["arm"] for call in unplayable.plays] == ["plain"], "no measurement arm for a task that cannot run"
     assert unplayable.deleted == ["harbor-00000-000"]
-    assert task_generator.results[0][0].error == "the agent could not play the task: Failed to start tmux session."
+    (result,) = task_generator.results[0]
+    assert result.error == "the agent could not play the task: Failed to start tmux session."
+    assert result.infrastructure_failure
+
+
+def test_a_task_that_cannot_run_is_an_infrastructure_failure(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0)])
+    p, _ = rounds(tmp_path, task_generator, BrokenPlayer(tmp_path / "tasks"), rounds=1)
+    looked(p)
+    ((result,),) = task_generator.results
+    assert result.infrastructure_failure and result.error == "the sandbox provider is down"
+    assert not result.is_played
 
 
 class PartlyReported(StandInGenerator):
@@ -693,10 +734,7 @@ def test_the_next_round_waits_for_batches_per_round(tmp_path: Path) -> None:
         p.acknowledge(p.build_batch().batch_id)
         looked(p)
     assert len(task_generator.requests) == 2 and p.status()["task_generation"]["completed"] == 2
-    assert sorted(entry.name for entry in (tmp_path / "state" / "tasks" / "store" / "generations").iterdir()) == [
-        "gen-00000.json",
-        "gen-00001.json",
-    ]
+    assert [state.generation for state in task_store(p).generations()] == [0, 1]
 
 
 def test_batches_trained_while_a_round_runs_count_toward_the_next_one(tmp_path: Path) -> None:
@@ -781,39 +819,48 @@ def test_results_that_the_generator_did_not_take_are_sent_again_by_a_later_job(t
     assert not looked(p)
     assert player.writes == ["harbor-00000-000", "harbor-00000-001"]
     assert p.status()["task_generation"]["last_error"] == "the generator lost its state directory"
-    assert not p.record2task.task_store.generation(generation=0).is_delivered
+    state = task_store(p).generation(0)
+    assert state is not None and not state.is_delivered
     task_generator.failing_results = False
-    assert asyncio.run(p.record2task.deliver_results()) == ""
+    record2task = p.record2task
+    assert isinstance(record2task, GeneratedTaskTasks)
+    assert asyncio.run(record2task.deliver_results()) == ""
     assert task_generator.result_generations == [0, 0], "the second delivery reached it"
-    assert p.record2task.task_store.generation(generation=0).is_delivered
-    assert asyncio.run(p.record2task.deliver_results()) == "" and len(task_generator.results) == 2
+    state = task_store(p).generation(0)
+    assert state is not None and state.is_delivered
+    assert asyncio.run(record2task.deliver_results()) == "" and len(task_generator.results) == 2
 
 
-def test_a_closed_pipeline_starts_no_round_and_ignores_a_round_that_finishes_late(tmp_path: Path) -> None:
-    worker = DeferredWorker()
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
-    assert not p.ready() and generation_numbers(worker) == [0]
-    p.close()
-    worker.finished.append(
-        GenerationOutcome(receipt="generation-00000", generation=0, tasks=(), is_deferred=False, error="")
-    )
-    assert not looked(p) and generation_numbers(worker) == [0]
-    assert p.status()["task_generation"]["completed"] == 0, "the late round settled nothing"
+def test_a_generation_whose_results_fail_does_not_hold_back_later_ones(tmp_path: Path) -> None:
+    task_generator = FirstResultsFail([generated(0, 0, 1), generated(1, 0, 1)])
+    p, _ = rounds(tmp_path, task_generator, rounds=2)
+    looked(p)
+    for task in ("t-0", "t-1"):
+        played(p, task, 0, 1.0)
+        played(p, task, 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    looked(p)
+    store = task_store(p)
+    first, second = store.generation(0), store.generation(1)
+    assert first is not None and not first.is_delivered
+    assert second is not None and second.is_delivered
 
 
-def test_a_worker_that_refuses_a_round_stops_the_pipeline_with_the_reason(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
-    p.record2task.worker.close()
-    with pytest.raises(RuntimeError, match="generation-00000 cannot run"):
-        p.ready()
+def test_a_worker_that_refuses_a_round_stops_the_rounds_with_the_reason(tmp_path: Path) -> None:
+    worker = InlineWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, rounds=2)
+    worker.close()
+    assert not looked(p) and not p.background_jobs_running()
+    assert generation_numbers(worker) == [0], "no round is tried after the refusal"
+    assert "no further job runs" in p.status()["task_generation"]["last_error"]
 
 
 def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) -> None:
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
     generation = GeneratedTaskTasks(
         context,
-        RoundSettings(rounds=1, description="shell tasks", state_dir=str(tmp_path / "state")),
+        RoundSettings(rounds=1, description="shell tasks"),
         stage,
         task_generator=ScriptedGenerator([generated(0, 0)]),
         task_player=StandInGenerator(tmp_path / "tasks"),
@@ -831,7 +878,8 @@ def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) ->
             time.sleep(0.02)
             p.ready()
         assert not p.background_jobs_running() and p.status()["task_generation"]["completed"] == 1
-        assert generation_document(tmp_path, 0)["is_delivered"], "the generation, its play and its results ran"
+        state = task_store(p).generation(0)
+        assert state is not None and state.is_delivered, "the generation, its play and its results ran"
     finally:
         p.close()
 
@@ -845,10 +893,10 @@ def test_a_generation_plays_nothing_and_its_tasks_play_from_the_task_pool(tmp_pa
     assert not p.ready()
     (play,) = [job for job in worker.submitted if isinstance(job, PlayJob)]
     assert play.task_names == ("harbor-00000-000", "harbor-00000-001")
-    assert p.status()["task_store"]["available/train"] == 2
+    assert {key: p.status()["task_store"][key] for key in ("train", "played")} == {"train": 2, "played": 0}
     worker.finish()
     assert player.writes == ["harbor-00000-000", "harbor-00000-001"]
-    assert p.status()["task_store"]["played/train"] == 2
+    assert p.status()["task_store"]["played"] == 2
 
 
 def test_a_restart_plays_the_saved_tasks_that_had_no_result_without_generating_again(tmp_path: Path) -> None:
@@ -858,31 +906,17 @@ def test_a_restart_plays_the_saved_tasks_that_had_no_result_without_generating_a
     worker.finish()
     first.ready()
     # The first task's play ended before the stop; the second task's did not.
-    first.record2task.task_store.record_result(generation=0, result=PlayedResult("harbor-00000-000", (1.0, 0.0)))
+    task_store(first).save_play_result(generation=0, result=PlayedResult("harbor-00000-000", (1.0, 0.0)))
     first.close()
     task_generator = ScriptedGenerator()
     player = StandInGenerator(tmp_path / "tasks")
     restarted, _ = rounds(tmp_path, task_generator, player, rounds=1)
-    assert len(restarted.record2record.task_pool) == 1, "the unplayed sibling is back in the task pool"
+    record2record = restarted.record2record
+    assert isinstance(record2record, GeneratedTaskRecord2Record)
+    assert record2record.task_pool == ["harbor-00000-001"], "the unplayed sibling is back in the task pool"
     looked(restarted)
     assert player.writes == ["harbor-00000-001"] and task_generator.requests == []
     assert task_generator.result_generations == [0], "the generation's results go out once both tasks have one"
-
-
-def test_a_task_that_cannot_run_is_an_infrastructure_failure(tmp_path: Path) -> None:
-    task_generator = ScriptedGenerator([generated(0, 0)])
-    p, _ = rounds(tmp_path, task_generator, BrokenPlayer(tmp_path / "tasks"), rounds=1)
-    looked(p)
-    ((result,),) = task_generator.results
-    assert result.infrastructure_failure and result.error == "the sandbox provider is down"
-    assert not result.is_played
-
-
-class BrokenPlayer(StandInGenerator):
-    """A generator service whose plays cannot run."""
-
-    async def play(self, task_path, **fields) -> tuple[TaskPlay, ...]:
-        raise GeneratorError("the sandbox provider is down")
 
 
 def test_a_task_that_an_earlier_generation_published_is_rejected_as_a_duplicate(tmp_path: Path) -> None:
@@ -901,9 +935,9 @@ def test_a_task_that_an_earlier_generation_published_is_rejected_as_a_duplicate(
         p.ready()
         worker.finish()
     p.ready()
-    store = p.record2task.task_store
-    assert store.generation(generation=1).train_task_names == ("harbor-00001-005",)
-    assert "already published in generation 0" in store.generation(generation=1).outcomes[0].error
+    state = task_store(p).generation(1)
+    assert state is not None and state.train_task_names == ("harbor-00001-005",)
+    assert state.candidates is not None and "already published in generation 0" in state.candidates[0].error
     assert task_generator.result_generations == [0, 1], "both generations get their results"
 
 
@@ -918,23 +952,11 @@ def test_a_restart_sends_results_that_the_generator_did_not_receive(tmp_path: Pa
     worker.finish()
     restarted.ready()
     assert task_generator.result_generations == [0]
-    assert restarted.record2task.task_store.generation(generation=0).is_delivered
+    state = task_store(restarted).generation(0)
+    assert state is not None and state.is_delivered
 
 
-def test_a_generation_whose_results_fail_does_not_hold_back_later_ones(tmp_path: Path) -> None:
-    task_generator = FirstResultsFail([generated(0, 0, 1), generated(1, 0, 1)])
-    p, _ = rounds(tmp_path, task_generator, rounds=2)
-    looked(p)
-    for task in ("t-0", "t-1"):
-        played(p, task, 0, 1.0)
-        played(p, task, 1, 0.0)
-    p.acknowledge(p.build_batch().batch_id)
-    looked(p)
-    store = p.record2task.task_store
-    assert not store.generation(generation=0).is_delivered and store.generation(generation=1).is_delivered
-
-
-def test_a_task_whose_play_a_stop_interrupted_is_staged_again_and_plays(tmp_path: Path) -> None:
+def test_a_task_whose_play_a_stop_interrupted_is_written_again_and_plays(tmp_path: Path) -> None:
     worker = DeferredWorker()
     player = StandInGenerator(tmp_path / "tasks")
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), player, worker=worker, rounds=1)
@@ -942,41 +964,13 @@ def test_a_task_whose_play_a_stop_interrupted_is_staged_again_and_plays(tmp_path
     worker.finish()
     first.ready()
     # The play wrote the task through the generator service, then the process stopped before its result was saved.
-    asyncio.run(player.write_task(first.record2task.task_store.tasks()[0].generated.task))
+    asyncio.run(player.write_task(task_store(first).tasks()[0].generated.task))
     first.close()
     task_generator = ScriptedGenerator()
     restarted, _ = rounds(tmp_path, task_generator, player, rounds=1)
     looked(restarted)
     ((result,),) = task_generator.results
     assert result.is_played and player.deleted == ["harbor-00000-000"]
-
-
-def test_a_generator_that_fails_at_once_waits_between_deferred_rounds(tmp_path: Path) -> None:
-    task_generator = FailingGenerator()
-    p, _ = rounds(tmp_path, task_generator, rounds=50, generation_attempts=2, **SOURCES)
-    sessions(p, "a")
-    for _ in range(60):
-        p.ready()
-    assert len(task_generator.requests) == 2, "one deferred round, two attempts, then a wait"
-    assert not p.record2record.rounds_stopped and p.status()["task_generation"]["completed"] == 0
-    assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the deferred round keeps its session"
-
-
-class FailingGenerator(ScriptedGenerator):
-    """A generator whose generate call fails to run at once."""
-
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
-        self.requests.append(request)
-        raise RuntimeError("the generator service is down")
-
-
-class FirstResultsFail(ScriptedGenerator):
-    """A generator that cannot take the results of generation 0."""
-
-    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
-        if generation == 0:
-            raise RuntimeError("generation 0 is lost")
-        await super().record_results(results, generation=generation)
 
 
 # --------------------------------------------------------------------------------------- source sessions
@@ -999,7 +993,7 @@ def session(name: str, tags: Mapping[str, str]) -> tuple[AgentRecord, AgentRecor
 def sessions(p: TrainingPipeline, *names: str, tags: Mapping[str, str] | None = None) -> None:
     for name in names:
         for record in session(name, {"source": "session"} if tags is None else tags):
-            p.ingest(record)
+            p.push(record)
 
 
 def source_ids(request: TaskGenerationRequest) -> list[str]:
@@ -1013,15 +1007,18 @@ def test_each_round_gives_the_generator_at_most_its_share_of_tagged_sessions(tmp
     sessions(p, "untagged", tags={"source": "other"})
     for _ in range(3):
         looked(p)
-    # Each round played no task, so the next one followed at once.
+    # Each round made no task, so the next one followed at once.
     assert [source_ids(request) for request in task_generator.requests] == [
         ["rec-a", "rep-a", "rec-b", "rep-b"],
         ["rec-c", "rep-c"],
         [],
     ]
     assert all(request.description == DESCRIPTION for request in task_generator.requests)
-    assert generation_document(tmp_path, 0)["source_record_ids"] == ["rec-a", "rep-a", "rec-b", "rep-b"]
-    assert generation_document(tmp_path, 2)["source_record_ids"] == []
+    assert [request.generation for request in task_generator.requests] == [0, 1, 2]
+    store = task_store(p)
+    first, last = store.generation(0), store.generation(2)
+    assert first is not None and first.source_record_ids == ("rec-a", "rep-a", "rec-b", "rep-b")
+    assert last is not None and last.source_record_ids == ()
 
 
 def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tmp_path: Path) -> None:
@@ -1033,7 +1030,11 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids()
     assert p.operational_metrics()["waiting_source_sessions"] == 1
     p.ready()
-    assert [record.agent_record_id for record in worker.submitted[0].source_records] == ["rec-a", "rep-a"]
+    (job,) = worker.submitted
+    assert isinstance(job, GenerationJob) and [record.agent_record_id for record in job.source_records] == [
+        "rec-a",
+        "rep-a",
+    ]
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the round runs"
     worker.finish()
     p.ready()
@@ -1128,9 +1129,22 @@ def test_a_deferred_round_runs_again_with_its_sessions_when_new_sessions_start_a
         p.ready()
     # Session b makes a round due and starts a run, which first runs round 0's sessions again.
     assert [source_ids(request) for request in task_generator.requests] == [["rec-a", "rep-a"]]
-    store = p.record2task.task_store
-    assert store.generation(generation=0).is_complete, "the deferred generation completed from its saved candidates"
-    assert store.counts()["played/train"] == 1
+    state = task_store(p).generation(0)
+    assert state is not None and state.is_complete, "the deferred generation completed from its saved candidates"
+    assert p.status()["task_store"]["played"] == 1
+
+
+def test_a_generator_that_fails_at_once_waits_between_deferred_rounds(tmp_path: Path) -> None:
+    task_generator = FailingGenerator()
+    p, _ = rounds(tmp_path, task_generator, rounds=50, generation_attempts=2, **SOURCES)
+    sessions(p, "a")
+    for _ in range(60):
+        p.ready()
+    assert len(task_generator.requests) == 2, "one deferred round, two attempts, then a wait"
+    record2record = p.record2record
+    assert isinstance(record2record, GeneratedTaskRecord2Record) and not record2record.rounds_stopped
+    assert p.status()["task_generation"]["completed"] == 0
+    assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the deferred round keeps its session"
 
 
 @pytest.mark.parametrize(
@@ -1138,9 +1152,12 @@ def test_a_deferred_round_runs_again_with_its_sessions_when_new_sessions_start_a
     [
         ({"tasks_per_step": 0}, "tasks_per_step must be positive"),
         ({"plays_per_task": 1}, "at least two"),
-        ({"rounds": 1, "description": "x", "state_dir": "s"}, "pipeline.record2task.config.generator"),
+        ({"rounds": 1, "description": "x"}, "pipeline.record2task.config.generator"),
         ({"source_records_per_round": 1}, "needs a source_tag"),
         ({"source_tag": "session"}, "name=value"),
+        ({"refill_tasks": 0}, "refill_tasks must be positive"),
+        ({"deferred_retry_seconds": -1.0}, "must be non-negative"),
+        ({"generation_attempts": 0}, "must be positive"),
     ],
 )
 def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str, int], message: str) -> None:
@@ -1148,7 +1165,7 @@ def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str
         processor(**config)
 
 
-def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> None:
+def test_rounds_need_a_description_the_generator_service_and_task_storage() -> None:
     def built(**config: object) -> GeneratedTaskTasks:
         context = PipelineContext("tasks")
         group_settings, round_settings, _ = stage_settings({"rounds": 1, **config})
@@ -1158,9 +1175,11 @@ def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> No
     with pytest.raises(ValueError, match="description"):
         built()
     with pytest.raises(ValueError, match="generator_url"):
-        built(description="x", state_dir="s")
+        built(description="x")
     with pytest.raises(ValueError, match="generator_url"):
-        built(description="x", state_dir="s", generator_url="${endpoints.generator}")
+        built(description="x", generator_url="${endpoints.generator}")
+    with pytest.raises(ValueError, match="task storage"):
+        built(description="x", generator_url="http://g:8910")
 
 
 # ------------------------------------------------------------------------------------------------- the recipe
@@ -1211,7 +1230,6 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
                     "rounds": 1,
                     "generator_url": "http://g:8910",
                     "description": "shell tasks",
-                    "state_dir": str(tmp_path / "state"),
                     "generator": generator,
                 },
             },
@@ -1222,14 +1240,13 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
         },
     )
     ScriptedGenerator.built.clear()
-    built = recipe.build_pipeline(PipelineContext("one"))
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=task_storage(tmp_path, "one")))
     assert isinstance(built.record2task, GeneratedTaskTasks)
     assert isinstance(built.record2task.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
     assert built.record2task.plays_per_task == 3, "the plays come from the record stage's groups"
-    assert built.record2task.state_dir == tmp_path / "state" / "one"
     assert built.batch_size == 2
-    assert recipe.scenario_state_dirs("one") == (tmp_path / "state" / "one",)
+    assert recipe.scenario_state_dirs("one") == (), "the task store is in the scenario storage"
     built.close()
 
 

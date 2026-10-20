@@ -96,6 +96,18 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         ),
     )
     parser.add_argument(
+        "--reef-checkpoint-interval",
+        type=int,
+        default=1,
+        help=(
+            "The number of scenario versions between two saved training checkpoints (Megatron and HF export). "
+            "1 saves after each training job. With a larger value, the jobs between two saves are faster. "
+            "A crash or a stop loses the training of the jobs after the last save. "
+            "reef.checkpoint_every_n_versions must be a multiple of this value. "
+            "Use it only for full-weight training without --release-train."
+        ),
+    )
+    parser.add_argument(
         "--critic-lr",
         type=float,
         default=None,
@@ -154,6 +166,8 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
 
     if args.critic_save_interval < 1:
         raise ValueError("--critic-save-interval must be positive")
+    if args.reef_checkpoint_interval < 1:
+        raise ValueError("--reef-checkpoint-interval must be positive")
     if args.critic_steps_per_actor is not None and args.critic_steps_per_actor <= 0:
         raise ValueError("--critic-steps-per-actor must be positive")
     if args.megatron_lora_alpha is None and args.megatron_lora_rank:

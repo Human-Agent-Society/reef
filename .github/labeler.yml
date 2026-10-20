@@ -61,7 +61,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "reef/artifact/**"
-          - "reef/dispatcher.py"
+          - "reef/dispatcher/**"
           - "reef/runtime/**"
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"

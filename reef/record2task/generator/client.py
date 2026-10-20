@@ -105,11 +105,6 @@ class Generator(ABC):
         model: str | None = None,
     ) -> tuple[TaskPlay, ...]: ...
 
-    @abstractmethod
-    async def write_manifest(
-        self, *, generation: int, names: Sequence[str], eval_fraction: float, seed: int
-    ) -> Path: ...
-
 
 class HttpGenerator(Generator):
     """The generator service over HTTP; a job is polled every ``poll_s`` seconds until it is done or failed.
@@ -279,11 +274,3 @@ class HttpGenerator(Generator):
             return tuple(play_from_document(row) for row in rows)
         except WireError as exc:
             raise GeneratorError(f"the play's episodes cannot be read: {exc}") from exc
-
-    async def write_manifest(self, *, generation: int, names: Sequence[str], eval_fraction: float, seed: int) -> Path:
-        answer = await self.call(
-            "POST",
-            "/manifests",
-            body={"generation": generation, "names": list(names), "eval_fraction": eval_fraction, "seed": seed},
-        )
-        return Path(checked_string(answer, "path", label="a manifest"))

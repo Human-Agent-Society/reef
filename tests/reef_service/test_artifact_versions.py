@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
@@ -117,6 +116,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
     assert len(scenario.store.history()) == 2
+    # The tracker hears about the rollback on the report thread; wait for it rather than race it.
+    value.registry.experiment_reports.flush()
     assert len(tracker.rollbacks) == 1
     assert tracker.rollbacks[0].produced_artifact_ref == recorded.artifact_ref
 
@@ -378,6 +379,7 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
             time.sleep(0.001)
         trained = scenario.current_artifact_ref()
         restored = value.rollback("math", initial.release_id)
+        value.registry.experiment_reports.flush()
         assert observed == [(1, 1, trained), (2, 2, restored), True]
     finally:
         value.close()
@@ -385,7 +387,7 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("operation", ["rollback", "promote"])
-def test_slow_rollback_tracker_does_not_block_scenario_resolution(
+def test_a_slow_rollback_tracker_holds_up_neither_the_rollback_nor_scenario_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     tracker = RecordingExperimentTracker()
@@ -403,17 +405,12 @@ def test_slow_rollback_tracker_does_not_block_scenario_resolution(
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_rollback", record)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            rollback = executor.submit(value.rollback, "math", initial.release_id, operation=operation)
-            try:
-                assert entered.wait(5), "rollback tracker was not called"
-                assert runtime.inference.inference_admission_status["open"]
-                lookup = executor.submit(value.get_or_create_scenario, "math")
-                assert lookup.result(timeout=2) is scenario
-                assert not rollback.done(), "tracker must remain blocked during the read"
-            finally:
-                release.set()
-            restored = rollback.result(timeout=5)
+        restored = value.rollback("math", initial.release_id, operation=operation)
+        assert entered.wait(5), "rollback tracker was not called"
+        assert runtime.inference.inference_admission_status["open"]
+        assert value.get_or_create_scenario("math") is scenario
+        release.set()
+        value.registry.experiment_reports.flush()
         assert tracker.rollbacks[0].produced_artifact_ref == restored
         assert scenario.store.history()[-1].operation == operation
     finally:
@@ -449,7 +446,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
                 assert entered.wait(5), "correlation tracker was not called"
-                read = executor.submit(scenario.artifact_with_metrics)
+                read = executor.submit(scenario.release_queries.artifact_with_metrics)
                 artifact, _ = read.result(timeout=2)
                 assert artifact.ref == initial
                 assert not recorded.is_set(), "commit must wait for correlation metadata"
@@ -499,37 +496,6 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
         assert len(tracker.events) == 1
     finally:
         release.set()
-        value.close()
-
-
-@pytest.mark.unit
-def test_rollback_uses_reloaded_scenario_after_waiting_for_reporting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tracker = RecordingExperimentTracker()
-    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
-    scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
-    reporting = scenario.experiment_reporting
-
-    @contextmanager
-    def reload_before_reporting():
-        with value._registry.lock_for("math"):
-            value._registry.reload("math")
-        with reporting():
-            yield
-
-    try:
-        train(value, 1)
-        monkeypatch.setattr(scenario, "experiment_reporting", reload_before_reporting)
-        restored = value.rollback("math", initial.release_id)
-        current = value.get_or_create_scenario("math")
-        assert current is not scenario
-        assert current.current_artifact_ref() == restored
-        assert current.scenario_step == 2
-        assert len(tracker.rollbacks) == 1
-        assert tracker.rollbacks[0].produced_artifact_ref == restored
-    finally:
         value.close()
 
 

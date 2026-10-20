@@ -53,6 +53,8 @@ objective; the driver checks it at start and refuses a mismatch.
 +=====================+=============================+============================+
 | ``sao``             | ``policy_loss``             | ``--use-rollout-logprobs`` |
 +---------------------+-----------------------------+----------------------------+
+| ``sft``             | ``sft_loss``                | not required               |
++---------------------+-----------------------------+----------------------------+
 | ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
 +---------------------+-----------------------------+----------------------------+
 | ``openclawrl``      | ``custom_loss``             | not required               |
@@ -147,8 +149,9 @@ A family that ships more than the five policy columns declares them on the spec.
 - ``critic_value_head_zero_init`` and ``critic_value_mask_key``: critic
   families only.
 
-Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
-row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
+Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
+built-in SFT family: Slime's ``sft_loss`` and no hooks),
+``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 (thin families on the distillation base below).

@@ -646,7 +646,7 @@ class RequestService:
         scenario: Scenario,
         release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, evaluation_metrics = scenario.artifact_with_metrics(release_id)
+        artifact, evaluation_metrics = scenario.release_queries.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(
@@ -704,7 +704,7 @@ class RequestService:
         files_component = scenario.surface.files_component
         if scenario.surface.single or files_component is None:
             return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
-        creation = scenario.creation_components(scenario.scenario_step)
+        creation = scenario.release_queries.creation_components(scenario.scenario_step)
         kept: list[dict[str, Any]] = []
         kept_ids: set[str] = set()
         carried_by: dict[str, str] = {}  # each release not kept, to the kept release whose tree it carried
@@ -817,7 +817,7 @@ class RequestService:
             }
         # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
         # state, which a step in flight has already moved; the seed before the first commit.
-        logged = scenario.entries_for_version(head)
+        logged = scenario.release_queries.entries_for_version(head)
         info = scenario.surface.harness
         if logged is None and info is not None:
             logged = info.seed_entries
@@ -896,13 +896,13 @@ class RequestService:
         before_files: Mapping[str, str] | None = None
         if before is not None:
             info = scenario.surface.harness
-            logged = scenario.entries_for_version(before)
+            logged = scenario.release_queries.entries_for_version(before)
             if logged is None and info is not None:
                 logged = info.seed_entries
             before_entries = logged or ()
             tree = scenario.surface.files
             try:
-                artifact, _ = scenario.artifact_with_metrics(before)
+                artifact, _ = scenario.release_queries.artifact_with_metrics(before)
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
@@ -1093,7 +1093,7 @@ class RequestService:
         info = scenario.surface.harness
         if not isinstance(model, str) or not model:
             model = None if info is None else info.served_model
-        entries = scenario.entries_for_version(manifest["release_id"])
+        entries = scenario.release_queries.entries_for_version(manifest["release_id"])
         if entries is None and info is not None:
             entries = info.seed_entries
         if not service_url or not model or not entries:
@@ -1215,7 +1215,7 @@ def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef
         or scenario.training_runtime is not None
     ):
         return served
-    return scenario.ref_for_version(claimed) or served
+    return scenario.release_queries.ref_for_version(claimed) or served
 
 
 def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:

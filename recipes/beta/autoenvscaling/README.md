@@ -49,7 +49,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). A duplicate task is invalid.
-4. The recipe saves each valid task and assigns its split. Later it plays training tasks `plays_per_task` times; eval tasks remain saved without plays.
+4. The recipe saves each valid task with its train/eval split. Later it plays each training task `plays_per_task` times. It does not play eval tasks.
 5. When every training task of the generation has a result, `record_results` computes each played task's pass rate and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
 Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
@@ -77,18 +77,18 @@ The generation's report gives each session the stage where it stopped:
 | `unchecked` | a refusing check could not run, so `validate` refused the task |
 | `play` | the recipe could not play the task |
 | `band` | the task played, and its pass rate is outside the band |
-| `held_out` | the valid task was saved in eval without plays or a band measurement |
+| `held_out` | the valid task is in the eval split, so the recipe did not play it and it has no band position |
 | `unreached` | the round ended before it played the task |
 
 Three kinds of failure end differently:
 
-- **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated training tasks made before it still play and remain in the store manifest. The outage's session counts as taken.
+- **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still play. The outage's session counts as taken.
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
-- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the store retains tasks already published before the failure. A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
+- **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
-### The report and the manifest
+### The report and the task store
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each played task (its path under the tasks root, training rewards, pass rate, band position and check results). The recipe stores valid tasks under its `state_dir/<scenario>/store/tasks/` and writes a cumulative `split-manifest.json` beside that directory before play. Related source sessions keep the same split. The band does not filter this manifest.
+`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each played task (its path under the tasks root, training rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before play. Related source sessions keep the same split. The band does not filter the store.
 
 The generator's `config` keys:
 
@@ -108,7 +108,7 @@ The generator's `config` keys:
 | `max_model_calls` | 250 | the agent's model calls in one run |
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
 
-Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. Existing stores require the same split settings when reopened.
+Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
 ## The author
 
@@ -120,7 +120,7 @@ The agent holds no credential. Its model calls go through a loopback gateway tha
 
 ## The band
 
-A played task's pass rate is the mean reward of its training plays. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can play it again. It remains in the store manifest and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that played is inside the band.
+A played task's pass rate is the mean reward of its training plays. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can play it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that played is inside the band.
 
 The band does not decide what trains. The recipe trains on the training plays of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four plays per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
 
@@ -147,7 +147,7 @@ The review needs `agent_api: openai` or `responses`; with `anthropic`, set `revi
 
 To compare Designers on identical inputs, set `author: prompt`. The author is then the generator service's one-reply prompt Designer, the one SPADE uses, on the same sources. It makes one model call with the repository, the session cut to 240,000 characters (tool results first, never the user's words), the agent's rebuild rules and the Designer's reply format. The reply's JSON block is the task. The call goes where the agent's calls go, through `agent_api`, which must be `openai` or `responses`. The agent's own settings go unused, and no E2B key is needed.
 
-Everything else is the same for both authors: the cursor, admission, the checks, plays, generation reports and manifest. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
+Everything else is the same for both authors: the cursor, admission, the checks, plays, generation reports and the task store. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
 
 ```yaml
 pipeline:
@@ -186,7 +186,7 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above creates it, and round 0 starts when the recipe's pipeline first looks for a batch after that. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps its cumulative manifest and each task's play result under `rounds/autoenvscaling/store/`.
+`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above creates it, and round 0 starts when the recipe's pipeline first looks for a batch after that. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps each task and its play result in the scenario's task store.
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 
@@ -200,45 +200,52 @@ The built-in generated-task recipe plays a generation's tasks only after the who
 
    ```python
    import os
+   import shutil
+   from pathlib import Path
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
    from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
-   from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
+   from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings, next_generation
+   from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-   async def build_pool(generator_config: dict[str, object], rounds: int, rounds_dir: str) -> None:
-       """Run the generator's generations with no trainer: generate, validate, and save the tasks."""
-       context = PipelineContext("autoenvscaling")
+   async def build_pool(generator_config: dict[str, object], rounds: int, records_dir: str, pool_dir: str) -> None:
+       """Run the generator's generations with no trainer, then copy each train task to ``pool_dir``."""
+       storage = SQLiteScenarioStorage(Path(records_dir) / "records")
+       session = storage.open("autoenvscaling")
+       context = PipelineContext("autoenvscaling", task_storage=session.tasks)
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
        settings = RoundSettings(
            rounds=rounds,
            description="coding tasks rebuilt from recorded coding-agent sessions",
            generator_url=str(generator_config["generator_url"]),
-           state_dir=rounds_dir,
        )
        record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=4))
        tasks = GeneratedTaskTasks(context, settings, record_stage, task_generator=generator)
        try:
-           for number in range(tasks.task_store.next_generation(), rounds):
+           for number in range(next_generation(tasks.task_store), rounds):
                await tasks.run(GenerationJob(receipt=f"generation-{number:05d}", generation=number))
+           for saved in tasks.task_store.tasks(split="train"):
+               shutil.copytree(tasks.task_store.path(saved), Path(pool_dir) / saved.generated.task.name, dirs_exist_ok=True)
        finally:
            tasks.close()
+           session.close()
+           storage.close()
    ```
 
-   `generator_config` is the generator's `config` from the example, with its environment references filled in. The recipe saves all valid tasks to `rounds_dir/autoenvscaling/store/tasks/` and writes the cumulative `split-manifest.json` beside that directory. A restart continues with the next generation.
+   `generator_config` is the generator's `config` from the example, with its environment references filled in. Each generation saves its valid tasks in the task store under `records_dir/records` and plays none. The script then copies each train task to its own directory under `pool_dir`. The band is only recorded in the generation report. A restart continues with the next generation.
 
-2. **Train from the pool.** Start the example with `rounds: 0`, in the environment of [Run it](#run-it), and create the scenario as there. With `rounds: 0` the recipe generates nothing and trains on the episodes that the task player reports with the label `arm=plain`, as [SPADE's README](../spade/README.md) describes. A task's group trains once it has `plays_per_task` episodes (4 in the example), so play the cumulative manifest's training side four times. `--agent-json` gives the task player the example's `generator.agent`, with thinking off.
+2. **Train from the pool.** Start the example with `rounds: 0`, in the environment of [Run it](#run-it), and create the scenario as there. With `rounds: 0` the recipe generates nothing and trains on the episodes that the task player reports with the label `arm=plain`, as [SPADE's README](../spade/README.md) describes. A task's group trains once it has `plays_per_task` episodes (4 in the example), so play each task directory under `pool_dir` four times. `--agent-json` gives the task player the example's `generator.agent`, with thinking off.
 
    ```bash
    reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml --pipeline.record2task.config.rounds 0
-   POOL="$PWD/work/pool/autoenvscaling/store"   # rounds_dir/autoenvscaling/store from step 1
+   POOL="$PWD/work/pool"   # the pool_dir of step 1
    AGENT='{"name": "terminus-2", "model_name": "openai/{model}", "kwargs": {"api_base": "{base_url}/v1",
      "llm_kwargs": {"api_key": "{api_key}", "extra_body": {"chat_template_kwargs": {"enable_thinking": false}}}}}'
    for play in 1 2 3 4; do
      python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario autoenvscaling \
-       --model Qwen/Qwen3-8B --agent-json "$AGENT" --manifest "$POOL/split-manifest.json" --tasks-root "$POOL/tasks" \
-       --side train --work-dir work/play --label arm=plain
+       --model Qwen/Qwen3-8B --agent-json "$AGENT" --work-dir work/play --label arm=plain "$POOL"/*/
    done
    ```
 

@@ -25,9 +25,8 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     ``task2batch``. Without that section, no round runs and the recipe trains
     on the training arm's reports only.
 
-    Enabled rounds save tasks and fixed splits under ``state_dir/<scenario>/store/`` before play.
-    Eval tasks remain saved without plays or training feedback.
-    On upgrade, the store starts fresh and leaves legacy rounds, records and training history untouched.
+    Enabled rounds save each task and its train/eval split in the scenario's task store before play.
+    Eval tasks stay in the store without plays or training feedback.
     """
 
     name: str = "generated-tasks"

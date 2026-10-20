@@ -2379,15 +2379,15 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert row["pending"] is True and row["restorable"] is True
         tree = scenario.surface.files
         assert tree is not None
-        pending_files = tree.read_files(scenario.artifact_for_version(row["release_id"]))
+        pending_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
         assert pending_files is not None and any("marker" in text for text in pending_files.values())
-        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
+        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert not served_files or not any("marker" in text for text in served_files.values())
 
         promoted = dispatcher.promote("review", row["release_id"])
         assert promoted.release_id != row["release_id"]
         assert scenario.current_artifact_ref() == promoted
-        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
+        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
         assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]

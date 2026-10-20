@@ -7,7 +7,9 @@ the training stack in `Train model weights from agent feedback
 <evolve-your-model.rst>`__, while harness recipes need only a model endpoint.
 
 Reefine ships with ``reef-infra``, and the other implementations live in the
-repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
+repository's ``recipes/`` cookbook and do not ship in the Reef wheel. Reef
+also ships `SFT <recipes/sft.rst>`__. SFT trains model weights on
+demonstrations or on imported examples, for all task types.
 ``recipes/basic/`` is the record-only starting stack and stays outside the
 catalog, and beta recipes join it once they publish learning results. The root
 `README <../../README.md#-recipes-and-examples>`__ and `recipes/README.md

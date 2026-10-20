@@ -178,7 +178,6 @@ class GenerationRecord:
     generation: int
     proposals: tuple[ProposalRecord, ...]
     measures: tuple[TaskMeasure, ...]
-    manifest_path: Path | None
     error: str = ""
 
     @property
@@ -206,7 +205,6 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     document = {
         "generation": record.generation,
-        "manifest": str(record.manifest_path) if record.manifest_path is not None else None,
         "error": record.error,
         "proposals": [asdict(proposal) for proposal in record.proposals],
         "tasks": [

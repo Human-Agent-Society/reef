@@ -38,13 +38,12 @@ pipeline:
     config:
       plays_per_task: 4
       batches_per_round: 2
-  # The rounds: one generation of tasks each, played through the generator service.
+  # The rounds: one generation of tasks each. The saved tasks play through the generator service.
   record2task:
     config:
       generator_url: ${endpoints.generator}
       rounds: 20
       description: shell tasks with hidden state under /var and /etc
-      state_dir: ${REEF_SPADE_STATE_DIR}/rounds
       # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
       scaffold_tolerance: 8
       # The task generator: SPADE's Designer, count tasks for each round, a hint arm for each task with a hint.

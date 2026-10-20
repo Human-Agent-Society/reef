@@ -18,6 +18,7 @@ from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2task import ReportTasks
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.task2batch import Task2Batch
 from reef.train import PreparedStep, Trainer, TrainingBatch
@@ -50,8 +51,8 @@ class FeedbackTasks(ReportTasks):
 
 
 class FeedbackBatches(Task2Batch):
-    def make_batch(self, tasks, batch_number):
-        return TrainingBatch(f"batch:{batch_number}", tasks)
+    def make_batch(self, tasks, batch_id):
+        return TrainingBatch(batch_id, tasks)
 
 
 def feedback_pipeline(context, batch_size):
@@ -81,7 +82,7 @@ class LearningRecipe(Recipe):
     def report_type(self):
         return ScoredRolloutReport
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -144,16 +145,18 @@ def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
 
 
 @pytest.mark.parametrize("bulk", (False, True))
-def test_record_import_keeps_its_body_limit(tmp_path, bulk):
+def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path, bulk):
     dispatcher = dispatcher_for(tmp_path, LearningRecipe())
-    record = imported("too-large", {"text": "x" * (1024 * 1024)})
+    long_record = imported("long", {"text": "x" * (3 * 1024 * 1024)})
+    too_large = imported("too-large", {"text": "x" * MAX_RECORD_IMPORT_BYTES})
 
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
             endpoint = "/reef/records/batch" if bulk else "/reef/records"
-            body = {"records": [record]} if bulk else record
-            response = await client.post(endpoint, headers=HEADERS, json=body)
-            assert response.status == 413
+            for record, status in ((long_record, 200), (too_large, 413)):
+                body = {"records": [record]} if bulk else record
+                response = await client.post(endpoint, headers=HEADERS, json=body)
+                assert response.status == status, await response.text()
 
     try:
         asyncio.run(run())
@@ -381,11 +384,13 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
             )
             assert response.status == 400
             response = await client.post(
-                endpoint, headers=HEADERS, json={"records": [imported("large", {"text": "x" * (1024 * 1024)})]}
+                endpoint,
+                headers=HEADERS,
+                json={"records": [imported("large", {"text": "x" * MAX_RECORD_IMPORT_BYTES})]},
             )
             assert response.status == 413
             assert scenario.records.get("s", "large") is None
-            assert not dispatcher._recipe.batches
+            assert not dispatcher.recipe.batches
 
     try:
         asyncio.run(run())
