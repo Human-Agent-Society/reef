@@ -95,8 +95,20 @@ def test_routed_abort_retry_records_each_attempt_without_selecting_again(tmp_pat
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure", ["status", "timeout", "non_sse"])
-def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(tmp_path: Path, failure: str) -> None:
+@pytest.mark.parametrize(
+    ("failure", "status"),
+    [
+        ("status", 502),
+        ("timeout", 503),
+        ("non_sse", 502),
+        ("malformed_json", 502),
+        ("non_object", 502),
+        ("provider_client_error", 400),
+    ],
+)
+def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(
+    tmp_path: Path, failure: str, status: int
+) -> None:
     async def run() -> None:
         finish = asyncio.Event()
 
@@ -105,6 +117,12 @@ def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(tmp_pa
                 await finish.wait()
             if failure == "non_sse":
                 return web.json_response({"choices": [{"message": {"content": "not a stream"}}]})
+            if failure == "malformed_json":
+                return web.Response(body=b"{not json", content_type="application/json")
+            if failure == "non_object":
+                return web.json_response([{"message": {"content": "a list"}}])
+            if failure == "provider_client_error":
+                return web.json_response({"error": "max_tokens too large"}, status=400)
             return web.json_response({"error": "temporarily unavailable"}, status=503)
 
         async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
@@ -123,12 +141,15 @@ def test_routed_upstream_failure_is_diagnostic_and_has_no_success_receipt(tmp_pa
                                 "stream": failure == "non_sse",
                             },
                         )
-                        assert response.status == (503 if failure == "timeout" else 502)
+                        assert response.status == status
                         assert "x-reef-agent-record-id" not in response.headers
                         assert len(router.selections) == 1
                         scenario = dispatcher.get_or_create_scenario("coding")
                         [record] = scenario.records.replay("coding")
                         assert "training" not in record.payload
+                        if failure != "timeout":
+                            # A provider's error status and an unusable successful reply fail the same way.
+                            assert record.payload["response"] == {"error_type": "UpstreamStatusError"}
                         routing = record.payload["metadata"]["routing"]
                         assert routing["execution_outcome"] == ("timeout" if failure == "timeout" else "error")
                         assert routing["delivery_outcome"] == "not_started"
@@ -289,6 +310,71 @@ def test_routed_stream_disconnect_keeps_an_incomplete_attempt(tmp_path: Path) ->
                         assert routing["execution_outcome"] == "unknown"
             finally:
                 continue_generation.set()
+                dispatcher.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ending", "outcome", "delivery"),
+    [
+        ("abort", "aborted", "unconfirmed"),
+        ("stop", "completed", "unconfirmed"),
+        ("missing_terminal", "unknown", "incomplete"),
+        ("abort_without_terminal", "aborted", "incomplete"),
+    ],
+)
+def test_a_routed_stream_records_an_explicit_abort_apart_from_its_delivery(
+    tmp_path: Path, ending: str, outcome: str, delivery: str
+) -> None:
+    content = b'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n'
+    finish = "abort" if ending.startswith("abort") else "stop"
+    last = f'data: {{"choices":[{{"index":0,"delta":{{}},"finish_reason":"{finish}"}}]}}\n\n'.encode()
+    terminal = ending in ("abort", "stop")
+    provider_body = content + last + (b"data: [DONE]\n\n" if terminal else b"")
+
+    async def run() -> None:
+        calls = []
+
+        async def upstream(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            return web.Response(body=provider_body, content_type="text/event-stream")
+
+        async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
+            adapter = routing_adapter(tmp_path, str(provider.make_url("")).rstrip("/"))
+            dispatcher = routing_dispatcher(tmp_path)
+            try:
+                async with running_router(adapter.snapshot) as router:
+                    app = create_app(dispatcher, tokens=SERVICE_TOKEN, routing=adapter, preview=router.settings)
+                    async with TestClient(TestServer(app)) as client:
+                        response = await client.post(
+                            "/v1/chat/completions",
+                            headers=routing_headers(),
+                            json={"model": "auto", "messages": [{"role": "user", "content": "x"}], "stream": True},
+                        )
+                        assert response.status == 200
+                        body = await response.read()
+                        # Provider frames reach the client unchanged, and a stream is never sent twice.
+                        assert body.startswith(content + last)
+                        assert len(calls) == 1 and len(router.selections) == 1
+                        [record] = dispatcher.get_or_create_scenario("coding").records.replay("coding")
+                        assert record.payload["response"]["complete"] is terminal
+                        routing = record.payload["metadata"]["routing"]
+                        assert (routing["execution_outcome"], routing["delivery_outcome"]) == (outcome, delivery)
+                        assert routing["client_visible"] is True
+                        if terminal:
+                            # The receipt still refers to the stored record, aborted or not.
+                            receipt = next(
+                                json.loads(line.removeprefix(b"data: "))["reef"]["agent_record_id"]
+                                for line in body.split(b"\n")
+                                if line.startswith(b"data: {") and b'"reef"' in line
+                            )
+                            assert receipt == record.agent_record_id
+                            assert body.endswith(b"data: [DONE]\n\n")
+                        else:
+                            assert b'"reef"' not in body
+            finally:
                 dispatcher.close()
 
     asyncio.run(run())

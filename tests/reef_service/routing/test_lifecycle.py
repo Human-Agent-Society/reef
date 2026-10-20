@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from tests.reef_service.routing.routing_fakes import (
 )
 from yarl import URL
 
+from reef.core import AgentRecord
 from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
@@ -56,6 +58,8 @@ from reef.service.lifecycle import (
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.wire import RequestHeaders
+from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.sqlite import SQLiteRecordStore
 
 pytestmark = pytest.mark.unit
 
@@ -275,6 +279,85 @@ def test_unexpected_stream_error_does_not_send_a_successful_terminal_response() 
             with pytest.raises(ClientPayloadError):
                 await response.read()
             assert acceptance.status()["active_requests"] == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [ValueError, RecordConflict, RuntimeError])
+def test_a_record_failure_after_stream_headers_never_writes_a_second_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[Exception]
+) -> None:
+    """Error translation maps the first two to 400 and 409 inside admission; the third is unmapped."""
+    appends: list[str] = []
+
+    def fail_append(store: SQLiteRecordStore, item: AgentRecord) -> AppendResult:
+        appends.append(item.agent_record_id)
+        raise failure("injected record failure")
+
+    async def run() -> None:
+        async def completion(request: web.Request) -> web.Response:
+            await request.read()
+            return web.Response(
+                body=b'data: {"choices":[{"index":0,"delta":{"content":"first"}}]}\n\ndata: [DONE]\n\n',
+                content_type="text/event-stream",
+            )
+
+        provider_app = web.Application()
+        provider_app.router.add_get("/v1/models", provider_models)
+        provider_app.router.add_post("/v1/chat/completions", completion)
+        async with TestServer(provider_app) as provider, contextlib.AsyncExitStack() as stack:
+            adapter = routing_adapter(tmp_path, str(provider.make_url("")))
+            dispatcher = routing_dispatcher(tmp_path)
+            stack.callback(dispatcher.close)
+            router = await stack.enter_async_context(running_router(adapter.snapshot))
+            lifecycle = LifecycleSettings(
+                "deployment",
+                "generation",
+                "control",
+                adapter.snapshot.version,
+                selection_token=SELECTION_TOKEN,
+                router_config_hash=ROUTER_HASH,
+            )
+            app = create_app(
+                dispatcher, tokens=SERVICE_TOKEN, routing=adapter, preview=router.settings, lifecycle=lifecycle
+            )
+            acceptance = app[REQUEST_ACCEPTANCE]
+            acceptance.control(command("open"))
+            server = await stack.enter_async_context(TestServer(app))
+            monkeypatch.setattr(SQLiteRecordStore, "append_result", fail_append)
+            payload = json.dumps({"model": "student", "messages": [{"role": "user", "content": "x"}], "stream": True})
+            headers = {
+                "Host": f"{server.host}:{server.port}",
+                "Content-Type": "application/json",
+                "Content-Length": str(len(payload)),
+                **routing_headers(),
+            }
+            reader, writer = await asyncio.open_connection(server.host, server.port)
+            try:
+                writer.write(
+                    (
+                        "POST /v1/chat/completions HTTP/1.1\r\n"
+                        + "".join(f"{name}: {value}\r\n" for name, value in headers.items())
+                        + "\r\n"
+                        + payload
+                    ).encode()
+                )
+                await writer.drain()
+                # The connection is kept alive, so it ends only because Reef closes it after the failure.
+                raw = await asyncio.wait_for(reader.read(), 5)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            async with asyncio.timeout(5):
+                while acceptance.active or acceptance.writes.tasks:
+                    await asyncio.sleep(0.01)
+            # One status line: the started SSE response is cut short, never followed by another response.
+            assert re.findall(rb"HTTP/1\.[01] \d{3}", raw) == [b"HTTP/1.1 200"]
+            assert b'"content":"first"' in raw
+            assert b'"reef"' not in raw and b"[DONE]" not in raw
+            # The stream was recorded once, and that write failed; nothing was stored.
+            assert len(appends) == 1 and acceptance.writes.failed_count == 1
+            assert dispatcher.get_or_create_scenario("coding").records.replay("coding") == ()
 
     asyncio.run(run())
 

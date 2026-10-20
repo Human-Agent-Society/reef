@@ -421,6 +421,11 @@ def create_acceptance_middleware(acceptance: RequestAcceptance) -> Middleware:
             try:
                 response = await handler(request)
             except web.HTTPException as exc:
+                if request.get(RESPONSE_STARTED, False):
+                    # A failure mapped to a status after the stream's headers cannot become a second response.
+                    if request.transport is not None:
+                        request.transport.close()
+                    raise
                 response = web.Response(status=exc.status, reason=exc.reason, body=exc.body, headers=exc.headers)
                 response.cookies.update(exc.cookies)
             except Exception:

@@ -10,6 +10,7 @@ scenario surface's request/response checks. No aiohttp types appear here;
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -39,6 +40,7 @@ from reef.service.release_page import before_release_id, build_release_page, bui
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
 from reef.service.routing_preview import RoutingPreviewClient
+from reef.service.streaming import sse_events
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
@@ -106,6 +108,25 @@ def _inference_aborted(response: Mapping[str, Any]) -> bool:
         )
         for choice in choices
     )
+
+
+def recorded_stream_aborted(response: Mapping[str, Any]) -> bool:
+    """Whether a recorded stream reports the ``abort`` finish reason that marks an unusable inference.
+
+    A relayed provider stream keeps its raw SSE ``body``, read event by event; a handler's own captured
+    response is one object.
+    """
+    body = response.get("body")
+    if not isinstance(body, str):
+        return _inference_aborted(response)
+    for data in sse_events(body):
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, Mapping) and _inference_aborted(event):
+            return True
+    return False
 
 
 def normalize_request_payload(
@@ -700,6 +721,13 @@ class RequestService:
             delivery = response.get("stream_delivery", response)
             complete = isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
             if pending.routing_decision is not None:
+                # An explicit abort describes the generation; ``complete`` still describes the transport.
+                if recorded_stream_aborted(response):
+                    execution_outcome = "aborted"
+                elif complete:
+                    execution_outcome = "completed"
+                else:
+                    execution_outcome = "unknown"
                 item = replace(
                     item,
                     payload=self.routed_payload(
@@ -708,7 +736,7 @@ class RequestService:
                         request_id=pending.routing_request_id,
                         attempt_index=1,
                         prior_attempt_ids=(),
-                        execution_outcome="completed" if complete else "unknown",
+                        execution_outcome=execution_outcome,
                         delivery_outcome="unconfirmed" if complete else "incomplete",
                         started=pending.routing_started,
                         client_visible=bool(response.get("body")) or complete,

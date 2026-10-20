@@ -12,25 +12,33 @@ import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 from tests.reef_service.routing.routing_fakes import (
     RUNTIME_HASH,
     SELECTION_TOKEN,
     ControllerCase,
+    FakeEvents,
     FakeRuntime,
     opened,
     routing_manifest,
 )
 
 from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing.routing_containers import ContainerCommandError, ContainerEvent
+from reef.service.deploy.routing.routing_containers import (
+    ContainerCommandError,
+    ContainerEvent,
+    ContainerInventory,
+    ContainerState,
+)
 from reef.service.deploy.routing.routing_control import RoutingControlError, RoutingControlTimeout
 from reef.service.deploy.routing.routing_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
     RoutingReadinessTimeout,
 )
+from reef.service.deploy.routing.routing_registry import DeploymentOwnership, RoutingOwnershipError
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import PreviewSettings
@@ -303,6 +311,150 @@ def test_stream_reconnect_inspects_without_recreating_healthy_containers(case: C
     assert "inspect" in case.actions[case.actions.index("control:close") :]
     # The verified runtime is unchanged, so it is not published again.
     assert "control:activate" not in case.actions
+
+
+@pytest.mark.parametrize("router", ["missing", "stopped", "unhealthy"])
+def test_a_failed_router_found_after_observation_returns_gets_bounded_recovery(
+    case: ControllerCase, router: str
+) -> None:
+    opened(case)
+    case.runtime.inventory = {
+        "missing": ContainerInventory(),
+        "stopped": ContainerInventory((ContainerState("router-0", "semantic-router", False, "healthy"),)),
+        "unhealthy": case.runtime.healthy_inventory("unhealthy"),
+    }[router]
+    case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
+    case.controller.tick()
+    # The same recovery a periodic inspection starts: one restart, then a verified reopening.
+    assert case.controller.state == "ready" and case.controller.restart_count == 1
+    assert case.actions.index("inspect") < case.actions.index("remove") < case.actions.index("start")
+    assert case.actions.index("start") < case.actions.index("control:open")
+
+
+@pytest.mark.parametrize("policy", ["fail_stop", "budget_spent"])
+def test_a_failed_router_found_after_observation_returns_follows_the_restart_policy(
+    case: ControllerCase, policy: str
+) -> None:
+    opened(case)
+    if policy == "fail_stop":
+        case.controller.policy = replace(case.controller.policy, restart_policy="fail_stop")
+    else:
+        case.controller.restart_count = case.controller.policy.max_restarts
+    case.runtime.inventory = ContainerInventory()
+    case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
+    with pytest.raises(RoutingDeploymentError, match="fail_stop" if policy == "fail_stop" else "budget"):
+        case.controller.tick()
+    assert "start" not in case.actions and "control:open" not in case.actions
+
+
+@pytest.mark.parametrize("router", ["healthy", "unhealthy", "missing", "queued_failure"])
+def test_a_restored_event_stream_that_disconnects_again_is_fatal_before_any_recovery(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, router: str
+) -> None:
+    opened(case)
+    if router == "unhealthy":
+        case.runtime.inventory = case.runtime.healthy_inventory("unhealthy")
+    elif router != "healthy":
+        case.runtime.inventory = ContainerInventory()
+    if router == "queued_failure":
+        create_stream = case.runtime.events
+
+        def events(ownership: DeploymentOwnership) -> FakeEvents:
+            # The old container's failure is queued first, then the new stream's own disconnect.
+            stream = create_stream(ownership)
+            stream.pending.extend([ContainerEvent("router-0", "die"), ContainerEvent("", "stream_disconnected")])
+            return stream
+
+        monkeypatch.setattr(case.runtime, "events", events)
+    else:
+        case.runtime.new_stream_disconnected = True
+    case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
+    with pytest.raises(RoutingDeploymentError):
+        case.controller.tick()
+    # Admission was closed and never reopened; nothing replaced the router or spent the restart budget.
+    assert "control:close" in case.actions and "control:open" not in case.actions
+    assert "remove" not in case.actions and "start" not in case.actions
+    assert case.controller.restart_count == 0
+
+
+@pytest.mark.parametrize("fault", ["foreign_owner", "events_unavailable", "inventory_unavailable", "control_lost"])
+def test_a_reconnect_without_trusted_observation_stays_fatal(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    opened(case)
+
+    def fail(*args: object, **kwargs: object) -> NoReturn:
+        if fault == "foreign_owner":
+            raise RoutingOwnershipError("refusing to adopt or change a foreign routing container")
+        raise ContainerCommandError("Docker CLI deadline expired")
+
+    if fault == "control_lost":
+        case.control.available = False
+    else:
+        monkeypatch.setattr(case.runtime, "events" if fault == "events_unavailable" else "inspect", fail)
+    case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
+    expected = RoutingOwnershipError if fault == "foreign_owner" else RoutingDeploymentError
+    with pytest.raises(expected):
+        case.controller.tick()
+    # Nothing restarts SR when the observer, the ownership or REEF control cannot be trusted.
+    assert case.controller.restart_count == 0
+    assert "remove" not in case.actions and "start" not in case.actions and "control:open" not in case.actions
+
+
+class SteppingClock:
+    """A monotonic clock that only ``sleep`` advances, standing in for the controller module's ``time``."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.mark.parametrize("ready_timeout_seconds", [30, 11])
+def test_reconnect_readiness_keeps_the_configured_deadline(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, ready_timeout_seconds: float
+) -> None:
+    import reef.service.deploy.routing.routing_controller as controller_module
+
+    opened(case)
+    clock = SteppingClock()
+    monkeypatch.setattr(controller_module, "time", clock)
+    case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=ready_timeout_seconds)
+    original_request = case.control.request
+    open_deadlines: list[float | None] = []
+
+    def request(
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        if action == "open":
+            open_deadlines.append(deadline)
+            if len(open_deadlines) == 1:
+                # A slow readiness check that fails after 12 seconds, longer than the old ten-second cap.
+                clock.sleep(12)
+                raise RoutingControlError("REEF lifecycle returned HTTP 503", status_code=503)
+        return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
+
+    monkeypatch.setattr(case.control, "request", request)
+    started = clock.now
+    case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
+    if ready_timeout_seconds == 30:
+        case.controller.tick()
+        assert case.controller.state == "ready"
+        # Every open of the phase carries the configured deadline.
+        assert open_deadlines == [started + 30, started + 30]
+    else:
+        with pytest.raises(RoutingReadinessTimeout):
+            case.controller.tick()
+        assert open_deadlines == [started + 11]
+    assert case.controller.restart_count == 0
 
 
 def test_child_control_loss_does_not_restart_sr(case: ControllerCase) -> None:

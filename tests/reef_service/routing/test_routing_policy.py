@@ -15,7 +15,7 @@ import stat
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -118,6 +118,9 @@ class RouterConfigServer:
         self.plans = 0
         self.puts: list[str] = []
         self.pending_reads = 0
+        #: This many ``/ready`` requests lose their reply; another writer may store a document at the first.
+        self.lost_ready_replies = 0
+        self.writer_at_lost_ready: str | None = None
         self.controller: RoutingDeploymentController | None = None
         state = self
 
@@ -171,6 +174,12 @@ class RouterConfigServer:
                         },
                     )
                 elif self.path == "/ready":
+                    if state.lost_ready_replies > 0:
+                        state.lost_ready_replies -= 1
+                        if state.writer_at_lost_ready is not None:
+                            state.document, state.writer_at_lost_ready = state.writer_at_lost_ready, None
+                        self.close_connection = True
+                        return
                     self.reply(200 if state.ready else 503, {"status": "ready" if state.ready else "starting"})
 
             def do_POST(self) -> None:
@@ -418,6 +427,35 @@ def test_normalized_rollback_records_the_restored_identity_for_the_same_snapshot
     assert publication["snapshot_version"] == case.startup_version
     assert case.actions.index("control:activate") < case.actions.index("control:open") == len(case.actions) - 1
     assert case.events()[-3:] == ["policy_rolled_back", "runtime_published", "ready"]
+
+
+@pytest.mark.parametrize(("lost_replies", "outcome"), [(1, "active"), (10**6, "timeout")])
+def test_a_lost_readiness_reply_is_read_again_and_the_put_is_never_sent_again(
+    case: PolicyCase, lost_replies: int, outcome: str
+) -> None:
+    case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=0.5)
+    management = case.controller.management
+    assert management is not None
+    current = case.router.document
+    candidate = current + "# candidate\n"
+    case.router.lost_ready_replies = lost_replies
+    started = time.monotonic()
+    assert case.controller.replace_router_document(management, candidate, etag(current), etag(candidate)) == outcome
+    assert case.router.puts == [candidate]
+    # Lost replies are read again only until the observation deadline.
+    assert time.monotonic() - started < 3
+
+
+def test_an_unknown_writer_is_refused_while_readiness_replies_are_lost(case: PolicyCase) -> None:
+    management = case.controller.management
+    assert management is not None
+    current = case.router.document
+    candidate = current + "# candidate\n"
+    case.router.lost_ready_replies = 10**6
+    case.router.writer_at_lost_ready = "written: elsewhere\n"
+    with pytest.raises(RoutingDeploymentError, match="unknown writer"):
+        case.controller.replace_router_document(management, candidate, etag(current), etag(candidate))
+    assert case.router.puts == [candidate] and case.router.document == "written: elsewhere\n"
 
 
 def test_a_writer_during_the_rollback_plan_is_never_overwritten(case: PolicyCase) -> None:

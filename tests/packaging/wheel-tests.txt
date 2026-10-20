@@ -48,6 +48,7 @@ tests/harness/test_terminus_agent.py
 tests/harness/test_terminus_episode.py
 tests/harness/test_terminus_tree.py
 tests/harness/test_version_check.py
+tests/inference/test_http.py
 tests/inference/test_inference_control.py
 tests/inference/test_sglang_chat_capture.py
 tests/inference/test_vllm_chat_capture.py

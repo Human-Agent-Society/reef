@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -289,6 +291,59 @@ def test_command_loses_owner_and_reaps_child(tmp_path: Path) -> None:
     assert command.process.returncode != 0
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+
+
+@pytest.mark.parametrize("ending", ["timeout", "owner_loss"])
+def test_a_failed_command_retires_a_descendant_that_ignores_sigterm(tmp_path: Path, ending: str) -> None:
+    """The CLI exits on SIGTERM, but the descendant it started ignores it and must still be gone afterwards.
+
+    The descendant holds a FIFO open for writing. End of file there shows that it exited, even before
+    anything reaps it.
+    """
+    fifo = tmp_path / "descendant.fifo"
+    os.mkfifo(fifo)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    descendant = (
+        "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"held = os.open({str(fifo)!r}, os.O_WRONLY); os.write(held, str(os.getpid()).encode()); time.sleep(30)"
+    )
+    cli = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {descendant!r}]); time.sleep(30)"
+    command = GuardedCommand([sys.executable, "-c", cli], 2 if ending == "timeout" else 30)
+    descendant_pid = None
+    try:
+        deadline = time.monotonic() + 5
+        while descendant_pid is None and time.monotonic() < deadline:
+            try:
+                written = os.read(reader, 32)
+            except BlockingIOError:
+                written = b""
+            if written:
+                descendant_pid = int(written)
+            else:
+                time.sleep(0.01)
+        assert descendant_pid is not None
+        if ending == "timeout":
+            command.process.wait(timeout=10)
+        command.close()
+        assert command.process.returncode != 0
+        exited = False
+        deadline = time.monotonic() + 5
+        while not exited and time.monotonic() < deadline:
+            try:
+                exited = os.read(reader, 1) == b""
+            except BlockingIOError:
+                time.sleep(0.02)
+        assert exited, "a descendant outlived its failed command"
+        descendant_pid = None
+    finally:
+        if descendant_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(descendant_pid, signal.SIGKILL)
+        os.close(reader)
+        command.close()
+        for stream in (command.process.stdout, command.process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def test_owner_sigkill_closes_lease_without_inheriting_lock(tmp_path: Path) -> None:

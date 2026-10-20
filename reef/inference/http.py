@@ -150,7 +150,7 @@ class HttpInferenceHandler(InferenceHandler):
         return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        from aiohttp import ClientSession, ClientTimeout
+        from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
@@ -158,9 +158,13 @@ class HttpInferenceHandler(InferenceHandler):
         ):
             if response.status >= 400:
                 raise self._status_error(response.status, await response.text())
-            value = await response.json()
+            try:
+                value = await response.json()
+            except (ContentTypeError, ValueError) as exc:
+                # A successful status with an unreadable body is the provider's failure, not the caller's.
+                raise UpstreamStatusError(f"{self._error_label} returned a body that is not JSON", status=502) from exc
         if not isinstance(value, dict):
-            raise TypeError(f"{self._error_label} response must be a JSON object")
+            raise UpstreamStatusError(f"{self._error_label} response must be a JSON object", status=502)
         return value
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
@@ -170,7 +174,8 @@ class HttpInferenceHandler(InferenceHandler):
         session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
             response = await session.post(**self._post_arguments(artifact, path, payload))
-        except Exception:
+        except BaseException:
+            # Cancelled while waiting for the provider's headers, too: nothing else owns this session yet.
             await session.close()
             raise
 

@@ -373,7 +373,13 @@ class RoutingDeploymentController:
             }:
                 return "container_failure"
 
-    def reconnect_events(self) -> None:
+    def reconnect_events(self) -> str | None:
+        """Restore observation and reopen admission, or return the router failure the new inventory shows.
+
+        Only a failed router in a trusted owned inventory, seen through a new event stream that has not
+        disconnected, is returned for recovery. A failure to restore observation or to read the inventory,
+        an ownership conflict, or lost REEF control propagates.
+        """
         ownership, control = self.require_clients()
         control.request("close")
         self.event("observation_lost")
@@ -381,9 +387,21 @@ class RoutingDeploymentController:
             self.event_stream.close()
         self.event_stream = self.runtime.events(ownership)
         # Re-inspection is mandatory; Docker's bounded event history is not a log.
-        self.inspect_ready(self.runtime.inspect(ownership))
-        self.ready_deadline = time.monotonic() + min(10, self.policy.ready_timeout_seconds)
+        inventory = self.runtime.inspect(ownership)
+        try:
+            self.inspect_ready(inventory)
+        except RoutingControlError:
+            # Recovery needs a working observer. Read every event the new stream already queued: one call
+            # stops at a container failure, which can precede a disconnect.
+            observed = self.observe_events()
+            while observed == "container_failure":
+                observed = self.observe_events()
+            if observed == "stream_disconnected":
+                raise RoutingControlError("the restored Docker event stream disconnected again") from None
+            return "container_health"
+        self.ready_deadline = time.monotonic() + self.policy.ready_timeout_seconds
         self.wait_ready(initial=False)
+        return None
 
     def router_failure(self) -> str | None:
         """The router's failure, if its readiness or active runtime no longer matches the committed pair.
@@ -419,12 +437,16 @@ class RoutingDeploymentController:
         event = self.observe_events()
         if event == "stream_disconnected":
             try:
-                self.reconnect_events()
+                failure = self.reconnect_events()
             except InterruptedError:
                 if not self.stop_requested:
                     raise
+                return
             except (RoutingControlError, ContainerCommandError) as exc:
                 raise RoutingDeploymentError("routing observation could not be restored") from exc
+            if failure is not None:
+                # Observation is restored; the same bounded recovery as a periodic inspection applies.
+                self.recover(failure)
             return
         failure = event
         now = time.monotonic()
@@ -713,9 +735,15 @@ class RoutingDeploymentController:
                     and isinstance(active, str)
                     and active
                     and active == generated
-                    and management.ready()
                 ):
-                    return "active"
+                    try:
+                        ready = management.ready()
+                    except RouterPolicyError:
+                        # A lost readiness reply is read again on the next pass, after the writer check; the PUT
+                        # is never sent again.
+                        ready = False
+                    if ready:
+                        return "active"
                 # "pending" and "unknown" keep waiting until the deadline.
                 if status == 503 or activation_status == ACTIVATION_FAILED:
                     return "failed"

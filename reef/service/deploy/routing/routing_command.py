@@ -47,12 +47,18 @@ def main() -> int:
     os.close(owner_descriptor)
     if outcome:
         os.killpg(os.getpgrp(), signal.SIGTERM)
+        grace_end = time.monotonic() + 2
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            # Kill the whole isolated group, including this guard. The caller
-            # treats every non-zero/timeout result as an uncertain mutation.
-            os.killpg(os.getpgrp(), signal.SIGKILL)
+            process.kill()
+            process.wait()
+        # As in deploy/guard.py: reap the CLI, then stay through the whole grace, since a descendant that
+        # ignored SIGTERM can outlive the CLI. While this guard lives, the group ID is still its own; SIGKILL
+        # retires every process left in it, this guard included. The caller treats every non-zero result as
+        # an uncertain mutation.
+        time.sleep(max(0, grace_end - time.monotonic()))
+        os.killpg(os.getpgrp(), signal.SIGKILL)
         return outcome
     return process.wait()
 
