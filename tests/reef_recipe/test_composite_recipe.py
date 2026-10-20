@@ -1393,3 +1393,23 @@ def test_a_composite_refuses_image_content_when_a_component_does(tmp_path: Path)
         }
     )
     assert recipe.refuses_image_content is True
+
+
+@pytest.mark.unit
+def test_a_composite_keeps_its_components_read_only_after_construction(tmp_path: Path) -> None:
+    from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+
+    from recipes.sao.recipe import SAORecipe
+
+    components: dict[str, Recipe] = {
+        "weights": SAORecipe(**runtime_bindings(StubTrainingRuntime())),
+        "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "h", seed={"AGENTS.md": "seed"}),
+    }
+    recipe = CompositeRecipe(components=components)
+    components.clear()
+    assert list(recipe.components) == ["weights", "harness"]
+    with pytest.raises(AttributeError):
+        recipe.components.clear()  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        recipe.components["weights"] = _ConfigRecipe()  # type: ignore[index]
+    assert recipe.refuses_image_content is True

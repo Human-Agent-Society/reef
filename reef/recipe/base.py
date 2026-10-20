@@ -95,15 +95,19 @@ class Recipe:
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
 
-    Values: a frozen value with ``name`` (a str), ``runtime`` (an
-    ``InferenceRuntime`` or ``None``), ``training_runtime`` (a
-    ``TrainingRuntime`` or ``None``), ``checkpoint_strategy`` (a
-    ``CheckpointStrategy``), ``training_mode`` (``"auto"``, ``"manual"`` or
-    ``"hybrid"``) and ``pipeline_stages`` (a ``PipelineConfig``, or ``None``
-    for the stage classes of :meth:`pipeline_spec` with no config).
-    ``__post_init__`` checks ``training_mode`` and that the stage classes
-    load. The other field domains are the annotations, which mypy checks.
-    By convention, a subclass adds fields and conditions and removes none.
+    Values: construction checks two conditions. ``__post_init__`` raises
+    ``ValueError`` unless ``training_mode`` is ``"auto"``, ``"manual"`` or
+    ``"hybrid"``. When ``pipeline_stages`` is ``None``, it loads the stage
+    classes of :meth:`pipeline_spec`, and raises ``RecipeConfigError`` when
+    they do not load.
+    Note: construction does not check the other fields. Their intended
+    domains are the annotations, which mypy checks in typed callers:
+    ``name`` is a str, ``runtime`` an ``InferenceRuntime`` or ``None``,
+    ``training_runtime`` a ``TrainingRuntime`` or ``None``,
+    ``checkpoint_strategy`` a ``CheckpointStrategy``, and ``pipeline_stages``
+    a ``PipelineConfig`` or ``None`` (the stage classes of
+    :meth:`pipeline_spec` with no config). By convention, a subclass adds
+    fields and conditions and removes none.
     Purpose: ``build_recipe`` makes the deployment's recipe from its config.
     ``ScenarioFactory`` reads it to make the surface, the trainers and the
     binding of each scenario.

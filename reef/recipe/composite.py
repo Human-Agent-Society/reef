@@ -34,6 +34,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, ClassVar
 
 from reef.core.components import validate_component_name
@@ -126,8 +127,8 @@ class CompositeRecipe(Recipe):
     ``RESERVED_COMPONENT_NAMES``. Each component is a ``Recipe`` and not a
     ``CompositeRecipe``, and has the composite's ``training_mode``. At most
     one component is a ``WeightTrainingRecipe``. ``__post_init__`` checks
-    these conditions and sets ``checkpoint_strategy`` to
-    ``EveryNVersions(1)``.
+    these conditions, stores ``components`` as a read-only mapping, and sets
+    ``checkpoint_strategy`` to ``EveryNVersions(1)``.
     Purpose: ``build_recipe`` makes it from a deployment config that lists
     the components under ``components``.
     ``ScenarioFactory`` builds one trainer per component and one release
@@ -164,7 +165,8 @@ class CompositeRecipe(Recipe):
         ]
         if len(weight_components) > 1:
             raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
-        object.__setattr__(self, "components", dict(self.components))
+        # Read-only, so the checked conditions and the properties read from the components hold after construction.
+        object.__setattr__(self, "components", MappingProxyType(dict(self.components)))
         # A composed release names every component, so every step checkpoints.
         object.__setattr__(self, "checkpoint_strategy", EveryNVersions(1))
 

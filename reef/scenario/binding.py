@@ -16,9 +16,10 @@ class ScenarioBinding:
     Values: ``surface`` is a ``Surface``; ``runtime``,
     ``inference_handler`` and ``training_runtime`` are an instance of their
     interface or ``None``; ``report_type`` is a ``ReportBase`` subclass or
-    ``None``; and ``refuses_image_content`` is a bool. These domains are the
-    annotations, which mypy checks; the binding checks nothing at
-    construction. The type puts no condition between fields.
+    ``None``; and ``refuses_image_content`` is a bool. Construction raises
+    ``TypeError`` when ``refuses_image_content`` is not a bool. The other
+    domains are the annotations, which mypy checks. The type puts no
+    condition between fields.
     Purpose: ``ScenarioFactory`` makes one binding for each scenario from the
     scenario's recipe (``refuses_image_content`` is the recipe's
     ``refuses_image_content``). ``Scenario`` holds it. The service, record
@@ -38,3 +39,7 @@ class ScenarioBinding:
     #: Whether the service refuses recorded inference requests, and record ingress refuses records, with image
     #: content (the recipe's ``refuses_image_content``).
     refuses_image_content: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.refuses_image_content, bool):
+            raise TypeError("refuses_image_content must be a bool")

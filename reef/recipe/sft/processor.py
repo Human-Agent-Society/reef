@@ -79,6 +79,27 @@ class SFTTasks(ReportTasks):
     a sample longer than ``max_tokens`` and counts it in ``sft_overflow_reports``.
     A recorded request with image content raises ``ReefError``: SFT samples
     do not support images yet.
+
+    Values: an ``SFTTasks`` holds ``target`` (a member of ``SFT_TARGETS``),
+    ``max_tokens`` (a non-negative int, where 0 turns off the limit),
+    ``tokenizer`` (the tokenizer that ``AutoTokenizer.from_pretrained``
+    loads from the settings' ``tokenizer_path``) and ``overflow_count`` (the
+    number of samples it skipped as too long: 0 at construction, and only
+    ``make_sample`` adds to it). The constructor copies ``target`` and
+    ``max_tokens`` from an ``SFTSettings``. ``SFTSettings.__post_init__``
+    checks that ``tokenizer_path`` is not blank, that ``target`` is in
+    ``SFT_TARGETS``, and that ``max_tokens`` is not negative. The
+    constructor itself checks nothing more. The int type of ``max_tokens``
+    is the annotation, which mypy checks.
+    Purpose: ``SFTRecipe`` names it as the record-to-task stage, and
+    ``from_config`` makes it from the stage config. For each
+    ``ReportContext``, ``make_sample`` returns one ``TrajectoryItem``, or
+    ``SkippedReport("sft_overflow")`` for a sample longer than a non-zero
+    ``max_tokens``. It raises ``ValueError`` when the report is not a
+    ``TeacherContextReport``, when the report does not reference exactly one
+    inference record, when the target is missing, or when the chat template
+    does not render the target as its own tokens after the prompt. It raises
+    ``ReefError`` when ``has_image_content`` finds an image in that record.
     """
 
     def __init__(self, settings: SFTSettings) -> None:

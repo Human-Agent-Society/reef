@@ -522,9 +522,6 @@ class RequestService:
         the ``evaluated`` one's, whose candidate the episode runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
-        # An evaluation call stores nothing, so it keeps its image content.
-        if record and initial.refuses_image_content and has_image_content(payload):
-            raise ImageContentNotSupported(parsed.scenario)
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
@@ -550,6 +547,10 @@ class RequestService:
                     dict(payload),
                 )
             )
+            # The check reads the payload the hooks made, which is the one the record stores. An evaluation
+            # call stores nothing, so it keeps its image content.
+            if record and initial.refuses_image_content and has_image_content(transformed):
+                raise ImageContentNotSupported(parsed.scenario)
             if isinstance(hooks, LeasingInferenceHooks):
                 # Freeze the served adapter for the attempt: the surface has
                 # named it, so it must stay resident until the attempt ends.

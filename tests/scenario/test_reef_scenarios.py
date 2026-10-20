@@ -10,8 +10,10 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.registry import InstanceState
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.surface import Surface
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -383,3 +385,12 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
     }
     with pytest.raises(ValueError, match=message):
         parse_scenario_metadata(metadata, checkpoint_head=base)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["false", 1, None])
+def test_a_scenario_binding_refuses_a_refuses_image_content_flag_that_is_not_a_bool(value) -> None:
+    fields = {"surface": Surface(), "runtime": None, "inference_handler": None}
+    with pytest.raises(TypeError, match="refuses_image_content must be a bool"):
+        ScenarioBinding(**fields, refuses_image_content=value)
+    assert ScenarioBinding(**fields, refuses_image_content=True).refuses_image_content is True
