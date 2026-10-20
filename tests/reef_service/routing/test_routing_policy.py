@@ -23,7 +23,8 @@ import pytest
 import yaml
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
+    OPEN_DEADLINE,
     SELECTION_TOKEN,
     SERVICE_TOKEN,
     FakeControl,
@@ -34,11 +35,11 @@ from tests.reef_service.routing_fakes import (
 )
 
 from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.deploy.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing_control import RoutingControlError
-from reef.service.deploy.routing_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing_policy import PolicyStateStore, RouterManagementClient, document_etag
-from reef.service.deploy.routing_renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.routing_control import RoutingControlError
+from reef.service.deploy.routing.routing_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing.routing_policy import PolicyStateStore, RouterManagementClient, document_etag
+from reef.service.deploy.routing.routing_renderer import ManagedRoutingRender, generate
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import LifecycleSettings
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
@@ -349,6 +350,24 @@ def test_incompatible_or_unchanged_sources_leave_the_serving_policy_untouched(
     assert case.router.puts == [] and "control:close" not in case.actions
 
 
+def test_a_source_that_is_not_yaml_is_rejected_and_the_next_valid_source_applies(case: PolicyCase) -> None:
+    case.source.write_text("scenarios: [\n", encoding="utf-8")
+    reload(case)
+    last = json.loads((case.controller.directory / "lifecycle-events.jsonl").read_text().splitlines()[-1])
+    assert last["state"] == "policy_rejected" and last["reason"].startswith("invalid routing manifest YAML")
+    # The serving policy stays in place: no drain, no router write.
+    assert case.controller.state == "ready"
+    assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
+    assert case.router.puts == [] and case.actions == []
+    # A new deployment refuses the same source with the same readable error.
+    with pytest.raises(ValueError, match="invalid routing manifest YAML"):
+        case.controller.validate_candidate()
+    write_source(case.source, keyword="escalate", rule="escalated")
+    reload(case)
+    assert case.events()[-2:] == ["policy_committed", "ready"]
+    assert case.control.snapshot_version == case.controller.snapshot_version != case.startup_version
+
+
 @pytest.mark.parametrize("mode", ["failed", "hash_mismatch"])
 def test_failed_activation_restores_the_committed_router_document_and_reopens_the_old_policy(
     case: PolicyCase, mode: str
@@ -612,13 +631,15 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
 
             async def control(client: TestClient, action: str, **publication: str) -> int:
                 nonlocal revision
-                body = {
+                body: dict[str, object] = {
                     "deployment_id": "deployment",
                     "generation": "generation",
                     "control_revision": revision,
                     "action": action,
                     **publication,
                 }
+                if action == "open":
+                    body["open_deadline_monotonic"] = OPEN_DEADLINE
                 revision += 1
                 return (await client.post("/reef/lifecycle", headers=control_headers, json=body)).status
 

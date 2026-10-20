@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.service.deploy.routing_config import RoutingDeploymentSettings, routing_deployment_settings
-from reef.service.deploy.routing_renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.deploy.routing.routing_renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.service.routing import RoutingSnapshot
 
@@ -289,7 +289,7 @@ def test_invalid_routing_settings_fail_before_launch(settings: dict[str, object]
 def test_the_documented_validate_command_reads_a_public_configuration_without_docker(
     deployment_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from reef.service.deploy import routing_ops
+    from reef.service.deploy.routing import routing_ops
 
     def no_docker(*args: object, **kwargs: object) -> None:
         pytest.fail("validate must not use Docker")

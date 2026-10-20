@@ -65,7 +65,7 @@ METHOD_PACKAGES = ("harness_evolve", "openclawrl", "sao", "tttd")
 
 
 def test_semantic_router_runtime_revision_matches_submodule_pin() -> None:
-    from reef.service.deploy.routing_containers import SEMANTIC_ROUTER_REVISION
+    from reef.service.deploy.routing.routing_containers import SEMANTIC_ROUTER_REVISION
 
     # Read the gitlink without requiring the submodule to be initialized. Wheels use the packaged constant.
     entry = subprocess.check_output(

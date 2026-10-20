@@ -99,27 +99,30 @@ async def _relay_inference_stream(
     upstream, pending = await request_service.start_stream(
         headers, payload, path, inference_handler, record=record, evaluated=evaluated, decision=decision
     )
-    response_headers = {
-        name: value
-        for name, value in upstream.headers.items()
-        if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
-    }
-    if record:
-        # Only a resident harness reads the head; an evaluation episode runs a candidate, not the served tree.
-        response_headers.update(await _release_header(request_service, headers))
-    content_type = next(
-        (value for name, value in response_headers.items() if name.lower() == "content-type"),
-        "",
-    )
-    is_sse = "text/event-stream" in content_type.lower()
-    if not is_sse and record:
-        response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
-    response = web.StreamResponse(status=upstream.status, headers=response_headers)
     body = bytearray()
     complete = False
     error = None
     record_attempted = False
+    response_created = False
+    # The stream is open: from here on, every await, including the header lookup, ends in its cleanup below.
     try:
+        response_headers = {
+            name: value
+            for name, value in upstream.headers.items()
+            if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
+        }
+        if record:
+            # Only a resident harness reads the head; an evaluation episode runs a candidate, not the served tree.
+            response_headers.update(await _release_header(request_service, headers))
+        content_type = next(
+            (value for name, value in response_headers.items() if name.lower() == "content-type"),
+            "",
+        )
+        is_sse = "text/event-stream" in content_type.lower()
+        if not is_sse and record:
+            response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
+        response = web.StreamResponse(status=upstream.status, headers=response_headers)
+        response_created = True
         await response.prepare(request)
         if is_sse:
             # A codex-bound stream speaks for a Codex client, which drops OpenRouter's
@@ -160,7 +163,11 @@ async def _relay_inference_stream(
                 body.extend(chunk)
                 await response.write(chunk)
             complete = True
-    except ConnectionResetError:
+    except ConnectionResetError as exc:
+        if not response_created:
+            # Not the client: no response exists yet, so the caller gets the original failure.
+            error = f"{type(exc).__name__}: {exc}"
+            raise
         error = "client disconnected"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"

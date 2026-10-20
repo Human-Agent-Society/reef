@@ -8,7 +8,7 @@ from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
-from tests.reef_service.routing_fakes import preview_reply
+from tests.reef_service.routing.routing_fakes import preview_reply
 
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingRequestError, RoutingSnapshot
 from reef.service.routing_preview import checked_selection

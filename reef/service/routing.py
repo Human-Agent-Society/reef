@@ -41,6 +41,9 @@ RESERVED_HEADER_PREFIX = "x-reef-routing-"
 SINGLE_VALUE_HEADERS = frozenset({"authorization", "x-api-key", "content-type"})
 #: A Semantic Router runtime hash: the SHA-256 of the configuration a router runtime serves.
 ROUTER_CONFIG_HASH = re.compile(r"[0-9a-f]{64}")
+#: Each provider model-list check during readiness waits at most this long, or the inference timeout if shorter.
+#: The managed owner budgets an ``open`` with the same limit.
+MAX_READINESS_TIMEOUT_SECONDS = 10.0
 
 
 def is_router_config_hash(value: object) -> bool:
@@ -333,7 +336,7 @@ class RoutingAdapter:
     router_config_hash: str | None
     handlers: Mapping[str, HttpInferenceHandler]
     api_keys: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
-    readiness_timeout_s: float = 10.0
+    readiness_timeout_s: float = MAX_READINESS_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.router_config_hash is not None and not is_router_config_hash(self.router_config_hash):
@@ -370,7 +373,7 @@ class RoutingAdapter:
                 request_headers=provider_request_headers(key) if key is not None else None,
                 timeout_s=timeout_s,
             )
-        return cls(snapshot, router_config_hash, handlers, api_keys, min(timeout_s, 10.0))
+        return cls(snapshot, router_config_hash, handlers, api_keys, min(timeout_s, MAX_READINESS_TIMEOUT_SECONDS))
 
     async def check_ready(self) -> None:
         """Check configured model availability; this does not verify model weights."""

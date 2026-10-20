@@ -20,8 +20,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.service.deploy.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing_containers import (
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.routing_containers import (
     ContainerCommandError,
     ContainerEvent,
     ContainerEventStream,
@@ -29,10 +29,10 @@ from reef.service.deploy.routing_containers import (
     ContainerRuntime,
     ContainerState,
 )
-from reef.service.deploy.routing_control import ReefLifecycleClient, RoutingControlError
-from reef.service.deploy.routing_controller import RoutingDeploymentController
-from reef.service.deploy.routing_policy import RouterManagementClient, RouterPolicyError, document_etag
-from reef.service.deploy.routing_registry import DeploymentOwnership
+from reef.service.deploy.routing.routing_control import ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.routing_controller import RoutingDeploymentController
+from reef.service.deploy.routing.routing_policy import RouterManagementClient, RouterPolicyError, document_etag
+from reef.service.deploy.routing.routing_registry import DeploymentOwnership
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingSnapshot
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
@@ -42,6 +42,8 @@ ROUTER_HASH = "1" * 64
 RUNTIME_HASH = "6" * 64
 SELECTION_TOKEN = "selection-test-token"
 SERVICE_TOKEN = "gateway-test-token"
+#: An ``open_deadline_monotonic`` no test reaches; it is fixed, so a repeated open is the same command.
+OPEN_DEADLINE = time.monotonic() + 24 * 3600
 
 
 def routing_manifest(upstream_url: str, *, teacher_url: str | None = None) -> dict[str, object]:
@@ -298,13 +300,21 @@ class FakeControl(ReefLifecycleClient):
         self.open_error: RoutingControlError | None = None
         self.activation_error: RoutingControlError | None = None
         self.publications: list[dict[str, str]] = []
+        #: The action and phase deadline of every request that reached the child.
+        self.deadlines: list[tuple[str | None, float | None]] = []
 
     def request(
-        self, action: str | None = None, *, cancel_active: bool = False, publication: dict[str, str] | None = None
+        self,
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         if not self.available:
             raise RoutingControlError("REEF child exited")
         self.actions.append("control:" + str(action))
+        self.deadlines.append((action, deadline))
         if action is not None:
             self.revision += 1
         if action == "activate" and publication is not None:

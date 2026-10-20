@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientConnectionError, ClientError, ClientPayloadError, ServerTimeoutError, web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
     ROUTER_HASH,
     SELECTION_TOKEN,
     SERVICE_TOKEN,

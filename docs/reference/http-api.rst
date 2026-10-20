@@ -264,11 +264,16 @@ routing deployment is ready to accept inference.
 ``activate``. ``activate`` also takes ``manifest_path``, ``snapshot_version``,
 ``expected_snapshot_version`` and a 64-hex ``router_config_hash``; it publishes
 them together while admission is closed and drained, and leaves admission
-closed. ``open`` returns 409 until a router runtime hash has been published,
-and on a routed deployment first checks every provider and sends one preview
-per Scenario under that hash; a failed check returns 503 and stays closed.
-Revisions increase monotonically. Repeating the same revision and command is
-idempotent; stale revisions, conflicting commands and identity mismatches
+closed. ``open`` also requires ``open_deadline_monotonic``: a positive, finite
+value of the owner's ``time.monotonic()`` clock, which the child shares because
+both run on the same host. ``open`` returns 409 until a router runtime hash has
+been published, and on a routed deployment first checks every provider and
+sends one preview per Scenario under that hash; a failed check returns 503 and
+stays closed. An ``open`` that has not opened admission by its deadline returns
+503 and changes nothing, including the revision. Revisions increase
+monotonically. Repeating the same revision and command, including the deadline,
+is idempotent: an applied ``open`` returns the current status, also after its
+deadline. Stale revisions, conflicting commands and identity mismatches
 return 409. ``stop`` is terminal for the generation. ``close`` and ``stop``
 also accept ``cancel_active: true`` to cancel accepted inference requests
 after their drain deadline; ``open`` and ``activate`` cannot use this option.

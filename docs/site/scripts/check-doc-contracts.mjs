@@ -208,8 +208,8 @@ function terminologySource(path, source) {
   // Surrounding text and identifiers still follow the repository's terminology.
   if ([
     "reef/service/routing_preview.py",
-    "tests/reef_service/routing_fakes.py",
-    "tests/reef_service/test_routing_preview.py",
+    "tests/reef_service/routing/routing_fakes.py",
+    "tests/reef_service/routing/test_routing_preview.py",
   ].includes(path)) {
     source = source.replace(/(["'])selection_provenance(?=\1|\.)/g, "$1selection_metadata");
   }

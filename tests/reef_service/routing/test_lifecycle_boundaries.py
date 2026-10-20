@@ -6,7 +6,7 @@ import asyncio
 import signal
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -14,32 +14,25 @@ from typing import NoReturn
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
     ControllerCase,
     FakeControl,
     FakeRuntime,
-    controller_case,
     opened,
     routing_dispatcher,
 )
 
 from reef.service.app import create_app
 from reef.service.deploy import orchestrator
-from reef.service.deploy.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing_containers import ContainerEvent
-from reef.service.deploy.routing_control import RoutingControlError
-from reef.service.deploy.routing_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing_registry import DeploymentOwnership
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.routing_containers import ContainerEvent
+from reef.service.deploy.routing.routing_control import RoutingControlError
+from reef.service.deploy.routing.routing_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing.routing_registry import DeploymentOwnership
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture
-def case(tmp_path: Path) -> Iterator[ControllerCase]:
-    with controller_case(tmp_path) as built:
-        yield built
 
 
 def deployment_config(directory: Path, *, managed: bool = False) -> Path:
@@ -225,7 +218,11 @@ def test_event_reconnect_waits_for_write_completion_and_rechecks_open_conflict(
     status_after_conflict = []
 
     def request(
-        action: str | None = None, *, cancel_active: bool = False, publication: dict[str, str] | None = None
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         if action is None:
             if attempts:
@@ -236,7 +233,7 @@ def test_event_reconnect_waits_for_write_completion_and_rechecks_open_conflict(
             if open_race and len(attempts) == 1:
                 # The control client reports a 409 as retryable: identity and status are checked again first.
                 raise RoutingControlError("write submitted after status snapshot", status_code=409)
-        return original_request(action, cancel_active=cancel_active, publication=publication)
+        return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))
@@ -261,13 +258,17 @@ def test_reconnect_open_conflict_never_retries_a_changed_generation(
     attempts = []
 
     def request(
-        action: str | None = None, *, cancel_active: bool = False, publication: dict[str, str] | None = None
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         if action == "open":
             attempts.append(True)
             case.control.generation = "different-generation"
             raise RoutingControlError("generation conflict", status_code=409)
-        return original_request(action, cancel_active=cancel_active, publication=publication)
+        return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     case.runtime.streams[-1].pending.append(ContainerEvent("", "stream_disconnected"))

@@ -24,32 +24,41 @@ from pathlib import Path
 
 import yaml
 
-from reef.service.deploy.routing_containers import (
+from reef.service.deploy.routing.routing_containers import (
     ContainerCommandError,
     ContainerEventStream,
     ContainerInventory,
     ContainerRuntime,
 )
-from reef.service.deploy.routing_control import MAX_SOCKET_PATH_BYTES, ReefLifecycleClient, RoutingControlError
-from reef.service.deploy.routing_policy import (
+from reef.service.deploy.routing.routing_control import (
+    MAX_SOCKET_PATH_BYTES,
+    ReefLifecycleClient,
+    RoutingControlError,
+    RoutingControlTimeout,
+)
+from reef.service.deploy.routing.routing_policy import (
     PolicyStateStore,
     RouterManagementClient,
     RouterPolicyError,
     document_etag,
 )
-from reef.service.deploy.routing_registry import DeploymentOwnership, DeploymentRegistry
-from reef.service.deploy.routing_renderer import (
+from reef.service.deploy.routing.routing_registry import DeploymentOwnership, DeploymentRegistry
+from reef.service.deploy.routing.routing_renderer import (
     MANAGEMENT_TOKEN_ENV,
     SELECTION_TOKEN_ENV,
     ManagedRoutingRender,
     generate,
 )
 from reef.service.deploy.service_config import ServiceConfig
-from reef.service.routing import RoutingSnapshot, check_policy_change
+from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
 #: Consecutive failed router readiness checks before the router counts as failed.
 READINESS_FAILURE_LIMIT = 3
+#: aiohttp moves a deadline of five seconds or more up to the next whole second of loop time.
+AIOHTTP_DEADLINE_ROUNDING_SECONDS = 1.0
+#: Time for the child's reply to an ``open`` after its last readiness check.
+OPEN_REPLY_ALLOWANCE_SECONDS = 5.0
 #: The router's activation states (``pkg/apiserver/config_activation.go`` at the pinned commit).
 ACTIVATION_ACTIVE = "active"
 ACTIVATION_FAILED = "failed"
@@ -178,16 +187,12 @@ class RoutingDeploymentController:
             descriptor = os.open(self.directory / "control.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 json.dump(control_data, stream)
-            # An open previews every Scenario, each within the router's deadline and write allowance.
-            open_timeout = len(rendered.scenarios) * (
-                self.policy.selection_timeout_seconds + RESPONSE_WRITE_ALLOWANCE_SECONDS
-            )
             self.control = ReefLifecycleClient(
                 control_socket,
                 self.ownership.deployment_id,
                 generation,
                 control_token,
-                open_timeout_seconds=open_timeout + 5,
+                open_timeout_seconds=self.open_timeout_seconds(rendered),
             )
             self.event("prepared")
         except BaseException:
@@ -195,6 +200,22 @@ class RoutingDeploymentController:
             # holds the lock, including partially rendered generations.
             self.failed = True
             raise
+
+    def open_timeout_seconds(self, snapshot: RoutingSnapshot) -> float:
+        """The longest one ``open`` of ``snapshot`` takes when every readiness check is healthy but slow.
+
+        The child checks the providers one after another, then previews each Scenario. It checks each
+        distinct provider URL and credential once, so the enabled-target count bounds those checks
+        without resolving credentials here. Each check gets the child's own timeout.
+        """
+        provider_check_seconds = min(self.service_settings.inference_timeout_s, MAX_READINESS_TIMEOUT_SECONDS)
+        preview_seconds = self.policy.selection_timeout_seconds + RESPONSE_WRITE_ALLOWANCE_SECONDS
+        enabled_targets = sum(target.enabled for target in snapshot.targets.values())
+        return (
+            enabled_targets * (provider_check_seconds + AIOHTTP_DEADLINE_ROUNDING_SECONDS)
+            + len(snapshot.scenarios) * (preview_seconds + AIOHTTP_DEADLINE_ROUNDING_SECONDS)
+            + OPEN_REPLY_ALLOWANCE_SECONDS
+        )
 
     def validate_candidate(self) -> str:
         """Render a candidate privately before any ownership or Docker mutation."""
@@ -272,12 +293,15 @@ class RoutingDeploymentController:
             if not initial:
                 # The existing REEF child must survive every routing replacement.
                 try:
-                    self.check_status(control.request())
+                    status = self.status_before(control, deadline)
                 except RoutingControlError as exc:
                     raise RoutingDeploymentError("REEF lifecycle unavailable during recovery") from exc
+                if status is None:
+                    break
+                self.check_status(status)
             try:
                 self.inspect_ready(self.runtime.inspect(ownership))
-                status = control.request()
+                status = control.request(deadline=deadline)
                 self.check_status(status)
                 if status.get("drain_pending_writes") != 0:
                     raise RoutingControlError("request records are still finalizing")
@@ -292,6 +316,7 @@ class RoutingDeploymentController:
                             "router_config_hash": runtime_hash,
                             "expected_snapshot_version": self.snapshot_version,
                         },
+                        deadline=deadline,
                     )
                     self.event("runtime_published", router_config_hash=runtime_hash)
             except RoutingControlError as exc:
@@ -305,8 +330,9 @@ class RoutingDeploymentController:
             if event_failure is not None:
                 raise RoutingDeploymentError("routing observation failed before opening acceptance")
             try:
-                # The child previews one message per Scenario under the published runtime before it opens.
-                control.request("open")
+                # The child checks every provider and previews one message per Scenario under the published
+                # runtime before it opens. It never opens after this call's first attempt has ended.
+                control.request("open", deadline=deadline)
             except RoutingControlError as exc:
                 if not exc.retryable:
                     raise RoutingDeploymentError(str(exc)) from exc
@@ -420,6 +446,20 @@ class RoutingDeploymentController:
             self.recover(failure)
 
     @staticmethod
+    def status_before(control: ReefLifecycleClient, deadline: float) -> dict[str, object] | None:
+        """The child's status, or None when the phase ending at ``deadline`` ran out during the read.
+
+        Raises:
+            RoutingControlError: The read failed, or it timed out while the phase still had time.
+        """
+        try:
+            return control.request(deadline=deadline)
+        except RoutingControlTimeout:
+            if time.monotonic() < deadline:
+                raise
+            return None
+
+    @staticmethod
     def reef_idle(status: dict[str, object]) -> bool:
         """No admitted request, including an upload in progress, or pending record write remains in REEF."""
         return status.get("active_requests") == 0 and status.get("drain_pending_writes") == 0
@@ -431,16 +471,21 @@ class RoutingDeploymentController:
         self.event("draining", recovery=recovery)
         deadline = time.monotonic() + self.policy.drain_timeout_seconds
         while time.monotonic() < deadline and not self.force_stop_requested:
-            status = control.request()
+            status = self.status_before(control, deadline)
+            if status is None:
+                break
             self.check_status(status)
             if self.reef_idle(status):
                 return
             time.sleep(0.05)
-        control.request("close", cancel_active=True)
-        self.event("finalizing", recovery=recovery)
+        # The forced close and every status read after it share the finalization deadline.
         deadline = time.monotonic() + self.policy.finalization_timeout_seconds
+        control.request("close", cancel_active=True, deadline=deadline)
+        self.event("finalizing", recovery=recovery)
         while time.monotonic() < deadline:
-            status = control.request()
+            status = self.status_before(control, deadline)
+            if status is None:
+                break
             self.check_status(status)
             if self.reef_idle(status):
                 return

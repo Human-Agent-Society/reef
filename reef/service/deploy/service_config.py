@@ -19,7 +19,7 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
-from reef.service.deploy.routing_config import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings, routing_deployment_settings
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage

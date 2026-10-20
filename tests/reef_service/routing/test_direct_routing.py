@@ -22,7 +22,8 @@ import pytest
 from aiohttp import ClientResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 from multidict import CIMultiDict
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
+    OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,
     SERVICE_TOKEN,
@@ -177,6 +178,7 @@ def command(action: str, revision: int = 0, **fields: object) -> dict[str, objec
         "generation": "generation",
         "control_revision": revision,
         "action": action,
+        **({"open_deadline_monotonic": OPEN_DEADLINE} if action == "open" else {}),
         **fields,
     }
 
@@ -660,7 +662,7 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
 
 def test_the_tutorial_cpu_provider_serves_auto_pin_json_sse_and_feedback(tmp_path: Path) -> None:
     """The provider the tutorial starts passes Reef's provider check and answers both response modes."""
-    script = Path(__file__).resolve().parents[2] / "tutorials/semantic-router/cpu_provider.py"
+    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/cpu_provider.py"
     spec = importlib.util.spec_from_file_location("reef_tutorial_cpu_provider", script)
     if spec is None or spec.loader is None:
         raise RuntimeError("the tutorial CPU provider is missing")

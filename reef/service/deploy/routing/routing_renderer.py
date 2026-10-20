@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from reef.service.deploy.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
 from reef.service.routing import DEFAULT_RULE, RoutingScenario, RoutingSnapshot, RoutingTarget, scenario_entrypoint
 
 #: Container variables holding the router's bearer tokens; Compose passes the values from the owner's environment.
@@ -188,7 +188,11 @@ def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -
         raise ValueError("routing output directory must not be a symlink")
     if output.exists() and any(output.iterdir()):
         raise ValueError("managed rendering requires a new or empty generation directory")
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        # A configuration error like any invalid manifest: a policy update rejects it and keeps serving.
+        raise ValueError(f"invalid routing manifest YAML in {manifest_path}") from exc
     RoutingSnapshot.from_mapping(manifest)
     configuration = {
         "renderer": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

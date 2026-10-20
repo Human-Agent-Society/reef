@@ -16,7 +16,8 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
+    OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,
     provider_models,
@@ -176,7 +177,11 @@ async def serve_large_response(
         async def lifecycle_status() -> dict[str, object]:
             return await (await control.get(control_url, headers=CONTROL_HEADERS)).json()
 
-        opened = await control.post(control_url, headers=CONTROL_HEADERS, json={**command, "action": "open"})
+        opened = await control.post(
+            control_url,
+            headers=CONTROL_HEADERS,
+            json={**command, "action": "open", "open_deadline_monotonic": OPEN_DEADLINE},
+        )
         assert opened.status == 200, await opened.text()
         client = await asyncio.to_thread(PausedClient, server.port)
         try:

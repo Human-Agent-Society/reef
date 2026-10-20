@@ -284,7 +284,7 @@ uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 
 ```bash
-python -m reef.service.deploy.routing_ops validate --config /path/to/candidate-reef.yaml
+python -m reef.service.deploy.routing.routing_ops validate --config /path/to/candidate-reef.yaml
 ```
 
 ## Stop, inspect and clean up
@@ -296,8 +296,8 @@ killed, the SR container can remain until the next start or an explicit
 cleanup:
 
 ```bash
-python -m reef.service.deploy.routing_ops status --deployment-id opd-routing
-python -m reef.service.deploy.routing_ops cleanup --deployment-id opd-routing
+python -m reef.service.deploy.routing.routing_ops status --deployment-id opd-routing
+python -m reef.service.deploy.routing.routing_ops cleanup --deployment-id opd-routing
 ```
 
 Both use the same per-user ownership registry as `reef serve`
@@ -308,7 +308,7 @@ proceed; cleanup keeps the operation ID that `status` reports. Only after
 checking that Docker has finished that operation, acknowledge it:
 
 ```bash
-python -m reef.service.deploy.routing_ops cleanup --deployment-id opd-routing \
+python -m reef.service.deploy.routing.routing_ops cleanup --deployment-id opd-routing \
   --acknowledge-unknown "<operation-id-from-status>"
 ```
 
@@ -320,9 +320,7 @@ The routing, preview client, lifecycle and policy-update tests use a fake SR
 preview listener and local providers, so they need neither Docker nor SR:
 
 ```bash
-python -m pytest tests/reef_service/test_routing*.py tests/reef_service/test_direct_routing.py \
-  tests/reef_service/test_lifecycle.py tests/reef_service/test_lifecycle_boundaries.py \
-  tests/reef_service/test_lifecycle_orchestration.py tests/reef_service/test_lifecycle_transport_boundaries.py -q
+python -m pytest tests/reef_service/routing -q
 ```
 
 They check what Reef sends and records, not how the real SR answers.

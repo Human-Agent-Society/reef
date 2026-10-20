@@ -26,6 +26,7 @@ import secrets
 import signal
 import stat
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
@@ -36,7 +37,7 @@ from typing import TypeVar, cast
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
-from reef.service.deploy.routing_control import MAX_SOCKET_PATH_BYTES
+from reef.service.deploy.routing.routing_control import MAX_SOCKET_PATH_BYTES
 from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")
@@ -45,6 +46,8 @@ INFERENCE_FINALIZATION = ContextVar("reef_inference_finalization", default=False
 RESPONSE_STARTED = web.RequestKey("reef_lifecycle_response_started", bool)
 #: The routing policy an inference request keeps, captured when it is admitted and before its body is read.
 ADMITTED_ROUTING = web.RequestKey("reef_admitted_routing", RoutingAdapter)
+#: The reply to an ``open`` that reached its deadline before admission opened; the owner may send a new one.
+OPEN_DEADLINE_PASSED = "lifecycle open deadline passed before admission opened"
 
 
 @dataclass(frozen=True)
@@ -204,7 +207,7 @@ class RequestAcceptance:
         self.accepting = False
         self.stopping = False
         self.control_revision = -1
-        self.last_action: tuple[str, bool, str, str] | None = None
+        self.last_action: tuple[str, bool, str, str, float] | None = None
         self.publisher: RoutingPublisher | None = None
         self.active: set[asyncio.Task[object]] = set()
         self.forced_requests = 0
@@ -276,16 +279,19 @@ class RequestAcceptance:
             "forced_requests": self.forced_requests,
         }
 
-    def opens_admission(self, body: Mapping[str, object]) -> bool:
-        """Whether ``body`` is a valid new ``open`` of a routed deployment, which needs a readiness check first.
+    def readiness_deadline(self, body: Mapping[str, object]) -> float | None:
+        """The deadline of ``body`` if it is a valid new ``open`` of a routed deployment, which needs a readiness
+        check first; None for any other valid command.
 
         Raises:
             web.HTTPException: The command is invalid, stale, or for another generation.
         """
-        action, revision, _ = self.validated(body)
-        return action == "open" and revision > self.control_revision and self.publisher is not None
+        action, revision, command = self.validated(body)
+        if action == "open" and revision > self.control_revision and self.publisher is not None:
+            return command[4]
+        return None
 
-    def validated(self, body: Mapping[str, object]) -> tuple[str, int, tuple[str, bool, str, str]]:
+    def validated(self, body: Mapping[str, object]) -> tuple[str, int, tuple[str, bool, str, str, float]]:
         """The action, revision and comparable command of a control body, after every check that changes nothing.
 
         Raises:
@@ -293,7 +299,11 @@ class RequestAcceptance:
         """
         required = {"deployment_id", "generation", "control_revision", "action"}
         publication = {"manifest_path", "snapshot_version", "router_config_hash", "expected_snapshot_version"}
-        allowed = required | {"cancel_active"} | (publication if body.get("action") == "activate" else set())
+        allowed = required | {"cancel_active"}
+        if body.get("action") == "activate":
+            allowed |= publication
+        elif body.get("action") == "open":
+            allowed.add("open_deadline_monotonic")
         if not required <= body.keys() or body.keys() - allowed:
             raise web.HTTPBadRequest(text="invalid lifecycle control fields")
         if body["deployment_id"] != self.settings.deployment_id or body["generation"] != self.settings.generation:
@@ -317,11 +327,25 @@ class RequestAcceptance:
             raise web.HTTPBadRequest(
                 text="activation requires a manifest path, both snapshot versions and a router runtime hash"
             )
+        if action == "open":
+            # The owner's time.monotonic() value after which it no longer waits; the owner shares this host's clock.
+            requested_deadline = body.get("open_deadline_monotonic")
+            if (
+                not isinstance(requested_deadline, (int, float))
+                or isinstance(requested_deadline, bool)
+                or not math.isfinite(requested_deadline)
+                or requested_deadline <= 0
+            ):
+                raise web.HTTPBadRequest(text="open requires a finite positive open_deadline_monotonic")
+            open_deadline = float(requested_deadline)
+        else:
+            open_deadline = 0.0
         command = (
             str(action),
             cancel,
             str(body.get("snapshot_version", "")),
             str(body.get("router_config_hash", "")),
+            open_deadline,
         )
         if revision < self.control_revision or (revision == self.control_revision and command != self.last_action):
             raise web.HTTPConflict(text="stale or conflicting lifecycle control revision")
@@ -334,6 +358,9 @@ class RequestAcceptance:
             return self.status()
         if action in ("open", "activate") and self.stopping:
             raise web.HTTPConflict(text="stopping is terminal for this generation")
+        if action == "open" and time.monotonic() >= command[4]:
+            # No await separates this check from the change below, so a late readiness result cannot open.
+            raise web.HTTPServiceUnavailable(text=OPEN_DEADLINE_PASSED)
         if action == "open" and self.drain_sequence is not None and self.writes.count_before(self.drain_sequence):
             raise web.HTTPConflict(text="previously admitted writes have not finalized")
         if action == "open" and self.publisher is not None and not self.settings.router_config_hash:
@@ -434,9 +461,10 @@ def create_control_app(acceptance: RequestAcceptance) -> web.Application:
     """The private lifecycle application; ``serve_managed`` serves it only on the control socket.
 
     Only the control token opens it, and it has no other route. Commands are
-    serialized: an ``open`` of a routed deployment first previews every
-    Scenario under the published runtime, and no other command can run until
-    it finishes.
+    serialized: an ``open`` of a routed deployment first checks every provider
+    and previews every Scenario under the published runtime, and no other
+    command can run until it finishes. That check stops at the open's
+    deadline, and an open whose deadline has passed never opens admission.
     """
     control_digest = hashlib.sha256(acceptance.settings.control_token.encode("utf-8")).digest()
     commands = asyncio.Lock()
@@ -462,11 +490,18 @@ def create_control_app(acceptance: RequestAcceptance) -> web.Application:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="request body must be an object")
         async with commands:
-            if acceptance.publisher is not None and acceptance.opens_admission(body):
+            if acceptance.publisher is not None and (deadline := acceptance.readiness_deadline(body)) is not None:
                 if not acceptance.settings.router_config_hash:
                     raise web.HTTPConflict(text="routing has no verified router runtime; publish one before opening")
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise web.HTTPServiceUnavailable(text=OPEN_DEADLINE_PASSED)
                 try:
-                    await acceptance.publisher.check_ready()
+                    # A blocked event loop can run this timer late; control() checks the clock again.
+                    async with asyncio.timeout(remaining_seconds):
+                        await acceptance.publisher.check_ready()
+                except TimeoutError as exc:
+                    raise web.HTTPServiceUnavailable(text=OPEN_DEADLINE_PASSED) from exc
                 except RoutingRequestError as exc:
                     raise web.HTTPServiceUnavailable(text=f"routing readiness failed: {exc.code}") from exc
             return web.json_response(acceptance.control(body))

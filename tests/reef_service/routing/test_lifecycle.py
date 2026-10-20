@@ -9,17 +9,23 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.routing_fakes import (
+from tests.reef_service.routing.routing_fakes import (
+    OPEN_DEADLINE,
     ROUTER_HASH,
     SELECTION_TOKEN,
     SERVICE_TOKEN,
+    FakeRuntime,
+    FakeSemanticRouter,
     provider_models,
     routing_adapter,
     routing_dispatcher,
@@ -31,11 +37,17 @@ from yarl import URL
 from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
+from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.routing_control import ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.routing_controller import RoutingDeploymentController
+from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import (
     INFERENCE_FINALIZATION,
+    REQUEST_ACCEPTANCE,
     LifecycleSettings,
     PendingWrites,
     RequestAcceptance,
+    RoutingPublisher,
     create_acceptance_middleware,
     create_control_app,
     register_admission,
@@ -102,6 +114,7 @@ def command(action: str, revision: int = 0, **overrides: object) -> dict[str, ob
         "generation": "generation",
         "control_revision": revision,
         "action": action,
+        **({"open_deadline_monotonic": OPEN_DEADLINE} if action == "open" else {}),
         **overrides,
     }
 
@@ -814,6 +827,12 @@ if sys.argv[2] == 'closed_loop':
         {"cancel_active": "yes"},
         {"cancel_active": True},
         {"extra": 1},
+        {"open_deadline_monotonic": None},
+        {"open_deadline_monotonic": True},
+        {"open_deadline_monotonic": "1"},
+        {"open_deadline_monotonic": 0},
+        {"open_deadline_monotonic": float("nan")},
+        {"open_deadline_monotonic": float("inf")},
     ],
 )
 def test_invalid_control_commands_do_not_change_acceptance(overrides: dict[str, object]) -> None:
@@ -822,3 +841,225 @@ def test_invalid_control_commands_do_not_change_acceptance(overrides: dict[str, 
         acceptance.control({**command("open"), **overrides})
     assert acceptance.control_revision == -1
     assert not acceptance.accepting
+
+
+def test_an_open_past_its_deadline_never_opens_but_an_applied_open_still_answers() -> None:
+    acceptance = RequestAcceptance(settings(), PendingWrites())
+    with pytest.raises(web.HTTPServiceUnavailable):
+        acceptance.control(command("open", open_deadline_monotonic=time.monotonic() - 1))
+    # An expired open changes nothing; the revision stays free.
+    assert (acceptance.control_revision, acceptance.accepting) == (-1, False)
+    applied = command("open", 1, open_deadline_monotonic=time.monotonic() + 0.05)
+    assert acceptance.control(applied)["accepting"] is True
+    time.sleep(0.1)
+    # The owner's retry after the deadline reads the open it already applied.
+    assert acceptance.control(applied)["control_revision"] == 1
+    with pytest.raises(web.HTTPConflict):
+        acceptance.control({**applied, "open_deadline_monotonic": time.monotonic() + 60})
+    # Only an open carries a deadline.
+    with pytest.raises(web.HTTPBadRequest):
+        acceptance.control(command("close", 2, open_deadline_monotonic=time.monotonic() + 60))
+    assert (acceptance.control_revision, acceptance.accepting) == (1, True)
+
+
+class ScriptedReadiness(RoutingPublisher):
+    """Readiness that passes after ``seconds``, waiting on the event loop or, with ``blocking``, holding it."""
+
+    def __init__(self, seconds: float, *, blocking: bool = False) -> None:
+        self.seconds = seconds
+        self.blocking = blocking
+        self.checks = 0
+        self.started = asyncio.Event()
+
+    def current(self) -> None:
+        return None
+
+    def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
+        raise NotImplementedError
+
+    async def check_ready(self) -> None:
+        self.checks += 1
+        self.started.set()
+        if self.blocking:
+            # The event loop cannot run the open's deadline timer while this thread sleeps.
+            time.sleep(self.seconds)
+        else:
+            await asyncio.sleep(self.seconds)
+
+
+def routed_acceptance(readiness: ScriptedReadiness) -> RequestAcceptance:
+    acceptance = RequestAcceptance(
+        LifecycleSettings("deployment", "generation", "control", "snapshot", router_config_hash=ROUTER_HASH),
+        PendingWrites(),
+    )
+    acceptance.publisher = readiness
+    return acceptance
+
+
+def test_readiness_that_holds_the_event_loop_past_the_deadline_cannot_open() -> None:
+    async def run() -> None:
+        readiness = ScriptedReadiness(1.0, blocking=True)
+        acceptance = routed_acceptance(readiness)
+        async with TestClient(TestServer(create_control_app(acceptance))) as control:
+            late = command("open", open_deadline_monotonic=time.monotonic() + 0.5)
+            response = await control.post("/reef/lifecycle", headers=CONTROL_HEADERS, json=late)
+            assert response.status == 503, await response.text()
+        assert readiness.checks == 1
+        assert (acceptance.control_revision, acceptance.accepting) == (-1, False)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("interruption", ["stop", "owner_lost"])
+def test_a_stop_waits_for_a_running_open_and_owner_loss_refuses_it(interruption: str) -> None:
+    async def run() -> None:
+        readiness = ScriptedReadiness(0.3)
+        acceptance = routed_acceptance(readiness)
+        async with TestClient(TestServer(create_control_app(acceptance))) as control:
+
+            async def lifecycle(body: dict[str, object]) -> int:
+                return (await control.post("/reef/lifecycle", headers=CONTROL_HEADERS, json=body)).status
+
+            opening = asyncio.create_task(lifecycle(command("open")))
+            await asyncio.wait_for(readiness.started.wait(), 5)
+            if interruption == "stop":
+                # Commands are serialized: the stop runs once the open finishes, and then it wins.
+                assert await lifecycle(command("stop", 1)) == 200
+                assert await opening == 200
+            else:
+                acceptance.owner_lost()
+                assert await opening == 409
+        assert acceptance.stopping and not acceptance.accepting
+        assert readiness.checks == 1
+
+    asyncio.run(run())
+
+
+@dataclass
+class SocketChild:
+    socket_path: Path
+    acceptance: RequestAcceptance
+    router: FakeSemanticRouter
+    #: The provider of every model-list check the child started, and every lifecycle POST it received.
+    checks: list[str]
+    posts: list[str]
+
+
+@contextlib.asynccontextmanager
+async def child_on_socket(tmp_path: Path, delay_seconds: float, timeout_s: float) -> AsyncIterator[SocketChild]:
+    """A routed child whose private control listens on a Unix socket without handler cancellation, as in production.
+
+    Its two targets have separate provider endpoints; each answers a model-list check after ``delay_seconds``.
+    """
+    checks: list[str] = []
+    posts: list[str] = []
+
+    def provider(name: str) -> web.Application:
+        async def models(request: web.Request) -> web.Response:
+            checks.append(name)
+            await asyncio.sleep(delay_seconds)
+            return await provider_models(request)
+
+        app = web.Application()
+        app.router.add_get("/v1/models", models)
+        return app
+
+    @web.middleware
+    async def count_posts(
+        request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+    ) -> web.StreamResponse:
+        if request.method == "POST":
+            posts.append(request.path)
+        return await handler(request)
+
+    # A short directory, since a Unix socket path is limited in length; its exit also removes the socket.
+    with tempfile.TemporaryDirectory(prefix="reef-ctl-") as directory:
+        async with (
+            TestServer(provider("student")) as student,
+            TestServer(provider("teacher")) as teacher,
+            contextlib.AsyncExitStack() as stack,
+        ):
+            adapter = routing_adapter(
+                tmp_path, str(student.make_url("")), teacher_url=str(teacher.make_url("")), timeout_s=timeout_s
+            )
+            dispatcher = routing_dispatcher(tmp_path)
+            stack.callback(dispatcher.close)
+            router = await stack.enter_async_context(running_router(adapter.snapshot, timeout_seconds=1))
+            lifecycle = LifecycleSettings(
+                "deployment",
+                "generation",
+                "control",
+                adapter.snapshot.version,
+                selection_token=SELECTION_TOKEN,
+                router_config_hash=ROUTER_HASH,
+            )
+            app = create_app(
+                dispatcher, tokens=SERVICE_TOKEN, routing=adapter, preview=router.settings, lifecycle=lifecycle
+            )
+            # The public application's startup starts the preview client that readiness uses.
+            await stack.enter_async_context(TestServer(app))
+            control_app = app[CONTROL_APPLICATION]
+            control_app.middlewares.append(count_posts)
+            runner = web.AppRunner(control_app)
+            await runner.setup()
+            stack.push_async_callback(runner.cleanup)
+            socket_path = Path(directory) / "control.sock"
+            await web.UnixSite(runner, str(socket_path)).start()
+            yield SocketChild(socket_path, app[REQUEST_ACCEPTANCE], router, checks, posts)
+
+
+def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_path: Path) -> None:
+    """The reviewed case: sequential provider checks outlast the old budget of only Scenario previews (11 s here)."""
+    policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=1)
+    controller = RoutingDeploymentController(
+        ServiceConfig(recipe="base", routing_deployment=policy, inference_timeout_s=6),
+        FakeRuntime([]),
+        registry_root=tmp_path / "registry",
+    )
+
+    async def run() -> None:
+        async with child_on_socket(tmp_path, delay_seconds=5.6, timeout_s=6) as child:
+            allowance = controller.open_timeout_seconds(child.router.snapshot)
+            client = ReefLifecycleClient(
+                child.socket_path, "deployment", "generation", "control", open_timeout_seconds=allowance
+            )
+            started = time.monotonic()
+            status = await asyncio.to_thread(client.request, "open")
+            elapsed = time.monotonic() - started
+            assert (status["accepting"], status["control_revision"]) == (True, 1)
+            # One attempt and one check per provider: a retry that read an applied open would hide a short budget.
+            assert child.posts == ["/reef/lifecycle"]
+            assert child.checks == ["student", "teacher"]
+            assert len(child.router.previews) == 1
+            assert 11 < elapsed < allowance
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["provider_check", "preview"])
+def test_an_open_whose_deadline_passes_during_readiness_stays_closed(tmp_path: Path, phase: str) -> None:
+    async def run() -> None:
+        async with child_on_socket(
+            tmp_path, delay_seconds=0.8 if phase == "provider_check" else 0, timeout_s=6
+        ) as child:
+            if phase == "preview":
+                child.router.hold = asyncio.Event()
+            # Deliberately shorter than readiness: the owner stops waiting, and the child must not open later.
+            client = ReefLifecycleClient(
+                child.socket_path, "deployment", "generation", "control", open_timeout_seconds=0.4
+            )
+            with pytest.raises(RoutingControlError) as error:
+                await asyncio.to_thread(client.request, "open")
+            # The child refused the expired open, whether in the reply to the first attempt or to a retry.
+            assert error.value.status_code == 503
+            if phase == "preview":
+                # The deadline cancelled the held preview and closed its connection.
+                await asyncio.wait_for(child.router.disconnected.wait(), 5)
+            await asyncio.sleep(1.0)
+            status = child.acceptance.status()
+            assert (status["accepting"], status["control_revision"]) == (False, -1)
+            # Readiness ran once, for the first attempt only.
+            assert child.checks == (["student"] if phase == "provider_check" else ["student", "teacher"])
+            assert len(child.router.previews) == (0 if phase == "provider_check" else 1)
+
+    asyncio.run(run())
