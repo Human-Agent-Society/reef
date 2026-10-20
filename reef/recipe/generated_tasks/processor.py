@@ -51,9 +51,9 @@ from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.record2record import (
-    BatchUnit,
     GroupDecision,
     Record2Record,
+    RecordSetUnit,
     ReportContext,
     ReportGrouping,
     ReportRecord2Record,
@@ -462,7 +462,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         self.rounds_stopped = True
         self.waiting_sources = []
 
-    def consume(self, units: tuple[BatchUnit, ...], *, trained: bool) -> frozenset[str]:
+    def consume(self, units: tuple[RecordSetUnit, ...], *, trained: bool) -> frozenset[str]:
         if trained:
             self.trained_batches += 1
         return super().consume(units, trained=trained)

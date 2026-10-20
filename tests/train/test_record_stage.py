@@ -25,7 +25,7 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import Task2Batch
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch
+from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 
 class WithholdingRecord2Record(InferenceRecord2Record):
@@ -374,3 +374,59 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
     batch = trainer.reserve_training_batch()
     assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
+
+
+class InferenceTasks(ImmediateRecord2Task):
+    """Each inference set becomes one task named after its record."""
+
+    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+        record_ids = record_set.record_ids()
+        return TaskResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
+
+
+class DataItemBatches(PairBatches):
+    accepted_items = frozenset({TrajectoryItem, TaskItem})
+
+
+TRAJECTORY = TrajectoryItem({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
+
+
+@pytest.mark.unit
+def test_uploaded_data_items_go_first_in_a_batch_and_count_as_units() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=DataItemBatches(context, 2),
+    )
+    processor.push(inference("i1"))
+    assert not processor.ready()
+    processor.push_item("t1", TRAJECTORY)
+    processor.push_item("k1", TaskItem(Path("k1")))
+    assert processor.status()["ready_units"] == 3
+
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TaskItem(Path("k1")))
+    processor.release_batch(batch.batch_id)
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TaskItem(Path("k1")))
+    assert processor.acknowledge(batch.batch_id) == {"item:t1", "item:k1"}
+
+    # A consumed data item that the trainer reads again before the commit releases it does not queue again.
+    processor.push_item("t1", TRAJECTORY)
+    processor.push_item("t2", TRAJECTORY)
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TaskItem(Path("i1"), source_agent_record_ids=("i1",)))
+    assert processor.acknowledge(batch.batch_id) == {"item:t2", "i1"}
+    assert {"item:t1", "item:k1", "item:t2"} <= processor.releasable_record_ids()
+    processor.release_records(frozenset({"item:t1", "item:k1", "item:t2"}))
+    assert not processor.consumed_items
+
+
+@pytest.mark.unit
+def test_a_pipeline_refuses_a_data_item_kind_that_its_batch_stage_does_not_accept() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(context, task2batch=PairBatches(context, 1))
+    with pytest.raises(ValueError, match="does not accept TrajectoryItem uploads"):
+        processor.push_item("t1", TRAJECTORY)

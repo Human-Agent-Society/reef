@@ -161,7 +161,14 @@ class Scenario:
     @property
     def dispatched_component(self) -> str | None:
         """The component whose trainer runs a dispatched backend on the training runtime, if any."""
-        return next((bound.component for bound in self.trainers if bound.trainer.dispatched), None)
+        return next(
+            (
+                component_trainer.component
+                for component_trainer in self.trainers
+                if component_trainer.trainer.dispatched
+            ),
+            None,
+        )
 
     @property
     def scenario_step(self) -> int:
@@ -179,7 +186,11 @@ class Scenario:
 
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
         """The trainers with a candidate backend; the first trainer when none has one."""
-        stepping = tuple(bound for bound in self.trainers if bound.trainer.candidate_backend is not None)
+        stepping = tuple(
+            component_trainer
+            for component_trainer in self.trainers
+            if component_trainer.trainer.candidate_backend is not None
+        )
         return stepping or self.trainers[:1]
 
     def set_training_mode(self, training_mode: str) -> None:
@@ -194,14 +205,14 @@ class Scenario:
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         stepping = self.stepping_trainers()
         unsupported = [
-            f"{bound.component} ({type(bound.trainer.pipeline.task2batch).__name__})"
-            for bound in stepping
-            if training_mode not in bound.trainer.pipeline.supported_training_modes
+            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.task2batch).__name__})"
+            for component_trainer in stepping
+            if training_mode not in component_trainer.trainer.pipeline.supported_training_modes
         ]
         if unsupported:
             raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
-        for bound in stepping:
-            bound.trainer.set_training_mode(training_mode)
+        for component_trainer in stepping:
+            component_trainer.trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare one local-backend step.
@@ -314,8 +325,8 @@ class Scenario:
                 return
             self._closed = True
             try:
-                for bound in self.trainers:
-                    bound.trainer.close()
+                for component_trainer in self.trainers:
+                    component_trainer.trainer.close()
             finally:
                 self._store.close()
 
@@ -325,9 +336,9 @@ def validate_component_trainers(
 ) -> tuple[ComponentTrainer, ...]:
     """Check that the trainers match the surface: each names a component it serves, and a surface serving
     no component has exactly one trainer, bound to ``records``."""
-    if not trainers or any(not isinstance(bound, ComponentTrainer) for bound in trainers):
+    if not trainers or any(not isinstance(component_trainer, ComponentTrainer) for component_trainer in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
-    names = [bound.component for bound in trainers]
+    names = [component_trainer.component for component_trainer in trainers]
     if len(set(names)) != len(names):
         raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
     if not surface.names:
@@ -339,7 +350,9 @@ def validate_component_trainers(
     unknown = [name for name in names if name not in surface.names]
     if unknown:
         raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
-    dispatched = [bound.component for bound in trainers if bound.trainer.dispatched]
+    dispatched = [
+        component_trainer.component for component_trainer in trainers if component_trainer.trainer.dispatched
+    ]
     if len(dispatched) > 1:
         raise ReefError(f"at most one component runs on the training runtime, not {dispatched}")
     return trainers

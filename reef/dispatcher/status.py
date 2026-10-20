@@ -123,15 +123,15 @@ class TrainingStatus:
         if len(current.trainers) > 1:
             # Each component's trainer commits on its own; report each one beside the scenario-wide step.
             components: dict[str, Any] = {}
-            for bound in current.trainers:
-                last = current.last_commit_for(bound.component)
-                components[str(bound.component)] = {
-                    "batch_ready": bound.trainer.batch_ready(),
-                    "training_mode": bound.trainer.pipeline.training_mode,
+            for component_trainer in current.trainers:
+                last = current.last_commit_for(component_trainer.component)
+                components[str(component_trainer.component)] = {
+                    "batch_ready": component_trainer.trainer.batch_ready(),
+                    "training_mode": component_trainer.trainer.pipeline.training_mode,
                     "processor": dict(
                         stepping_pipeline_status
-                        if bound.trainer is stepping_trainer
-                        else bound.trainer.pipeline_status()
+                        if component_trainer.trainer is stepping_trainer
+                        else component_trainer.trainer.pipeline_status()
                     ),
                     "last_committed_step": (
                         None

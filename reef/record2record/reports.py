@@ -25,7 +25,7 @@ from reef.core.reports import ReportBase, ReportValidationError, validate_report
 from reef.pipeline_context import PipelineContext
 from reef.record2record.base import Record2Record
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
-from reef.record2record.sets import BatchUnit, RecordSet
+from reef.record2record.sets import RecordSet, RecordSetUnit
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class ReportEntry:
 
 
 @dataclass(frozen=True, kw_only=True)
-class ReportSet(BatchUnit):
+class ReportSet(RecordSetUnit):
     """A singleton report or a ready group.
 
     Values: a batch unit whose record sets are the candidates of ``entries``,
@@ -165,7 +165,7 @@ class ReportSet(BatchUnit):
         return tuple(entry.candidate for entry in self.entries)
 
 
-def report_units(units: tuple[BatchUnit, ...]) -> tuple[ReportSet, ...]:
+def report_units(units: tuple[RecordSetUnit, ...]) -> tuple[ReportSet, ...]:
     """Return pool units as report sets. A report stage puts only report sets in its pool."""
     selected = tuple(unit for unit in units if isinstance(unit, ReportSet))
     if len(selected) != len(units):
@@ -412,7 +412,7 @@ class ReportRecord2Record(Record2Record):
                 )
                 self.limit_warned = True
 
-    def drop_held_unit(self, unit: BatchUnit) -> None:
+    def drop_held_unit(self, unit: RecordSetUnit) -> None:
         self.release_set(report_units((unit,))[0])
 
     def release_set(self, report_set: ReportSet) -> None:
@@ -433,7 +433,7 @@ class ReportRecord2Record(Record2Record):
             entry.report_id for report_set in report_units(self.pool.reserved_units()) for entry in report_set.entries
         }
 
-    def consume(self, units: tuple[BatchUnit, ...], *, trained: bool) -> frozenset[str]:
+    def consume(self, units: tuple[RecordSetUnit, ...], *, trained: bool) -> frozenset[str]:
         trained_reports: set[str] = set()
         trained_sources: set[str] = set()
         changed_groups: set[Hashable] = set()

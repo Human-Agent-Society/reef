@@ -1,8 +1,8 @@
-"""Validate records and append them to one loaded scenario.
+"""Validate records and uploaded data items and append them to one loaded scenario.
 
 The dispatcher calls these functions under the scenario's lock. They append
-records durably and count the scenario's ``ingest/*`` metrics. They do not
-start training: the caller wakes the trainers after a new record lands.
+records and data items durably and count the ``ingest/*`` metrics of records.
+They do not start training: the caller wakes the trainers after new data lands.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.batches import TrainDataItem
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
@@ -51,7 +52,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 return existing
             if current.training_mode == "auto":
                 raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if all(bound.trainer.candidate_backend is None for bound in current.trainers):
+            if all(component_trainer.trainer.candidate_backend is None for component_trainer in current.trainers):
                 raise ValueError("explicit training requests require a training backend")
             request = normalize_training_request_payload(item.payload)
             if item.references:
@@ -125,3 +126,17 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     for result in appended:
         current.operations.increment("ingest/accepted_total" if result.inserted else "ingest/duplicates_total")
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
+
+
+def append_data_items(current: Scenario, items: tuple[tuple[str, TrainDataItem], ...]) -> bool:
+    """Save uploaded ``(item_id, item)`` pairs in one transaction. Return True if one or more is new.
+
+    A data item trains only through a recipe that accepts its kind. Otherwise
+    every trainer would skip it, so admission refuses it.
+    """
+    for _, item in items:
+        if not any(
+            type(item) in component_trainer.trainer.pipeline.accepted_items for component_trainer in current.trainers
+        ):
+            raise ValueError(f"the recipe of scenario {current.name!r} does not accept {type(item).__name__} uploads")
+    return current.store.data_items.add(items)

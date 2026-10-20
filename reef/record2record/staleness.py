@@ -6,7 +6,7 @@ from collections.abc import Hashable, Mapping, Sequence
 
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import TrainDataItem, TrajectoryItem
-from reef.record2record.sets import BatchUnit
+from reef.record2record.sets import RecordSetUnit
 from reef.runtime.interfaces import RuntimeLoadId
 
 
@@ -31,11 +31,11 @@ def producing_runtime_load_ids(tasks: Sequence[TrainDataItem]) -> frozenset[str 
 
 
 def stale_units(
-    units: Sequence[BatchUnit],
+    units: Sequence[RecordSetUnit],
     producing_runtime_load_ids_by_set: Mapping[Hashable, frozenset[str | None]],
     served_runtime_load_ids: Sequence[str],
     max_staleness: int,
-) -> tuple[BatchUnit, ...]:
+) -> tuple[RecordSetUnit, ...]:
     """Return the units whose training data is more than ``max_staleness`` versions behind.
 
     ``served_runtime_load_ids`` lists the versions that the scenario served,
@@ -51,7 +51,7 @@ def stale_units(
         return ()
     newest_position = len(served_runtime_load_ids) - 1
     positions = {version: position for position, version in enumerate(served_runtime_load_ids)}
-    stale: list[BatchUnit] = []
+    stale: list[RecordSetUnit] = []
     for unit in units:
         versions = (
             version

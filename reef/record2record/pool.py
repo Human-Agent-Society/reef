@@ -1,15 +1,15 @@
-"""The batch units that a stage holds, and the batch that the pipeline reserved from them."""
+"""The record set units that a record stage holds, and the batch that the pipeline reserved from them."""
 
 from __future__ import annotations
 
 from collections.abc import Hashable
 
 from reef.record2record.selection import ArrivalOrder, SelectionPolicy
-from reef.record2record.sets import BatchUnit
+from reef.record2record.sets import RecordSetUnit
 
 
-class BatchUnitPool:
-    """Hold the batch units that a batch can use, and the reserved batch.
+class RecordSetUnitPool:
+    """Hold the record set units that a batch can use, and the reserved batch.
 
     The stage adds and removes units. It also decides what a consumed unit
     releases. The pool orders units only through its ``SelectionPolicy``.
@@ -20,8 +20,8 @@ class BatchUnitPool:
 
     def __init__(self, selection: SelectionPolicy | None = None) -> None:
         self.selection = ArrivalOrder() if selection is None else selection
-        self.units_by_id: dict[Hashable, BatchUnit] = {}
-        self.reserved: tuple[BatchUnit, ...] | None = None
+        self.units_by_id: dict[Hashable, RecordSetUnit] = {}
+        self.reserved: tuple[RecordSetUnit, ...] | None = None
         self.arrival_count = 0
 
     def __len__(self) -> int:
@@ -32,27 +32,27 @@ class BatchUnitPool:
         self.arrival_count += 1
         return self.arrival_count
 
-    def put(self, unit: BatchUnit) -> None:
+    def put(self, unit: RecordSetUnit) -> None:
         """Add the unit. If the pool holds a unit with the same ``unit_id``, replace that unit."""
         self.units_by_id[unit.unit_id] = unit
 
-    def remove(self, unit_id: Hashable) -> BatchUnit | None:
+    def remove(self, unit_id: Hashable) -> RecordSetUnit | None:
         """Remove the unit and return it. Return None if the pool does not hold it."""
         return self.units_by_id.pop(unit_id, None)
 
-    def units(self) -> tuple[BatchUnit, ...]:
+    def units(self) -> tuple[RecordSetUnit, ...]:
         """Return all units, in the order that the pool received them."""
         return tuple(self.units_by_id.values())
 
-    def ordered_units(self) -> tuple[BatchUnit, ...]:
+    def ordered_units(self) -> tuple[RecordSetUnit, ...]:
         """Return all units, in the order of the selection policy."""
         return self.select(len(self.units_by_id))
 
-    def reserved_units(self) -> tuple[BatchUnit, ...]:
+    def reserved_units(self) -> tuple[RecordSetUnit, ...]:
         """Return the reserved units. Return an empty tuple if no batch is reserved."""
         return () if self.reserved is None else self.reserved
 
-    def reserve(self, max_unit_count: int) -> tuple[BatchUnit, ...]:
+    def reserve(self, max_unit_count: int) -> tuple[RecordSetUnit, ...]:
         """Select at most ``max_unit_count`` units as the next batch, and keep them reserved."""
         if max_unit_count < 0:
             raise ValueError("max_unit_count must not be negative")
@@ -63,7 +63,7 @@ class BatchUnitPool:
         """Clear the reservation without consuming it. The units stay held for the next reservation."""
         self.reserved = None
 
-    def consume_reserved(self) -> tuple[BatchUnit, ...]:
+    def consume_reserved(self) -> tuple[RecordSetUnit, ...]:
         """Remove the reserved units from the pool, clear the reservation, and return the units.
 
         The result also includes a reserved unit that the stage removed after
@@ -75,7 +75,7 @@ class BatchUnitPool:
         self.reserved = None
         return consumed
 
-    def select(self, max_unit_count: int) -> tuple[BatchUnit, ...]:
+    def select(self, max_unit_count: int) -> tuple[RecordSetUnit, ...]:
         """Apply the selection policy, and make sure that it returned held units only, each one time."""
         selected = self.selection.select(self.units(), max_unit_count)
         selected_ids = [unit.unit_id for unit in selected]

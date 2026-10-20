@@ -58,8 +58,8 @@ def test_each_composite_component_opens_its_own_task_stores() -> None:
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
             "math", session.records, surface=Surface(), algorithm_states={}, task_storage=session.tasks
         )
-        for bound in trainers:
-            bound.trainer.close()
+        for component_trainer in trainers:
+            component_trainer.trainer.close()
         first_storage, second_storage = first.contexts[-1].task_storage, second.contexts[-1].task_storage
         assert first_storage is not None and second_storage is not None
         first_storage.open("tasks", split=SPLIT).begin_generation(generation=0, source_record_ids=("record-1",))

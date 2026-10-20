@@ -56,6 +56,7 @@ from reef.storage.commits import CommitLogError, CommitRecord
 from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.sql_data_items import DataItemTable, SQLDataItemStore, data_item_table
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -174,6 +175,7 @@ class PostgresRecordDatabase:
         version = Table("schema_version", metadata, Column("version", Integer, primary_key=True))
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
+        self.data_item_table = data_item_table(metadata, foreign_key="record_store.storage_id")
         #: One row per committed step, as the JSON object a commit log line holds.
         self.commits = Table(
             "scenario_commit",
@@ -196,18 +198,18 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
-                # create_all adds them to an older schema.
+                # Version 6 adds the data item table. create_all adds them to an older schema.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [5]:
-                    connection.execute(version.update().values(version=5))
+                if versions and versions != [6]:
+                    connection.execute(version.update().values(version=6))
                 elif not versions:
-                    connection.execute(version.insert().values(version=5))
+                    connection.execute(version.insert().values(version=6))
         except BaseException:
             self._engine.dispose()
             raise
@@ -377,6 +379,11 @@ class PostgresRecordStore(SQLRecordStore):
         tables = replace(self._database.task_tables, scope={"storage_id": self.storage_id})
         return SQLTaskStorage(self, tables, files, scenario)
 
+    def data_item_store(self, files: TaskFileStore, scenario: str) -> SQLDataItemStore:
+        """Open the data items of this store generation, with the files of its tasks in ``files``."""
+        table = DataItemTable(self._database.data_item_table, scope={"storage_id": self.storage_id})
+        return SQLDataItemStore(self, table, files, scenario)
+
     def close(self) -> None:
         with self._lock:
             if not self._closed:
@@ -528,7 +535,11 @@ class PostgresScenarioStorage(ScenarioStorage):
             try:
                 commits = PostgresCommitTable(self._database, records.storage_id)
                 return CommitHistoryScenarioStore(
-                    scenario, records, commits, tasks=records.task_storage(self.task_files, scenario)
+                    scenario,
+                    records,
+                    commits,
+                    tasks=records.task_storage(self.task_files, scenario),
+                    data_items=records.data_item_store(self.task_files, scenario),
                 )
             except BaseException:
                 records.close()

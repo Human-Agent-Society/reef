@@ -1015,8 +1015,10 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
                 pipeline_factory=threshold_pipeline,
                 candidate_backend=_PreparingBackend(),
             )
-            tasks = records.task_storage(LocalTaskFileStore(tmp_path / "task-files"), "math")
-            with closing(CommitHistoryScenarioStore("math", records, tasks=tasks)) as session:
+            files = LocalTaskFileStore(tmp_path / "task-files")
+            tasks = records.task_storage(files, "math")
+            data_items = records.data_item_store(files, "math")
+            with closing(CommitHistoryScenarioStore("math", records, tasks=tasks, data_items=data_items)) as session:
                 consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
                 trainer.replay_retained(up_to_sequence=0, consumed_ids=consumed)
                 batch = trainer.reserve_training_batch()

@@ -371,9 +371,9 @@ class ScenarioFactory:
                 task_storage=store.tasks,
             )
             if any(
-                bound.trainer.candidate_backend is not None
-                and bound.trainer.pipeline.training_mode != recipe.training_mode
-                for bound in trainers
+                component_trainer.trainer.candidate_backend is not None
+                and component_trainer.trainer.pipeline.training_mode != recipe.training_mode
+                for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
                 raise ValueError("recipe.build must pass its training_mode to Trainer.build")
@@ -417,24 +417,25 @@ class ScenarioFactory:
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed
             # rows for audit.
-            for bound in trainers:
+            for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the surface serves: each has a state.
-                recovered = recovered_states[bound.component]
+                recovered = recovered_states[component_trainer.component]
                 if recovered.high_water is not None:
                     scenario.replay_retained(
                         up_to_sequence=recovered.high_water[0],
                         consumed_ids=recovered.consumed_ids,
-                        component=bound.component,
+                        component=component_trainer.component,
                     )
                     scenario.restore_record_progress(
                         after_sequence=recovered.high_water[0],
                         offset=recovered.high_water[1],
-                        component=bound.component,
+                        component=component_trainer.component,
                     )
                 elif recovered.consumed_ids:
                     scenario.replay_retained(
-                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=bound.component
+                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
+                component_trainer.trainer.read_data_items(store.data_items)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()
@@ -444,8 +445,8 @@ class ScenarioFactory:
                 scenario.close()
             else:
                 try:
-                    for bound in trainers:
-                        bound.trainer.close()
+                    for component_trainer in trainers:
+                        component_trainer.trainer.close()
                 finally:
                     store.close()
             raise

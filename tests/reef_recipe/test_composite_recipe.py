@@ -170,7 +170,7 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     trainers = recipe.build_trainers(
         "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}
     )
-    assert [bound.component for bound in trainers] == ["harness", "config"]
+    assert [component_trainer.component for component_trainer in trainers] == ["harness", "config"]
     assert trainers[0].trainer.candidate_backend is not None
     assert trainers[1].trainer.candidate_backend is None
 
@@ -619,7 +619,10 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         surface=mixed.build_surface("agent"),
         algorithm_states={},
     )
-    assert [bound.trainer.pipeline.context.admitted_report_type is mixed.report_type for bound in trainers] == [
+    assert [
+        component_trainer.trainer.pipeline.context.admitted_report_type is mixed.report_type
+        for component_trainer in trainers
+    ] == [
         True,
         True,
     ]

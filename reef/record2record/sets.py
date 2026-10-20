@@ -1,4 +1,4 @@
-"""Record sets and batch units: the input of the record-to-task stage, and the unit that a batch takes.
+"""Record sets and record set units: the input of the record-to-task stage, and the unit that a batch takes.
 
 Notation: ``refs(r)`` is the set of records that a record ``r`` references.
 """
@@ -57,19 +57,19 @@ class SingleRecordSet(RecordSet):
 
 
 @dataclass(frozen=True, kw_only=True)
-class BatchUnit(ABC):
+class RecordSetUnit(ABC):
     """Record sets that must train in the same batch.
 
-    Values: ``U`` is a batch unit if and only if ``record_sets(U)`` is not empty.
-    Its record sets are distinct and share no record, because a record stage
-    forms each record into one set only. ``unit_id`` identifies ``U`` in its
-    pool. ``arrival_index`` orders the units of a pool. ``group_key`` names the
-    group of a unit that is a group. It is None for any other unit.
+    Values: ``U`` is a record set unit if and only if ``record_sets(U)`` is not
+    empty. Its record sets are distinct and share no record, because a record
+    stage forms each record into one set only. ``unit_id`` identifies ``U`` in
+    its pool. ``arrival_index`` orders the units of a pool. ``group_key`` names
+    the group of a unit that is a group. It is None for any other unit.
 
     Purpose: the record stage puts it in its pool when the tasks of its record
     sets are ready. A batch takes all its tasks or none of them, and
-    ``batch_size`` counts batch units. Consuming ``U`` writes ``consumed_ids(U)``,
-    the IDs of the records of its record sets, to the commit.
+    ``batch_size`` counts it as one unit. Consuming ``U`` writes
+    ``consumed_ids(U)``, the IDs of the records of its record sets, to the commit.
     """
 
     unit_id: Hashable
@@ -78,7 +78,7 @@ class BatchUnit(ABC):
 
     def __post_init__(self) -> None:
         if not self.record_sets():
-            raise ValueError(f"batch unit {self.unit_id!r} must hold one or more record sets")
+            raise ValueError(f"record set unit {self.unit_id!r} must hold one or more record sets")
 
     @abstractmethod
     def record_sets(self) -> tuple[RecordSet, ...]:
@@ -94,7 +94,7 @@ class BatchUnit(ABC):
 
 
 @dataclass(frozen=True, kw_only=True)
-class SingleSetUnit(BatchUnit):
+class SingleSetUnit(RecordSetUnit):
     """A batch unit of one record set, with the ID and the arrival index of that set. ``of`` makes it."""
 
     record_set: RecordSet

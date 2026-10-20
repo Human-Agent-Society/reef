@@ -18,6 +18,7 @@ from typing import Any, Self
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
+from reef.storage.data_items import DataItemStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
@@ -135,6 +136,10 @@ class ObservedScenarioStore(ScenarioStore):
     @property
     def tasks(self) -> TaskStorage:
         return self._inner.tasks
+
+    @property
+    def data_items(self) -> DataItemStore:
+        return self._inner.data_items
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

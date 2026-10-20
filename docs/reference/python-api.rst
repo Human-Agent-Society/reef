@@ -1066,6 +1066,11 @@ the judged samples into batches.
 | ``required_request_types``               | optionally restrict which record  |
 |                                          | types reach the pipeline          |
 +------------------------------------------+-----------------------------------+
+| ``accepted_items``                       | optionally name the uploaded data |
+|                                          | item kinds that the recipe trains |
+|                                          | on: ``TrajectoryItem``,           |
+|                                          | ``TaskItem``                      |
++------------------------------------------+-----------------------------------+
 
 Before each ``observe``, the stage retires expired records and absorbs finished
 judgments. ``observe`` then uses the stage's ``track(record)``,

@@ -72,7 +72,7 @@ tests/recipes/sdpo/test_sdpo_pipeline.py
 tests/recipes/skillclaw/test_skillclaw.py
 tests/recipes/skillclaw/test_skillclaw_catalog.py
 tests/recipes/tttd/test_tttd.py
-tests/record2record/test_batch_unit_pool.py
+tests/record2record/test_record_set_unit_pool.py
 tests/record2task/test_generator_designer.py
 tests/record2task/test_generator_harbor.py
 tests/record2task/test_generator_service.py

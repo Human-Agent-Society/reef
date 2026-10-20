@@ -230,7 +230,7 @@ def _commit_step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | 
 def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispatchers) -> None:
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
-    assert [bound.component for bound in scenario.trainers] == [WEIGHTS, HARNESS]
+    assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert scenario.trainer_for(HARNESS) is scenario.trainers[1].trainer
 
     assert _commit_step(scenario, HARNESS) is not None
@@ -1393,7 +1393,10 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
     scenario = _scenario(dispatcher)
     with pytest.raises(NotImplementedError, match=r"harness \(ThresholdBatches\)"):
         scenario.set_training_mode("hybrid")
-    assert [bound.trainer.pipeline.training_mode for bound in scenario.trainers] == ["auto", "auto"]
+    assert [component_trainer.trainer.pipeline.training_mode for component_trainer in scenario.trainers] == [
+        "auto",
+        "auto",
+    ]
     with pytest.raises(ValueError, match="training_mode must be"):
         scenario.set_training_mode("bogus")
 

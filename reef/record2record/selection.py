@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any, cast
 
-from reef.record2record.sets import BatchUnit
+from reef.record2record.sets import RecordSetUnit
 
 
 class SelectionPolicy(ABC):
@@ -16,14 +16,14 @@ class SelectionPolicy(ABC):
     """
 
     @abstractmethod
-    def select(self, candidates: Sequence[BatchUnit], max_unit_count: int) -> tuple[BatchUnit, ...]:
+    def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
         """Return at most ``max_unit_count`` units from ``candidates``, in batch order."""
 
 
 class ArrivalOrder(SelectionPolicy):
     """Take the oldest units first."""
 
-    def select(self, candidates: Sequence[BatchUnit], max_unit_count: int) -> tuple[BatchUnit, ...]:
+    def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
         return tuple(sorted(candidates, key=lambda unit: unit.arrival_index)[:max_unit_count])
 
 
@@ -33,7 +33,7 @@ class GroupKeyOrder(SelectionPolicy):
     Group keys must be sortable, such as step indices.
     """
 
-    def select(self, candidates: Sequence[BatchUnit], max_unit_count: int) -> tuple[BatchUnit, ...]:
+    def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
         ungrouped = sorted(
             (unit for unit in candidates if unit.group_key is None),
             key=lambda unit: unit.arrival_index,

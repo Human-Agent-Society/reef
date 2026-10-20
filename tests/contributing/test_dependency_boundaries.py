@@ -209,7 +209,14 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
-        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits", "reef.storage.tasks"),
+        "reef.storage.data_items": ("reef.core",),
+        "reef.storage.scenario": (
+            "reef.core",
+            "reef.storage.records",
+            "reef.storage.commits",
+            "reef.storage.tasks",
+            "reef.storage.data_items",
+        ),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)

@@ -15,6 +15,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.core.batches import TrainDataItem
 from reef.core.errors import ScenarioBusy, ScenarioCapacityFull, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
@@ -204,8 +205,8 @@ class Dispatcher(ScenarioLifecycle):
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)
             if dropped is not None:
-                for bound in dropped.trainers:
-                    backend = bound.trainer.candidate_backend
+                for component_trainer in dropped.trainers:
+                    backend = component_trainer.trainer.candidate_backend
                     if backend is not None:
                         backend.retire_scenario(scenario)
                 dropped.close()
@@ -248,7 +249,7 @@ class Dispatcher(ScenarioLifecycle):
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
-        return not any(bound.trainer.holds_untrained_records() for bound in current.trainers)
+        return not any(component_trainer.trainer.holds_untrained_records() for component_trainer in current.trainers)
 
     def unload_if_idle(self, scenario: str) -> bool:
         """Unload ``scenario`` if it is idle, and return whether it was unloaded.
@@ -427,6 +428,19 @@ class Dispatcher(ScenarioLifecycle):
                 self.process_accepted_records(current)
             return stored
 
+    def accept_data_items(
+        self, scenario: str, items: tuple[tuple[str, TrainDataItem], ...], *, release_id: str | None = None
+    ) -> None:
+        """Save uploaded ``(item_id, item)`` pairs in one transaction, then wake their consumer."""
+        if not items:
+            raise ValueError("an upload must hold one or more data items")
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, release_id=release_id)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            if ingest.append_data_items(current, items):
+                self.process_accepted_records(current)
+
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""
         # Every component's trainer sees the record. A dispatched backend wakes the
@@ -435,9 +449,9 @@ class Dispatcher(ScenarioLifecycle):
         self.local_workers.wake(current)
         if current.training_runtime is not None:
             return
-        for bound in current.trainers:
-            if bound.trainer.candidate_backend is None:
-                current.prepare_training_step(bound.component)
+        for component_trainer in current.trainers:
+            if component_trainer.trainer.candidate_backend is None:
+                current.prepare_training_step(component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
 

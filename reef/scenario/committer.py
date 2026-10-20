@@ -148,17 +148,17 @@ class ScenarioCommitter:
         self._step = step
         self._commit_status = (step, self._latest_training_record, self._artifact_head_sync)
 
-    def bound_trainer(self, component: str | None) -> ComponentTrainer:
-        """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
+    def component_trainer(self, component: str | None) -> ComponentTrainer:
+        """Return the component trainer of ``component``. ``None`` selects the first, for scenario-wide operations."""
         if component is None:
             return self.trainers[0]
-        for bound in self.trainers:
-            if bound.component == component:
-                return bound
+        for component_trainer in self.trainers:
+            if component_trainer.component == component:
+                return component_trainer
         raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
 
     def trainer_for(self, component: str | None) -> Trainer:
-        return self.bound_trainer(component).trainer
+        return self.component_trainer(component).trainer
 
     def component_on_record(self, component: str | None) -> str | None:
         """The trainer a record or receipt names: ``component`` with several, none with one.
@@ -178,13 +178,15 @@ class ScenarioCommitter:
     def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
         """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
         with self._lock:
-            bound = self.bound_trainer(component)
-            bound.trainer.reject_pending(metrics, component=self.component_on_record(bound.component))
+            component_trainer = self.component_trainer(component)
+            component_trainer.trainer.reject_pending(
+                metrics, component=self.component_on_record(component_trainer.component)
+            )
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
-        name = self.bound_trainer(component).component
+        name = self.component_trainer(component).component
         return next((record for record in reversed(records) if self.own_record(record, name)), None)
 
     def record_is_current(self, record: CommitRecord) -> bool:
@@ -328,7 +330,7 @@ class ScenarioCommitter:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
-            if any(bound.trainer.pending_batch is not None for bound in self.trainers):
+            if any(component_trainer.trainer.pending_batch is not None for component_trainer in self.trainers):
                 raise ReefError("cannot rollback while a training result is pending commit")
 
             artifacts = self._artifacts
@@ -523,8 +525,8 @@ class ScenarioCommitter:
         """
         with self._lock:
             with self._publication_lock:
-                bound = self.bound_trainer(component)
-                trainer, component = bound.trainer, bound.component
+                component_trainer = self.component_trainer(component)
+                trainer, component = component_trainer.trainer, component_trainer.component
                 next_step = self._step + 1
                 # A step that is in the log already is a retry after a lost acknowledgment.
                 records = self._store.history()
