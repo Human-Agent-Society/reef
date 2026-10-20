@@ -46,6 +46,7 @@ from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor, deployment_owner
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend
@@ -677,6 +678,7 @@ class CordisRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
@@ -694,6 +696,7 @@ class CordisRecipe(Recipe):
             self.selection_plugin(candidate_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            task_storage=task_storage,
         )
 
     def _backend_kwargs(self, scenario: str | None = None) -> dict[str, Any]:
@@ -743,6 +746,7 @@ class CordisRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         if self.training_mode != "auto" and not self.propose.reads_requests:
             raise RecipeConfigError(
@@ -761,4 +765,5 @@ class CordisRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            task_storage=task_storage,
         )

@@ -1022,7 +1022,7 @@ def test_the_dispatched_training_thread_skips_a_failed_instruction(tmp_path):
             return super().prepare_step(batch, state, scenario_step)
 
     class DispatchedRecipe(Recipe):
-        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
             return Trainer.build(
                 scenario,
                 records,

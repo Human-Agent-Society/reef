@@ -22,6 +22,7 @@ from reef.service.deploy.config_utils import config_value, interpolate_config, i
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.tasks import TaskFileStore
 
 
 @dataclass(frozen=True)
@@ -189,6 +190,17 @@ class ServiceConfig:
         public_path=("storage", "record_backend"),
         help="Scenario storage backend: sqlite, postgres, or a ScenarioStorage plugin reference.",
     )
+    #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
+    task_file_backend: str | Mapping[str, Any] = config_option(
+        "local",
+        public_path=("storage", "task_file_backend"),
+        help="Store of the files of generated tasks: local, or a TaskFileStore plugin reference.",
+    )
+    task_file_dir: str = config_option(
+        ".reef/task-files",
+        public_path=("storage", "task_file_dir"),
+        help="Directory of the generated task files, or the local cache of a plugin store.",
+    )
     record_database_url: str | None = field(
         default=None,
         repr=False,
@@ -294,6 +306,10 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.task_file_backend != "local":
+            if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
+                raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
+            TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
         if self.record_backend == "postgres":
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
                 raise ValueError("reef.record_database_url is required for the postgres backend")

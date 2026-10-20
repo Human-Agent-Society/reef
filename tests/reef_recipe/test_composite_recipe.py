@@ -81,7 +81,7 @@ class _TreeRecipe(Recipe):
     def base_artifact_files(self) -> Mapping[str, str] | None:
         return self.seed
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -109,7 +109,7 @@ def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
 class _HybridTreeRecipe(_TreeRecipe):
     """The tree recipe with a pipeline that runs in every mode."""
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -801,7 +801,7 @@ class _EpisodeTreeRecipe(_TreeRecipe):
     closing: threading.Event = field(default_factory=threading.Event)
     episode_done: threading.Event = field(default_factory=threading.Event)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,

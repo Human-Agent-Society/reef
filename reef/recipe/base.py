@@ -36,6 +36,7 @@ from reef.runtime.interfaces import (
     TrainingRuntime,
 )
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.task2batch import NoBatches
@@ -241,6 +242,7 @@ class Recipe:
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -250,6 +252,7 @@ class Recipe:
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            task_storage=task_storage,
         )
 
     def build_trainers(
@@ -260,6 +263,7 @@ class Recipe:
         surface: Surface,
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
@@ -269,7 +273,8 @@ class Recipe:
         this to return one trainer per component. The scenario runs them as
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
-        component name.
+        component name. ``task_storage`` opens the generated task stores of
+        the scenario session. Each trainer gives it to its pipeline.
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -285,6 +290,7 @@ class Recipe:
                     records,
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
+                    task_storage=task_storage,
                 ),
             ),
         )
@@ -567,17 +573,20 @@ class WeightTrainingRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 
         Override with ``Trainer.build`` for bespoke wiring such as a local
-        training backend, and pass :attr:`report_type` through there too.
+        training backend, and pass :attr:`report_type` and ``task_storage``
+        through there too.
         """
         return self._build_trainer(
             scenario,
             records,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            task_storage=task_storage,
         )
 
     def _build_trainer(
@@ -587,6 +596,7 @@ class WeightTrainingRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
@@ -631,4 +641,5 @@ class WeightTrainingRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             max_staleness=self.max_staleness,
+            task_storage=task_storage,
         )

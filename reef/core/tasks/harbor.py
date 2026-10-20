@@ -131,23 +131,26 @@ class HarborTask:
         except UnicodeEncodeError as exc:
             raise HarborTaskError(f"the task is not valid Unicode text: {exc.reason}") from exc
 
+    def document(self) -> dict[str, object]:
+        """Return the fields of the task as JSON values.
+
+        To rebuild the task, call ``HarborTask(**document)`` with ``source_agent_record_ids`` as a tuple.
+        """
+        return {
+            "name": self.name,
+            "instruction": self.instruction,
+            "tests": dict(self.tests),
+            "environment": dict(self.environment),
+            "solution": dict(self.solution),
+            "config": {table: dict(values) for table, values in self.config.items()},
+            "metadata": dict(self.metadata),
+            "source_agent_record_ids": list(self.source_agent_record_ids),
+        }
+
     @property
     def digest(self) -> str:
         """sha256 over the task's content and its source record ids, the same for the same task however it was built."""
-        canonical = json.dumps(
-            {
-                "name": self.name,
-                "instruction": self.instruction,
-                "tests": dict(self.tests),
-                "environment": dict(self.environment),
-                "solution": dict(self.solution),
-                "config": {table: dict(values) for table, values in self.config.items()},
-                "metadata": dict(self.metadata),
-                "source_agent_record_ids": list(self.source_agent_record_ids),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        canonical = json.dumps(self.document(), sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @property

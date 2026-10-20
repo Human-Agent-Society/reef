@@ -825,7 +825,9 @@ class _NamedComponentsRecipe(Recipe):
             }
         )
 
-    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+    def build_trainers(
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+    ):
         return tuple(
             ComponentTrainer(
                 name,

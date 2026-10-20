@@ -208,7 +208,8 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
 def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
-        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits"),
+        "reef.storage.tasks": ("reef.core",),
+        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits", "reef.storage.tasks"),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)
@@ -574,6 +575,7 @@ def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
         "reef.pipeline_context",
         "reef.record2record",
         "reef.record2task",
+        "reef.storage.tasks",
         "reef.task2batch",
     )
     paths = [*sorted((REPO_ROOT / "reef" / "task2batch").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]

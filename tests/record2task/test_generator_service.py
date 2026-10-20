@@ -1,4 +1,4 @@
-"""The generator service and its client: proposals, written tasks, checks, plays and manifests over HTTP."""
+"""The generator service and its client: proposals, written tasks, checks and plays over HTTP."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from reef_client.client import ReefClientError
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
-from reef.core.tasks import HarborTask, TaskGenerationRequest, read_harbor_task, read_split_manifest
+from reef.core.tasks import HarborTask, TaskGenerationRequest, read_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
@@ -454,26 +454,6 @@ def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path:
     assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
 
 
-def test_a_manifest_splits_the_named_tasks_under_the_root(tmp_path: Path) -> None:
-    built, _, _, _ = service(tmp_path)
-
-    async def body(generator: HttpGenerator) -> object:
-        names = []
-        for index in range(3):
-            proposed = await generator.propose(request(), scenario="spade", generation=2, index=index, tags={})
-            assert proposed.task is not None
-            names.append((await generator.write_task(proposed.task)).name)
-        path = await generator.write_manifest(generation=2, names=names, eval_fraction=0.3, seed=1)
-        assert path == tmp_path / "tasks" / "manifest-00002.json"
-        manifest = read_split_manifest(path)
-        assert sorted([*manifest.train, *manifest.eval]) == sorted(names) and len(manifest.eval) == 1
-        with pytest.raises(GeneratorError, match="not a task directory"):
-            await generator.write_manifest(generation=2, names=["missing"], eval_fraction=0.0, seed=1)
-        return None
-
-    run_with(built, body)
-
-
 def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
     built, designer, _, _ = service(tmp_path)
 
@@ -696,21 +676,18 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
     assert [report["record_id"] for report in designer.reports] == ["designer-1"]
 
 
-def test_history_proposal_preserves_tasks_referenced_by_a_loop_manifest(tmp_path: Path) -> None:
+def test_a_history_proposal_keeps_a_written_loop_task(tmp_path: Path) -> None:
     built, _, _, _ = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> None:
         task_generator = spade(generator, tmp_path)
         (loop,) = await task_generator.generate(TaskGenerationRequest((), "shell tasks"))
         written = await generator.write_task(loop.task)
-        manifest_path = await generator.write_manifest(generation=0, names=[loop.task.name], eval_fraction=0, seed=0)
-        manifest = manifest_path.read_bytes()
 
         (history,) = await task_generator.generate(TaskGenerationRequest(source_records(), "rebuild"))
 
         assert (await task_generator.validate(history.task)).is_valid and history.task.name != loop.task.name
         assert read_harbor_task(written.path).digest == loop.task.digest
-        assert manifest_path.read_bytes() == manifest
 
     run_with(built, body)
 

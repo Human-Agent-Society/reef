@@ -867,7 +867,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         objective = _GROUPED_PG_OBJECTIVE
         loss_family = "pg"
 
-        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
             return Trainer.build(
                 scenario,
                 records,
@@ -1004,6 +1004,7 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
     from reef.core.components import RECORDS_COMPONENT
     from reef.scenario.factory import recovered_trainer_states
     from reef.storage.commit_log import CommitHistoryScenarioStore
+    from reef.storage.tasks import LocalTaskFileStore
     from reef.surface.base import Surface
 
     database = tmp_path / "records.sqlite3"
@@ -1017,7 +1018,8 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
                 pipeline_factory=threshold_pipeline,
                 candidate_backend=_PreparingBackend(),
             )
-            with closing(CommitHistoryScenarioStore("math", records)) as session:
+            tasks = records.task_storage(LocalTaskFileStore(tmp_path / "task-files"), "math")
+            with closing(CommitHistoryScenarioStore("math", records, tasks=tasks)) as session:
                 consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
                 trainer.reingest(up_to_sequence=0, consumed_ids=consumed)
                 batch = trainer.reserve_training_batch()

@@ -116,6 +116,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
     assert len(scenario.store.history()) == 2
+    # The tracker hears about the rollback on the report thread; wait for it rather than race it.
+    value.registry.experiment_reports.flush()
     assert len(tracker.rollbacks) == 1
     assert tracker.rollbacks[0].produced_artifact_ref == recorded.artifact_ref
 

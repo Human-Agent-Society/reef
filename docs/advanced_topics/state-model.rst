@@ -85,8 +85,9 @@ a new ``release_id``, keeping step numbers monotonic.
 Commit ordering
 ---------------
 
-``ScenarioStore`` owns a scenario's committed state and its ``RecordStore``.
-It validates step progression and settles record consumption with each commit.
+``ScenarioStore`` owns a scenario's committed state, its ``RecordStore`` and
+its generated task stores. It validates step progression and settles record
+consumption with each commit.
 Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` handles
 registration and release selection, then ``recover_scenario`` opens a session
 and returns the complete ``Scenario``. The scenario owns that session and

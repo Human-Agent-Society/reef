@@ -368,6 +368,7 @@ class ScenarioFactory:
                 surface=surface,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
+                task_storage=store.tasks,
             )
             if any(
                 bound.trainer.candidate_backend is not None

@@ -144,7 +144,9 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
 class _Recipe(_TwoTrainerRecipe):
     pipelines: tuple[tuple[str, Any], ...] = ()
 
-    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+    def build_trainers(
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+    ):
         pipelines = dict(self.pipelines)
 
         def factory_for(component: str):

@@ -101,7 +101,9 @@ class _TwoTrainerRecipe(Recipe):
             return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
         return threshold_pipeline(context)
 
-    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+    def build_trainers(
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+    ):
         def factory_for(component: str):
             return lambda context: self.pipeline_for(component, context)
 

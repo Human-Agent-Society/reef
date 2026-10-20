@@ -69,7 +69,7 @@ class _LocalBackend(CandidateBackend):
 class _LocalRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,

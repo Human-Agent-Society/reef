@@ -249,6 +249,57 @@ code against these tools.
 - Keep I/O and framework integration at the edges so that core behavior can be
   tested with ordinary Python objects.
 
+### Define every type with mathematical rigor
+
+A type is a mathematical object: a set of values, and the operations that make
+and read them. Define each new or changed class, dataclass, enum, and type
+alias with the rigor of a definition in mathematics. From the definition alone,
+a reader must be able to tell what the type can hold and what each operation
+does with it.
+
+- Define the value set exactly. Give a membership condition: a value belongs
+  to the type if and only if the condition is true. Name each field and its
+  domain, and state each invariant between fields. For a collection, state the
+  element type, whether order matters, whether duplicates are allowed, and
+  whether it can be empty. Use set notation, such as `R ⊆ S` or
+  `refs(r) ⊆ R`, when words are not exact.
+- State the one purpose of the type: which operation makes its values, which
+  operation reads them, and what a value means to that reader.
+- Define each operation on the type by its inputs, its outputs, and the
+  relation between them. For example: for each item `i` that `make_tasks(X)`
+  returns, `sources(i) ⊆ records(X)`.
+- Make the definition complete. Each enum member, each status, and each case
+  of an operation has a defined meaning and a defined result. No value can
+  reach a state that the definition does not cover.
+- Make the definition consistent. Invariants must not contradict each other. A
+  subclass is a subset of its base class: it satisfies every condition of the
+  base definition and only adds conditions.
+- Check the invariants when a value is made, in the constructor or in
+  `__post_init__`. A caller must not be able to make a value that breaks them.
+- Give each type one role. Split a type that has two jobs into two types. Do
+  not use a base class as a loose category of different things.
+- If two values of the type can hold the same member, state what happens
+  then, for example which value consumes a shared record.
+
+Put the definition in the docstring of the type. For example:
+
+```python
+@dataclass(frozen=True)
+class ReportGroup:
+    """Reports that must train in the same batch.
+
+    Values: a tuple ``reports`` belongs to the type if and only if it is
+    non-empty, all its reports are of one scenario and have the same group key,
+    it is in arrival order, and no report ID occurs twice.
+    Purpose: the record stage makes it when the group is complete. The pipeline
+    reserves all of ``reports`` for one batch, or none of them.
+    """
+```
+
+A docstring such as "Records that are used together" is not a definition. It
+gives no membership condition, so a reader cannot tell which values the type
+can hold or which code reads them.
+
 ### Avoid dynamic design shortcuts
 
 - Do not use `TYPE_CHECKING`. Imports needed by annotations must also be valid
@@ -327,9 +378,9 @@ reliably:
   debt for Callable patterns; Protocol and `TYPE_CHECKING` findings cannot be baselined.
 
 Automation cannot determine whether a class is the right abstraction, whether
-an identifier uses the clearest domain term, or whether an interface has one
-cohesive responsibility. Authors and reviewers must evaluate those design and
-readability requirements during review. Do not add a lint exception merely to
+a type has a rigorous definition, whether an identifier uses the clearest domain
+term, or whether an interface has one cohesive responsibility. Authors and
+reviewers must evaluate those design and readability requirements during review. Do not add a lint exception merely to
 silence a warning; keep it narrow and explain why the general rule does not fit.
 
 Before requesting review for Python changes, run:

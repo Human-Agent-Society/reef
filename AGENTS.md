@@ -26,6 +26,10 @@ precedence over repository guidance.
   [Naming and terminology](#naming-and-terminology), and fix any violation.
   Passing pre-commit does not replace this review; these rules are not all
   checked mechanically.
+- When reviewing a pull request, check each new or changed type against
+  [Define every type with mathematical rigor](CONTRIBUTING.md#define-every-type-with-mathematical-rigor).
+  Report a definition that is not exact, complete, or consistent as a blocking
+  finding.
 - Before submitting a pull request that changes documentation, complete the
   [Documentation review checklist](#documentation-review-checklist) and fix
   any issues. Review the resulting sections in context, not only the diff.
@@ -158,6 +162,15 @@ is a reference; the rules here take precedence where it differs.
 - **Describe types explicitly.** Do not use `Any` fields or annotations to
   bypass pre-commit, mypy, or other checks. Model the actual value types and
   interfaces instead of weakening annotations to silence failures.
+- **Define each type with mathematical rigor.** For each new or changed type,
+  state in its docstring the membership condition of its values (fields,
+  domains, invariants) and its one purpose (the code that makes and reads the
+  values). Define each operation on the type by the relation between its
+  inputs and outputs. The definition must be complete, so that no value
+  reaches an undefined state, and consistent, so that a subclass only adds
+  conditions to its base class. Check the invariants at construction. Give each
+  type one role, and split a type that has two. See
+  [Define every type with mathematical rigor](CONTRIBUTING.md#define-every-type-with-mathematical-rigor).
 - **Name the actual quantity or concept.** Variable and function names must
   express their domain, scientific, or physical meaning. Include units or
   representation where needed, such as `timeout_seconds`, `token_count`, or

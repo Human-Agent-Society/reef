@@ -30,6 +30,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.pipeline import InstructionFailure, TrainingPipeline
 from reef.train.types import PreparedCommit, TrainingBatch, TrainStepResult
@@ -92,6 +93,7 @@ class Trainer:
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
         max_staleness: int = 0,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend")
@@ -104,6 +106,7 @@ class Trainer:
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
                 max_staleness=max_staleness,
+                task_storage=task_storage,
             )
         )
         if pipeline.training_mode != training_mode:

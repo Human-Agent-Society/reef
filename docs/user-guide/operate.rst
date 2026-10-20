@@ -168,7 +168,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits and settings, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. A scenario whose weight training job is out at its backend answers 409 until the job has landed.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. A scenario whose weight training job is out at its backend answers 409 until the job has landed.
 
 Choose the storage backend
 --------------------------
@@ -282,6 +282,36 @@ A change from one backend to another does not move releases. Keep the old
 store readable while scenarios refer to its releases, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
+Choose the task file store
+--------------------------
+
+A recipe that generates tasks saves each published task as a Harbor task
+directory. The scenario storage keeps the state of the tasks. The task file
+store keeps the files of the task directories, which can be text or binary.
+
+The default, ``local``, keeps the files in ``storage.task-file-dir``
+(default: ``.reef/task-files``). Put this directory on a persistent volume.
+Archiving a scenario moves its files under ``archived/`` in that directory.
+
+To use a different store, name a subclass of
+``reef.storage.tasks.TaskFileStore`` in ``storage.task-file-backend``.
+Give ``package.module:ClassName``, or give the name and a ``config`` mapping:
+
+.. code-block:: yaml
+
+   storage:
+     task-file-backend:
+       module: my_package.tasks:ObjectStoreTaskFileStore
+       config:
+         bucket: reef-tasks
+     task-file-dir: .reef/task-files
+
+Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping
+and ``storage.task-file-dir``. A remote store can use that directory as a
+local cache. The `Python task file store contract
+<../reference/python-api.rst#task-file-stores>`__ gives the necessary
+behavior.
+
 Limit the scenarios a service holds
 -----------------------------------
 
@@ -384,8 +414,12 @@ artifact repository.
    * - a plugin
      - The plugin's own store and the artifact repository
 
-With PostgreSQL and a remote artifact repository, a new host with the same
-configuration continues every scenario from the database and the Git remote.
+With all backends, also back up the task file store: ``task_file_dir`` with
+the ``local`` store, or the plugin's own store.
+
+With PostgreSQL, a remote artifact repository and a remote task file store, a
+new host with the same configuration continues every scenario from the
+database and the two remote stores.
 
 Some recipes have their own directories, for example Reefine's
 ``step_record_dir`` and ``proposals_dir``. These directories are not scenario

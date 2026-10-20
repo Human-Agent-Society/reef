@@ -266,7 +266,8 @@ The extension points those packages expose are in `Python API
 - Does it define shared record operations or retention limits? Put the contract
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
-  ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
+  ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
+  and opens the scenario's generated task stores (``reef/storage/tasks.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or play them with an agent? Put it in ``reef/record2task/generator/``, the
@@ -278,12 +279,15 @@ The extension points those packages expose are in `Python API
   ``reef/core/tasks/``. What a method asks the designer for, and what it does
   with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
-  shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
+  shares SQL record and retention operations. ``sql_tasks.py`` shares the
+  task tables and task store operations in the same database.
+  ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts,
+  as ``commit_log.py`` holds the JSONL commit history. ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
   PostgreSQL tables, the commit table, pooled transactions, and retention.
   ``commit_log.py`` owns the ``CommitHistory`` base, the JSONL ``CommitLog``, and
-  ``CommitHistoryScenarioStore``, which accepts any ``RecordStore`` and
-  ``CommitHistory``. ``migrations.py`` holds one-time upgrades of older schemas
+  ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
+  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time upgrades of older schemas
   and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.

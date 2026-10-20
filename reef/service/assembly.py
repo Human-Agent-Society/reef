@@ -39,6 +39,7 @@ from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -304,18 +305,34 @@ def build_dispatcher(
     scenario_storage: ScenarioStorage | None = None
     try:
         record_directory = Path(settings.agent_record_dir)
-        if settings.record_backend == "postgres":
-            scenario_storage = PostgresScenarioStorage(
-                _require_non_empty(settings.record_database_url, "reef.record_database_url"),
-                record_directory,
-                schema=settings.record_database_schema,
-            )
-        elif settings.record_backend == "sqlite":
-            scenario_storage = SQLiteScenarioStorage(record_directory)
+        task_file_directory = Path(settings.task_file_dir)
+        task_files: TaskFileStore
+        if settings.task_file_backend == "local":
+            task_files = LocalTaskFileStore(task_file_directory)
         else:
-            reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
-            storage_class = ScenarioStorage.referenced_class(reference)
-            scenario_storage = storage_class.from_config(reference.config, directory=record_directory)
+            reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
+            store_class = TaskFileStore.referenced_class(reference)
+            task_files = store_class.from_config(reference.config, directory=task_file_directory)
+        try:
+            if settings.record_backend == "postgres":
+                scenario_storage = PostgresScenarioStorage(
+                    _require_non_empty(settings.record_database_url, "reef.record_database_url"),
+                    record_directory,
+                    schema=settings.record_database_schema,
+                    task_files=task_files,
+                )
+            elif settings.record_backend == "sqlite":
+                scenario_storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
+            else:
+                reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
+                storage_class = ScenarioStorage.referenced_class(reference)
+                scenario_storage = storage_class.from_config(
+                    reference.config, directory=record_directory, task_files=task_files
+                )
+        except BaseException:
+            # The storage owns the task file store after it exists. Until then, this code closes it.
+            task_files.close()
+            raise
         # Record tracing observes storage events; the storage closes the observer with itself.
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
