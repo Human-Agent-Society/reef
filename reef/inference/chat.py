@@ -35,6 +35,14 @@ ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 #: Request keys forwarded from the provider request to the native payload
 #: unchanged; each engine reads the ones it understands.
 NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params", "vllm_sampling_params")
+# ``<think>`` and the newline after it can be several tokens; the end of a
+# rendered prompt this long is enough to read an open tag.
+PROMPT_TAIL_TOKEN_COUNT = 8
+# The reasoning tags and the tool-call start that SGLang's Qwen3 reasoning
+# parser reads; a tool call that starts before ``</think>`` ends the reasoning.
+THINK_START = "<think>"
+THINK_END = "</think>"
+TOOL_CALL_START = "<tool_call>"
 
 
 @dataclass(frozen=True)
@@ -155,13 +163,18 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
 
 
 class ReasoningStreamSplitter:
-    """Split sampled thinking tags without waiting for the full completion."""
+    """Split sampled thinking tags without waiting for the full completion.
 
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
+    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
+    reasoning and is dropped, the first ``</think>`` or ``<tool_call>`` ends
+    it, and a stream that ends inside it is reasoning. A slice that may be
+    the start of one of these tags is held until the next delta.
+    """
 
     def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
-        self._mode = "thinking" if enabled and force_reasoning else ("undecided" if enabled else "text")
+        self._enabled = enabled
+        self._in_reasoning = enabled and force_reasoning
+        self._stripped_think_start = False
         self._buffer = ""
 
     @staticmethod
@@ -174,30 +187,40 @@ class ReasoningStreamSplitter:
     def feed(self, delta: str) -> list[tuple[str, str]]:
         if not delta:
             return []
-        if self._mode == "text":
+        if not self._enabled:
             return [("text", delta)]
         self._buffer += delta
-        if self._mode == "undecided":
-            if self._OPEN.startswith(self._buffer) and len(self._buffer) < len(self._OPEN):
-                return []
-            if self._buffer.startswith(self._OPEN):
-                self._buffer = self._buffer[len(self._OPEN) :]
-                self._mode = "thinking"
-            else:
-                value, self._buffer = self._buffer, ""
-                self._mode = "text"
-                return [("text", value)]
+        if any(
+            tag.startswith(self._buffer) and tag != self._buffer for tag in (THINK_START, THINK_END, TOOL_CALL_START)
+        ):
+            return []
+        if not self._stripped_think_start and THINK_START in self._buffer:
+            self._buffer = self._buffer.replace(THINK_START, "", 1)
+            self._stripped_think_start = True
+            self._in_reasoning = True
+        if not self._in_reasoning:
+            value, self._buffer = self._buffer, ""
+            return [("text", value)]
 
-        before, separator, after = self._buffer.partition(self._CLOSE)
+        before, separator, after = self._buffer.partition(THINK_END)
         if separator:
             self._buffer = ""
-            self._mode = "text"
+            self._in_reasoning = False
             parts = [("thinking", before)] if before else []
             visible = after.lstrip("\n")
             if visible:
                 parts.append(("text", visible))
             return parts
-        held = self._held_suffix(self._buffer, self._CLOSE)
+        tool_start = self._buffer.find(TOOL_CALL_START)
+        if tool_start != -1:
+            before, after = self._buffer[:tool_start], self._buffer[tool_start:]
+            self._buffer = ""
+            self._in_reasoning = False
+            return [("thinking", before), ("text", after)] if before else [("text", after)]
+        held_tags = (
+            [THINK_END, TOOL_CALL_START] if self._stripped_think_start else [THINK_START, THINK_END, TOOL_CALL_START]
+        )
+        held = max(self._held_suffix(self._buffer, tag) for tag in held_tags)
         if held:
             value = self._buffer[:-held]
             self._buffer = self._buffer[-held:]
@@ -209,8 +232,10 @@ class ReasoningStreamSplitter:
         if not self._buffer:
             return []
         value, self._buffer = self._buffer, ""
-        kind = "thinking" if self._mode == "thinking" else "text"
-        return [(kind, value)]
+        if self._in_reasoning:
+            value = value.removeprefix(THINK_START)
+            return [("thinking", value)] if value else []
+        return [("text", value)]
 
 
 def _sse_data(event: Mapping[str, Any]) -> bytes:
@@ -510,8 +535,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     SPLIT_REASONING = True
     # Set when the chat template pre-opens ``<think>``: the sample then
     # carries only the closing tag, so a sample with no ``</think>`` is
-    # reasoning that ran out of tokens, not an answer. Sniffed from the
-    # rendered template at first use; ``force_reasoning`` in the handler
+    # reasoning that ran out of tokens, not an answer. Read from the end of
+    # each request's rendered prompt; ``force_reasoning`` in the handler
     # config pins it either way.
     force_reasoning: bool | None = None
 
@@ -552,7 +577,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # that reproduces a reference run pins its effective temperature
         # here (e.g. OpenClaw-RL: 0.6/0.95/20).
         self._sampling_defaults = dict(sampling_defaults or {})
-        # None = sniff the chat template on first render.
+        # None = read the end of each rendered prompt.
         self.force_reasoning = force_reasoning
 
     @property
@@ -617,7 +642,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
-            text, tool_parser, force_reasoning=self.reasoning_is_pre_opened()
+            text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
         choice: dict[str, Any] = {
             "index": 0,
@@ -1171,22 +1196,22 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             normalized.append(entry)
         return normalized
 
-    def reasoning_is_pre_opened(self) -> bool:
-        """Whether this model's chat template opens ``<think>`` for the model.
+    def reasoning_is_pre_opened(self, prompt_ids: list[int]) -> bool:
+        """Whether the rendered prompt ends with an open ``<think>`` for the model.
 
-        Qwen3-*-Thinking templates end the generation prompt with an open
-        ``<think>``, so the sample carries only the closing tag and a sample
-        without one is truncated reasoning. Sniffed once from the rendered
-        prompt; an explicit ``force_reasoning`` in the handler config wins.
-        Rendering errors propagate without caching a result.
+        Some templates end the generation prompt with ``<think>``: Qwen3.5 and
+        Qwen3.8 by default, Qwen3-*-Thinking always. The sample then carries
+        only the closing tag, so a sample without one is truncated reasoning.
+        Hybrid templates close the tag at once for ``enable_thinking: false``,
+        so a sample without a tag is then the answer. The check reads the
+        request's own prompt, so it follows its ``chat_template_kwargs``,
+        tools and messages. An explicit ``force_reasoning`` in the handler
+        config wins.
         """
         if self.force_reasoning is not None:
             return self.force_reasoning
-        rendered = self._require_tokenizer().apply_chat_template(
-            [{"role": "user", "content": ""}], tokenize=False, add_generation_prompt=True
-        )
-        self.force_reasoning = str(rendered).rstrip().endswith("<think>")
-        return self.force_reasoning
+        tail = self._require_tokenizer().decode(prompt_ids[-PROMPT_TAIL_TOKEN_COUNT:], skip_special_tokens=False)
+        return tail.rstrip().endswith("<think>")
 
     @classmethod
     def _assistant_message(
@@ -1196,28 +1221,37 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         *,
         force_reasoning: bool = False,
     ) -> tuple[dict[str, Any], bool]:
-        # Thinking-template models emit reasoning before the last </think>
-        # (the opening tag is auto-inserted by the chat template, so it is
-        # usually absent from the sampled text). OpenAI-shaped clients render
+        # Thinking-template models emit reasoning before </think>. The
+        # opening tag is often inserted by the chat template, so it is
+        # usually absent from the sampled text. OpenAI-shaped clients render
         # content verbatim, so reasoning must ride the standard
         # reasoning_content field — otherwise every consumer downstream
         # (agents, judges, user simulators) sees chain-of-thought as the
         # reply. Training tensors are captured from the raw token stream and
-        # are unaffected by this presentation split.
+        # are unaffected by this presentation split. The split follows
+        # SGLang's Qwen3 reasoning parser. SGLang forces reasoning whenever
+        # enable_thinking is not false, so a closing tag also starts the
+        # split: it only appears when thinking is on.
         reasoning: str | None = None
-        if cls.SPLIT_REASONING and "</think>" in text:
-            head, _, tail = text.rpartition("</think>")
-            reasoning = head.replace("<think>", "").strip()
-            text = tail.lstrip("\n")
-        elif cls.SPLIT_REASONING and force_reasoning:
-            # A pre-opened template with no closing tag: the generation hit
-            # its token cap mid-thought. The whole sample is reasoning, so
-            # fail closed — handing it back as content is exactly the
-            # chain-of-thought-as-reply this split exists to prevent, and a
-            # judge scoring it scores the wrong text. SGLang's own parser
-            # takes the same branch (force_reasoning => normal_text empty).
-            reasoning = text.replace("<think>", "").strip()
-            text = ""
+        if cls.SPLIT_REASONING and (force_reasoning or THINK_START in text or THINK_END in text):
+            body = text
+            while body.startswith(THINK_START):
+                body = body[len(THINK_START) :]
+            head, separator, tail = body.partition(THINK_END)
+            tool_start = body.find(TOOL_CALL_START)
+            if separator:
+                reasoning, text = head, tail.lstrip("\n")
+            elif tool_start != -1:
+                # A tool call that starts before </think> ends the reasoning.
+                reasoning, text = body[:tool_start], body[tool_start:]
+            else:
+                # No closing tag: the generation hit its token cap
+                # mid-thought. The whole sample is reasoning, so fail closed
+                # — handing it back as content is exactly the
+                # chain-of-thought-as-reply this split exists to prevent, and
+                # a judge scoring it scores the wrong text.
+                reasoning, text = body, ""
+            reasoning = reasoning.strip()
         message: dict[str, Any] = {"role": "assistant", "content": text}
         if reasoning:
             message["reasoning_content"] = reasoning

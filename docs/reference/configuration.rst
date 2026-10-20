@@ -568,12 +568,18 @@ above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
 would lift that restriction. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
-For both handlers, set ``inference.handler-config.force_reasoning`` to
-``true`` if the chat template pre-opens ``<think>``, or ``false`` if it does
-not. When omitted, the handler detects this by rendering the template and
-caches only a successful result. Tokenizer or template errors propagate to the
-request; they do not silently disable reasoning separation. An explicit value
-bypasses this detection.
+Both handlers split each reply into ``content`` and ``reasoning_content`` with
+the rules of SGLang's Qwen3 reasoning parser: ``<think>`` starts reasoning, and
+the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside
+reasoning has an empty ``content``.
+
+Set ``inference.handler-config.force_reasoning`` to ``true`` if the chat
+template pre-opens ``<think>``, or ``false`` if it does not. When omitted, the
+handler checks whether each request's rendered prompt ends with ``<think>``.
+The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
+pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
+so such a request keeps its reply in ``content``. An explicit value bypasses
+this check.
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~

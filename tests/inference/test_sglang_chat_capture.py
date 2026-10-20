@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
@@ -44,26 +45,128 @@ class FakeTokenizer:
         return f"<{token_ids[0]}>"
 
 
+class HybridThinkingTokenizer(FakeTokenizer):
+    """A Qwen3.5-style hybrid template: <think> opens by default and closes at once for enable_thinking=False."""
+
+    vocabulary = {10: "<user>", 11: "<assistant>", 12: "<think>", 13: "\n", 14: "</think>"}
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+        prompt = super().apply_chat_template(
+            messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+        )
+        if kwargs.get("enable_thinking", True):
+            return [*prompt, 12, 13]
+        return [*prompt, 12, 13, 13, 14, 13, 13]
+
+    def decode(self, token_ids, *, skip_special_tokens=False):
+        return "".join(self.vocabulary[token_id] for token_id in token_ids)
+
+
 @pytest.mark.unit
-def test_reasoning_template_failure_propagates_without_caching_a_false_result() -> None:
-    class ThinkingTokenizer(FakeTokenizer):
-        template_available = False
+def test_reasoning_check_reads_the_rendered_prompt() -> None:
+    tokenizer = HybridThinkingTokenizer()
+    thinking = tokenizer.apply_chat_template([], tokenize=True, add_generation_prompt=True)
+    answering = tokenizer.apply_chat_template([], tokenize=True, add_generation_prompt=True, enable_thinking=False)
 
-        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
-            if not self.template_available:
-                raise TypeError("chat template is unavailable")
-            return "<user></user><assistant><think>"
-
-    tokenizer = ThinkingTokenizer()
     backend = SGLangInferenceHandler("http://unused", model_path="model", tokenizer=tokenizer)
-    with pytest.raises(TypeError, match="chat template is unavailable"):
-        backend.reasoning_is_pre_opened()
+    assert backend.reasoning_is_pre_opened(thinking) is True
+    assert backend.reasoning_is_pre_opened(answering) is False
 
-    tokenizer.template_available = True
-    message, _ = backend._assistant_message(
-        "unfinished reasoning", None, force_reasoning=backend.reasoning_is_pre_opened()
-    )
-    assert message == {"role": "assistant", "content": "", "reasoning_content": "unfinished reasoning"}
+    pinned = SGLangInferenceHandler("http://unused", model_path="model", tokenizer=tokenizer, force_reasoning=True)
+    assert pinned.reasoning_is_pre_opened(answering) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "force_reasoning", "message"),
+    [
+        ("No tags here.", False, {"role": "assistant", "content": "No tags here."}),
+        ("<think>still thinking", False, {"role": "assistant", "content": "", "reasoning_content": "still thinking"}),
+        (
+            "<think>a</think>\n\nb</think>c",
+            False,
+            {"role": "assistant", "content": "b</think>c", "reasoning_content": "a"},
+        ),
+        (
+            "plan the call\n<tool_call>{}</tool_call>",
+            True,
+            {"role": "assistant", "content": "<tool_call>{}</tool_call>", "reasoning_content": "plan the call"},
+        ),
+    ],
+)
+def test_reasoning_split_follows_sglang_qwen3_parser(text, force_reasoning, message) -> None:
+    """A leading <think> starts reasoning; the first </think> or <tool_call> ends it."""
+    split, _ = SGLangInferenceHandler._assistant_message(text, None, force_reasoning=force_reasoning)
+    assert split == message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("deltas", "force_reasoning", "parts"),
+    [
+        (["<thi", "nk>a", "</th", "ink>\n\nb"], False, [("thinking", "a"), ("text", "b")]),
+        (["<think>a</think>b"], True, [("thinking", "a"), ("text", "b")]),
+        (["a", "<tool_", "call>x"], True, [("thinking", "a"), ("text", "<tool_call>x")]),
+        (["still thin", "king"], True, [("thinking", "still thin"), ("thinking", "king")]),
+        (["plain ", "text"], False, [("text", "plain "), ("text", "text")]),
+    ],
+)
+def test_reasoning_stream_split_follows_sglang_qwen3_parser(deltas, force_reasoning, parts) -> None:
+    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=force_reasoning)
+    streamed = [part for delta in deltas for part in splitter.feed(delta)]
+    assert [*streamed, *splitter.finish()] == parts
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("template_kwargs", "message"),
+    [
+        ({}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
+        ({"enable_thinking": False}, {"role": "assistant", "content": "The answer is 5."}),
+    ],
+)
+def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, template_kwargs, message) -> None:
+    """A tag-free sample is truncated reasoning after an open <think>, and the answer after a closed one."""
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "The answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=HybridThinkingTokenizer(),
+            )
+            response = await backend.inference(
+                _artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "what is 2+3?"}],
+                    "chat_template_kwargs": template_kwargs,
+                    "max_completion_tokens": 2,
+                },
+            )
+        finally:
+            await server.close()
+
+        assert response["choices"][0]["message"] == message
+
+    asyncio.run(run())
 
 
 def _artifact(tmp_path) -> Artifact:

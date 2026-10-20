@@ -187,6 +187,7 @@ Reviewers evaluate the change at the appropriate level:
 - local correctness and failure behavior;
 - public contracts and backwards compatibility;
 - package and trust boundaries;
+- rigorous type definitions;
 - tests, documentation, and migration needs;
 - operational cost and observability; and
 - long-term maintenance burden.
@@ -198,6 +199,13 @@ changes. Check the author's Documentation impact explanation against the
 change. Identify specific obstacles to understanding, such as using a concept
 before defining it or omitting a prerequisite, rather than only asking for
 clearer writing.
+
+Each new or changed type must have an exact, complete, and consistent
+definition of its values and its purpose, as
+[Define every type with mathematical rigor](../CONTRIBUTING.md#define-every-type-with-mathematical-rigor)
+describes. A type without such a definition is a blocking finding. Name the
+missing part, such as an unstated invariant, a state that the definition does
+not cover, a second role, or a subclass that breaks its base class definition.
 
 Review feedback should be actionable and identify whether it is blocking,
 optional, or suitable for a follow-up. Authors should respond to substantive
