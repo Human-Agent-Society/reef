@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import ClientConnectionError, ClientError, ClientPayloadError, ServerTimeoutError, web
@@ -26,11 +29,14 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core import RequestType
 from reef.core.records_types import AgentRecord
 from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
 from reef.service.app import InferenceRetryPolicy, create_app
+from reef.service.request_service import PendingInference
+from reef.service.routing import RoutingDecision
 from reef.service.routing_preview import PreviewSettings
 from reef.storage.records import AppendResult
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -547,7 +553,11 @@ def test_persistence_failure_has_no_receipt_and_releases_the_attempt(
 
 
 class SpecializedRecipe(Recipe):
-    """An extension whose processors are outside record-only routing's contract."""
+    """A ``Recipe`` subclass that changes nothing.
+
+    Routing accepts only the base ``Recipe`` type itself, so this stands for any extension whose processors
+    may fall outside record-only routing's contract.
+    """
 
 
 @pytest.mark.unit
@@ -572,3 +582,31 @@ def test_routing_rejects_specialized_recipes(tmp_path: Path) -> None:
         assert dispatcher.list_scenarios() == ()
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_pending_stream_is_routed_exactly_when_it_has_a_decision_for_its_own_scenario(tmp_path: Path) -> None:
+    snapshot = routing_adapter(tmp_path, "http://127.0.0.1:1").snapshot
+    decision = RoutingDecision(snapshot.targets["student"], snapshot.version, "coding", "student", "explicit_pin")
+
+    def item(scenario: str = "coding") -> AgentRecord:
+        return AgentRecord.create(scenario=scenario, request_type=RequestType.INFERENCE, payload={"messages": []})
+
+    assert PendingInference(item(), None, routing_decision=decision, routing_request_id="request").record
+    # An unrouted stream also records when its provider call started; zero and past readings are readings too.
+    assert PendingInference(item(), None, record=False, routing_started=time.monotonic()).routing_request_id == ""
+    assert PendingInference(item(), None, routing_started=-1).routing_started == -1
+    for make in (
+        lambda: PendingInference(item(), None, routing_decision=decision),
+        lambda: PendingInference(item(), None, record=False, routing_decision=decision, routing_request_id="request"),
+        lambda: PendingInference(item("other"), None, routing_decision=decision, routing_request_id="request"),
+        lambda: PendingInference(item(), None, routing_request_id="request"),
+        lambda: PendingInference(
+            item(), None, routing_decision=SimpleNamespace(scenario="coding"), routing_request_id="r"
+        ),
+        lambda: PendingInference(item(), None, routing_request_id=None),
+        lambda: PendingInference(item(), None, routing_started=math.nan),
+        lambda: PendingInference(item(), None, routing_started=True),
+    ):
+        with pytest.raises(ValueError):
+            make()

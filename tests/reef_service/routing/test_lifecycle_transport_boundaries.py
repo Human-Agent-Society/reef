@@ -44,7 +44,13 @@ def terminal_frame(padding_bytes: int) -> bytes:
 
 
 class LargeProvider:
-    """A provider whose answer to ``LARGE_PROMPT`` is ``size_bytes`` long; it counts every completion."""
+    """A provider whose answer to ``LARGE_PROMPT`` is large; every other answer has 8 bytes of padding.
+
+    ``size_bytes`` is the integer repetition count for content without streaming, or terminal SSE padding
+    with streaming. Python repetition makes a negative count empty. ``completion`` counts every request in
+    ``completions`` and answers the model it names. ``app`` makes a new application with the model list
+    and that handler, which the test serves and closes.
+    """
 
     def __init__(self, size_bytes: int) -> None:
         self.size_bytes = size_bytes
@@ -71,7 +77,13 @@ class LargeProvider:
 
 
 class PausedClient:
-    """One keep-alive connection that reads only response headers until ``read`` is called."""
+    """One keep-alive loopback connection that reads only response headers until ``read`` is called.
+
+    It owns ``socket``, connected on construction with a 256 KiB receive buffer and a 40-second timeout,
+    and ``connection``, which sends over that socket. ``send`` posts one chat request for the pinned target
+    ``student`` and returns once the response headers arrive; ``read`` enlarges the buffer and reads the
+    rest of that response. ``close`` closes both, and the test calls it.
+    """
 
     def __init__(self, port: int) -> None:
         self.socket = socket.socket()

@@ -98,7 +98,15 @@ def _write_resolved_config(config: dict[str, Any]) -> Path:
 
 
 class _Stack:
-    """Dependency orchestration over Executor RPCs, independent of placement."""
+    """Dependency orchestration over Executor RPCs, independent of placement.
+
+    ``routing_controller`` is None for an ordinary deployment, which keeps its behavior unchanged. Otherwise
+    the stack begins router startup in the background (``begin_start``) before it launches the services, so
+    the router may still be starting while they launch; once they are ready, ``complete_start`` joins that
+    startup and opens admission. The stack ticks the controller while running, forwards stop intent to it,
+    and shuts it down before the executors. Controller shutdown releases its registry lock. The outer
+    orchestrator releases the separate control directory after service-executor shutdown.
+    """
 
     def __init__(
         self,

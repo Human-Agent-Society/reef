@@ -30,35 +30,95 @@ SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"
 
 
 class ContainerCommandError(RuntimeError):
-    """The CLI failed; a submitted mutation may still have reached the daemon."""
+    """The CLI failed; a submitted mutation may still have reached the daemon.
+
+    ``outcome_unknown`` is a bool. True means a mutation may have reached the daemon although its result is
+    unknown, so callers must not assume a rollback or start a replacement; false makes no claim about the
+    resource's health. The message never contains CLI output, which may hold secrets.
+    """
 
     def __init__(self, message: str, *, outcome_unknown: bool = False) -> None:
+        if type(outcome_unknown) is not bool:
+            raise ValueError("container command outcome_unknown must be a boolean")
         super().__init__(message)
         self.outcome_unknown = outcome_unknown
 
 
 @dataclass(frozen=True)
 class ContainerState:
+    """One owned container as Docker reported it, whether or not it is usable.
+
+    Values: ``resource_id`` and ``service`` are strings as Docker reported them (the Compose service label);
+    ``running`` and ``paused`` are bools; ``health`` is None (no health check) or Docker's health status,
+    including values Reef does not know.
+    Purpose: ``ContainerRuntime.inspect`` makes it; the controller's ``inspect_ready`` alone decides whether
+    it is the one healthy Semantic Router.
+    """
+
     resource_id: str
     service: str
     running: bool
     health: str | None
     paused: bool = False
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_id, str) or not isinstance(self.service, str):
+            raise ValueError("container identity and service must be strings")
+        if type(self.running) is not bool or type(self.paused) is not bool:
+            raise ValueError("container running and paused states must be booleans")
+        if self.health is not None and not isinstance(self.health, str):
+            raise ValueError("container health must be None or a string")
+
 
 @dataclass(frozen=True)
 class ContainerInventory:
+    """Every owned container and network one ownership-checked inspection found.
+
+    Values: ``containers`` is a tuple of ``ContainerState`` and ``network_ids`` a tuple of strings, in the order
+    found; either may be empty. Nothing is removed or merged, so several, duplicate or failed observations
+    stay visible to the reader. Order has no meaning.
+    Purpose: ``ContainerRuntime.inspect`` makes it; the controller checks readiness with it, and cleanup
+    checks that it is empty. It describes resources and owns none of them.
+    """
+
     containers: tuple[ContainerState, ...] = ()
     network_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.containers) is not tuple or not all(isinstance(item, ContainerState) for item in self.containers):
+            raise ValueError("container inventory containers must be a tuple of container states")
+        if type(self.network_ids) is not tuple or not all(isinstance(item, str) for item in self.network_ids):
+            raise ValueError("container inventory network IDs must be a tuple of strings")
 
 
 @dataclass(frozen=True)
 class ContainerEvent:
+    """One Docker event, or the end of the observation.
+
+    Values: ``container_id`` and ``action`` are strings as Docker reported them; any action, including one
+    Reef does not interpret, is a valid event. The action ``stream_disconnected`` is not a Docker action:
+    the event stream adds it, with an empty ``container_id``, when its reader stops, overflows or reads
+    malformed input, so the observation is incomplete.
+    Purpose: a ``ContainerEventStream`` makes it; the controller reacts to the disconnect and to failure
+    actions of its own containers and ignores the rest.
+    """
+
     container_id: str
     action: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.container_id, str) or not isinstance(self.action, str):
+            raise ValueError("container event identity and action must be strings")
+
 
 class ContainerEventStream(ABC):
+    """Docker events for one deployment, owned by the controller that subscribed.
+
+    ``poll(timeout_seconds)`` waits up to ``timeout_seconds`` and returns the oldest queued event, removing
+    it, or None if none arrived; None is silence, not the end. The end of the observation is the
+    ``stream_disconnected`` event. ``close`` stops and reaps the reader; the stream is not used after it.
+    """
+
     @abstractmethod
     def poll(self, timeout_seconds: float = 0) -> ContainerEvent | None:
         """Return an event; EOF is a stream_disconnected event, not silence."""
@@ -69,6 +129,15 @@ class ContainerEventStream(ABC):
 
 
 class ContainerRuntime(ABC):
+    """Local container operations for one deployment owner, each limited to resources it owns.
+
+    ``compose_environment`` holds the private values later Compose commands receive; ``use_environment``
+    replaces it with a copy. Its values never appear in arguments or files. ``inspect`` returns every
+    resource the ownership labels match and refuses a foreign one; ``start`` and ``remove`` change only
+    owned resources; ``events`` returns a new stream that the caller owns. One runtime serves one owner,
+    because its environment is mutable.
+    """
+
     #: Variables Compose substitutes into containers, such as the router management token.
     compose_environment: dict[str, str]
 
@@ -98,7 +167,18 @@ class ContainerRuntime(ABC):
 
 
 class GuardedCommand:
-    """An isolated CLI group whose lifetime is bounded by its caller's pipe."""
+    """An isolated CLI group whose lifetime is bounded by its caller's pipe.
+
+    Values: ``command`` is a non-empty sequence of strings, not itself a string or bytes, whose first item
+    (the executable) is non-empty; later arguments may be empty. ``timeout_seconds`` is a finite positive
+    number. Both are checked before any pipe or process exists. If the guard cannot be spawned, both ends
+    of the owner pipe are closed before the error propagates.
+    State: ``process`` is the guard (``routing_command.py``), leader of a new process group that also holds
+    the CLI and its descendants. ``owner_descriptor`` is the write end of the guard's owner pipe while this
+    object holds it, and None once released. ``release_owner`` closes it at most once, from any thread, and
+    makes the guard stop the group; ``close`` also waits for the guard and kills the group if the guard does
+    not exit. The caller reads and closes the guard's stdout and stderr.
+    """
 
     def __init__(
         self,
@@ -108,6 +188,21 @@ class GuardedCommand:
         discard_stderr: bool = False,
         environment: Mapping[str, str] | None = None,
     ) -> None:
+        if (
+            isinstance(command, (str, bytes))
+            or not isinstance(command, Sequence)
+            or not command
+            or any(not isinstance(argument, str) for argument in command)
+            or not command[0]
+        ):
+            raise ValueError("a guarded command needs a non-empty executable and string arguments")
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("a guarded command needs a finite positive timeout")
         self.owner_lock = threading.Lock()
         read_descriptor, write_descriptor = os.pipe()
         self.owner_descriptor: int | None = write_descriptor
@@ -128,7 +223,8 @@ class GuardedCommand:
                 # Secret values reach Compose through its environment, never its arguments.
                 env=None if environment is None else {**os.environ, **environment},
             )
-        except OSError:
+        except (OSError, ValueError, TypeError):
+            # Spawning failed, or Popen refused an argument or environment value it cannot encode.
             os.close(write_descriptor)
             self.owner_descriptor = None
             raise
@@ -152,6 +248,15 @@ class GuardedCommand:
 
 
 class DockerEventStream(ContainerEventStream):
+    """``docker events`` read by one thread into a queue of at most 1024 events.
+
+    The reader queues each JSON line as one event, in arrival order. A malformed line or the end of the
+    CLI's output queues a ``stream_disconnected`` event after the earlier ones; a full queue instead
+    discards what is queued and keeps only that event. The reader then stops, and ``poll`` returns what is
+    left, then None. ``closed`` is set when the observation must stop; ``close`` sets it, ends the guarded
+    command, joins the reader and closes the command's pipes.
+    """
+
     def __init__(self, command: Sequence[str]) -> None:
         # Events intentionally outlive individual CLI timeouts. The owner pipe
         # and explicit close bound their lifetime to this controller instance.
@@ -218,7 +323,17 @@ class DockerEventStream(ContainerEventStream):
 
 
 class DockerComposeRuntime(ContainerRuntime):
+    """The local Docker CLI and its Compose plugin, run through ``GuardedCommand``.
+
+    ``docker_command`` is a non-empty executable name or path. Making the runtime starts nothing.
+    ``run(arguments)`` returns the CLI's UTF-8 stdout or raises ``ContainerCommandError``, whose outcome is
+    unknown for a mutation. ``mutate`` writes a marker file before a mutation and removes it only after the
+    mutation succeeds; while it exists, ``start`` refuses, until ``acknowledge_unknown`` clears it.
+    """
+
     def __init__(self, docker_command: str = "docker") -> None:
+        if not isinstance(docker_command, str) or not docker_command:
+            raise ValueError("the Docker command must be a non-empty executable name or path")
         self.docker_command = docker_command
         self.compose_environment = {}
 

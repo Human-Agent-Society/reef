@@ -4,13 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.reef_service.routing.routing_fakes import preview_reply
 
-from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingRequestError, RoutingSnapshot
+from reef.inference.http import HttpInferenceHandler
+from reef.service.errors import ROUTING_ERRORS
+from reef.service.routing import (
+    ROUTING_ERROR_STATUSES,
+    RoutingAdapter,
+    RoutingDecision,
+    RoutingRequestError,
+    RoutingRule,
+    RoutingScenario,
+    RoutingSnapshot,
+    RoutingTarget,
+)
 from reef.service.routing_preview import checked_selection
 
 pytestmark = pytest.mark.unit
@@ -243,7 +256,7 @@ def test_snapshot_and_handlers_are_immutable_and_do_not_reload(adapter: RoutingA
 def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> None:
     decision = automatic_decision(adapter, "code-opd", "default", "code-student")
     with pytest.raises(RoutingRequestError, match="another snapshot"):
-        adapter.handler_for(replace(decision, snapshot_version="old-snapshot"))
+        adapter.handler_for(replace(decision, snapshot_version="sha256:" + "0" * 64))
     with pytest.raises(RoutingRequestError, match="another snapshot"):
         adapter.handler_for(replace(decision, target=replace(decision.target, url="http://different")))
 
@@ -261,6 +274,9 @@ def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> Non
         (("scenarios", "math-opd", "default_target"), "retired-teacher"),
         (("scenarios", "code-opd", "targets"), ["code-student", "unknown-teacher"]),
         (("scenarios", "code-opd", "targets"), ["code-student", "code-student"]),
+        # A manifest list stays a list; only direct construction may pass a tuple.
+        (("scenarios", "code-opd", "targets"), ("code-student", "code-teacher")),
+        (("scenarios", "code-opd", "rules"), [{"name": "hard", "keywords": ("x",), "target": "code-teacher"}]),
         (("scenarios", "code-opd", "tragets"), ["code-student"]),
         (("scenarios", "code-opd", "rules"), [{"name": "default", "keywords": ["x"], "target": "code-teacher"}]),
         (("scenarios", "code-opd", "rules"), [{"name": "hard", "keywords": [], "target": "code-teacher"}]),
@@ -275,6 +291,9 @@ def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> Non
         (("targets", "code-teacher", "enabled"), "true"),
         (("targets", "code-teacher", "api_key"), "inline-secret"),
         (("targets", "code-teacher", "api_key_env"), "invalid-name"),
+        # Optional fields may be omitted, never given as null.
+        (("targets", "code-teacher", "role"), None),
+        (("targets", "code-teacher", "api_key_env"), None),
     ],
 )
 def test_invalid_manifest_fields_fail_at_load(
@@ -288,6 +307,152 @@ def test_invalid_manifest_fields_fail_at_load(
     node[keys[-1]] = value
     with pytest.raises(ValueError):
         RoutingSnapshot.from_mapping(manifest)
+
+
+def target(target_id: str = "code-student", **changes: object) -> RoutingTarget:
+    fields: dict[str, object] = {"provider_model": "code-student", "revision": "r2", "url": "http://localhost:8101"}
+    return RoutingTarget(target_id, **{**fields, **changes})
+
+
+def automatic(snapshot: RoutingSnapshot, **changes: object) -> RoutingDecision:
+    fields: dict[str, object] = {
+        "target": snapshot.targets["code-student"],
+        "snapshot_version": snapshot.version,
+        "scenario": "code-opd",
+        "original_selector": "auto",
+        "reason": "default",
+        "rule_name": "default",
+        "router_config_hash": ROUTER_HASH,
+    }
+    return RoutingDecision(**{**fields, **changes})
+
+
+def replaced_scenario(snapshot: RoutingSnapshot, scenario: RoutingScenario, version: str = "") -> RoutingSnapshot:
+    return RoutingSnapshot(
+        "auto", snapshot.targets, {**snapshot.scenarios, scenario.name: scenario}, version or snapshot.version
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        # Values that used to be refused only while a manifest was parsed.
+        lambda snapshot: target(url="file:///tmp/provider"),
+        lambda snapshot: target(url="http://user:secret@localhost"),
+        lambda snapshot: target("reef-entrypoint/code"),
+        lambda snapshot: target(provider_model=" padded"),
+        lambda snapshot: target(api_key_env="invalid-name"),
+        lambda snapshot: target(enabled="true"),
+        lambda snapshot: RoutingRule("hard", (), "code-teacher"),
+        lambda snapshot: RoutingRule("hard", ("x", "x"), "code-teacher"),
+        lambda snapshot: RoutingRule("default", ("x",), "code-teacher"),
+        lambda snapshot: RoutingScenario("code-opd", "math-student", ("code-student",)),
+        lambda snapshot: RoutingScenario("global", "code-student", ("code-student",)),
+        lambda snapshot: RoutingScenario(
+            "code-opd", "code-student", ("code-student",), (RoutingRule("hard", ("x",), "math-teacher"),)
+        ),
+        lambda snapshot: RoutingScenario(
+            "code-opd",
+            "code-student",
+            ("code-student", "code-teacher"),
+            (RoutingRule("hard", ("x",), "code-teacher"), RoutingRule("hard", ("y",), "code-student")),
+        ),
+        # References across the catalog, which only the snapshot can check.
+        lambda snapshot: RoutingSnapshot(
+            "auto",
+            {**snapshot.targets, "other": snapshot.targets["code-student"]},
+            snapshot.scenarios,
+            snapshot.version,
+        ),
+        lambda snapshot: replaced_scenario(
+            snapshot, RoutingScenario("math-opd", "retired-teacher", ("math-student", "retired-teacher"))
+        ),
+        lambda snapshot: replaced_scenario(
+            snapshot,
+            RoutingScenario(
+                "math-opd",
+                "math-student",
+                ("math-student", "retired-teacher"),
+                (RoutingRule("old", ("x",), "retired-teacher"),),
+            ),
+        ),
+        lambda snapshot: replaced_scenario(
+            snapshot, RoutingScenario("code-opd", "code-student", ("code-student", "unknown-teacher"))
+        ),
+        lambda snapshot: replaced_scenario(snapshot, snapshot.scenarios["code-opd"], "old-snapshot"),
+        lambda snapshot: RoutingSnapshot("code-student", snapshot.targets, snapshot.scenarios, snapshot.version),
+        # The three decision reasons and what each one implies.
+        lambda snapshot: automatic(snapshot, reason="explicit_pin", original_selector="code-student"),
+        lambda snapshot: automatic(snapshot, router_config_hash=None),
+        lambda snapshot: automatic(snapshot, rule_name="teacher_requested"),
+        lambda snapshot: automatic(snapshot, reason="rule"),
+        lambda snapshot: automatic(snapshot, target=snapshot.targets["retired-teacher"]),
+        lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {"unknown": HttpInferenceHandler("http://x")}),
+        lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {}, {"code-student": ""}),
+        lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {}, readiness_timeout_s=11),
+        lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {}, readiness_timeout_s=0),
+        lambda snapshot: RoutingRequestError("unmapped", status=500),
+        lambda snapshot: RoutingRequestError("no code", code=""),
+        # A frozen value holds the declared values, not mutable lookalikes.
+        lambda snapshot: RoutingScenario(
+            "code-opd", "code-student", ("code-student",), (SimpleNamespace(name="hard", target_id="code-student"),)
+        ),
+        lambda snapshot: RoutingSnapshot(
+            "auto",
+            {**snapshot.targets, "code-student": SimpleNamespace(target_id="code-student", enabled=True)},
+            snapshot.scenarios,
+            snapshot.version,
+        ),
+        lambda snapshot: RoutingSnapshot(
+            "auto",
+            snapshot.targets,
+            {**snapshot.scenarios, "code-opd": SimpleNamespace(**vars(snapshot.scenarios["code-opd"]))},
+            snapshot.version,
+        ),
+        lambda snapshot: automatic(snapshot, target=SimpleNamespace(**vars(snapshot.targets["code-student"]))),
+        lambda snapshot: RoutingAdapter(SimpleNamespace(targets=snapshot.targets), ROUTER_HASH, {}),
+        lambda snapshot: RoutingAdapter(snapshot, ROUTER_HASH, {"code-student": 42}),
+        lambda snapshot: RoutingRequestError("float", status=400.0),
+        lambda snapshot: RoutingRequestError("unhashable", status=[400]),
+    ],
+)
+def test_routing_values_refuse_what_their_definitions_exclude(
+    manifest: dict[str, object], make: Callable[[RoutingSnapshot], object]
+) -> None:
+    with pytest.raises(ValueError):
+        make(RoutingSnapshot.from_mapping(manifest))
+
+
+def test_routing_values_keep_their_own_collections(manifest: dict[str, object]) -> None:
+    snapshot = RoutingSnapshot.from_mapping(manifest)
+    keywords = ["reef_teacher_required"]
+    rule = RoutingRule("teacher_requested", keywords, "code-teacher")
+    keywords.append("later")
+    assert rule.keywords == ("reef_teacher_required",)
+    targets = dict(snapshot.targets)
+    copied = RoutingSnapshot("auto", targets, snapshot.scenarios, snapshot.version)
+    targets.clear()
+    assert copied.targets == snapshot.targets
+
+    # Constructors store lists as tuples and accept subclasses of the declared member types.
+    class LabelledRule(RoutingRule):
+        """A rule subclass, which is still a rule."""
+
+    scenario = RoutingScenario(
+        "code-opd", "code-student", ["code-student", "code-teacher"], [LabelledRule("hard", ["x"], "code-teacher")]
+    )
+    assert scenario.target_ids == ("code-student", "code-teacher")
+    assert type(scenario.rules) is tuple and isinstance(scenario.rules[0], LabelledRule)
+    # Shared targets, an empty handler map and a pin without a router runtime are all valid.
+    assert RoutingAdapter(snapshot, None, {}).handlers == {}
+    assert RoutingDecision(
+        snapshot.targets["code-teacher"], snapshot.version, "code-opd", "code-teacher", "explicit_pin"
+    )
+
+
+def test_every_routing_error_status_has_an_http_translation() -> None:
+    # 413 needs its body limit, so the translation builds it separately.
+    assert set(ROUTING_ERRORS) | {413} == ROUTING_ERROR_STATUSES
 
 
 def test_required_credentials_resolve_only_at_startup(manifest_path: Path) -> None:

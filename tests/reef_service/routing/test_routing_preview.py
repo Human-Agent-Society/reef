@@ -21,14 +21,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.service import routing_preview
-from reef.service.routing import (
-    RoutingAdapter,
-    RoutingDecision,
-    RoutingRequestError,
-    RoutingRule,
-    RoutingScenario,
-    RoutingSnapshot,
-)
+from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingRequestError, RoutingScenario, RoutingSnapshot
 from reef.service.routing_preview import (
     EXPECTED_HASH_HEADER,
     PREVIEW_BODY_LIMIT_BYTES,
@@ -83,7 +76,11 @@ CHAT, BASE = SNAPSHOT.scenarios["chat-opd"], SNAPSHOT.scenarios["base-opd"]
 
 
 class Reply(ABC):
-    """A fake preview response with explicit behavior, including delays and failures."""
+    """One scripted way to answer a preview, including delays and failures.
+
+    ``respond(request, data)`` receives the request and its body bytes and returns the response, or delays,
+    closes the connection or raises as a subclass chooses. The fake router's server owns the connection.
+    """
 
     @abstractmethod
     async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
@@ -123,6 +120,8 @@ def selection_reply(scenario: str, rule: str, target: str, *, method: str = "sin
 
 def json_reply(body: object, *, status: int = 200, hashes: tuple[str, ...] = (ACTIVE,)) -> Reply:
     class ReplyImplementation(Reply):
+        """Answers ``body`` as JSON with ``status`` and one returned-hash header per ``hashes`` entry."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             response = web.json_response(body, status=status)
             for value in hashes:
@@ -138,7 +137,11 @@ def error_reply(status: int, code: str, message: str = "router detail that must 
 
 
 class FakeRouter:
-    """A fake Semantic Router preview listener that records each request it receives."""
+    """A fake Semantic Router preview handler that records each request it receives.
+
+    ``handle`` appends ``(method, path, headers, body, peer address)`` to ``requests`` in arrival order and
+    then answers with ``reply``, whatever the path. ``fake_router`` serves it on loopback and closes it.
+    """
 
     def __init__(self, reply: Reply) -> None:
         self.reply = reply
@@ -368,19 +371,18 @@ def test_the_returned_runtime_header_must_be_exactly_the_expected_hash(hashes: t
 
 
 @pytest.mark.parametrize(
-    "rule",
-    [RoutingRule("old_rule", ("old",), "retired"), RoutingRule("outside", ("out",), "chat-student")],
+    ("rule", "selected"),
+    [("default", "retired"), ("escalate_base", "retired"), ("escalate_base", "chat-student"), ("old_rule", "retired")],
 )
-def test_a_rule_whose_target_is_disabled_or_outside_the_scenario_is_refused(rule: RoutingRule) -> None:
-    """Manifest parsing already forbids both; the reply check refuses them on its own as well."""
-    scenario = RoutingScenario("base-opd", "base-student", ("base-student", "retired"), (rule,))
-    snapshot = RoutingSnapshot("auto", SNAPSHOT.targets, {"base-opd": scenario}, "sha256:" + "3" * 64)
-    routing = RoutingAdapter(snapshot, ACTIVE, {})
+def test_a_reply_selecting_a_disabled_or_foreign_target_or_an_unknown_rule_is_refused(
+    rule: str, selected: str
+) -> None:
+    """The manifest cannot route there (see test_routing.py); the reply check refuses such a reply on its own."""
     good = selection_reply("base-opd", "default", "base-student")
-    assert routing_preview.checked_selection(routing, scenario, good, [ACTIVE]).target.target_id == "base-student"
-    reply = selection_reply("base-opd", rule.name, rule.target_id)
-    with pytest.raises(RoutingRequestError, match="selected_model") as caught:
-        routing_preview.checked_selection(routing, scenario, reply, [ACTIVE])
+    assert routing_preview.checked_selection(ROUTING, BASE, good, [ACTIVE]).target.target_id == "base-student"
+    reply = selection_reply("base-opd", rule, selected)
+    with pytest.raises(RoutingRequestError) as caught:
+        routing_preview.checked_selection(ROUTING, BASE, reply, [ACTIVE])
     assert (caught.value.status, caught.value.code) == (502, "routing_selection")
 
 
@@ -397,6 +399,8 @@ def test_a_rule_whose_target_is_disabled_or_outside_the_scenario_is_refused(rule
 )
 def test_a_reply_that_is_not_one_plain_json_object_is_refused(body: bytes, content_type: str) -> None:
     class ReplyImplementation(Reply):
+        """Answers the raw ``body`` with ``content_type`` and the active hash."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             response = web.Response(body=body, content_type=content_type)
             response.headers[RETURNED_HASH_HEADER] = ACTIVE
@@ -444,6 +448,8 @@ def test_an_error_code_outside_the_routers_format_is_not_repeated() -> None:
 
 def test_redirects_are_refused_and_never_followed() -> None:
     class ReplyImplementation(Reply):
+        """Redirects the preview path; any other path would receive a valid selection."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             if request.path == PREVIEW_PATH:
                 raise web.HTTPTemporaryRedirect("/elsewhere")
@@ -459,6 +465,8 @@ def test_redirects_are_refused_and_never_followed() -> None:
 def test_a_connection_closed_before_any_reply_is_unavailable_and_not_retried() -> None:
     # As when the router process stops after accepting a preview and before answering it.
     class ReplyImplementation(Reply):
+        """Closes the connection before writing any reply."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             if request.transport is not None:
                 request.transport.close()
@@ -567,6 +575,8 @@ def test_a_router_that_never_answers_times_out_once(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(routing_preview, "RESPONSE_WRITE_ALLOWANCE_SECONDS", 0.0)
 
     class ReplyImplementation(Reply):
+        """Never answers: waits until the client disconnects."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             await until_disconnected(request)
             return web.Response()
@@ -589,6 +599,8 @@ def test_cancellation_closes_the_connection_and_leaves_the_client_usable() -> No
     calls: list[int] = []
 
     class ReplyImplementation(Reply):
+        """Holds the first request until it is cancelled; answers every later one with a valid selection."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             calls.append(1)
             if len(calls) > 1:
@@ -641,6 +653,8 @@ def sized_payload(size_bytes: int, character: str = "x") -> dict[str, object]:
 
 def test_a_preview_body_at_the_limit_is_sent_and_one_byte_more_is_refused_locally() -> None:
     class ReplyImplementation(Reply):
+        """A valid selection that echoes the last message as ``original_text``."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             reply = selection_reply("chat-opd", "default", "chat-student")
             reply["original_text"] = json.loads(data)["messages"][-1]["content"]
@@ -657,6 +671,8 @@ def test_a_preview_body_at_the_limit_is_sent_and_one_byte_more_is_refused_locall
 
 def test_the_reply_limit_allows_gos_html_escaping_of_an_echoed_prompt() -> None:
     class ReplyImplementation(Reply):
+        """Echoes the last message as ``original_text``, escaping ``<`` as Go's JSON encoder does."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             reply = selection_reply("chat-opd", "default", "chat-student")
             reply["original_text"] = json.loads(data)["messages"][-1]["content"]
@@ -671,6 +687,8 @@ def test_the_reply_limit_allows_gos_html_escaping_of_an_echoed_prompt() -> None:
 
 def test_a_reply_beyond_its_limit_is_refused() -> None:
     class ReplyImplementation(Reply):
+        """A valid selection whose ``original_text`` alone exceeds the reply limit."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             reply = selection_reply("chat-opd", "default", "chat-student")
             reply["original_text"] = "x" * (2 * 1024 * 1024)
@@ -741,6 +759,8 @@ def test_caller_contract_errors_never_reach_the_router() -> None:
 
 def test_readiness_previews_each_scenario_and_accepts_a_rule_selection() -> None:
     class ReplyImplementation(Reply):
+        """Selects by rule for the chat Scenario and by default for every other one."""
+
         async def respond(self, request: web.Request, data: bytes) -> web.StreamResponse:
             scenario = json.loads(data)["model"].removeprefix("reef-entrypoint/")
             # The readiness message happens to match the chat Scenario's rule; any valid selection passes.
@@ -762,6 +782,9 @@ def test_readiness_previews_each_scenario_and_accepts_a_rule_selection() -> None
 
 
 def test_the_client_must_be_started_once_and_closes_cleanly() -> None:
+    with pytest.raises(ValueError):
+        RoutingPreviewClient(object())
+
     async def run() -> None:
         client = RoutingPreviewClient(PreviewSettings("http://127.0.0.1:9", TOKEN))
         with pytest.raises(RuntimeError, match="not started"):
@@ -789,6 +812,7 @@ def test_the_client_must_be_started_once_and_closes_cleanly() -> None:
         ("http://user:pw@127.0.0.1:8080", TOKEN, 10),
         ("http://127.0.0.1:8080", "", 10),
         ("http://127.0.0.1:8080", "two words", 10),
+        ("http://127.0.0.1:8080", ["t", "o", "k"], 10),
         ("http://127.0.0.1:8080", TOKEN, 0),
         ("http://127.0.0.1:8080", TOKEN, 301),
         ("http://127.0.0.1:8080", TOKEN, 1.5),
@@ -796,7 +820,7 @@ def test_the_client_must_be_started_once_and_closes_cleanly() -> None:
     ],
 )
 def test_settings_accept_only_a_loopback_listener_a_token_and_whole_seconds(
-    base_url: str, token: str, timeout: object
+    base_url: str, token: object, timeout: object
 ) -> None:
     with pytest.raises(ValueError):
         PreviewSettings(base_url, token, timeout)

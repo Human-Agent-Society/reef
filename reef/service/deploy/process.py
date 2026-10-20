@@ -45,7 +45,14 @@ def _with_path_entry(current: str | None, entry: Path) -> str:
 
 
 class ProcessWorker:
-    """Own a set of node-local service process trees (one per deployment worker)."""
+    """Own a set of node-local service process trees (one per deployment worker).
+
+    ``routing_owner_descriptors`` lists, in start order, the write end of each managed routing REEF child's
+    owner pipe; it starts empty and holds at most one per such child. The child inherits only the read end,
+    so it sees end of file when this worker closes the write end or dies. ``shutdown`` closes and clears
+    them after its termination attempts (SIGTERM, the grace period, SIGKILL and a bounded wait to reap each
+    leader), whether or not every process was confirmed to have exited.
+    """
 
     def __init__(
         self,

@@ -104,6 +104,12 @@ class HttpInferenceHandler(InferenceHandler):
 
     RequestHeadersFactory implementations provide artifact identity, provider
     authentication, or deployment-specific headers.
+
+    ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
+    ``UpstreamStatusError`` with that status; a successful status whose body is not one JSON object raises
+    it with status 502, since the provider failed and not the caller. ``inference_stream`` owns its
+    provider session until it returns: on any failure or cancellation before then it closes the session
+    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it.
     """
 
     def __init__(

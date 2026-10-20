@@ -77,7 +77,13 @@ def write_manifest(path: Path, provider_url: str, *, keyword: str = "reef_teache
 
 @dataclass
 class Provider:
-    """A deterministic CPU provider that records every request body it receives."""
+    """A deterministic CPU provider for every target: its request handlers, not a server.
+
+    ``models`` lists every ``PROVIDER_MODELS`` value. ``chat`` appends each request body to ``received``, in
+    arrival order, and answers whatever model it names: with ``"stream": true`` one SSE delta ``a`` and
+    ``[DONE]``, otherwise one ``answer`` message. The aiohttp server that mounts these handlers owns the
+    connections.
+    """
 
     received: list[dict[str, object]] = field(default_factory=list)
 
@@ -98,7 +104,16 @@ class Provider:
 
 @dataclass(frozen=True)
 class RoutedService:
-    """A routed Reef app with its fake router, provider and dispatcher."""
+    """A running routed Reef app and what ``routed_service`` assembled it from.
+
+    ``client`` reaches the public app and ``control`` its private control app, or is None when unmanaged.
+    ``router`` is the fake preview listener; ``provider`` serves every target at ``provider_url``.
+    ``adapter`` is the adapter the app started with; a later publication may replace the app's.
+    ``dispatcher`` stores the records. ``routed_service`` starts and closes all of them; this value owns
+    none. ``records(scenario)`` replays that Scenario's stored payloads, or is empty if it is not loaded;
+    ``chat`` posts one chat completion with the routing headers and returns its status, text and headers;
+    ``lifecycle`` posts one control command and raises ``RuntimeError`` when unmanaged.
+    """
 
     client: TestClient
     #: The private control application, here over loopback TCP for the test; production serves it on a socket.

@@ -173,6 +173,8 @@ def test_an_ordinary_deployment_never_installs_a_sighup_handler(
     monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: installed.append(signum))
 
     class Stack(orchestrator._Stack):
+        """The real stack with no services: it starts and runs nothing, so only its signal setup is observed."""
+
         def start(self) -> None:
             pass
 
@@ -201,6 +203,8 @@ def test_managed_object_config_prepares_controller_and_private_child(
     observed = {}
 
     class Controller:
+        """Stands in for the routing controller: records what the orchestrator passes and calls, nothing else."""
+
         def __init__(self, settings: ServiceConfig, runtime: ContainerRuntime) -> None:
             observed["deployment_id"] = settings.routing_deployment.deployment_id
             self.directory = tmp_path / "generation"
@@ -219,6 +223,8 @@ def test_managed_object_config_prepares_controller_and_private_child(
             observed["control_released_after_close"] = self.closed
 
     class Stack:
+        """Stands in for the stack: records the managed configuration and control file it receives."""
+
         def __init__(
             self,
             config: dict[str, dict[str, object]],
@@ -338,6 +344,8 @@ def test_unexpected_routing_cleanup_exception_still_stops_native_executor(tmp_pa
     actions = []
 
     class Controller:
+        """A routing controller whose shutdown always fails with an unexpected error."""
+
         def request_stop(self, *, force: bool = False) -> None:
             actions.append("routing-stop")
 
@@ -345,6 +353,8 @@ def test_unexpected_routing_cleanup_exception_still_stops_native_executor(tmp_pa
             raise ValueError("malformed dependency reply")
 
     class Executor:
+        """A native executor whose RPCs succeed with empty results; it logs each method it is asked to run."""
+
         def rpc(self, worker: int, method: str, **kwargs: object) -> tuple[str, int] | bool:
             actions.append(method)
             if method == "read_log":
@@ -365,10 +375,14 @@ def test_watchdog_child_exit_interrupts_routing_recovery(tmp_path: Path) -> None
     stopped = []
 
     class Controller:
+        """A routing controller that only records stop requests."""
+
         def request_stop(self) -> None:
             stopped.append(True)
 
     class Executor:
+        """A native executor whose ``reef`` child has exited with status 1."""
+
         def rpc(self, worker: int, method: str, **kwargs: object) -> tuple[str, int] | dict[str, int]:
             return ("", 0) if method == "read_log" else {"reef": 1}
 

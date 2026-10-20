@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import socket
@@ -50,6 +51,7 @@ from reef.service.lifecycle import (
     PendingWrites,
     RequestAcceptance,
     RoutingPublisher,
+    WriteAdmission,
     create_acceptance_middleware,
     create_control_app,
     register_admission,
@@ -71,7 +73,9 @@ class ManagedClients:
     """A public application with admission and its separate control application, each with its own client.
 
     ``get`` and ``post`` send ``/reef/lifecycle`` to the control application (over loopback TCP here; production
-    serves it only on a Unix socket) and every other path to the public application.
+    serves it only on a Unix socket) and every other path to the public application. The public ``app``
+    authenticates the ``service`` and ``evaluation`` tokens and admits through ``acceptance``; a test may add
+    routes to it before entering. ``async with`` starts both test servers and closes both on exit.
     """
 
     def __init__(self, acceptance: RequestAcceptance) -> None:
@@ -417,6 +421,8 @@ def test_root_is_counted_until_response_eof(stream: bool) -> None:
         eof_finish = asyncio.Event()
 
         class DelayedResponse(web.Response):
+            """A response whose end of body is held until the test releases ``eof_finish``."""
+
             async def write_eof(self, data: bytes = b"") -> None:
                 eof_started.set()
                 await eof_finish.wait()
@@ -573,6 +579,24 @@ def test_private_control_settings(tmp_path: Path) -> None:
     path.chmod(0o644)
     with pytest.raises(ValueError, match="group or other"):
         LifecycleSettings.load(path)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: LifecycleSettings(1, "generation", "control"),
+        lambda: LifecycleSettings("deployment", "generation", "control", None),
+        lambda: LifecycleSettings("deployment", "generation", "control", body_timeout_seconds=True),
+        lambda: LifecycleSettings("deployment", "generation", "control", finalization_timeout_seconds=math.inf),
+        lambda: WriteAdmission(0, False),
+        lambda: WriteAdmission(1, "no"),
+    ],
+)
+def test_lifecycle_values_refuse_what_their_definitions_exclude(make: Callable[[], object]) -> None:
+    with pytest.raises(ValueError):
+        make()
+    # Before a manifest is named, the snapshot version is not yet known.
+    assert LifecycleSettings("deployment", "generation", "control").snapshot_version == ""
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -946,7 +970,10 @@ def test_an_open_past_its_deadline_never_opens_but_an_applied_open_still_answers
 
 
 class ScriptedReadiness(RoutingPublisher):
-    """Readiness that passes after ``seconds``, waiting on the event loop or, with ``blocking``, holding it."""
+    """Readiness that passes after ``seconds``, waiting on the event loop or, with ``blocking``, holding it.
+
+    Only the readiness part of a publisher: nothing is published (``current`` is None) and ``publish`` is unsupported.
+    """
 
     def __init__(self, seconds: float, *, blocking: bool = False) -> None:
         self.seconds = seconds
@@ -1020,6 +1047,8 @@ def test_a_stop_waits_for_a_running_open_and_owner_loss_refuses_it(interruption:
 
 @dataclass
 class SocketChild:
+    """A running routed child: its control socket, its acceptance and the fake router it routes through."""
+
     socket_path: Path
     acceptance: RequestAcceptance
     router: FakeSemanticRouter

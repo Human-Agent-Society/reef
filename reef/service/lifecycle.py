@@ -52,7 +52,19 @@ OPEN_DEADLINE_PASSED = "lifecycle open deadline passed before admission opened"
 
 @dataclass(frozen=True)
 class LifecycleSettings:
-    """Private child settings assembled by the deployment controller."""
+    """A managed REEF child's private identity, credentials and request deadlines.
+
+    Values: ``deployment_id``, ``generation`` and ``control_token`` are non-empty strings. The other strings
+    may be empty, which means "not yet known": ``snapshot_version`` before a manifest is named,
+    ``selection_token`` without routing, ``router_config_hash`` before the owner publishes a verified
+    runtime, and ``control_socket`` for an in-process child without its own socket. A non-empty
+    ``router_config_hash`` is a router runtime hash; a non-empty ``control_socket`` is an absolute path of at
+    most ``MAX_SOCKET_PATH_BYTES`` bytes. Both timeouts are finite positive numbers of seconds.
+    Purpose: the deployment controller writes it to the child's private control file and ``load`` reads it;
+    ``load`` also requires a non-empty ``snapshot_version`` and refuses empty optional fields that are
+    present. ``RequestAcceptance.activate`` replaces its value with the published snapshot and runtime; it
+    never changes a value in place.
+    """
 
     deployment_id: str
     generation: str
@@ -68,13 +80,25 @@ class LifecycleSettings:
     control_socket: str = ""
 
     def __post_init__(self) -> None:
-        if not self.deployment_id or not self.generation or not self.control_token:
-            raise ValueError("managed lifecycle requires deployment ID, generation, and a control token")
         if any(
-            not math.isfinite(value) or value <= 0
-            for value in (self.body_timeout_seconds, self.finalization_timeout_seconds)
+            not isinstance(value, str) or not value
+            for value in (self.deployment_id, self.generation, self.control_token)
         ):
-            raise ValueError("managed lifecycle timeouts must be positive")
+            raise ValueError("managed lifecycle requires deployment ID, generation, and a control token")
+        for name, text in (
+            ("snapshot_version", self.snapshot_version),
+            ("selection_token", self.selection_token),
+            ("router_config_hash", self.router_config_hash),
+            ("control_socket", self.control_socket),
+        ):
+            if not isinstance(text, str):
+                raise ValueError(f"lifecycle {name} must be a string")
+        for name, seconds in (
+            ("body_timeout_seconds", self.body_timeout_seconds),
+            ("finalization_timeout_seconds", self.finalization_timeout_seconds),
+        ):
+            if type(seconds) not in (float, int) or not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError(f"lifecycle {name} must be a positive finite number")
         if self.router_config_hash and not is_router_config_hash(self.router_config_hash):
             raise ValueError("lifecycle router_config_hash must be 64 lowercase hexadecimal characters")
         if self.control_socket and (
@@ -116,21 +140,45 @@ class LifecycleSettings:
         for name in ("selection_token", "router_config_hash", "control_socket"):
             if name in raw and (not isinstance(raw[name], str) or not raw[name]):
                 raise ValueError(f"lifecycle {name} must be a nonempty string")
-        for name, default in (("body_timeout_seconds", 30.0), ("finalization_timeout_seconds", 5.0)):
-            value = raw.get(name, default)
-            if type(value) not in (float, int) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"lifecycle {name} must be a positive finite number")
+        # The constructor checks every field's domain, including both timeouts.
         return cls(**raw)
 
 
 @dataclass(frozen=True)
 class WriteAdmission:
+    """One submitted record write's place in the drain order.
+
+    Values: ``sequence`` is a positive int, unique and increasing per ``PendingWrites``; ``inference`` is a
+    bool that is true for a write submitted while an admitted inference request finalizes.
+    Purpose: ``PendingWrites.run`` makes one per write. ``count_before`` reads it: a drain waits for every
+    inference write and for other writes with ``sequence`` up to its cutoff.
+    """
+
     sequence: int
     inference: bool
 
+    def __post_init__(self) -> None:
+        if type(self.sequence) is not int or self.sequence < 1:
+            raise ValueError("write admission sequence must be a positive integer")
+        if type(self.inference) is not bool:
+            raise ValueError("write admission inference flag must be a boolean")
+
 
 class PendingWrites:
-    """Keep once-submitted writes alive and observable after request cancellation."""
+    """Keep once-submitted writes alive and observable after request cancellation.
+
+    State: ``tasks`` maps each tracked write task to its ``WriteAdmission``. A task is tracked from ``run``
+    until its done callback ``finished`` runs, so a task that has just completed stays tracked until the
+    event loop runs that callback. ``sequence`` (≥ 0) is the last sequence assigned; ``failed_count`` (≥ 0)
+    counts writes that raised or were cancelled; ``idle`` is set exactly when ``tasks`` is empty. All of it
+    belongs to one event loop.
+    Operations: ``run(write)`` submits ``write`` once as a task, records it, and returns its result or raises
+    its error; cancelling the caller does not cancel the task. ``finished`` removes the task and counts a
+    failure only if it was cancelled or raised. ``count_before(cutoff)`` counts all tracked inference writes,
+    plus other tracked writes whose ``sequence ≤ cutoff``. With None it counts every tracked write.
+    ``wait(timeout)`` is true if ``tasks`` became empty in time. The service and its request acceptance
+    share one instance.
+    """
 
     def __init__(self) -> None:
         self.tasks: dict[asyncio.Task[object], WriteAdmission] = {}
@@ -172,7 +220,13 @@ class PendingWrites:
 
 
 class RoutingPublisher(ABC):
-    """The service's routing policy: read when a request is admitted, replaced in one event-loop step."""
+    """The service's routing policy: read when a request is admitted, replaced in one event-loop step.
+
+    An implementation holds one current ``RoutingAdapter`` or None and belongs to one event loop.
+    ``current`` returns it without copying; a request keeps the adapter it read, so a later ``publish``
+    never changes a request already admitted. ``publish`` either replaces the adapter in one assignment or
+    raises and leaves it unchanged. ``check_ready`` changes nothing.
+    """
 
     @abstractmethod
     def current(self) -> RoutingAdapter | None:
@@ -199,7 +253,23 @@ class RoutingPublisher(ABC):
 
 
 class RequestAcceptance:
-    """An event-loop-local admission barrier, response lease, and control state."""
+    """An event-loop-local admission barrier, response lease, and control state.
+
+    State: it starts closed (``accepting`` false), not ``stopping``, with ``control_revision == -1`` and no
+    ``last_action``. ``stopping`` is terminal and implies not ``accepting``. ``control_revision`` is -1
+    exactly when ``last_action`` is None; otherwise it is the revision of the last applied command and
+    ``last_action`` is that command's ``(action, cancel_active, snapshot_version, router_config_hash,
+    open_deadline)``, with empty strings and 0.0 for fields the action lacks. ``accepting`` implies
+    ``drain_sequence`` is None; after a close, ``drain_sequence`` is the write sequence at the first close
+    and limits which writes the drain waits for. ``active`` holds the root task of each admitted request;
+    middleware removes it when the response is complete, so it may briefly hold a finished task.
+    ``forced_requests`` (≥ 0) counts tasks cancelled by a forced close, stop or owner loss.
+    Operations: ``control`` applies one validated command: an ``open`` opens admission, ``close`` and ``stop``
+    close it (``stop`` also sets ``stopping``), ``activate`` replaces ``settings`` through ``publisher``
+    while closed and drained. Repeating the last revision with the same command returns the status and
+    changes nothing; an older or conflicting revision is refused. ``writes`` is shared with the service;
+    ``publisher`` is set once by the app that creates this object, or stays None without routing.
+    """
 
     def __init__(self, settings: LifecycleSettings, writes: PendingWrites) -> None:
         self.settings = settings

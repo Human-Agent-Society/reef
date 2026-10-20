@@ -34,6 +34,13 @@ class ServiceConfig:
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+
+    ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
+    takes a blank value as not supplied, and nothing checks the file when the value is made.
+    ``routing_deployment`` holds the managed router's settings; loading a configuration parses and checks
+    them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
+    needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
+    those when they start, not here.
     """
 
     recipe: str = config_option(
@@ -288,6 +295,10 @@ class ServiceConfig:
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.routing_manifest is not None and (
+            not isinstance(self.routing_manifest, str) or not self.routing_manifest
+        ):
+            raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
             raise ValueError("reef.scenario_idle_unload_s must be positive")

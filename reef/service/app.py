@@ -77,7 +77,16 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
 
 
 class RoutingPublication(RoutingPublisher):
-    """Replace the service's routing policy and router runtime together, keeping the per-target handlers."""
+    """Replace the service's routing policy and router runtime together, keeping the per-target handlers.
+
+    It holds ``request_service`` and reads and replaces only that service's ``routing`` adapter.
+    ``current`` returns it, None without routing. ``publish`` refuses when routing is off, loads the
+    manifest, and refuses one whose digest is not ``snapshot_version`` or that ``check_policy_change``
+    refuses (a changed catalog, automatic model or set of Scenario names). Otherwise it assigns a new
+    adapter with the old handlers, credentials and readiness timeout, whose constructor checks the router
+    runtime hash; a refusal leaves the adapter unchanged. ``check_ready``
+    refuses a missing or unpublished runtime, then checks every provider and previews every Scenario.
+    """
 
     def __init__(self, request_service: RequestService) -> None:
         self.request_service = request_service

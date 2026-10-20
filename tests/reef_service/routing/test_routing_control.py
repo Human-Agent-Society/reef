@@ -2,11 +2,12 @@
 
 import contextlib
 import json
+import math
 import socket
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingUnixStreamServer
@@ -17,6 +18,7 @@ from reef.service.deploy.routing.routing_control import (
     ReefLifecycleClient,
     RoutingControlError,
     RoutingControlTimeout,
+    UnixHTTPConnection,
     json_object,
 )
 
@@ -24,15 +26,21 @@ pytestmark = pytest.mark.unit
 
 
 class UnixHTTPServer(ThreadingUnixStreamServer):
+    """A threaded HTTP server on a Unix socket whose handler threads never block process exit."""
+
     daemon_threads = True
 
 
 class SlowChild:
     """A lifecycle endpoint that applies each revision once and answers request ``n`` after ``delays[n]`` seconds.
 
-    ``reply`` is False to close each connection without any answer; ``reply_body`` replaces the JSON status.
-    With ``headers_first`` the status line and headers go out at once and only the body waits; ``closed``
-    then records, for each waiting request, whether the client closed its connection meanwhile.
+    A request after the last delay is answered at once. ``bodies`` lists every request body in arrival
+    order, repeats included, and ``applied`` each revision when it was first seen. ``reply`` is False to close
+    each connection without any answer; ``reply_body`` replaces the JSON status, so malformed replies stay
+    possible. With ``headers_first`` the status line and headers go out at once and only the body waits;
+    ``closed`` then records, for each waiting request, whether the client closed its connection meanwhile.
+    ``protocol`` is the HTTP version it answers with. ``handler`` makes a request handler class bound to
+    this child; ``serving`` serves it on a temporary Unix socket and shuts it down.
     """
 
     def __init__(
@@ -59,6 +67,8 @@ class SlowChild:
         child = self
 
         class Handler(BaseHTTPRequestHandler):
+            """One connection to this child: it records the request in ``child`` and answers as configured."""
+
             protocol_version = child.protocol
 
             def do_GET(self) -> None:
@@ -239,6 +249,8 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
+        """Records each POST in ``requests`` and answers with the parametrized ``status``, maybe a redirect."""
+
         def do_POST(self) -> None:
             body = self.rfile.read(int(self.headers["Content-Length"]))
             requests.append((self.path, self.headers["Authorization"], body))
@@ -307,3 +319,26 @@ def test_the_client_never_connects_over_tcp(tmp_path: Path) -> None:
 def test_invalid_control_json_is_a_typed_error(body: bytes) -> None:
     with pytest.raises(RoutingControlError):
         json_object(body)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: ReefLifecycleClient(Path("control.sock"), "", "generation", "token"),
+        lambda: ReefLifecycleClient(Path("control.sock"), "test", "generation", "token", revision=-1),
+        lambda: ReefLifecycleClient(Path("control.sock"), "test", "generation", "token", timeout_seconds=math.nan),
+        lambda: ReefLifecycleClient(Path("control.sock"), "test", "generation", "token", open_timeout_seconds=0),
+        lambda: RoutingControlError("no status", status_code=42),
+        lambda: RoutingControlError("no flag", retryable="yes"),
+        lambda: UnixHTTPConnection(Path("control.sock"), math.inf),
+    ],
+)
+def test_control_values_refuse_what_their_definitions_exclude(make: Callable[[], object]) -> None:
+    with pytest.raises(ValueError):
+        make()
+
+
+def test_a_deadline_that_already_passed_is_a_timeout_not_an_invalid_connection(tmp_path: Path) -> None:
+    connection = UnixHTTPConnection(tmp_path / "control.sock", time.monotonic() - 1)
+    with pytest.raises(TimeoutError):
+        connection.connect()

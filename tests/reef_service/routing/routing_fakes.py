@@ -151,8 +151,13 @@ def last_user_text(messages: list[dict[str, object]]) -> str:
 class FakeSemanticRouter:
     """A fake routing preview listener (not the Semantic Router) that records what Reef sends it.
 
-    ``failure`` answers every preview with that status and error code; ``hold``, when set, delays each
-    answer until it is set, after setting ``arrived``. ``disconnected`` is set when Reef drops a held preview.
+    ``previews`` lists every request in arrival order, repeats included. ``hold``, when set, delays each
+    answer until it is set, after setting ``arrived``; ``disconnected`` is set when Reef drops a held
+    preview. Then the first failing check answers with an error body: a token other than the selection
+    token is 401, an expected hash other than ``runtime_hash`` is 412, ``failure`` gives its status and
+    code, and a model outside ``snapshot``'s entrypoints is 400. Otherwise it selects the first rule with a
+    keyword in the last user text, ignoring case, or the default, and answers under ``runtime_hash``;
+    ``reply_changes`` overwrites reply fields, so a test can send replies that Reef must refuse.
     """
 
     def __init__(self, snapshot: RoutingSnapshot, runtime_hash: str = ROUTER_HASH) -> None:
@@ -228,6 +233,11 @@ async def running_router(
 
 
 class FakeEvents(ContainerEventStream):
+    """Events a test queues in ``pending``: ``poll`` returns the oldest at once, or None, never waiting.
+
+    ``close`` sets ``closed`` and then, with ``close_error``, raises ``ContainerCommandError``.
+    """
+
     def __init__(self) -> None:
         self.pending: deque[ContainerEvent] = deque()
         self.closed = False
@@ -243,9 +253,18 @@ class FakeEvents(ContainerEventStream):
 
 
 class FakeRuntime(ContainerRuntime):
-    """One owned router container per start."""
+    """One owned router container per start, with no Docker.
+
+    ``inventory`` is what ``inspect`` returns; tests may replace it with an empty, stopped or unhealthy one.
+    Each ``start`` raises ``start_error`` if set, else makes container ``router-<n>`` with the next ``n``,
+    healthy unless ``healthy_after_start`` is false; ``remove`` empties the inventory. ``ensure_available``,
+    ``start``, ``inspect``, ``remove`` and ``events`` append ``available``, ``start``, ``inspect``,
+    ``remove`` and ``subscribe`` to the shared ``actions`` log before they act. Each ``events`` stream is a
+    new ``FakeEvents`` kept in ``streams``, already holding a disconnect when ``new_stream_disconnected``.
+    """
 
     def __init__(self, actions: list[str]) -> None:
+        self.compose_environment = {}
         self.actions = actions
         self.group_number = 0
         self.inventory = self.healthy_inventory()
@@ -285,7 +304,15 @@ class FakeRuntime(ContainerRuntime):
 
 
 class FakeControl(ReefLifecycleClient):
-    """The REEF child's lifecycle: closed and unpublished until the controller publishes a runtime."""
+    """The REEF child's lifecycle: closed and unpublished until the controller publishes a runtime.
+
+    It keeps the client's ``request`` contract (status dict, ``RoutingControlError``) but answers in memory,
+    so an ``open`` never previews anything. With ``available`` False every request raises
+    ``RoutingControlError``, as for a lost child, before it is logged. Otherwise ``actions`` and
+    ``deadlines`` log it, and each command advances ``revision`` even if it then fails: an ``activate``
+    raises ``activation_error`` if set, or a non-retryable 409 when its expected snapshot is not the current
+    one; an ``open`` raises a retryable 409 before any runtime is published, then ``open_error`` if set.
+    """
 
     def __init__(self, actions: list[str]) -> None:
         super().__init__(Path("/unused/control.sock"), "unit-routing", "generation-one", "unit-control-token")
@@ -348,7 +375,14 @@ class FakeControl(ReefLifecycleClient):
 
 
 class FakeManagement(RouterManagementClient):
-    """The router's management API serving one stored document and its runtime."""
+    """The router's management API serving one stored document and its runtime.
+
+    Only three reads are faked, in memory. ``config_etag`` returns ``etag`` and ``runtime_hashes`` the two
+    runtime hashes and ``activation_status``; with ``available`` False both raise ``RouterPolicyError``.
+    ``ready`` logs ``router:ready``, requests the stop of ``stop_on_ready`` if set, and returns
+    ``available and is_ready``, so an unavailable router is not ready rather than an error. The inherited
+    ``call``, ``plan`` and ``replace`` are the real client's, aimed at port 1.
+    """
 
     def __init__(self, actions: list[str], document: Path) -> None:
         super().__init__(1, "unit-management-token")
@@ -384,6 +418,12 @@ class FakeManagement(RouterManagementClient):
 
 @dataclass
 class ControllerCase:
+    """What ``controller_case`` assembles: ``controller`` uses ``runtime``, ``control`` and ``management``.
+
+    ``actions`` is the one ordered log, repeats included, that those three fakes append their calls to;
+    the controller writes its own lifecycle events to its event file, not here.
+    """
+
     controller: RoutingDeploymentController
     runtime: FakeRuntime
     control: FakeControl

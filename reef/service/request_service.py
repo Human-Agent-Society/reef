@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Mapping, Sequence
@@ -144,6 +145,19 @@ def normalize_request_payload(
 
 @dataclass(frozen=True)
 class PendingInference:
+    """State retained to finalize one provider stream, including after its connection has closed.
+
+    ``item`` is the record to finalize. ``record_stream`` releases the optional ``admission`` and ``lease``
+    handles in its finalization path, whether storage succeeds or fails. ``deferred_prepared`` and ``path``
+    are set together when the handler validates its response only at the end. ``routing_decision`` is None
+    or a ``RoutingDecision`` and ``routing_request_id`` a string. For a routed stream, ``routing_decision`` is its
+    decision, ``record`` is true, ``routing_request_id`` is non-empty and
+    ``routing_decision.scenario == item.scenario``; otherwise ``routing_decision`` is None and
+    ``routing_request_id`` is empty. ``routing_started`` is a finite int or float, normally the
+    ``time.monotonic`` reading taken at the provider call, or zero by default. A routed record's elapsed
+    time is measured from it. The other fields retain their existing contracts.
+    """
+
     item: AgentRecord
     release_id: str | None
     admission: InferenceAdmissionHandle | None = None
@@ -156,6 +170,19 @@ class PendingInference:
     routing_decision: RoutingDecision | None = None
     routing_request_id: str = ""
     routing_started: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
+            raise ValueError("a stream's routing decision must be None or a routing decision")
+        if not isinstance(self.routing_request_id, str):
+            raise ValueError("a stream's routing request ID must be a string")
+        if type(self.routing_started) not in (float, int) or not math.isfinite(self.routing_started):
+            raise ValueError("a stream's routing start must be a finite monotonic reading")
+        if self.routing_decision is None:
+            if self.routing_request_id:
+                raise ValueError("an unrouted stream has no routing request ID")
+        elif not self.record or not self.routing_request_id or self.routing_decision.scenario != self.item.scenario:
+            raise ValueError("a routed stream keeps a record of its own Scenario under a routing request ID")
 
 
 @dataclass(frozen=True)
@@ -207,6 +234,18 @@ class InferenceRetryTimeout(ReefError):
 
 
 class RequestService:
+    """The HTTP routes' inference, record and report operations over one dispatcher.
+
+    Routing state: ``routing`` is the routing adapter requests are admitted with, or None without routing; a
+    managed child's publication replaces it. ``preview`` is the router's preview client, needed only for
+    automatic selection: without it ``select_route`` raises for the automatic model, while explicit pins
+    still resolve. ``writes`` is the managed child's ``PendingWrites``, or None, which makes ``persist`` a
+    plain await.
+    Routed operations: ``select_route`` decides once per request; ``infer_routed`` and the routed branch of
+    ``start_stream`` use that decision and its handler for the provider call and every retry; each provider
+    attempt keeps one record, and a success's receipt names a record that is already stored.
+    """
+
     def __init__(
         self,
         dispatcher: Dispatcher,

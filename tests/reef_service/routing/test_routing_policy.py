@@ -100,7 +100,9 @@ class RouterConfigServer:
     """Upstream management schema: ETag on GET, plan ETags, If-Match PUT, generated/active runtime hashes.
 
     Like ``config_activation.go``, the status is ``active`` exactly when the
-    active runtime hash equals the generated one.
+    active runtime hash equals the generated one. ``mode`` scripts the next
+    PUT (``ok``, ``other_writer``, ``lost_unknown``, ``pending``, ``stop``,
+    ``failed``, ``hash_mismatch`` or ``lost``); ``next_mode`` then replaces it.
     """
 
     def __init__(self, document: str) -> None:
@@ -125,6 +127,8 @@ class RouterConfigServer:
         state = self
 
         class Handler(BaseHTTPRequestHandler):
+            """Serves the management API from the enclosing server's state to requests with its token."""
+
             def log_message(self, *arguments: object) -> None:
                 pass
 
@@ -242,6 +246,11 @@ class RouterConfigServer:
 
 @dataclass
 class PolicyCase:
+    """A ready controller whose management client reaches ``router``, serving the policy rendered from ``source``.
+
+    ``startup_version`` is that rendered snapshot's version, and ``actions`` is the log shared by the fakes.
+    """
+
     controller: RoutingDeploymentController
     control: FakeControl
     router: RouterConfigServer
@@ -787,3 +796,21 @@ def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case: Policy
     case.controller.next_probe = 0
     with pytest.raises(RoutingDeploymentError, match="fail_stop"):
         case.controller.tick()
+
+
+@pytest.mark.parametrize(
+    ("port", "token", "timeout_seconds"),
+    [
+        (0, MANAGEMENT_TOKEN, 1.0),
+        (True, MANAGEMENT_TOKEN, 1.0),
+        (8080, "", 1.0),
+        (8080, "two words", 1.0),
+        (8080, MANAGEMENT_TOKEN, float("nan")),
+        (8080, MANAGEMENT_TOKEN, 0),
+    ],
+)
+def test_a_management_client_needs_a_port_a_header_safe_token_and_a_bounded_timeout(
+    port: object, token: object, timeout_seconds: object
+) -> None:
+    with pytest.raises(ValueError):
+        RouterManagementClient(port, token, timeout_seconds)

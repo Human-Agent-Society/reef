@@ -63,6 +63,8 @@ def test_unrouted_deployment_does_not_construct_controller_or_touch_docker(
         pytest.fail("a deployment without routing reached a managed Docker/controller boundary")
 
     class NativeStack:
+        """An ordinary stack: checks no service gets a routing control file and logs start, block and shutdown."""
+
         def __init__(
             self,
             config: dict[str, object],
@@ -163,6 +165,8 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
             released.set()
 
     class RoutingOnlyStack(orchestrator._Stack):
+        """The real stack with its routing controller but no native services."""
+
         def __init__(
             self,
             config: dict[str, object],

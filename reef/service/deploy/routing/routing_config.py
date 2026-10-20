@@ -14,7 +14,17 @@ from reef.core.config import config_arguments, config_option, parse_config_value
 class RoutingDeploymentSettings:
     """The owned router container: identity, resources, preview limits and recovery policy.
 
-    These settings apply only when ``reef.routing_manifest`` is set; ``deployment_id`` is then required.
+    Values: ``deployment_id`` is None or 1 to 48 lowercase letters, digits or hyphens, starting with a letter
+    or digit. ``restart_policy`` is ``fail_stop`` or ``bounded``; ``max_restarts`` is an int ≥ 0, and ≥ 1
+    when bounded. ``restart_backoff_seconds`` is a non-empty tuple of finite numbers ≥ 0, in order, with
+    repeats allowed. The ready, finalization and container stop timeouts and ``sr_cpus`` are finite and
+    positive; ``drain_timeout_seconds`` is finite and ≥ 0. ``sr_management_port`` is an int from 1 to 65535,
+    ``selection_timeout_seconds`` an int from 1 to 300, ``preview_max_concurrency`` an int from 1 to 4096,
+    and ``sr_memory_bytes`` a positive int.
+    Purpose: ``routing_deployment_settings`` makes it from ``reef.routing_deployment``; the controller and
+    the renderer read it. Recovery attempt ``n`` (from 1) waits ``restart_backoff_seconds[min(n - 1,
+    len - 1)]``, so the last delay repeats. These settings apply only when ``reef.routing_manifest`` is set;
+    ``require_identity`` then returns ``deployment_id`` or refuses a deployment without one.
     """
 
     deployment_id: str | None = config_option(None, help="Stable local deployment identifier.")
@@ -49,6 +59,9 @@ class RoutingDeploymentSettings:
             raise ValueError("routing max_restarts must be a nonnegative integer")
         if self.restart_policy == "bounded" and self.max_restarts == 0:
             raise ValueError("bounded routing requires at least one recovery attempt")
+        if type(self.restart_backoff_seconds) is not tuple:
+            # A frozen value must not keep a list the caller can still change.
+            raise ValueError("routing restart_backoff_seconds must be a tuple of numbers")
         if not self.restart_backoff_seconds or any(
             type(value) not in (int, float) or not math.isfinite(value) or value < 0
             for value in self.restart_backoff_seconds

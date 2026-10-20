@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import signal
 import stat
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,9 @@ from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
 from reef.service.deploy.routing.routing_containers import (
     SEMANTIC_ROUTER_REVISION,
     ContainerCommandError,
+    ContainerEvent,
+    ContainerInventory,
+    ContainerState,
     DockerComposeRuntime,
     DockerEventStream,
     GuardedCommand,
@@ -37,6 +41,15 @@ def ownership(tmp_path: Path) -> DeploymentOwnership:
 
 
 class FakeDocker(DockerComposeRuntime):
+    """The real runtime over an in-memory Docker: ``run`` answers CLI commands without starting any.
+
+    ``containers`` maps container IDs to Compose services and ``networks`` holds network IDs, all labeled
+    as ``ownership``'s; ``foreign`` and ``paused`` change what container inspection reports, and
+    ``image_labels`` is the image inspection output. ``container rm`` and ``network rm`` delete the resource
+    they name; they and every other command without an answer here return empty output. ``commands`` logs
+    every CLI command in order.
+    """
+
     def __init__(self, ownership: DeploymentOwnership) -> None:
         super().__init__()
         self.commands: list[list[str]] = []
@@ -233,6 +246,8 @@ def test_image_inspection_failure_never_submits_container_creation(
     ownership: DeploymentOwnership, failure: str
 ) -> None:
     class UnavailableImage(FakeDocker):
+        """A Docker whose image inspection fails as ``failure`` names; other commands are unchanged."""
+
         def run(self, arguments: Sequence[str], timeout_seconds: float = 5, *, mutation: bool = False) -> str:
             if arguments[:2] == ["image", "inspect"]:
                 if failure == "malformed-labels":
@@ -261,6 +276,82 @@ def test_unknown_mutation_never_echoes_command_output() -> None:
         runtime.run(["-c", "print('secret-value'); raise SystemExit(7)"], mutation=True)
     assert caught.value.outcome_unknown
     assert "secret-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: ContainerState("router-0", "semantic-router", "false", "healthy"),
+        lambda: ContainerState("router-0", "semantic-router", True, 1),
+        lambda: ContainerInventory([ContainerState("router-0", "semantic-router", True, "healthy")]),
+        lambda: ContainerInventory((), ["network-0"]),
+        lambda: ContainerEvent("router-0", None),
+        lambda: ContainerCommandError("failed", outcome_unknown=1),
+        lambda: DockerComposeRuntime(""),
+    ],
+)
+def test_container_values_refuse_what_their_definitions_exclude(make: Callable[[], object]) -> None:
+    with pytest.raises(ValueError):
+        make()
+
+
+@pytest.mark.parametrize(
+    ("command", "timeout_seconds"),
+    [
+        ("docker", 1),
+        (b"docker", 1),
+        ([], 1),
+        ([""], 1),
+        (["", "ps"], 1),
+        ([sys.executable, 1], 1),
+        ([sys.executable], math.inf),
+        ([sys.executable], 0),
+    ],
+)
+def test_a_malformed_command_is_refused_before_any_pipe_exists(
+    monkeypatch: pytest.MonkeyPatch, command: object, timeout_seconds: float
+) -> None:
+    monkeypatch.setattr(os, "pipe", lambda: pytest.fail("a malformed command allocated a pipe"))
+    with pytest.raises(ValueError):
+        GuardedCommand(command, timeout_seconds)
+
+
+@pytest.mark.parametrize(
+    ("command", "environment", "error"),
+    [([sys.executable, "embedded\0null"], None, ValueError), ([sys.executable], {"REEF_TEST": 1}, TypeError)],
+)
+def test_a_command_popen_refuses_closes_both_ends_of_its_owner_pipe(
+    monkeypatch: pytest.MonkeyPatch, command: list[str], environment: dict[str, object] | None, error: type
+) -> None:
+    owner_pipe: list[tuple[int, int]] = []
+    real_pipe = os.pipe
+
+    def first_pipe() -> tuple[int, int]:
+        descriptors = real_pipe()
+        if not owner_pipe:
+            owner_pipe.append(descriptors)
+        return descriptors
+
+    monkeypatch.setattr(os, "pipe", first_pipe)
+    with pytest.raises(error):
+        GuardedCommand(command, 1, environment=environment)
+    monkeypatch.undo()
+    for descriptor in owner_pipe[0]:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_an_empty_argument_after_the_executable_reaches_the_command() -> None:
+    output = DockerComposeRuntime(sys.executable).run(["-c", "import sys; print(sys.argv[1:])", ""])
+    assert output.strip() == "['']"
+
+
+def test_container_values_keep_every_observation() -> None:
+    """Readiness, not the value, decides what an observation means; duplicates and unknown strings stay."""
+    stopped = ContainerState("router-0", "other-service", False, "unknown-health")
+    assert ContainerInventory((stopped, stopped)).containers == (stopped, stopped)
+    assert ContainerEvent("", "stream_disconnected").container_id == ""
+    assert ContainerEvent("router-0", "").action == ""
 
 
 def test_command_timeout_is_bounded() -> None:
@@ -420,6 +511,8 @@ def test_interrupted_mutation_requires_matching_explicit_acknowledgement(ownersh
 
 def test_mutation_marker_precedes_cli_and_survives_failure(ownership: DeploymentOwnership) -> None:
     class FailingDocker(FakeDocker):
+        """A Docker whose every mutation fails with an unknown outcome, after checking its marker exists."""
+
         def run(self, arguments: Sequence[str], timeout_seconds: float = 5, *, mutation: bool = False) -> str:
             if mutation:
                 assert self.mutation_pending(ownership)
@@ -531,6 +624,8 @@ def test_invalid_inspect_responses_have_typed_sanitized_errors(
     malformation: str,
 ) -> None:
     class MalformedDocker(FakeDocker):
+        """A Docker whose container inspection reply is malformed as ``malformation`` names."""
+
         def run(self, arguments: Sequence[str], timeout_seconds: float = 5, *, mutation: bool = False) -> str:
             encoded = super().run(arguments, timeout_seconds, mutation=mutation)
             if arguments[:2] != ["container", "inspect"]:

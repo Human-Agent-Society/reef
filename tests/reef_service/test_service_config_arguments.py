@@ -303,3 +303,12 @@ def test_scenario_limits_and_idle_unload_are_reef_settings():
 def test_invalid_scenario_admission_settings_are_refused(values, message):
     with pytest.raises(ValueError, match=message):
         service_config_from_mapping({"reef": {"recipe": "recipe", **values}})
+
+
+def test_a_routing_manifest_is_none_or_a_non_empty_path() -> None:
+    with pytest.raises(ValueError, match="routing_manifest must be a non-empty path"):
+        ServiceConfig(recipe="recipe", routing_manifest="")
+    # The public reader takes a blank value, such as an unset environment reference, as not supplied.
+    assert (
+        service_config_from_mapping({"reef": {"recipe": "recipe", "routing_manifest": " "}}).routing_manifest is None
+    )

@@ -81,9 +81,13 @@ READINESS_TEXT = "Reef routing readiness check."
 class PreviewSettings:
     """The router's loopback management listener, its selection-only token, and its preview timeout.
 
-    ``request_timeout_seconds`` must equal the router's
-    ``global.services.api.routing_preview.request_timeout_seconds``; the client
-    waits that long plus the router's write allowance before giving up.
+    Values: ``base_url`` is exactly ``http://127.0.0.1:<port>`` with a port of at least 1 and no
+    credentials, path, query or fragment. ``token`` is a non-empty string of printable ASCII other than
+    space (code points 33 to 126). ``request_timeout_seconds`` is an int from 1 to 300 and must equal the
+    router's ``global.services.api.routing_preview.request_timeout_seconds``.
+    Purpose: service assembly makes it from the managed child's settings; ``RoutingPreviewClient`` reads it.
+    ``preview_url`` is ``base_url + PREVIEW_PATH``. ``http_timeout_seconds`` is
+    ``request_timeout_seconds + RESPONSE_WRITE_ALLOWANCE_SECONDS``: how long the client waits for one reply.
     """
 
     base_url: str
@@ -108,7 +112,7 @@ class PreviewSettings:
             or parts.fragment
         ):
             raise ValueError("routing preview URL must be http://127.0.0.1:<port>")
-        if not self.token or any(not 33 <= ord(char) <= 126 for char in self.token):
+        if not isinstance(self.token, str) or not self.token or any(not 33 <= ord(char) <= 126 for char in self.token):
             raise ValueError("routing preview token must be nonempty printable ASCII without spaces")
         if type(self.request_timeout_seconds) is not int or not 1 <= self.request_timeout_seconds <= 300:
             raise ValueError("routing preview request timeout must be a whole number of seconds from 1 to 300")
@@ -324,11 +328,20 @@ async def read_bounded(response: ClientResponse, limit: int) -> bytes:
 class RoutingPreviewClient:
     """One HTTP session to the router's preview route, opened by ``start`` and released by ``close``.
 
-    Each ``select`` sends exactly one request. It starts no background task; a
-    cancelled ``select`` closes its connection and raises ``CancelledError``.
+    Values: ``settings`` is the ``PreviewSettings`` the client was made with.
+    State: ``session`` is None (not started, or closed) or one open ``ClientSession``. ``start`` opens it
+    and is refused while it is open; ``close`` releases it, does nothing when there is none, and allows a
+    later ``start``. ``select`` and ``check_ready`` need an open session.
+    Operations: ``select(routing, scenario, payload)`` sends exactly one preview for an automatic request
+    of ``scenario``, a Scenario of ``routing.snapshot``, and returns a decision with ``target_id ∈
+    target_ids(scenario)`` or raises ``RoutingRequestError``. It starts no background task; a cancelled
+    ``select`` closes its connection and raises ``CancelledError``. ``check_ready`` sends one such preview
+    per Scenario. One service owns one client; requests share its session.
     """
 
     def __init__(self, settings: PreviewSettings) -> None:
+        if not isinstance(settings, PreviewSettings):
+            raise ValueError("a routing preview client needs preview settings")
         self.settings = settings
         self.session: ClientSession | None = None
 

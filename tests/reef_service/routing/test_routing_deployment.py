@@ -286,6 +286,18 @@ def test_invalid_routing_settings_fail_before_launch(settings: dict[str, object]
         normalize_service_config({"reef": {"routing_deployment": settings}})
 
 
+def test_directly_made_routing_values_keep_their_definitions() -> None:
+    # The public parser turns the backoff list into a tuple; a frozen value never keeps a caller's list.
+    with pytest.raises(ValueError, match="tuple"):
+        RoutingDeploymentSettings(restart_backoff_seconds=[1.0])
+    policy = RoutingDeploymentSettings(deployment_id="test-routing")
+    for deployment_id, owner_id, generation in (("other", "owner", "one"), ("test-routing", "", "one")):
+        with pytest.raises(ValueError):
+            ManagedRoutingRender(policy, deployment_id, owner_id, generation)
+    # Candidate validation renders with placeholder labels, not registry identities.
+    assert ManagedRoutingRender(policy, "test-routing", "validation", "validation").owner_id == "validation"
+
+
 def test_the_documented_validate_command_reads_a_public_configuration_without_docker(
     deployment_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

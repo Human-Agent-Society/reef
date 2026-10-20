@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -24,16 +25,41 @@ class RouterPolicyError(RuntimeError):
     """The router's configuration cannot be confirmed as this owner's committed or candidate document.
 
     A failed mutation may still have reached the router, so its caller inspects the result and never replays it.
+    The controller turns a failure before any mutation into a rejected update, and a failed read while it
+    observes the router into a failed readiness check.
     """
 
 
 @dataclass
 class RouterManagementClient:
-    """Authenticated loopback calls to the router's configuration API; no redirects or proxies."""
+    """Authenticated loopback calls to the router's configuration API; no redirects or proxies.
+
+    Values: ``port`` is an int from 1 to 65535 on 127.0.0.1; ``token`` is a non-empty bearer token of
+    printable ASCII other than space; ``timeout_seconds`` is finite and positive. It is the socket timeout of
+    each connect, send and read, so one call may take longer in total.
+    Operations: ``call`` returns ``(status, body, etag)``: the HTTP status, the reply as a JSON object or
+    ``{}`` when it is not one, and the ETag or ``""``. It raises ``RouterPolicyError`` when no reply
+    arrives, and then a mutation may have been applied. ``config_etag``, ``plan`` and ``runtime_hashes``
+    raise ``RouterPolicyError`` for any status but 200; ``replace`` returns the PUT's status and body for the
+    caller to inspect; ``ready`` is true exactly for a 200 ``/ready``. The controller sends each PUT once.
+    """
 
     port: int
     token: str = field(repr=False)
     timeout_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise ValueError("router management port must be an integer from 1 to 65535")
+        if not isinstance(self.token, str) or not self.token or any(not 33 <= ord(char) <= 126 for char in self.token):
+            raise ValueError("router management token must be nonempty printable ASCII without spaces")
+        if (
+            not isinstance(self.timeout_seconds, (int, float))
+            or isinstance(self.timeout_seconds, bool)
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("router management timeout must be finite positive seconds")
 
     def call(
         self, method: str, path: str, body: dict[str, object] | None = None, *, if_match: str | None = None
@@ -109,12 +135,17 @@ def write_private_atomically(path: Path, text: str) -> None:
 
 
 class PolicyStateStore:
-    """The deployment's private journal: the committed pair and any pending update.
+    """Read and replace the deployment's private policy journal: one JSON object in one file.
 
-    ``committed`` names the router document, its ETag and runtime hash, and a
-    copy of the Reef manifest kept outside generation directories. It changes
-    only after the router reports that exact runtime active, and before the
-    Reef child publishes it. ``pending`` remains until the outcome is verified.
+    The store holds only ``path`` and checks only that the file holds a JSON object; the controller defines
+    and checks its keys. By its convention ``committed`` names the router document, its ETag and runtime
+    hash, and a copy of the Reef manifest kept outside generation directories. It changes only after the
+    router reports that exact runtime active, and before the Reef child publishes it. ``pending`` remains
+    until the outcome is verified.
+    Operations: ``load`` returns ``{}`` when the file does not exist, the object it holds otherwise, and
+    raises ``ValueError`` for any other JSON value. ``write`` replaces the whole file atomically.
+    ``keep_source`` copies a manifest to ``committed/<digest>.yaml`` beside the journal, privately and
+    atomically, and returns that path.
     """
 
     def __init__(self, path: Path) -> None:

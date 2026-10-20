@@ -131,7 +131,15 @@ def test_frame_for_codex_leaves_every_other_frame_untouched() -> None:
 
 
 class _RecordingRequestService:
-    """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream."""
+    """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream.
+
+    ``dispatcher`` exposes only ``recipe.harness_adapter``, and ``routing`` is None, so no request is
+    routed. ``start_stream`` appends ``(record, evaluated, decision)`` to ``started`` and returns a new
+    ``upstream`` stream of the ``OPENROUTER_SSE`` frames, with a pending value that holds ``record`` and a
+    new ``reef-codex`` inference record. ``record_stream`` appends the relayed response to ``recorded`` and
+    returns that record, ``persist`` awaits its write, and ``harness_head`` returns None. It writes no
+    storage and holds no connection.
+    """
 
     def __init__(self, harness_adapter: str | None) -> None:
         self.recorded: list[Mapping[str, Any]] = []
@@ -178,7 +186,12 @@ class _RecordingRequestService:
 
 
 class HeaderLookupService(_RecordingRequestService):
-    """A resident harness whose release-header lookup blocks, or fails, after the stream is open."""
+    """A resident ``pi`` harness whose release-header lookup blocks, or fails, after the stream is open.
+
+    ``upstream`` streams like the base service's but counts each ``close`` of its stream in ``closes``.
+    ``harness_head`` sets ``entered``, then raises ``failure`` if one was given, or else waits up to five
+    seconds for the test to set ``release``. Both events are ``threading.Event`` values.
+    """
 
     def __init__(self, failure: Exception | None) -> None:
         super().__init__("pi")

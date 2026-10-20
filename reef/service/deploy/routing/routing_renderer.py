@@ -39,12 +39,25 @@ UNUSED_BACKEND = "127.0.0.1:9"
 
 @dataclass(frozen=True)
 class ManagedRoutingRender:
-    """Identity supplied by the deployment controller for one generation's resources."""
+    """Identity supplied by the deployment controller for one generation's resources.
+
+    Values: ``deployment_id`` equals ``settings.deployment_id``; ``owner_id`` and ``generation`` are non-empty
+    strings, used only as container and network labels. They need not be registry identities: candidate
+    validation renders with the placeholder labels ``"validation"``.
+    Purpose: the controller makes it for ``generate``, which writes the generation's files with these
+    labels. It owns no container and holds no credential.
+    """
 
     settings: RoutingDeploymentSettings
     deployment_id: str
     owner_id: str
     generation: str
+
+    def __post_init__(self) -> None:
+        if self.settings.deployment_id != self.deployment_id:
+            raise ValueError("managed renderer identity must match its deployment settings")
+        if any(not isinstance(label, str) or not label for label in (self.owner_id, self.generation)):
+            raise ValueError("managed renderer owner and generation labels must be non-empty strings")
 
 
 def write_private_document(path: Path, document: object) -> None:
@@ -182,8 +195,6 @@ def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -
     Token values never enter this renderer, its configuration digest or any generated file.
     """
     settings = managed.settings
-    if settings.deployment_id != managed.deployment_id:
-        raise ValueError("managed renderer identity must match its deployment settings")
     if output.is_symlink():
         raise ValueError("routing output directory must not be a symlink")
     if output.exists() and any(output.iterdir()):

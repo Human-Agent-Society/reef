@@ -402,7 +402,11 @@ def test_a_reconnect_without_trusted_observation_stays_fatal(
 
 
 class SteppingClock:
-    """A monotonic clock that only ``sleep`` advances, standing in for the controller module's ``time``."""
+    """A monotonic clock that only ``sleep`` advances, standing in for the controller module's ``time``.
+
+    ``now`` starts at 1000.0. ``monotonic`` returns it; ``sleep(seconds)`` adds ``seconds`` at once, without
+    waiting or checking the sign. It provides only these two functions of ``time`` and owns no resource.
+    """
 
     def __init__(self) -> None:
         self.now = 1000.0

@@ -19,16 +19,28 @@ MAX_SOCKET_PATH_BYTES = 103
 
 
 class RoutingControlError(RuntimeError):
-    """A bounded control request failed without exposing credentials or bodies."""
+    """A bounded control request failed without exposing credentials or bodies.
+
+    Values: ``retryable`` is a bool; ``status_code`` is None when no HTTP reply status exists, or the
+    child's HTTP status from 100 to 599. ``retryable`` tells the controller whether waiting and checking
+    again can succeed; ``ReefLifecycleClient.request`` itself retries only transport timeouts.
+    """
 
     def __init__(self, message: str, *, retryable: bool = True, status_code: int | None = None) -> None:
+        if type(retryable) is not bool:
+            raise ValueError("routing control retryable must be a boolean")
+        if status_code is not None and (type(status_code) is not int or not 100 <= status_code <= 599):
+            raise ValueError("routing control status_code must be None or an HTTP status")
         super().__init__(message)
         self.retryable = retryable
         self.status_code = status_code
 
 
 class RoutingControlTimeout(RoutingControlError):
-    """No timely reply: every attempt timed out, or the reply came after the caller's deadline."""
+    """No timely reply: every attempt timed out, or the reply came after the caller's deadline.
+
+    It does not show that the child did nothing: a command may have been applied before its reply was lost.
+    """
 
 
 def json_object(body: bytes) -> dict[str, object]:
@@ -44,11 +56,15 @@ def json_object(body: bytes) -> dict[str, object]:
 class UnixHTTPConnection(http.client.HTTPConnection):
     """One HTTP exchange over a Unix socket; each blocking step gets only the time left before ``deadline``.
 
-    ``deadline`` is on the ``time.monotonic`` clock. A socket timeout bounds each blocking socket call,
-    not the whole exchange.
+    ``deadline`` is a finite value of the ``time.monotonic`` clock and may already have passed, which makes
+    the next step raise ``TimeoutError``. A socket timeout bounds each blocking socket call, not the whole
+    exchange. ``ReefLifecycleClient.request`` makes one connection per attempt and closes it, together with
+    any response that ``getresponse`` handed the socket to.
     """
 
     def __init__(self, socket_path: Path, deadline: float) -> None:
+        if not math.isfinite(deadline):
+            raise ValueError("a Unix HTTP connection deadline must be finite")
         super().__init__("localhost")
         self.socket_path = socket_path
         self.deadline = deadline
@@ -86,8 +102,14 @@ CONTROL_ATTEMPTS = 3
 class ReefLifecycleClient:
     """Owner-generation control requests to the REEF child over its private Unix socket.
 
-    ``timeout_seconds`` bounds one attempt of an ordinary request. An ``open`` checks every provider and
-    previews every Scenario first, so its first attempt gets ``open_timeout_seconds``.
+    Values: ``deployment_id``, ``generation`` and ``token`` are non-empty strings; ``revision`` is an int ≥ 0,
+    the last allocated command revision. Both timeouts are finite positive numbers of seconds.
+    ``socket_path`` is always dialed as a Unix socket, whatever it looks like; it need not exist yet.
+    Operations: ``request(None)`` reads the status and leaves ``revision`` unchanged; each command
+    increments it once, and its retries resend the same bytes. ``timeout_seconds`` bounds one attempt of an
+    ordinary request. An ``open`` checks every provider and previews every Scenario first, so its first
+    attempt gets ``open_timeout_seconds``. One controller owns a client, so the child sees one sequence of
+    revisions per generation; the client keeps no connection between requests.
     """
 
     socket_path: Path
@@ -97,6 +119,20 @@ class ReefLifecycleClient:
     revision: int = 0
     timeout_seconds: float = 2.0
     open_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation, self.token)):
+            raise ValueError("REEF lifecycle control needs a deployment ID, a generation and a token")
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("REEF lifecycle control revision must be a nonnegative integer")
+        for seconds in (self.timeout_seconds, self.open_timeout_seconds):
+            if (
+                not isinstance(seconds, (int, float))
+                or isinstance(seconds, bool)
+                or not math.isfinite(seconds)
+                or seconds <= 0
+            ):
+                raise ValueError("REEF lifecycle control timeouts must be finite positive seconds")
 
     def request(
         self,

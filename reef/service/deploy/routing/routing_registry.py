@@ -14,11 +14,27 @@ from reef.runtime.recovery import write_json
 
 
 class RoutingOwnershipError(RuntimeError):
-    """A resource or registry does not belong to this managed deployment."""
+    """A resource or registry does not belong to this managed deployment.
+
+    The registry and the Docker runtime raise it instead of acting on a resource whose ownership they could
+    not verify, so no foreign resource is adopted or removed; the owner stops instead of recovering. It does
+    not mean nothing changed: ``DeploymentRegistry.acquire`` may already have created the registry directory
+    and lock file, and made them private, before it finds the lock held.
+    """
 
 
 @dataclass(frozen=True)
 class DeploymentOwnership:
+    """Which owner runs which generation of one managed routing deployment.
+
+    Values: ``deployment_id`` is 1 to 48 lowercase letters, digits or hyphens and ``generation`` 1 to 64, each
+    starting with a letter or digit; ``owner_id`` is 32 lowercase hexadecimal characters (a UUID), stable
+    across the deployment's generations; ``configuration_directory`` is an absolute path.
+    Purpose: ``DeploymentRegistry.prepare`` makes it and saves it before any Docker change. Every container
+    and network carries ``labels`` and belongs to the Compose project ``project_name``
+    (``reef-<deployment_id>-<generation>``); the runtime refuses resources whose labels differ.
+    """
+
     deployment_id: str
     owner_id: str
     generation: str
@@ -52,6 +68,13 @@ class DeploymentRegistry:
 
     The registry path is independent of the run directory. The lock descriptor
     is non-inheritable, and mutation methods reject calls from a forked child.
+
+    State: ``directory`` is ``<root>/<deployment_id>``. Unlocked, ``lock_descriptor`` and ``lock_owner_pid``
+    are None; ``acquire`` creates the directory and lock file if needed, makes them private, then takes the
+    exclusive lock and sets both; it does nothing when this process already holds it, and refuses a lock
+    another process holds. ``release`` unlocks and does nothing when unlocked.
+    ``load``, ``prepare`` and ``save`` need the lock; ``read_owner`` does not and serves status only. The
+    saved ``owner_id`` never changes once written; ``prepare`` keeps it and saves a new generation.
     """
 
     def __init__(self, deployment_id: str, root: Path | None = None) -> None:
