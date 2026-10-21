@@ -34,8 +34,10 @@ class ScriptedEngine(FakeMLXEngine):
     """A fake engine that answers each probe prompt with the next scripted reply."""
 
     replies: list[str] = field(default_factory=list)
+    temperatures: list[float | None] = field(default_factory=list)
 
     def generate(self, prompt_tokens, *, max_tokens=None, temperature=None, listener=None):
+        self.temperatures.append(temperature)
         rollout = super().generate(prompt_tokens, max_tokens=max_tokens, temperature=temperature, listener=listener)
         return replace(rollout, text=self.replies.pop(0))
 
@@ -218,10 +220,12 @@ def test_the_first_turn_probe_refuses_a_candidate_that_stops_calling_tools(tmp_p
         evaluation = plugin.evaluate(candidate)
         return plugin.decide(candidate, evaluation), evaluation
 
-    calls, evaluation = run([TOOL_CALL, TOOL_CALL])
+    calls, evaluation = run([TOOL_CALL] * 4)
     assert evaluation.metrics["first_turn_tool_rate"] == 1.0
     assert calls.selected
-    announced, evaluation = run(["I'll read the file first.", TOOL_CALL])
+    # Two openings per conversation, sampled as serving samples them.
+    assert engine.temperatures[-4:] == [None] * 4
+    announced, evaluation = run(["I'll read the file first.", TOOL_CALL, "I'll read it.", TOOL_CALL])
     assert evaluation.metrics["first_turn_tool_rate"] == 0.5
     assert not announced.selected
     assert announced.reason.startswith("first_turn_tool_rate 0.5 is below min_first_turn_tool_rate 0.75")

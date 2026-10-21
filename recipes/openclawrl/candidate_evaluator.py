@@ -65,7 +65,9 @@ reply_clean_rate`` makes the regression check use it instead of
 A policy can also stop calling tools where the harness needs one: it writes
 that it will read the file and ends its turn. The reply probe starts after the
 file was read, so it cannot see this. ``min_first_turn_tool_rate`` adds a probe
-of each conversation cut after the user's request. ``evaluate`` reports
+of each conversation cut after the user's request. It samples two openings
+per conversation as serving does, because greedy decoding hides a policy that
+calls the tool on only some samples. ``evaluate`` reports
 ``first_turn_tool_rate``, the fraction of these openings that contain a tool
 call, and ``decide`` refuses a candidate below the floor before any other check.
 """
@@ -99,6 +101,9 @@ REPLY_CLEAN_RATE_METRIC = "reply_clean_rate"
 FIRST_TURN_TOOL_RATE_METRIC = "first_turn_tool_rate"
 #: Enough tokens for a short preamble and the start of a tool call.
 FIRST_TURN_MAX_TOKENS = 96
+#: Sampled openings per conversation. Greedy decoding hides a policy that
+#: calls the tool only on some samples, as serving draws them.
+FIRST_TURN_SAMPLES = 2
 REGRESSION_METRICS = (CLEAN_RATE_METRIC, REPLY_CLEAN_RATE_METRIC)
 
 # Fixed GSM8K problems with gold answers; a run probes the first ``probe_size``.
@@ -319,7 +324,10 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
             }
             if self.first_turn_prompts:
                 openings = self.runtime.probe_candidate(
-                    candidate.candidate_id, self.first_turn_prompts, max_tokens=FIRST_TURN_MAX_TOKENS
+                    candidate.candidate_id,
+                    [prompt for prompt in self.first_turn_prompts for _ in range(FIRST_TURN_SAMPLES)],
+                    max_tokens=FIRST_TURN_MAX_TOKENS,
+                    sampled=True,
                 )
                 tool_count = sum(1 for opening in openings if "<tool_call>" in visible_reply(opening))
                 reply_metrics[FIRST_TURN_TOOL_RATE_METRIC] = tool_count / len(openings)
