@@ -470,6 +470,87 @@ def test_child_control_loss_does_not_restart_sr(case: ControllerCase) -> None:
     assert "start" not in case.actions
 
 
+def time_out_status_reads(case: ControllerCase, monkeypatch: pytest.MonkeyPatch, count: int) -> None:
+    """Make the next ``count`` status reads time out, as when the child's event loop is busy."""
+    original_request = case.control.request
+    remaining = count
+
+    def request(
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        nonlocal remaining
+        if action is None and remaining:
+            remaining -= 1
+            raise RoutingControlTimeout("REEF lifecycle request timed out")
+        return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
+
+    monkeypatch.setattr(case.control, "request", request)
+
+
+def test_periodic_status_timeouts_keep_serving_and_a_later_reply_is_still_checked(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened(case)
+    time_out_status_reads(case, monkeypatch, 3)
+    for _ in range(3):
+        case.controller.next_probe = case.controller.next_inspect = 0
+        case.controller.tick()
+    assert case.controller.state == "ready" and case.controller.restart_count == 0
+    # The router and container checks still ran after every timeout; nothing closed, stopped or restarted.
+    assert case.actions.count("router:ready") == case.actions.count("inspect") == 3
+    assert not {"control:close", "control:stop", "remove", "start"} & set(case.actions)
+    events = (case.controller.directory / "lifecycle-events.jsonl").read_text().splitlines()
+    assert [json.loads(line)["state"] for line in events].count("status_timeout") == 3
+    case.controller.next_probe = 0
+    case.controller.tick()
+    assert case.actions.count("control:None") == 1
+    assert case.controller.state == "ready" and case.controller.restart_count == 0
+    assert not {"control:close", "control:stop", "remove", "start"} & set(case.actions)
+    case.control.stopping = True
+    case.controller.next_probe = 0
+    with pytest.raises(RoutingDeploymentError, match="stopping"):
+        case.controller.tick()
+
+
+@pytest.mark.parametrize(
+    ("generation", "snapshot_version"),
+    [("stale-generation", "snapshot-one"), ("generation-one", "other-snapshot")],
+)
+def test_a_periodic_status_for_another_generation_or_snapshot_is_fatal(
+    case: ControllerCase, generation: str, snapshot_version: str
+) -> None:
+    opened(case)
+    case.control.generation = generation
+    case.control.snapshot_version = snapshot_version
+    case.controller.next_probe = 0
+    with pytest.raises(RoutingDeploymentError, match="mismatch"):
+        case.controller.tick()
+    assert "start" not in case.actions
+
+
+@pytest.mark.parametrize("failure", ["runtime", "container"])
+def test_a_periodic_status_timeout_does_not_hide_a_router_failure(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    opened(case)
+    time_out_status_reads(case, monkeypatch, 1)
+    case.controller.next_probe = case.controller.next_inspect = 0
+    if failure == "runtime":
+        # Another writer's consistent runtime, as in the drift test above.
+        case.management.active = case.management.generated = "9" * 64
+        with pytest.raises(RoutingDeploymentError, match="router does not run the committed policy"):
+            case.controller.tick()
+        assert case.actions.index("control:close") < case.actions.index("remove")
+    else:
+        case.runtime.inventory = case.runtime.healthy_inventory("unhealthy")
+        case.controller.tick()
+        assert case.controller.restart_count == 1 and case.controller.state == "ready"
+
+
 def test_generation_mismatch_never_opens(case: ControllerCase) -> None:
     case.control.generation = "stale-generation"
     with pytest.raises(RoutingDeploymentError, match="mismatch"):

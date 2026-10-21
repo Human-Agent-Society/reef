@@ -86,13 +86,15 @@ class RoutingDeploymentController:
     ``event_stream`` are None, ``snapshot_version`` is empty and ``directory`` is a placeholder. ``prepare``
     fills ``ownership``, ``directory``, ``control``, ``management`` and ``snapshot_version`` for one new
     generation; ``event_stream`` stays None until ``begin_start`` subscribes. Restoring lost observation and
-    recovery replace it with a new subscription, and shutdown closes it. ``state`` is ``"new"`` or the last state given to ``event`` other
-    than the diagnostics ``policy_rejected`` and ``policy_unchanged``, which leave the serving state in
-    place: ``prepared``, ``starting``, ``runtime_published``, ``ready``, ``observation_lost``, ``draining``,
-    ``finalizing``, the ``policy_*`` update and rollback states, ``pending_policy_recovered``, ``unready``,
-    ``recovering``, ``recovery_failed``, ``stopping``, ``stopped``, or a shutdown failure such as
-    ``forced_shutdown`` or ``cleanup_incomplete``. ``tick`` acts only in ``ready``. ``stop_requested`` and
-    ``force_stop_requested`` only become true; ``closed`` means shutdown has begun and makes it run once,
+    recovery replace it with a new subscription, and shutdown closes it. ``state`` is ``"new"`` or the last
+    state given to ``event`` other than the diagnostics ``policy_rejected``, ``policy_unchanged`` and
+    ``status_timeout``, which leave the serving state in place: ``prepared``, ``starting``,
+    ``runtime_published``, ``ready``, ``observation_lost``, ``draining``, ``finalizing``, the ``policy_*``
+    update and rollback states, ``pending_policy_recovered``, ``unready``, ``recovering``,
+    ``recovery_failed``, ``stopping``, ``stopped``, or a shutdown failure such as ``forced_shutdown`` or
+    ``cleanup_incomplete``. ``tick`` acts only in ``ready``. When its periodic status read times out, it
+    records ``status_timeout`` instead of failing; a reply that arrives is still checked. ``stop_requested``
+    and ``force_stop_requested`` only become true; ``closed`` means shutdown has begun and makes it run once,
     and ``failed`` that some step failed. ``restart_count`` (≥ 0) never resets and is bounded by
     ``policy.max_restarts``. ``reload_requested`` is intent that ``tick`` consumes. One owner process
     holds the registry lock and is the only caller of the mutating methods.
@@ -143,7 +145,7 @@ class RoutingDeploymentController:
     def event(self, state: str, **details: str | int | float | bool) -> None:
         # These outcomes leave the committed policy serving. Keep monitoring it
         # and accepting later reloads instead of treating the diagnostic as a phase.
-        if state not in {"policy_rejected", "policy_unchanged"}:
+        if state not in {"policy_rejected", "policy_unchanged", "status_timeout"}:
             self.state = state
         data = {"monotonic_seconds": time.monotonic(), "state": state, "restarts": self.restart_count, **details}
         if self.ownership is not None:
@@ -473,6 +475,10 @@ class RoutingDeploymentController:
             self.next_probe = now + 1
             try:
                 self.check_status(control.request())
+            except RoutingControlTimeout:
+                # A child event loop busy with a large request can miss this read. The orchestrator's watchdog
+                # stops the stack when the child exits, so only a reply is checked here; the router checks go on.
+                self.event("status_timeout")
             except RoutingControlError as exc:
                 # Losing the REEF control boundary cannot be repaired by restarting SR.
                 raise RoutingDeploymentError("REEF lifecycle unavailable") from exc
