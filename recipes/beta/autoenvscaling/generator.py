@@ -35,18 +35,12 @@ from recipes.beta.autoenvscaling.author import (
 from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewCheck, TaskCheck, check_mode
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    HarborTaskError,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask, HarborTaskError
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
 from reef.record2task.generator.client import DuplicateTask, Generator, GeneratorError, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.designer import parse_harbor_reply
 from reef.record2task.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.sandbox.e2b import E2BExecutor
 from reef.sandbox.process import SandboxUnavailable
 
@@ -520,7 +514,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         os.replace(partial, path)
         self.cursor = cursor
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         """One generation: the next ``count`` sessions, each rebuilt and admitted; an outage ends it with what ran.
 
         The sources file says what the tasks are, so the request's description goes unused. A request that
@@ -534,7 +528,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         if request.source_records:
             self.error = "AutoEnvScalingGenerator takes its sessions from its sources file, not from source records"
             raise ValueError(self.error)
-        tasks: list[GeneratedTask] = []
+        tasks: list[HarborTask] = []
         for index in range(self.count):
             position = self.cursor.next_position
             source = self.sources[position % len(self.sources)]
@@ -553,7 +547,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 self.pending[task.name] = replace(
                     proposal, designer_record_id=task.source_agent_record_ids[0], task_name=task.name
                 )
-                tasks.append(GeneratedTask(task))
+                tasks.append(task)
             # The session is taken; a restart continues with the next one. A cancelled run takes none.
             self.save_cursor(replace(self.cursor, next_position=position + 1))
             if self.error:

@@ -47,7 +47,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.storage.tasks import SplitSettings, TaskStorage, TaskStore
+from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
 
@@ -107,14 +107,20 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 
 
 class ComponentTaskStorage(TaskStorage):
-    """Opens the task stores of one component under ``<component>/<name>``, so components never share a store."""
+    """Opens the task stores of one component under ``<component>/<name>``, so components never share a store.
+
+    The one exception is the scenario's ``imported-tasks`` store, which every component reads by its own name.
+    """
 
     def __init__(self, storage: TaskStorage, component: str) -> None:
         self.storage = storage
         self.component = component
 
-    def open(self, name: str, *, split: SplitSettings) -> TaskStore:
-        return self.storage.open(f"{self.component}/{name}", split=split)
+    def open(self, name: str) -> TaskStore:
+        # The scenario's imported tasks are the one store that the components share; only the service writes it.
+        if name == IMPORTED_TASK_STORE:
+            return self.storage.open(name)
+        return self.storage.open(f"{self.component}/{name}")
 
 
 @dataclass(frozen=True, kw_only=True)

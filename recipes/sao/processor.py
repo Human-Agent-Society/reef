@@ -45,6 +45,7 @@ class SAOTasks(ReportTasks):
     """
 
     def __init__(self, settings: SampleAssemblySettings) -> None:
+        super().__init__()
         self.assembly = SAOSampleAssembly(settings)
 
     @classmethod

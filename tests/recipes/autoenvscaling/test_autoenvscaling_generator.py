@@ -51,12 +51,14 @@ from recipes.beta.autoenvscaling.author import AgentTools
 from recipes.beta.autoenvscaling.checks import CheckResult
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import HarborTask, TaskGenerationRequest, TaskPlayResult, read_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
+from reef.recipe.generated_tasks.generator import TaskPlayResult
 from reef.recipe.generated_tasks.processor import RoundJob, RoundSettings, TaskGroupSettings
 from reef.record2task.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2task.generator.harbor import ORACLE_TIMEOUT_S
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -88,8 +90,8 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
     # The agent's candidates are written, checked and deleted; the tasks themselves are not written yet.
     assert [path.name for path in service.checks] == [f"{name}-check-1" for name in NAMES]
     assert service.deleted == [f"{name}-check-1" for name in NAMES]
-    assert [item.task.name for item in tasks] == NAMES
-    task = tasks[0].task
+    assert [task.name for task in tasks] == NAMES
+    task = tasks[0]
     assert task.source_agent_record_ids == ("agent-2", "session-1")
     assert "RUN set -e; cd /app; if [ -d .git ]" in task.environment["Dockerfile"], "the source's history step"
     assert task.solution["hint.txt"]
@@ -109,7 +111,7 @@ def test_a_restarted_generator_continues_with_the_next_session_and_generation(tm
     tasks = asyncio.run(again.generate(REQUEST))
     # The walk cycles: positions 2 and 3 are the third session and the first.
     assert [call["source"] for call in author.calls] == ["session-1", "session-2", "session-3", "session-1"]
-    assert [item.task.name for item in tasks] == [
+    assert [task.name for task in tasks] == [
         "harbor-00001-000-autoenvscaling",
         "harbor-00001-001-autoenvscaling",
     ]
@@ -225,21 +227,21 @@ def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tm
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(item.task)).is_valid
+    assert asyncio.run(generator.validate(item)).is_valid
     assert service.checks[-1] == tmp_path / "tasks" / NAMES[0]
     assert service.deleted[-1] == NAMES[0] and not (tmp_path / "tasks" / NAMES[0]).exists()
 
     further = RefusingCheck()
     generator = autoenvscaling(tmp_path / "further", StandInAuthor(), task_checks=(further,), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(item.task)).errors == ("the verifier checks the wording of the change",)
+    assert asyncio.run(generator.validate(item)).errors == ("the verifier checks the wording of the change",)
     assert further.runs == [NAMES[0]]
 
     refusing = StandInGenerator(tmp_path / "refusing", is_solvable=False)
     further = RefusingCheck()
     generator = autoenvscaling(tmp_path / "refusing", StandInAuthor(), refusing, task_checks=(further,), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(item.task)).errors == ("oracle check refused: the oracle scored 0",)
+    assert asyncio.run(generator.validate(item)).errors == ("oracle check refused: the oracle scored 0",)
     assert further.runs == [], "a check that found a defect ends the validation"
     assert refusing.deleted[-1] == NAMES[0]
 
@@ -248,10 +250,8 @@ def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    asyncio.run(service.write_task(item.task))
-    assert asyncio.run(generator.validate(item.task)).errors == (
-        "refused: duplicate of a task already under the root",
-    )
+    asyncio.run(service.write_task(item))
+    assert asyncio.run(generator.validate(item)).errors == ("refused: duplicate of a task already under the root",)
 
 
 def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) -> None:
@@ -259,12 +259,12 @@ def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) 
     service = StandInGenerator(tmp_path / "tasks", check_fail_after=3)
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
     first, second = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(first.task)).is_valid
-    asyncio.run(service.write_task(first.task))
+    assert asyncio.run(generator.validate(first)).is_valid
+    asyncio.run(service.write_task(first))
     with pytest.raises(GeneratorError, match="the harbor command line is not installed"):
-        asyncio.run(generator.validate(second.task))
+        asyncio.run(generator.validate(second))
     assert not (tmp_path / "tasks" / NAMES[1]).exists(), "no copy is left"
-    asyncio.run(generator.record_results((TaskPlayResult(first.task, (0.0, 1.0)),)))
+    asyncio.run(generator.record_results((TaskPlayResult(first, (0.0, 1.0)),)))
     document = report(tmp_path)
     assert document["error"].startswith(f"the check of {NAMES[1]} could not run")
     assert [entry["stage"] for entry in document["proposals"]] == ["", "unreached"]
@@ -310,8 +310,8 @@ def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
     (generated,) = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(generated.task)).is_valid
-    asyncio.run(generator.record_results((TaskPlayResult(task=generated.task, split="eval"),)))
+    assert asyncio.run(generator.validate(generated)).is_valid
+    asyncio.run(generator.record_results((TaskPlayResult(task=generated, split="eval"),)))
     document = report(tmp_path)
     assert document["tasks"] == []
     assert document["proposals"][0]["stage"] == "held_out"
@@ -323,15 +323,15 @@ def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> Non
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInAuthor(), service)
     first, second, third = asyncio.run(generator.generate(REQUEST))
-    assert asyncio.run(generator.validate(first.task)).is_valid
-    assert asyncio.run(generator.validate(third.task)).is_valid
-    asyncio.run(service.write_task(first.task))
+    assert asyncio.run(generator.validate(first)).is_valid
+    assert asyncio.run(generator.validate(third)).is_valid
+    asyncio.run(service.write_task(first))
     service.is_solvable = False
-    errors = asyncio.run(generator.validate(second.task)).errors
+    errors = asyncio.run(generator.validate(second)).errors
     results = (
-        TaskPlayResult(first.task, (0.0, 1.0)),
-        TaskPlayResult(second.task, error="; ".join(errors)),
-        TaskPlayResult(third.task, error="the agent could not play the task: no sandbox"),
+        TaskPlayResult(first, (0.0, 1.0)),
+        TaskPlayResult(second, error="; ".join(errors)),
+        TaskPlayResult(third, error="the agent could not play the task: no sandbox"),
     )
     asyncio.run(generator.record_results(results))
 

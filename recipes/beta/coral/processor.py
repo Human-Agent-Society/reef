@@ -87,6 +87,7 @@ class CoralTasks(ReportTasks):
     """
 
     def __init__(self, settings: CoralAssemblySettings) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(settings)
 
     @classmethod

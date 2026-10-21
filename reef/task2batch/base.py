@@ -1,7 +1,7 @@
-"""The task-to-batch contract: the tasks of selected record sets become one batch.
+"""The task-to-batch contract: the tasks of the selected batch units become one batch.
 
 The training pipeline (:class:`~reef.train.pipeline.TrainingPipeline`) selects
-the record sets of the next batch from the record-to-record stage, takes the
+the batch units of the next batch from the record-to-record stage, takes the
 tasks that the record-to-task stage made from them, and gives the tasks to a
 recipe's ``Task2Batch``. A task is a ``TrainDataItem``.
 """
@@ -25,9 +25,9 @@ from reef.record2task import Record2Task
 
 @dataclass(frozen=True)
 class BatchSettings(PluginSettings):
-    """The config of a task-to-batch stage that batches ``batch_size`` record sets."""
+    """The config of a task-to-batch stage that batches ``batch_size`` batch units."""
 
-    batch_size: int = config_option(1, help="The record sets in one batch.")
+    batch_size: int = config_option(1, help="The batch units in one batch.")
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
@@ -35,7 +35,7 @@ class BatchSettings(PluginSettings):
 
 
 class Task2Batch(ABC, Plugin):
-    """The task-to-batch stage: shape the tasks of the selected record sets into one batch.
+    """The task-to-batch stage: shape the tasks of the selected batch units into one batch.
 
     A recipe implements ``make_batch``. The class attributes declare what the
     pipeline and the trainer need to know about the recipe's batches.
@@ -52,11 +52,14 @@ class Task2Batch(ABC, Plugin):
     supported_training_modes: frozenset[str] = frozenset({"auto"})
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
+    #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
+    #: when no trainer of the scenario accepts uploaded trajectories.
+    accepts_trajectories: bool = False
 
     def __init__(self, context: PipelineContext, batch_size: int) -> None:
         self.context = context
         self.scenario = context.scenario
-        #: The number of record sets in one batch.
+        #: The number of batch units in one batch.
         self.batch_size = batch_size
 
     @classmethod

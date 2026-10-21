@@ -238,8 +238,8 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
 @pytest.mark.unit
 def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> None:
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(_sao_inference("i1"))
-    processor.ingest(_sao_report("r1", "i1", 0.75))
+    processor.push(_sao_inference("i1"))
+    processor.push(_sao_report("r1", "i1", 0.75))
 
     batch = processor.build_batch()
 
@@ -276,8 +276,8 @@ def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live()
         artifact_ref=None,
     )
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(inference)
-    processor.ingest(_sao_report("r1", "i1", 0.5))
+    processor.push(inference)
+    processor.push(_sao_report("r1", "i1", 0.5))
 
     batch = processor.build_batch()
 
@@ -289,7 +289,7 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
     processor = sao_processor(PipelineContext("math"))
     # Response tokens: action, observation, action. loss_mask trains only the
     # action tokens.
-    processor.ingest(
+    processor.push(
         _sao_inference(
             "i1",
             tokens=(5, 1, 2, 3),
@@ -298,7 +298,7 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
             rollout_log_probs=(-0.1, -0.2, -0.3),
         )
     )
-    processor.ingest(_sao_report("r1", "i1", 1.0))
+    processor.push(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
 
@@ -312,7 +312,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     # Skip-observation GAE would give it zero advantage: reject the rollout
     # rather than silently waste gradient on it.
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(
+    processor.push(
         _sao_inference(
             "i1",
             tokens=(5, 1, 2, 3),
@@ -320,7 +320,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
             action_mask=(1, 0, 1),
         )
     )
-    processor.ingest(_sao_report("r1", "i1", 1.0))
+    processor.push(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
     prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
@@ -332,8 +332,8 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
 @pytest.mark.unit
 def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
-    processor.ingest(_sao_report("r1", "i1", 1.0))
+    processor.push(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
+    processor.push(_sao_report("r1", "i1", 1.0))
 
     batch = processor.build_batch()
     prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
@@ -345,9 +345,9 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
 @pytest.mark.unit
 def test_processor_rejects_non_finite_report_scores() -> None:
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(_sao_inference("i1"))
+    processor.push(_sao_inference("i1"))
     with pytest.raises(ReportValidationError, match="finite"):
-        processor.ingest(_sao_report("r1", "i1", float("nan")))
+        processor.push(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready()
     assert processor.releasable_record_ids().isdisjoint({"i1"})
 
@@ -355,8 +355,8 @@ def test_processor_rejects_non_finite_report_scores() -> None:
 @pytest.mark.unit
 def test_malformed_training_data_is_preserved_until_backend_validation() -> None:
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(_sao_inference("i1", loss_mask=(0, 0, 0)))
-    processor.ingest(_sao_report("r1", "i1", 1.0))
+    processor.push(_sao_inference("i1", loss_mask=(0, 0, 0)))
+    processor.push(_sao_report("r1", "i1", 1.0))
     batch = processor.build_batch()
     prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
@@ -370,7 +370,7 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
     # Invalid eligibility flags never claim or consume the source record;
     # a valid report is processed independently of arrival order.
     processor = sao_processor(PipelineContext("math"))
-    processor.ingest(_sao_inference("i1"))
+    processor.push(_sao_inference("i1"))
     dead = AgentRecord.create(
         scenario="math",
         request_type=RequestType.REPORT,
@@ -382,9 +382,9 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
     for item in (dead, retry) if dead_report_first else (retry, dead):
         if item is dead:
             with pytest.raises(ReportValidationError, match="eligible"):
-                processor.ingest(item)
+                processor.push(item)
         else:
-            processor.ingest(item)
+            processor.push(item)
         processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
@@ -733,7 +733,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             candidate_backend=_StateOnlySaoBackend(),
             algorithm_state=prepared.algorithm_state,
         )
-        second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+        second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
         assert second.reserve_training_batch() is not None

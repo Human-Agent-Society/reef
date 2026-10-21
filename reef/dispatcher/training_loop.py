@@ -140,7 +140,7 @@ class DispatchedTrainingLoop:
         for name in self.registry.training_scenario_names:
             current = self.registry.get_optional(name)
             if current is not None and any(
-                bound.trainer.pipeline.background_jobs_running() for bound in current.trainers
+                component_trainer.trainer.pipeline.background_jobs_running() for component_trainer in current.trainers
             ):
                 poll = True
         if poll:

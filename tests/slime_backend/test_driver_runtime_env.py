@@ -93,7 +93,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         rollout_external=mode == "external",
         keep_lora_base_resident=mode == "lora-colocate-keep-base",
         disjoint_prefix_sharing=False,
-        reef_checkpoint_interval=1,
+        save_interval=1,
     )
 
     class Algorithm:
@@ -170,7 +170,7 @@ def test_the_artifact_cadence_must_be_a_multiple_of_the_checkpoint_interval(
     monkeypatch.setenv("RAY_ADDRESS", "external")
     monkeypatch.setattr(driver, "resolve_loss_family", lambda name: Algorithm())
     monkeypatch.setattr(
-        driver, "_parse_slime_args", lambda arguments: SimpleNamespace(reef_checkpoint_interval=checkpoint_interval)
+        driver, "_parse_slime_args", lambda arguments: SimpleNamespace(save_interval=checkpoint_interval)
     )
     for name in (
         "_configure_executors",
@@ -187,4 +187,4 @@ def test_the_artifact_cadence_must_be_a_multiple_of_the_checkpoint_interval(
     with pytest.raises(RuntimeError if refused else PreparedBridge) as raised:
         driver.create_training_plan({"reef": reef}, loss_family="loss")
     if refused:
-        assert "must be a multiple of --reef-checkpoint-interval" in str(raised.value)
+        assert "must be a multiple of --save-interval" in str(raised.value)

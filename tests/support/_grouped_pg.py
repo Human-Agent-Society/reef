@@ -70,6 +70,7 @@ class ComparisonSetTasks(ReportTasks):
     """One report as one sample in its comparison set."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:

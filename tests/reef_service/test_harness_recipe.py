@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -2675,9 +2676,8 @@ def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: 
     assert not (published / "tree.json").exists()
 
 
-def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
-    from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
-
+def write_demo_evolution(tmp_path: Path, monkeypatch) -> None:
+    """A proposer that proposes nothing and a scorer, importable as ``demo_evolution``."""
     module = tmp_path / "demo_evolution.py"
     module.write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
@@ -2688,17 +2688,29 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
+
+
+def task_directory(root: Path, name: str) -> Path:
+    from reef.core.tasks import HarborTask, write_harbor_task
+
+    return write_harbor_task(
+        HarborTask(
+            name=name,
+            instruction=f"task {name}",
+            tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+            environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        ),
+        root,
+    )
+
+
+def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
+    from reef.core.tasks import TaskSplit, write_split_manifest
+
+    write_demo_evolution(tmp_path, monkeypatch)
     root = tmp_path / "tasks"
     for name in ("held-1", "held-2", "train-1"):
-        write_harbor_task(
-            HarborTask(
-                name=name,
-                instruction=f"task {name}",
-                tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-                environment={"Dockerfile": "FROM python:3.12-slim\n"},
-            ),
-            root,
-        )
+        task_directory(root, name)
     write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
     evolution = {
         "propose": "demo_evolution:Propose",
@@ -2736,3 +2748,44 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
     (root / "held-2" / "instruction.md").write_text("changed")
     with pytest.raises(RecipeConfigError, match=r"held-2.*does not match its digest"):
         CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+
+
+def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from reef.storage.tasks import IMPORTED_TASK_STORE
+    from reef.train.cordis_backend.backend import eval_task_paths
+
+    write_demo_evolution(tmp_path, monkeypatch)
+    root = tmp_path / "tasks"
+    evolution = {
+        "propose": "demo_evolution:Propose",
+        "evaluate": "demo_evolution:Evaluate",
+        "eval_task_store": IMPORTED_TASK_STORE,
+        "adapter": "terminus",
+    }
+    built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+    assert built.tasks == () and built.eval_task_store == IMPORTED_TASK_STORE
+
+    with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
+        store = session.tasks.open(IMPORTED_TASK_STORE)
+        with pytest.raises(RecipeConfigError, match="holds no task"):
+            built.build("s", session.records, task_storage=session.tasks)
+        first = store.add_task(directory=task_directory(root, "held-1"), split="eval")
+        store.add_task(directory=task_directory(root, "train-1"), split="train")
+        candidate_backend = built.build("s", session.records, task_storage=session.tasks).candidate_backend
+        assert isinstance(candidate_backend, CordisBackend)
+        prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
+        assert prepared.metrics["evaluation_task_count"] == 1
+        # A task that the store gets after the build is in the next step's list.
+        second = store.add_task(directory=task_directory(root, "held-2"), split="eval")
+        prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
+        assert prepared.metrics["evaluation_task_count"] == 2
+        assert eval_task_paths(store) == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
+        with pytest.raises(RecipeConfigError, match="needs the task storage"):
+            built.build("s", session.records)
+
+    with pytest.raises(RecipeConfigError, match=r"cannot be set with evolution\.tasks"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())

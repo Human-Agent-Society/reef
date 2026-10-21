@@ -211,7 +211,9 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
 def sqlite_session(journal=None, *, database=None, initial_step=0):
     records = SQLiteRecordStore(database)
     tasks = records.task_storage(LocalTaskFileStore(), "math")
-    return CommitHistoryScenarioStore("math", records, journal, tasks=tasks, initial_step=initial_step)
+    return CommitHistoryScenarioStore(
+        "math", records, journal, tasks=tasks, trajectories=records.trajectory_store(), initial_step=initial_step
+    )
 
 
 def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):

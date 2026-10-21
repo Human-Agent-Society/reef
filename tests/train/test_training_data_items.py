@@ -255,7 +255,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
     ):
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="mixed",
                 request_type=RequestType.INFERENCE,
@@ -263,7 +263,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 payload=payload,
             )
         )
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="mixed",
                 request_type=RequestType.REPORT,

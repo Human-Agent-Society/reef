@@ -713,7 +713,7 @@ invalid; a settled one an earlier release left behind is read as it is.
 Reef records ``RUNNING`` before calling ``train``, then invokes
 ``save_checkpoint`` and verifies the checkpoint directory. When the backend
 sets ``TrainingCheckpoint.writes_checkpoint`` to false, Reef does not do
-these two steps. Slime does this with ``--reef-checkpoint-interval`` above 1.
+these two steps. Slime does this with ``--save-interval`` above 1.
 Then the marker records a null ``checkpoint_path``, and the committer
 publishes the version of the job as live weights. Training metrics and
 method telemetry are recorded together with ``CHECKPOINT`` in one durable write,

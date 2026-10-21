@@ -103,9 +103,11 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "evaluation",
         "pipeline",
         "generator",
+        "task_import",
         "observability",
     }
-    extra = set(pending) - known_sections
+    # A section name, like a field name, can use a hyphen for an underscore.
+    extra = {section.replace("-", "_") for section in pending} - known_sections
     if extra:
         raise DeployConfigError(f"unknown config sections: {', '.join(sorted(extra))}; {LAYOUT_HINT}")
     resolved: dict[str, Any] = {"reef": {"recipe": "recipe", "host": "127.0.0.1"}, "run_dir": ".reef/run"}

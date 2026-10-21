@@ -18,6 +18,7 @@ class ThresholdTasks(ReportTasks):
     """One report becomes one sample, with no score filtering."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     @classmethod

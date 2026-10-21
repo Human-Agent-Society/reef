@@ -1,13 +1,5 @@
-"""The task generation contract, Harbor task values, and task file operations."""
+"""Harbor task values, task file operations, and train/eval split manifests."""
 
-from reef.core.tasks.generation import (
-    GeneratedTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
 from reef.core.tasks.harbor import (
     TASK_CONFIG_VERSION,
     HarborTask,
@@ -27,17 +19,11 @@ from reef.core.tasks.split import (
 
 __all__ = [
     "TASK_CONFIG_VERSION",
-    "GeneratedTask",
     "HarborTask",
     "HarborTaskConflict",
     "HarborTaskError",
-    "PlayArm",
-    "TaskGenerationRequest",
-    "TaskGenerator",
-    "TaskPlayResult",
     "TaskSplit",
     "TaskSplitError",
-    "TaskValidationResult",
     "manifest_task_paths",
     "primary_reward",
     "read_harbor_task",

@@ -76,12 +76,12 @@ def _attempt_report(record_id, references, score, *, commit, parent=None, agent=
 
 def test_sibling_group_trains_as_one_grouped_batch():
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(_inference("i2", [3, 4], [1], [-0.2]))
-    processor.ingest(_attempt_report("r1", "i1", 0.3, commit="c-a", parent="p0"))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i2", [3, 4], [1], [-0.2]))
+    processor.push(_attempt_report("r1", "i1", 0.3, commit="c-a", parent="p0"))
     assert not processor.ready()  # one sibling is not a comparison group
 
-    processor.ingest(_attempt_report("r2", "i2", 0.9, commit="c-b", parent="p0"))
+    processor.push(_attempt_report("r2", "i2", 0.9, commit="c-b", parent="p0"))
     assert processor.ready()
 
     batch = processor.build_batch()
@@ -92,10 +92,10 @@ def test_sibling_group_trains_as_one_grouped_batch():
 
 def test_root_attempts_group_together():
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(_inference("i2", [3, 4], [1], [-0.2]))
-    processor.ingest(_attempt_report("r1", "i1", 0.1, commit="c-a", parent=None))
-    processor.ingest(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i2", [3, 4], [1], [-0.2]))
+    processor.push(_attempt_report("r1", "i1", 0.1, commit="c-a", parent=None))
+    processor.push(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
     assert processor.ready()
     batch = processor.build_batch()
     assert {item.group_id for item in batch.items} == {ROOT_GROUP}
@@ -103,24 +103,24 @@ def test_root_attempts_group_together():
 
 def test_groups_do_not_mix_across_parents():
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(_inference("i2", [3, 4], [1], [-0.2]))
-    processor.ingest(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
-    processor.ingest(_attempt_report("r2", "i2", 0.6, commit="c-b", parent="p1"))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i2", [3, 4], [1], [-0.2]))
+    processor.push(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
+    processor.push(_attempt_report("r2", "i2", 0.6, commit="c-b", parent="p1"))
     # two half-full groups, no cross-parent comparison
     assert not processor.ready()
 
 
 def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(_inference("i2", [3, 4], [1], [-0.2]))
-    processor.ingest(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i2", [3, 4], [1], [-0.2]))
+    processor.push(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
     # duplicate grader run for the same attempt commit, different record id
-    processor.ingest(_attempt_report("r1b", "i1", 0.5, commit="c-a", parent="p0"))
+    processor.push(_attempt_report("r1b", "i1", 0.5, commit="c-a", parent="p0"))
     assert not processor.ready()  # still one distinct sibling
 
-    processor.ingest(_attempt_report("r2", "i2", 0.7, commit="c-b", parent="p0"))
+    processor.push(_attempt_report("r2", "i2", 0.7, commit="c-b", parent="p0"))
     assert processor.ready()
     (group,) = trajectory_groups(processor.build_batch())
     assert len(group) == 2
@@ -128,11 +128,11 @@ def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
 
 def test_multi_call_attempt_assembles_multi_turn():
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.ingest(_inference("i2", [1, 2, 3, 4], [1], [-0.2]))  # extends i1
-    processor.ingest(_inference("i3", [5, 6], [1], [-0.3]))
-    processor.ingest(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
-    processor.ingest(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i2", [1, 2, 3, 4], [1], [-0.2]))  # extends i1
+    processor.push(_inference("i3", [5, 6], [1], [-0.3]))
+    processor.push(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
+    processor.push(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
     assert processor.ready()
     (group,) = trajectory_groups(processor.build_batch())
     multi = next(s for s in group if trajectory_reward(s) == 0.5)
@@ -141,9 +141,9 @@ def test_multi_call_attempt_assembles_multi_turn():
 
 def test_report_without_coral_metadata_fails_explicitly():
     processor = _processor()
-    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
     with pytest.raises(ValueError, match=r"metadata\.coral"):
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario=SCENARIO,
                 request_type=RequestType.REPORT,

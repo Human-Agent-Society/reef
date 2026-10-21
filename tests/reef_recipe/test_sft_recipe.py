@@ -137,8 +137,8 @@ def _prompt_ids() -> list[int]:
 @pytest.mark.unit
 def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline()
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
 
     (sample,) = pipeline.build_batch().items
 
@@ -157,8 +157,8 @@ def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: T
     pipeline = _pipeline(target="response")
     tool_call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": '{"q": "water"}'}}
     response = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [tool_call]}}]}
-    pipeline.ingest(_inference("i1", response))
-    pipeline.ingest(_report("r1", ("i1",), teacher_context=""))
+    pipeline.push(_inference("i1", response))
+    pipeline.push(_report("r1", ("i1",), teacher_context=""))
 
     (sample,) = pipeline.build_batch().items
 
@@ -173,8 +173,8 @@ def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: T
 @pytest.mark.unit
 def test_a_sample_over_max_tokens_is_skipped_and_counted(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline(max_tokens=len(_prompt_ids()) + 2)
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
 
     assert not pipeline.ready()
     assert pipeline.record2task.operational_metrics() == {"sft_overflow_reports": 1}
@@ -184,13 +184,13 @@ def test_a_sample_over_max_tokens_is_skipped_and_counted(tokenizer: TurnTokenize
 @pytest.mark.unit
 def test_a_broken_training_contract_raises(tokenizer: TurnTokenizer) -> None:
     demonstration = _pipeline()
-    demonstration.ingest(_inference("i1"))
+    demonstration.push(_inference("i1"))
     with pytest.raises(ValueError, match="teacher_context"):
-        demonstration.ingest(_report("r1", ("i1",), teacher_context=""))
+        demonstration.push(_report("r1", ("i1",), teacher_context=""))
     response = _pipeline(target="response")
-    response.ingest(_inference("i2", {"output_text": "no choices"}))
+    response.push(_inference("i2", {"output_text": "no choices"}))
     with pytest.raises(ValueError, match="recorded response message"):
-        response.ingest(_report("r2", ("i2",)))
+        response.push(_report("r2", ("i2",)))
 
 
 @pytest.mark.unit
@@ -210,8 +210,8 @@ def test_a_template_that_rewrites_the_generation_prompt_is_refused(
 @pytest.mark.unit
 def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline()
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
     # Two later versions: with max_staleness 0 a sampled policy row would be dropped.
     pipeline.observe_serving_runtime_load_id("slime-v4")
     pipeline.observe_serving_runtime_load_id("slime-v5")
@@ -290,8 +290,8 @@ def test_sft_recipe_rejects_a_missing_tokenizer_and_objective_options() -> None:
 @pytest.mark.unit
 def test_objective_trains_every_batch_without_advantages_and_allows_several_epochs(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline()
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
 
     signal = SftObjective().prepare(pipeline.build_batch(), {"steps": 2})
 
@@ -309,8 +309,8 @@ def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
     # The Slime bridge never imports the recipe module, so no objective is registered there.
     monkeypatch.setattr(registry, "OBJECTIVES", ObjectiveRegistry())
     pipeline = _pipeline()
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
 
     step = prepare_slime_step(
         pipeline.build_batch(), TrainingMethod(SFTRecipe.training_spec().objective), {}, StepScheduling(unit="sample")
@@ -323,8 +323,8 @@ def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
 @pytest.mark.unit
 def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline()
-    pipeline.ingest(_inference("i1"))
-    pipeline.ingest(_report("r1", ("i1",)))
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
 
     payload = prepare_slime_step(
         pipeline.build_batch(), TrainingMethod("sft"), {}, StepScheduling(unit="sample")

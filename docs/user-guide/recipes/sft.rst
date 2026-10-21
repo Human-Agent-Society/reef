@@ -49,7 +49,7 @@ SFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__):
 
 - ``SFTRecord2Record`` makes each report its own record set. It never drops a
-  set as stale. An SFT target is fixed text, not tokens that an older model
+  batch unit as stale. An SFT target is fixed text, not tokens that an older model
   version sampled. Thus ``max-staleness`` has no effect.
 - ``SFTTasks`` makes one ``TrajectoryItem`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.

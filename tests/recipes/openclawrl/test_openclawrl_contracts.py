@@ -594,8 +594,8 @@ def test_processor_attaches_topk_and_candidates() -> None:
     # Two sessions with distinct prefixes; each first turn gets a successor.
     for index, opening in enumerate(["q-alpha", "q-beta"]):
         first = [{"role": "user", "content": opening}]
-        processor.ingest(turn(index, first))
-        processor.ingest(
+        processor.push(turn(index, first))
+        processor.push(
             turn(
                 index + 10,
                 [*first, {"role": "assistant", "content": "a"}, {"role": "user", "content": "next"}],

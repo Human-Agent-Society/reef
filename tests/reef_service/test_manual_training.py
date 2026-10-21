@@ -22,7 +22,7 @@ from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError
-from reef.record2record import InferenceRecord2Record, SingleRecordSet
+from reef.record2record import InferenceRecord2Record, SingleRecordSet, SingleSetUnit
 from reef.runtime.interfaces import TrainingRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -187,7 +187,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     records = SQLiteRecordStore(path)
     recovered = build(records, backend)
     recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
-    recovered.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
     assert recovered.run_once() is not None
     assert [batch.request.text for batch in backend.batches] == ["committed", "pending"]
     recovered.close()
@@ -337,9 +337,9 @@ def test_manual_instruction_batch_never_falls_back_to_auto():
         record2task=InferenceTasks(),
         task2batch=TraceOnlyBatches(context, 1),
     )
-    pipeline.ingest(inference("held"))
+    pipeline.push(inference("held"))
     assert not pipeline.ready()
-    pipeline.ingest(instruction("one"))
+    pipeline.push(instruction("one"))
     batch = pipeline.build_batch()
     # The instruction runs alone: the held set an automatic batch would take stays held.
     assert batch.request.id == "one"
@@ -369,7 +369,9 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     def hold(count):
         for index in range(len(stage.pool), count):
             record = inference(f"inf-{index}")
-            stage.pool.put(SingleRecordSet(set_id=record.agent_record_id, arrival_index=index, record=record))
+            stage.pool.put(
+                SingleSetUnit.of(SingleRecordSet(set_id=record.agent_record_id, arrival_index=index, record=record))
+            )
 
     assert pipeline.status() == {"ready_units": 0, "batch_size": 4}
     hold(3)
@@ -390,11 +392,11 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
 
     context = PipelineContext("s", training_mode="hybrid")
     pipeline = TrainingPipeline(context, task2batch=HybridOnlyBatches(context, 1))
-    pipeline.ingest(instruction("one"))
+    pipeline.push(instruction("one"))
     assert pipeline.status()["buffered_requests"] == 1
     pipeline.close()
     auto_only = TrainingPipeline(PipelineContext("s"))
-    auto_only.ingest(instruction("one"))
+    auto_only.push(instruction("one"))
     assert "buffered_requests" not in auto_only.status()
     auto_only.close()
 
@@ -1102,7 +1104,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
 
 
 @pytest.mark.parametrize("processor", [reports_pipeline, records_pipeline])
-def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
+def test_manual_traffic_is_available_to_auto_without_a_replay(processor):
     records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, processor, mode="manual", batch_size=2)
     try:
@@ -1206,8 +1208,8 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
 
 def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
     processor = reports_pipeline(PipelineContext("s", training_mode="hybrid"))
-    processor.ingest(instruction("first"))
-    processor.ingest(instruction("second"))
+    processor.push(instruction("first"))
+    processor.push(instruction("second"))
     assert processor.status()["buffered_requests"] == 2
     assert processor.ready()
     batch = processor.build_batch()
@@ -1223,8 +1225,8 @@ def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
 
 def test_hybrid_batches_as_auto_does_without_an_instruction():
     processor = reports_pipeline(PipelineContext("s", training_mode="hybrid"))
-    processor.ingest(inference("a"))
-    processor.ingest(report("a"))
+    processor.push(inference("a"))
+    processor.push(report("a"))
     batch = processor.build_batch()
     assert batch.batch_id == "s:batch:1"
     assert batch.request is None
@@ -1390,8 +1392,8 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     def fill(mode):
         processor = reports_pipeline(PipelineContext("s", training_mode=mode))
         for i in range(20):
-            processor.ingest(inference(f"inf-{i}"))
-            processor.ingest(
+            processor.push(inference(f"inf-{i}"))
+            processor.push(
                 AgentRecord.create(
                     scenario="s",
                     request_type=RequestType.REPORT,
@@ -1412,7 +1414,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     assert retention.isdisjoint(kept)
     assert sum("released report rep-0" in record.message for record in caplog.records) == 1
     assert len(caplog.records) == 1
-    manual.ingest(instruction("do-it"))
+    manual.push(instruction("do-it"))
     batch = manual.build_batch()
     assert batch.items == ()
     assert manual.acknowledge(batch.batch_id) == frozenset({"do-it"})

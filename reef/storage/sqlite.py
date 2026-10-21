@@ -28,6 +28,7 @@ from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
+from reef.storage.sql_trajectories import SQLTrajectoryStore, TrajectoryTable, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
@@ -87,6 +88,7 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
+TRAJECTORY_TABLE = TrajectoryTable(trajectory_table(_METADATA))
 logger = logging.getLogger(__name__)
 
 _TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
@@ -202,6 +204,10 @@ class SQLiteRecordStore(SQLRecordStore):
     def task_storage(self, files: TaskFileStore, scenario: str) -> SQLTaskStorage:
         """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
         return SQLTaskStorage(self, TASK_TABLES, files, scenario)
+
+    def trajectory_store(self) -> SQLTrajectoryStore:
+        """Open the uploaded trajectories in this database."""
+        return SQLTrajectoryStore(self, TRAJECTORY_TABLE)
 
     def close(self) -> None:
         with self._lock:
@@ -319,8 +325,8 @@ class SQLiteRecordRetention:
 class SQLiteScenarioStorage(ScenarioStorage):
     """Open existing hashed SQLite and JSONL paths and manage their lifecycle.
 
-    Each scenario has one database file for its records, settings and generated
-    tasks, and one JSONL commit log. Without a directory, all state is in memory.
+    Each scenario has one database file for its records, settings, generated
+    tasks and uploaded trajectories, and one JSONL commit log. Without a directory, all state is in memory.
     Records, commits and task states then last for one session, and settings
     last for the storage. ``task_files`` keeps the files of published tasks.
     The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If
@@ -378,7 +384,11 @@ class SQLiteScenarioStorage(ScenarioStorage):
             records = SQLiteRecordStore(database)
             try:
                 return CommitHistoryScenarioStore(
-                    scenario, records, commit_log, tasks=records.task_storage(self.task_files, scenario)
+                    scenario,
+                    records,
+                    commit_log,
+                    tasks=records.task_storage(self.task_files, scenario),
+                    trajectories=records.trajectory_store(),
                 )
             except BaseException:
                 records.close()

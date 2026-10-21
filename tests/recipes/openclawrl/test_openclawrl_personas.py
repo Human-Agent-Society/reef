@@ -105,7 +105,7 @@ def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) ->
             (f"i{index}", first),
             (f"i{index}-next", [*first, {"role": "assistant", "content": "a"}, {"role": "user", "content": "ok"}]),
         ):
-            processor.ingest(
+            processor.push(
                 AgentRecord.create(
                     scenario="s",
                     request_type=RequestType.INFERENCE,

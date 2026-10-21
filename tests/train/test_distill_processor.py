@@ -130,8 +130,8 @@ def _processor(**config: Any) -> TrainingPipeline:
 @pytest.mark.unit
 def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: CountingTokenizer) -> None:
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",), teacher_context=""))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",), teacher_context=""))
 
     batch = processor.build_batch()
 
@@ -159,8 +159,8 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
         record2task=FeedbackTasks(DistillSettings(tokenizer_path="/models/science")),
         task2batch=DistillBatches(context, 1),
     )
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",), teacher_context="Too low."))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",), teacher_context="Too low."))
 
     batch = processor.build_batch()
 
@@ -179,8 +179,8 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     # The window admits the short request's teacher sequence and not the long one's.
     window = len(tokenizer.count_ids(short_request.payload["messages"])) + 3
     processor = _processor(max_teacher_tokens=window)
-    processor.ingest(long_request)
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(long_request)
+    processor.push(_report("r1", ("i1",)))
 
     assert not processor.ready()
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
@@ -188,8 +188,8 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     assert {"r1", "i1"} <= processor.releasable_record_ids()
 
     # A later report that fits still trains.
-    processor.ingest(short_request)
-    processor.ingest(_report("r2", ("i2",), teacher_context="ok"))
+    processor.push(short_request)
+    processor.push(_report("r2", ("i2",), teacher_context="ok"))
     assert len(processor.build_batch().items) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
 
@@ -210,11 +210,11 @@ def test_teacher_tokens_render_the_request_cut_the_prompt_and_append_the_respons
 @pytest.mark.unit
 def test_the_processor_requires_one_recorded_request_per_report(tokenizer: CountingTokenizer) -> None:
     processor = _processor(accept_multi_turn_policy_samples=True)
-    processor.ingest(_inference("i1"))
-    processor.ingest(_inference("i2"))
+    processor.push(_inference("i1"))
+    processor.push(_inference("i2"))
 
     with pytest.raises(ValueError, match="one recorded request per report"):
-        processor.ingest(_report("r1", ("i1", "i2")))
+        processor.push(_report("r1", ("i1", "i2")))
 
 
 @pytest.mark.unit

@@ -176,8 +176,8 @@ def test_the_template_needs_the_placeholder() -> None:
 @pytest.mark.unit
 def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: CountingTokenizer) -> None:
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
 
     batch = processor.build_batch()
 
@@ -298,8 +298,8 @@ def test_sdft_recipe_refuses_stage_settings_in_the_recipe_config() -> None:
 def test_objective_trains_every_batch_and_refuses_multiple_epochs(tokenizer: CountingTokenizer) -> None:
     objective = SdftObjective()
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
     signal = objective.prepare(batch, {"steps": 2})
@@ -313,8 +313,8 @@ def test_objective_trains_every_batch_and_refuses_multiple_epochs(tokenizer: Cou
 @pytest.mark.unit
 def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokenizer: CountingTokenizer) -> None:
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
     prepared = prepare_slime_step(batch, TrainingMethod("sdft"), {}, StepScheduling(unit="sample"))

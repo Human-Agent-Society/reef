@@ -136,6 +136,7 @@ class TTTDTasks(ReportTasks):
     """
 
     def __init__(self, settings: SampleAssemblySettings, record2record: TTTDRecord2Record) -> None:
+        super().__init__()
         self.groups_per_step = record2record.groups_per_step
         self.rollouts_per_group = record2record.rollouts_per_group
         self.assembly = SampleAssembly(settings)

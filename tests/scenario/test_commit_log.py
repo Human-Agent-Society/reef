@@ -603,7 +603,7 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
 
 
 class ProtectAllPipeline(TrainingPipeline):
-    """Pairs like SFT but never releases a row: every ingested id is protected."""
+    """Pairs like SFT but never releases a row: every pushed id is protected."""
 
     def __init__(self, context, batch_size: int) -> None:
         super().__init__(
@@ -614,9 +614,9 @@ class ProtectAllPipeline(TrainingPipeline):
         )
         self._seen: set[str] = set()
 
-    def ingest(self, item) -> None:
+    def push(self, item) -> None:
         self._seen.add(item.agent_record_id)
-        super().ingest(item)
+        super().push(item)
 
     def releasable_record_ids(self) -> frozenset[str]:
         return frozenset()
@@ -640,7 +640,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
     The protect-all pipeline keeps every row physically present, so recovery
-    without the log's high-water mark would page from sequence 0, re-ingest
+    without the log's high-water mark would page from sequence 0, push again
     the consumed pair, and train it again.
     """
     initial = tmp_path / "initial"
@@ -687,13 +687,13 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None:
+def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     """Issue #344: the consumption cursor passes rows whose batches have not trained.
 
     The drain that readies step 1 also consumes the next step's inference, so
     the committed high-water mark covers it while retention keeps it stored.
     Recovery must feed that row back to the rebuilt processor; otherwise the
-    step-2 report waits forever on a reference that can never be ingested
+    step-2 report waits forever on a reference that can never be pushed
     again and training stalls silently. The consumed step-1 pair, compacted
     and so absent from replay, still never trains twice.
     """
@@ -721,7 +721,7 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
 
     second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
-    # The reingested inference pairs with the late report; i1 never retrains.
+    # The replayed inference pairs with the late report; i1 never retrains.
     assert second_runtime.trained_batches == [["i2"]]
     assert recovered.scenario_step == 2
 

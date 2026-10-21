@@ -10,7 +10,7 @@ from reef.core.plugins import NoSettings
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, ReportContext, SingleRecordSet
-from reef.record2task import Record2Task, ReportTasks, TaskResult
+from reef.record2task import ImmediateRecord2Task, ReportTasks, TaskResult
 from reef.record2task.assembly import reported_task
 from reef.task2batch import DistillBatches
 from reef.train.types import TrajectoryItem
@@ -46,7 +46,7 @@ class TraceTasks(ReportTasks):
         return sample if task is None else sample.with_metadata(task=task)
 
 
-class InferenceTasks(Record2Task):
+class InferenceTasks(ImmediateRecord2Task):
     """One recorded inference as one unscored trace task, with ``InferenceRecord2Record``.
 
     The proposer contract requires handling unscored samples.

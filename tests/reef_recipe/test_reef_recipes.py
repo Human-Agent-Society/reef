@@ -232,10 +232,10 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
     # Unsupported multi-turn training fails explicitly and preserves its inputs.
     trainer = recipe.build("math", SQLiteRecordStore())
     pipeline = trainer.pipeline
-    pipeline.ingest(_turn_inference("i1", [10, 20], -0.1))
-    pipeline.ingest(_turn_inference("i2", [10, 20, 11, 21], -0.2))
+    pipeline.push(_turn_inference("i1", [10, 20], -0.1))
+    pipeline.push(_turn_inference("i2", [10, 20, 11, 21], -0.2))
     with pytest.raises(ValueError, match="accept_multi_turn"):
-        pipeline.ingest(
+        pipeline.push(
             AgentRecord.create(
                 scenario="math",
                 request_type=RequestType.REPORT,
@@ -254,7 +254,7 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # held for retention only — terminal on sight, releasable, never a candidate.
     trainer = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
     pipeline = trainer.pipeline
-    pipeline.ingest(
+    pipeline.push(
         AgentRecord.create(
             scenario="math",
             request_type=RequestType.REPORT,

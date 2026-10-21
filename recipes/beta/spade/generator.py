@@ -2,16 +2,18 @@
 
 One ``generate`` call is one generation: ``count`` proposals across the configured ``skills``, each a
 Designer call through the generator service (``reef.record2task.generator``), with the last generation's
-results in the prompt as SPADE's experience section. A task with ``solution/hint.txt`` asks for a
-``hint`` arm of ``hint_plays`` plays with that file appended to the instruction.
+results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
 and removes it again: the generated-task recipe writes the valid task once more to play it.
 
-``record_results`` closes the generation. It reports each proposal's regret against the Designer's
-receipt (0 for a refused one) and keeps the generation report under ``state_dir``. An eval task gets no
-Designer report and does not go into the experience. A restart reads the last report to continue with the next
-generation and the last experience.
+``record_results`` closes the generation. For each train task that the recipe played and that has
+``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
+file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
+them. It reports each proposal's regret against the Designer's receipt (0 for a refused one) and keeps
+the generation report under ``state_dir``. An eval task gets no hint plays and no Designer report, and does
+not go into the experience. A restart reads the last report to continue with the next generation and the
+last experience.
 """
 
 from __future__ import annotations
@@ -38,15 +40,9 @@ from recipes.beta.spade.generation import (
     write_generation_report,
 )
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.processor import rewards_of
 from reef.record2task.generator.client import (
     DuplicateTask,
     Generator,
@@ -57,6 +53,7 @@ from reef.record2task.generator.client import (
     WrittenTask,
 )
 from reef.record2task.generator.designer import DIFFICULTIES, DesignerRequest
+from reef.record2task.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 
@@ -172,12 +169,12 @@ class SpadeTaskGenerator(TaskGenerator):
         except (OSError, ValueError) as exc:
             raise PluginConfigError(f"invalid SpadeTaskGenerator config: {exc}") from exc
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         """One generation: ``count`` Designer proposals; a failed service call ends it with what ran."""
         if any(record.scenario != self.scenario for record in request.source_records):
             raise ValueError("source records must belong to the generator's scenario")
         self.refused, self.pending, self.error = [], {}, ""
-        tasks: list[GeneratedTask] = []
+        tasks: list[HarborTask] = []
         try:
             for index in range(self.count):
                 skill = self.skills[index % len(self.skills)] if self.skills else None
@@ -186,12 +183,7 @@ class SpadeTaskGenerator(TaskGenerator):
                     self.refused.append(ProposalRecord(index, skill, proposed.record_id, None, proposed.refusal))
                     continue
                 self.pending[proposed.task.name] = PendingProposal(index, skill, proposed.record_id)
-                arms = (
-                    (PlayArm(HINT_ARM, self.hint_plays, (HINT_FILE,)),)
-                    if self.hint_plays and HINT_NAME in proposed.task.solution
-                    else ()
-                )
-                tasks.append(GeneratedTask(proposed.task, arms))
+                tasks.append(proposed.task)
         except GeneratorError as exc:
             self.error = str(exc)
             logger.error("SPADE generation %d stopped: %s", self.generation, exc)
@@ -231,6 +223,26 @@ class SpadeTaskGenerator(TaskGenerator):
         await self.service.delete_task(task.name)
         return TaskValidationResult(() if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",))
 
+    async def hint_rewards(self, task: HarborTask) -> tuple[float, ...]:
+        """Play a task that the recipe played ``hint_plays`` times with its hint, and return the rewards of the plays.
+
+        The recipe wrote the task to play it, and a second write of the same task is refused, so the task is
+        written again in place. The plays report on the ``hint`` arm, which the recipe does not train on.
+        """
+        await self.service.delete_task(task.name)
+        written = await self.service.write_task(task)
+        plays = await self.service.play(
+            written.path,
+            scenario=self.scenario,
+            arm=HINT_ARM,
+            plays=self.hint_plays,
+            is_reporting=True,
+            extra_instruction_files=(HINT_FILE,),
+            tags={"generation": str(self.generation)},
+            model=self.served_model,
+        )
+        return rewards_of(plays)
+
     async def write(self, task: HarborTask) -> WrittenTask:
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""
         try:
@@ -257,7 +269,13 @@ class SpadeTaskGenerator(TaskGenerator):
                 proposals.append((proposal, None))
                 continue
             plain = result.training_rewards
-            hint = result.measurement_rewards.get(HINT_ARM, ())
+            hint: tuple[float, ...] = ()
+            if self.hint_plays and HINT_NAME in result.task.solution:
+                try:
+                    hint = await self.hint_rewards(result.task)
+                except GeneratorError as exc:
+                    self.error = self.error or f"the hint plays of {result.task.name} failed: {exc}"
+                    logger.error("SPADE hint plays of %s failed: %s", result.task.name, exc)
             play_record = PlayRecord(
                 name=result.task.name,
                 skill=pending.skill,

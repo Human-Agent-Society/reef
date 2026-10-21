@@ -120,9 +120,9 @@ ANCHOR = ({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)
 def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     worker = FakeWorker()
     processor = _processor(batch_size=1, worker=worker)
-    processor.ingest(_turn("t1", Q1))
+    processor.push(_turn("t1", Q1))
     assert not worker.jobs  # no successor yet
-    processor.ingest(_turn("t2", _successor(Q1, "Great, that works!")))
+    processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
     assert [job.receipt for job in worker.jobs] == ["t1"]
     assert worker.jobs[0].next_state_text == "Great, that works!"
@@ -146,10 +146,10 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
 def test_interleaved_sessions_with_distinct_prefixes_stay_separate() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.ingest(_turn("a1", Q1))
-    processor.ingest(_turn("b1", Q2))
-    processor.ingest(_turn("b2", _successor(Q2, "that crashes")))
-    processor.ingest(_turn("a2", _successor(Q1, "works great")))
+    processor.push(_turn("a1", Q1))
+    processor.push(_turn("b1", Q2))
+    processor.push(_turn("b2", _successor(Q2, "that crashes")))
+    processor.push(_turn("a2", _successor(Q1, "works great")))
 
     bound = {job.receipt: job.next_state_text for job in worker.jobs}
     assert bound == {"b1": "that crashes", "a1": "works great"}
@@ -168,9 +168,9 @@ def test_side_calls_and_retried_turns_are_terminal() -> None:
         },
         agent_record_id="side",
     )
-    processor.ingest(side)  # no tools: auxiliary call
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t1-retry", Q1))  # identical request: retried logical turn
+    processor.push(side)  # no tools: auxiliary call
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t1-retry", Q1))  # identical request: retried logical turn
 
     releasable = processor.releasable_record_ids()
     assert {"side", "t1-retry"} <= set(releasable)
@@ -182,7 +182,7 @@ def test_side_calls_and_retried_turns_are_terminal() -> None:
 def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker, ttl_s=1e-6)
-    processor.ingest(_turn("t1", Q1))
+    processor.push(_turn("t1", Q1))
     time.sleep(0.001)
     assert not processor.ready()  # catches up: the TTL pass runs
     decision = processor.releasable_record_ids()
@@ -194,15 +194,15 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
 def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.ingest(_turn("declined", Q1))
-    processor.ingest(_turn("cont1", _successor(Q1, "meh")))
+    processor.push(_turn("declined", Q1))
+    processor.push(_turn("cont1", _successor(Q1, "meh")))
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
     assert not processor.ready()
     assert "declined" in processor.releasable_record_ids()
 
     # ragged top-K capture: one row missing → the select loss cannot run
-    processor.ingest(_turn("ragged", Q2, topk_rows=[[1, 2]]))
-    processor.ingest(_turn("cont2", _successor(Q2, "ok")))
+    processor.push(_turn("ragged", Q2, topk_rows=[[1, 2]]))
+    processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
     assert not processor.ready()
     assert "ragged" in processor.releasable_record_ids()
@@ -213,11 +213,11 @@ def test_candidates_behind_the_serving_version_drop_from_pending_candidates() ->
     worker = FakeWorker()
     processor = _processor(batch_size=2, worker=worker)
     processor.observe_serving_runtime_load_id("v1")
-    processor.ingest(_turn("old", Q1, runtime_load_id="v1"))
-    processor.ingest(_turn("cont1", _successor(Q1, "ok")))
+    processor.push(_turn("old", Q1, runtime_load_id="v1"))
+    processor.push(_turn("cont1", _successor(Q1, "ok")))
     processor.observe_serving_runtime_load_id("v2")
-    processor.ingest(_turn("new", Q2, runtime_load_id="v2"))
-    processor.ingest(_turn("cont2", _successor(Q2, "ok")))
+    processor.push(_turn("new", Q2, runtime_load_id="v2"))
+    processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     assert not processor.ready()  # the stale candidate was dropped, 1 < batch_size
@@ -228,8 +228,8 @@ def test_candidates_behind_the_serving_version_drop_from_pending_candidates() ->
 @pytest.mark.unit
 def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor = _processor(worker=None)  # no prm_url, no injected worker
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t2", _successor(Q1, "ok")))
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t2", _successor(Q1, "ok")))
     assert not processor.ready()
     assert "t1" in processor.releasable_record_ids()
 
@@ -239,9 +239,9 @@ def test_background_jobs_running_and_close_propagation() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
     assert not processor.background_jobs_running()
-    processor.ingest(_turn("t1", Q1))
+    processor.push(_turn("t1", Q1))
     assert not processor.background_jobs_running()  # an idle tracked turn does not keep the training thread polling
-    processor.ingest(_turn("t2", _successor(Q1, "ok")))
+    processor.push(_turn("t2", _successor(Q1, "ok")))
     assert processor.background_jobs_running()  # the judgment of t1 runs
     processor.close()
     assert worker.closed
@@ -292,8 +292,8 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
     # clients (not a scripted worker): the REAL worker thread runs the
     # processor's own judge against the scripted PRM clients.
     processor = _processor(clients=(ScriptedJudge(), teacher, None))
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t2", _successor(Q1, "Great, that works!")))
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
     deadline = time.monotonic() + 10.0
     while not processor.ready() and time.monotonic() < deadline:
@@ -435,7 +435,7 @@ def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline
 
 @pytest.mark.unit
 def test_the_batches_need_the_openclawrl_record_stage() -> None:
-    recipe = openclawrl_recipe({"record2record": {"module": "reef.record2record:PassThroughRecord2Record"}})
+    recipe = openclawrl_recipe({"record2record": {"module": "reef.record2record:NoRecordSets"}})
     with pytest.raises(RecipeConfigError, match="OpenClawRLBatches needs OpenClawRLRecord2Record"):
         recipe.build_pipeline(PipelineContext("s"))
 
@@ -444,9 +444,9 @@ def test_the_batches_need_the_openclawrl_record_stage() -> None:
 def test_echo_only_extension_never_binds_a_turn_to_its_own_reply() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.ingest(_turn("t1", Q1))
+    processor.push(_turn("t1", Q1))
     # Continue/prefill shape: the successor carries ONLY the assistant echo.
-    processor.ingest(_turn("t2", [*Q1, {"role": "assistant", "content": "the answer is"}]))
+    processor.push(_turn("t2", [*Q1, {"role": "assistant", "content": "the answer is"}]))
     assert not worker.jobs
 
 
@@ -454,13 +454,13 @@ def test_echo_only_extension_never_binds_a_turn_to_its_own_reply() -> None:
 def test_sequential_sessions_with_identical_openers_stay_separate() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.ingest(_turn("a1", Q1))
-    processor.ingest(_turn("a2", _successor(Q1, "session A feedback")))
+    processor.push(_turn("a1", Q1))
+    processor.push(_turn("a2", _successor(Q1, "session A feedback")))
     # Session B re-opens with the canonically identical first request. A has
     # progressed (its last request is longer), so this is a new session, not
     # a retry — and B's successor binds B's opener, never A's tail.
-    processor.ingest(_turn("b1", Q1))
-    processor.ingest(_turn("b2", _successor(Q1, "session B feedback")))
+    processor.push(_turn("b1", Q1))
+    processor.push(_turn("b2", _successor(Q1, "session B feedback")))
     bound = {job.receipt: job.next_state_text for job in worker.jobs}
     assert bound == {"a1": "session A feedback", "b1": "session B feedback"}
 
@@ -468,9 +468,7 @@ def test_sequential_sessions_with_identical_openers_stay_separate() -> None:
 @pytest.mark.unit
 def test_reports_are_terminal_on_sight() -> None:
     processor = _processor(worker=FakeWorker())
-    processor.ingest(
-        AgentRecord.create(scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
-    )
+    processor.push(AgentRecord.create(scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id="r1"))
     releasable = processor.releasable_record_ids()
     assert "r1" in set(releasable)
 
@@ -482,8 +480,8 @@ def test_rejected_submission_retires_the_turn() -> None:
             return False
 
     processor = _processor(worker=RefusingWorker())
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t2", _successor(Q1, "ok")))
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t2", _successor(Q1, "ok")))
     assert "t1" in processor.releasable_record_ids()
 
 
@@ -564,8 +562,8 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
             context, OpenClawRLBatchSettings(batch_size=1, prm_record_file=str(record)), stage
         ),
     )
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t2", _successor(Q1, "that works")))
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
     assert processor.ready()
     processor.build_batch()
@@ -588,10 +586,10 @@ def test_every_main_turn_is_judged_whatever_its_next_state_is() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
     tool_step = [*Q1, {"role": "assistant", "content": ""}, {"role": "tool", "content": "file contents"}]
-    processor.ingest(_turn("t1", Q1))
-    processor.ingest(_turn("t2", tool_step))
+    processor.push(_turn("t1", Q1))
+    processor.push(_turn("t2", tool_step))
     assert [(job.receipt, job.next_state_role) for job in worker.jobs] == [("t1", "tool")]
-    processor.ingest(_turn("t3", _successor(tool_step, "too AI-written, redo it")))
+    processor.push(_turn("t3", _successor(tool_step, "too AI-written, redo it")))
     assert [(job.receipt, job.next_state_role) for job in worker.jobs] == [("t1", "tool"), ("t2", "user")]
     assert worker.jobs[1].next_state_text == "too AI-written, redo it"
 
@@ -686,7 +684,7 @@ def test_traffic_without_a_session_tag_says_so_instead_of_training_on_nothing(ca
     processor = _processor(worker=FakeWorker())
     with caplog.at_level("WARNING"):
         for i in range(9):  # Hermes shape: each turn restarts the transcript
-            processor.ingest(_turn(f"t{i}", [{"role": "user", "content": f"homework {i}"}]))
+            processor.push(_turn(f"t{i}", [{"role": "user", "content": f"homework {i}"}]))
         assert "x-reef-tag-session" in caplog.text  # the fallback announced itself
         caplog.clear()
         processor.record2record.judging.expire(time.monotonic() + 10_000.0)  # every session times out unbound
@@ -698,8 +696,8 @@ def test_traffic_without_a_session_tag_says_so_instead_of_training_on_nothing(ca
 def test_a_tagged_run_stays_quiet(caplog) -> None:
     processor = _processor(worker=FakeWorker())
     with caplog.at_level("WARNING"):
-        processor.ingest(_turn("t1", Q1, session="hw-1"))
-        processor.ingest(_turn("t2", Q2, session="hw-1"))
+        processor.push(_turn("t1", Q1, session="hw-1"))
+        processor.push(_turn("t2", Q2, session="hw-1"))
         processor.record2record.judging.expire(time.monotonic() + 10_000.0)
     assert caplog.text == ""
 

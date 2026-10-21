@@ -256,7 +256,7 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
         task2batch=TTTDBatches(context, record2record),
     )
-    processor.ingest(
+    processor.push(
         AgentRecord.create(
             scenario="discovery",
             request_type=RequestType.INFERENCE,
@@ -273,7 +273,7 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
         rollouts_per_group=64,
     ).to_dict(references=["inference-a"])
     with pytest.raises(ValueError, match="8x64"):
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="discovery",
                 request_type=RequestType.REPORT,
@@ -282,7 +282,7 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
             )
         )
     with pytest.raises(ReportValidationError, match="metadata"):
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="discovery",
                 request_type=RequestType.REPORT,
@@ -302,7 +302,7 @@ def test_report_references_are_checked_against_storage_not_processor_cache() -> 
             agent_record_id="source",
             payload={},
         )
-        scenario.records.append(source)  # Stored, but deliberately not ingested by the processor.
+        scenario.records.append(source)  # Stored, but deliberately not pushed to the processor.
         stored = dispatcher.accept_record(_report_record("feedback", {"references": ["source"], "score": 0.0}))
         assert stored.references == ("source",)
     finally:

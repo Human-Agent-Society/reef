@@ -21,7 +21,7 @@ from reef_client.client import ReefClientError
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
-from reef.core.tasks import HarborTask, TaskGenerationRequest, read_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
@@ -46,6 +46,7 @@ from reef.record2task.generator import (
     TaskPlays,
     readiness_probes,
 )
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.record2task.generator.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
 from reef.record2task.generator.wire import (
     WireError,
@@ -651,8 +652,7 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
 
     async def body(generator: HttpGenerator) -> None:
         task_generator = spade(generator, tmp_path)
-        (item,) = await task_generator.generate(generation_request)
-        task = item.task
+        (task,) = await task_generator.generate(generation_request)
         assert task.source_agent_record_ids == ("original-inference", "original-report")
         assert task.metadata["designer_record_id"] == "designer-1"
         assert task.name.startswith("harbor-history-")
@@ -660,8 +660,8 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         context = PipelineContext("spade")
         round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=2))
         generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, task_player=generator)
-        result, _ = await generation.played(item, 0)
-        assert result.is_played and len(result.training_rewards) == 2 and set(result.measurement_rewards) == {"hint"}
+        result, _ = await generation.played(task, 0)
+        assert result.is_played and len(result.training_rewards) == 2
         assert read_harbor_task(tmp_path / "tasks" / task.name).source_agent_record_ids == task.source_agent_record_ids
         await task_generator.record_results((result,))
 
@@ -682,12 +682,12 @@ def test_a_history_proposal_keeps_a_written_loop_task(tmp_path: Path) -> None:
     async def body(generator: HttpGenerator) -> None:
         task_generator = spade(generator, tmp_path)
         (loop,) = await task_generator.generate(TaskGenerationRequest((), "shell tasks"))
-        written = await generator.write_task(loop.task)
+        written = await generator.write_task(loop)
 
         (history,) = await task_generator.generate(TaskGenerationRequest(source_records(), "rebuild"))
 
-        assert (await task_generator.validate(history.task)).is_valid and history.task.name != loop.task.name
-        assert read_harbor_task(written.path).digest == loop.task.digest
+        assert (await task_generator.validate(history)).is_valid and history.name != loop.name
+        assert read_harbor_task(written.path).digest == loop.digest
 
     run_with(built, body)
 
@@ -698,13 +698,13 @@ def test_history_write_refuses_a_name_conflict_without_replacing_the_task(tmp_pa
     async def body(generator: HttpGenerator) -> None:
         task_generator = spade(generator, tmp_path)
         (item,) = await task_generator.generate(TaskGenerationRequest(source_records(), "rebuild"))
-        written = await task_generator.write(item.task)
-        conflicting = replace(item.task, instruction=item.task.instruction + "Use the supplied state file.\n")
+        written = await task_generator.write(item)
+        conflicting = replace(item, instruction=item.instruction + "Use the supplied state file.\n")
 
         with pytest.raises(TaskNameConflict):
             await task_generator.write(conflicting)
 
-        assert read_harbor_task(written.path).digest == item.task.digest
+        assert read_harbor_task(written.path).digest == item.digest
 
     run_with(built, body)
 

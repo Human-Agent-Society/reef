@@ -20,6 +20,7 @@ from reef.service.request_service import InferenceRetryTimeout
 from reef.service.routing import RoutingRequestError
 from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.storage.records import RecordConflict
+from reef.storage.trajectories import TrajectoryConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactConflict, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPConflict),
     (RecordConflict, web.HTTPConflict),
+    (TrajectoryConflict, web.HTTPConflict),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),

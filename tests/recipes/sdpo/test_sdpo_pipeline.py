@@ -77,7 +77,7 @@ def processor(**config: Any) -> TrainingPipeline:
     )
 
 
-def ingest(
+def push(
     target: SDPOBatches,
     rollout: int,
     *,
@@ -98,11 +98,11 @@ def ingest(
         inference = replace(inference, artifact_ref=None)
     elif release != "slime-v3":
         inference = replace(inference, artifact_ref=replace(inference.artifact_ref, release_id=release))
-    target.ingest(inference)
+    target.push(inference)
     body = SDPOReport(step=step, group=group, rollout=rollout, score=score, teacher_context=feedback).to_dict(
         references=(name,)
     )
-    target.ingest(
+    target.push(
         AgentRecord.create(
             scenario="science",
             request_type=RequestType.REPORT,
@@ -116,12 +116,12 @@ def ingest(
 @pytest.mark.unit
 def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokenizer) -> None:
     target = processor(groups_per_step=2)
-    ingest(target, 1, score=0.0)
-    ingest(target, 0, group=1, score=0.0)
-    ingest(target, 1, group=1, score=0.0)
+    push(target, 1, score=0.0)
+    push(target, 0, group=1, score=0.0)
+    push(target, 1, group=1, score=0.0)
     with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
-    ingest(target, 0, score=1.0)
+    push(target, 0, score=1.0)
     batch = target.build_batch()
     assert isinstance(batch, TrainingBatch)
     assert batch.batch_id == "science:batch:1"
@@ -139,8 +139,8 @@ def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokeni
 @pytest.mark.unit
 def test_a_rollout_reads_its_own_success_only_when_allowed(tokenizer: SDPOTokenizer) -> None:
     target = processor(allow_own_success_as_demonstration=True)
-    ingest(target, 0, score=1.0)
-    ingest(target, 1, score=0.0)
+    push(target, 0, score=1.0)
+    push(target, 1, score=0.0)
     batch = target.build_batch()
     assert [s.training["distill_sample_weight"] for s in batch.items] == [1.0, 1.0]
     assert "Answer from s0g0r0" in tokenizer.calls[0][0][-1]["content"]
@@ -149,11 +149,11 @@ def test_a_rollout_reads_its_own_success_only_when_allowed(tokenizer: SDPOTokeni
 @pytest.mark.unit
 def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
     target = processor()
-    ingest(target, 0, score=0.0)
-    ingest(target, 0, score=1.0, suffix="retry")
+    push(target, 0, score=0.0)
+    push(target, 0, score=1.0, suffix="retry")
     with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
-    ingest(target, 1, score=0.0)
+    push(target, 1, score=0.0)
     batch = target.build_batch()
     assert len(batch.items) == 2
     assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.items)
@@ -163,8 +163,8 @@ def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
 @pytest.mark.parametrize("release", [None, "slime-v4"])
 def test_rejects_steps_without_one_known_policy_release(tokenizer: SDPOTokenizer, release: str | None) -> None:
     target = processor()
-    ingest(target, 0)
-    ingest(target, 1, release=release)
+    push(target, 0)
+    push(target, 1, release=release)
     with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_release_ids"}]
@@ -173,8 +173,8 @@ def test_rejects_steps_without_one_known_policy_release(tokenizer: SDPOTokenizer
 @pytest.mark.unit
 def test_rejects_different_questions_in_one_group(tokenizer: SDPOTokenizer) -> None:
     target = processor()
-    ingest(target, 0)
-    ingest(target, 1, question=[{"role": "user", "content": "A different question"}])
+    push(target, 0)
+    push(target, 1, question=[{"role": "user", "content": "A different question"}])
     with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     assert target.status()["failed_steps"][0]["reason"] == "different_requests_in_group"
@@ -184,8 +184,8 @@ def test_rejects_different_questions_in_one_group(tokenizer: SDPOTokenizer) -> N
 @pytest.mark.parametrize("include_feedback", [False, True])
 def test_environment_feedback_is_opt_in(tokenizer: SDPOTokenizer, include_feedback: bool) -> None:
     target = processor(include_environment_feedback=include_feedback)
-    ingest(target, 0, feedback="The tool call is missing a required argument.")
-    ingest(target, 1)
+    push(target, 0, feedback="The tool call is missing a required argument.")
+    push(target, 1)
     batch = target.build_batch()
     assert [s.training["distill_sample_weight"] for s in batch.items] == [float(include_feedback), 0.0]
     assert ("missing a required argument" in tokenizer.calls[0][0][-1]["content"]) == include_feedback
@@ -199,8 +199,8 @@ def test_solution_can_take_priority_over_feedback_and_prompt_truncates_right(tok
         max_teacher_prompt_tokens=2,
         max_teacher_tokens=5,
     )
-    ingest(target, 0, score=1.0)
-    ingest(target, 1, feedback="Do not include this feedback when a solution exists.")
+    push(target, 0, score=1.0)
+    push(target, 1, feedback="Do not include this feedback when a solution exists.")
     batch = target.build_batch()
     assert "Do not include" not in tokenizer.calls[1][0][-1]["content"]
     assert list(batch.items[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
@@ -209,8 +209,8 @@ def test_solution_can_take_priority_over_feedback_and_prompt_truncates_right(tok
 @pytest.mark.unit
 def test_teacher_overflow_fails_without_silently_dropping_part_of_a_step(tokenizer: SDPOTokenizer) -> None:
     target = processor(max_teacher_prompt_tokens=2, max_teacher_tokens=3)
-    ingest(target, 0)
-    ingest(target, 1)
+    push(target, 0)
+    push(target, 1)
     with pytest.raises(ValueError, match="exceeds max_teacher_tokens"):
         target.build_batch()
 

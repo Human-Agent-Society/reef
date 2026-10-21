@@ -57,6 +57,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/trajectories``                                                      | upload ATIF trajectories to train on directly     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
@@ -346,6 +348,8 @@ understands. Import does not synthesize missing training tensors, run inference,
 or assign the current serving artifact to externally generated examples.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
+To upload ATIF trajectories that are already complete, see
+`Upload trajectories <#upload-trajectories>`__.
 
 For existing datasets, use the batch endpoint and resumable JSONL importer
 below. Both endpoints accept request bodies up to 10 MiB.
@@ -431,6 +435,50 @@ may retain inference records while waiting for feedback; placing all inferences
 before all reports can therefore build a large in-memory backlog. Where possible,
 place reports close to their referenced inferences. Large-dataset throughput and
 end-to-end memory use require measurement with the selected recipe.
+
+Upload trajectories
+-------------------
+
+Use this route when your data is already a complete ATIF trajectory. An
+uploaded trajectory is not a record. Reef keeps it in the scenario storage and
+gives it directly to the recipe's task-to-batch stage. The scenario's recipe
+must accept uploaded trajectories. If it does not, Reef refuses the upload with
+400. For the recipe side, see
+`Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+
+The route uses the usual Bearer token and ``x-reef-scenario`` header. Send 1
+to 1000 trajectories in one request to ``POST /reef/trajectories``. Each one
+has a ``trajectory_id`` that you choose. Each document must have an ``ATIF-v``
+``schema_version``, an ``agent`` object and at least one step. Reef saves all
+of them in one transaction, or none. The request body can be at most 10 MiB:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/trajectories \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'x-reef-scenario: my-agent' \
+     -H 'Content-Type: application/json' \
+     -d '{"trajectories": [{
+       "trajectory_id": "trajectory-0001",
+       "trajectory": {
+         "schema_version": "ATIF-v1.4",
+         "session_id": "trajectory-0001",
+         "agent": {"name": "my-agent", "version": "1"},
+         "steps": [{"step_id": 1, "source": "user", "message": "What is 2 + 2?"}]
+       }
+     }]}'
+
+The response is ``{"scenario": "my-agent", "trajectory_ids":
+["trajectory-0001"]}``. An identical retry returns the same receipt, also
+after training. The same ID with a different trajectory returns 409. An
+invalid upload returns 400 and saves nothing.
+
+Each uploaded trajectory counts as one batch unit toward the recipe's
+``batch_size``. A batch takes uploaded trajectories first, in upload order,
+and then the units of recorded traffic. Thus a large upload can delay the
+training of live traffic. The delay continues until the batches use all of
+the upload. Archiving the scenario retires its uploaded trajectories with its
+records. Record retention does not delete them.
 
 Manual training
 ---------------

@@ -157,6 +157,7 @@ class SDPOTasks(ReportTasks):
     """
 
     def __init__(self, settings: SDPOTeacherSettings, record2record: SDPORecord2Record) -> None:
+        super().__init__()
         self.groups_per_step = record2record.step_grouping.groups_per_step
         self.rollouts_per_group = record2record.step_grouping.rollouts_per_group
         self.assembly = SampleAssembly(settings)
