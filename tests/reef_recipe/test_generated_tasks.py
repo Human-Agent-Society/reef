@@ -1279,3 +1279,10 @@ def test_a_task_whose_step_did_not_commit_rolls_out_again_after_a_restart(tmp_pa
     first.close()
     restarted, _ = rounds(tmp_path, ScriptedGenerator(), rounds=1)
     assert len(restarted.record2record.task_pool) == 2, "both tasks roll out again"
+
+
+def test_a_generation_outcome_that_is_incomplete_holds_no_task_and_names_its_error() -> None:
+    with pytest.raises(ValueError, match="incomplete generation"):
+        GenerationOutcome(receipt="generation-00000", generation=0, tasks=(), is_complete=False, error="")
+    with pytest.raises(ValueError, match="non-negative"):
+        GenerationJob(receipt="generation-x", generation=-1)

@@ -316,20 +316,42 @@ class RoundResult:
 
 @dataclass(frozen=True)
 class GenerationJob(SupportsReceipt):
-    """One generation to run, with its source sessions' records; the receipt names it."""
+    """One generation to run.
+
+    Values: ``receipt`` is ``generation-<generation>``. ``generation`` is a non-negative generation number of
+    the task store. ``source_records`` holds the records of the round's source sessions that no complete
+    generation used, each record once; it is empty for a description-only generation.
+    Purpose: ``GeneratedTaskTasks.start_round`` makes it; its worker runs it in ``run_generation``.
+    """
 
     generation: int
     source_records: tuple[AgentRecord, ...] = ()
 
+    def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int) or self.generation < 0:
+            raise ValueError("generation must be a non-negative integer")
+
 
 @dataclass(frozen=True)
 class GenerationOutcome(SupportsReceipt):
-    """What the worker hands back for one generation: its train tasks, whether it is complete, and its error."""
+    """How one generation job ended.
+
+    Values: ``receipt`` and ``generation`` are those of the job. ``is_complete`` says whether the generation
+    is complete in the task store. A complete generation holds in ``tasks`` its published train tasks that
+    have not trained, and its ``error`` is empty or names a delivery to the generator that failed. An
+    incomplete generation ran out of attempts: it holds no task, and ``error`` names the last failure.
+    Purpose: the worker hands it back from ``run``; ``GeneratedTaskTasks.finished_rounds`` turns it into a
+    ``RoundResult``.
+    """
 
     generation: int
     tasks: tuple[TaskItem, ...]
     is_complete: bool
     error: str
+
+    def __post_init__(self) -> None:
+        if not self.is_complete and (self.tasks or not self.error):
+            raise ValueError("an incomplete generation holds no task and names its error")
 
 
 @dataclass(frozen=True)

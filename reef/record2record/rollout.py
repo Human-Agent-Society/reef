@@ -78,7 +78,14 @@ class PooledTask:
 
 
 class TaskPool:
-    """Hold the saved tasks that wait to roll out, in arrival order. A task ID is held at most one time."""
+    """The saved tasks that wait to roll out.
+
+    Values: a finite set of ``PooledTask`` values with distinct ``task_id``; ``arrival_count`` is larger than
+    the ``arrival_index`` of each task that ``add`` made. ``take`` removes the oldest tasks by
+    ``arrival_index``; ``put_back`` restores taken tasks with their indices; ``add`` gives a new index.
+    Purpose: a rollout record stage holds it; the pipeline takes a rollout batch's tasks from it and puts back
+    the tasks that the batch did not train.
+    """
 
     def __init__(self) -> None:
         self.tasks_by_id: dict[Hashable, PooledTask] = {}
@@ -107,6 +114,13 @@ class TaskPool:
 
 class RolloutGrouping(ReportGrouping):
     """The training episodes of one task use in one rollout batch form one group.
+
+    Values: ``active_keys`` holds the ``(batch, task_use)`` keys of the active batches. ``expected_reports``
+    maps a key whose plays ended to the report IDs of its training episodes; ``ended_reports`` maps a key to
+    its reports that ended without training; ``closed`` holds the keys whose batch's settle deadline passed.
+    Every key in the last three sets is in ``active_keys`` until its batch ends.
+    Purpose: ``RolloutReportRecord2Record`` owns it and updates it as batches begin, end their plays and end;
+    the report stage asks it which reports train and when a group settles.
 
     A group settles when every report that its plays returned joined it or ended without training, or when
     its batch's groups are closed. A group of fewer than two training episodes has no relative reward and is
