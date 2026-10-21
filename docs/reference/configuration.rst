@@ -73,7 +73,8 @@ For example, the local inference command above can also use:
 Run it with ``reef serve -c reef.yaml --inference.options.mem-fraction-static 0.7``.
 An explicit CLI value overrides the corresponding YAML value. Omitted public
 fields use their declared defaults. Hyphens and underscores are accepted in
-declared YAML fields; supplying both spellings of one field is an error.
+section names and declared YAML fields; supplying both spellings of one field
+is an error.
 Unknown sections and undeclared public fields are rejected.
 
 The public layout groups fields by their owner:
@@ -974,12 +975,13 @@ Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
 .. config::
 
    evolution.propose | a ``Proposer`` class: ``package.module:ClassName``, or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives
-   evolution.evaluate | an ``EpisodeScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest``
+   evolution.evaluate | an ``EpisodeScorer`` class, in the same form; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward, for an evaluation fed by ``evolution.task_manifest`` or ``evolution.eval_task_store``
    evolution.selection | score_comparison | ``floor`` (the candidate alone must score at least ``evolution.floor_score`` on every evaluation task; the current release is not run, and ``recheck_every`` is refused since a recheck compares two trees), ``always``, or a ``SelectionPlugin`` class in the same form as ``evolution.propose``
    evolution.floor_score | 1.0 | the score every evaluation task must reach under ``selection: floor``; a positive number, refused with any other selection, as ``min_win_margin`` is outside ``score_comparison``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
    evolution.tasks_root | the directory the manifest's task names live under
+   evolution.eval_task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. Set instead of ``evolution.tasks`` and ``evolution.task_manifest``, with the same adapter and ``promote_failures`` limits as ``evolution.task_manifest``. The eval split must hold a task when the scenario loads.
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
    evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
@@ -1191,14 +1193,12 @@ The task files go in the task file store; see `Choose the task file store
 <../user-guide/operate.rst#choose-the-task-file-store>`__.
 Related source sessions keep the same split across generations.
 A task that joins existing train and eval source groups is rejected.
-Eval tasks are saved without training plays, measurement plays or Designer rewards.
+Eval tasks are saved without plays or Designer rewards.
 The generator's pass-rate band does not filter the store.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.
-The task store saves these values when the scenario opens it for the first time.
-A scenario that loads with other values fails.
-Use a new scenario for a different split.
+A published task keeps its split. A change of these values applies to the tasks generated after it.
 
 ``GeneratedTaskBatches`` batches complete task groups:
 
@@ -1263,6 +1263,18 @@ other children: the Reef address from ``reef.host`` and ``reef.port``, the
 token from ``reef.token``, and the served model from ``inference.model-path``
 or ``inference.upstream-model``. Without ``reef serve``,
 ``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
+
+The ``task-import`` section
+---------------------------
+
+Absent by default. When present, each scenario imports the Harbor tasks of a
+split manifest into its task store ``imported-tasks`` when it opens. See
+`Import Harbor tasks <../user-guide/operate.rst#import-harbor-tasks>`__.
+
+.. config::
+
+   task-import.manifest | a split manifest: a JSON file with ``version``, ``seed``, ``eval_fraction``, and the task names of ``train`` and ``eval``. Required with ``tasks-root``.
+   task-import.tasks-root | the directory that holds a Harbor task directory for each task name of the manifest. Required with ``manifest``.
 
 Experiment tracking
 -------------------

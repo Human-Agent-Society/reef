@@ -20,9 +20,8 @@ from dataclasses import dataclass
 from reef_client.client import ReefClient, ReefClientError
 
 from reef.core.prompts import untrusted_text
-from reef.core.tasks.generation import TaskGenerationRequest
 from reef.core.tasks.harbor import HarborTaskError, checked_files
-from reef.record2task.generator.inputs import MAX_ASSET_BYTES, MAX_ASSET_FILES, record_document
+from reef.record2task.generator.inputs import MAX_ASSET_BYTES, MAX_ASSET_FILES, TaskGenerationRequest, record_document
 
 DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12

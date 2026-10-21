@@ -528,11 +528,16 @@ def test_training_backends_never_import_inference_implementations() -> None:
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
 
 
-def test_task_generation_input_definition_does_not_depend_on_consumers() -> None:
-    module = importlib.import_module("reef.core.tasks.generation")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.core.tasks")
-    for dependency in ("reef.train", "reef.record2task.generator", "recipes"):
-        assert _imports_of(imported, dependency) == []
+def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
+    # The generator service owns the request; the generated-task recipe owns the generator contract.
+    for module_name, package, consumers in (
+        ("reef.record2task.generator.inputs", "reef.record2task.generator", ("reef.train", "reef.recipe", "recipes")),
+        ("reef.recipe.generated_tasks.generator", "reef.recipe.generated_tasks", ("reef.train", "recipes")),
+    ):
+        module = importlib.import_module(module_name)
+        imported = _imported_modules(ast.parse(inspect.getsource(module)), package=package)
+        for dependency in consumers:
+            assert _imports_of(imported, dependency) == [], module_name
 
 
 def test_background_jobs_depend_only_on_the_standard_library() -> None:

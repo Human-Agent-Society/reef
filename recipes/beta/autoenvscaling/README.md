@@ -44,7 +44,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 ## The generator
 
-`AutoEnvScalingGenerator` implements `reef.core.tasks.TaskGenerator`. One round of the recipe is one generation:
+`AutoEnvScalingGenerator` implements `reef.recipe.generated_tasks.TaskGenerator`. One round of the recipe is one generation:
 
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).

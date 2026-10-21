@@ -86,7 +86,6 @@ training:
     hf-checkpoint: "${inference.model-path}"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
-    save-interval: "1000"
     # The next stage starts from the HF export alone, so the optimizer state
     # is never saved: a step's checkpoint is the weights, not the Adam moments.
     no-save-optim: true

@@ -46,7 +46,6 @@ training:
     ref-load: "${inference.model-path}"
     save: "${training.config.checkpoint_dir}/megatron"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    save-interval: "${recipe.config.checkpoint-every-n-versions}"
     reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
     reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"

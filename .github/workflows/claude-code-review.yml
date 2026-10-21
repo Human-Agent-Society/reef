@@ -12,9 +12,12 @@ on:
 
 jobs:
   claude-review:
-    # Dependabot runs get only Dependabot secrets, so the OAuth token is empty,
-    # and the action refuses bot actors. Skip those pull requests.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # A pull request from a fork gets no repository secrets and no OIDC token,
+    # so the action cannot sign in. Dependabot runs get only Dependabot secrets,
+    # so the OAuth token is empty, and the action refuses bot actors. Skip both.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:

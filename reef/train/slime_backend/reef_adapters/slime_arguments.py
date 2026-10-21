@@ -156,6 +156,9 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         argument == "--use-critic" or argument.startswith("--use-critic=") for argument in arguments
     )
     explicitly_resident = "--no-offload-train" in arguments
+    if any(argument == "--save-interval" or argument.startswith("--save-interval=") for argument in arguments):
+        # Only Slime's own training loop reads --save-interval; the Reef bridge saves by its own interval.
+        raise ValueError("--save-interval has no effect under Reef; set --reef-checkpoint-interval instead")
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is

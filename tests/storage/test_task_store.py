@@ -1,7 +1,8 @@
-"""Generated task store contract on every bundled scenario storage."""
+"""Task store contract on every bundled scenario storage."""
 
 from __future__ import annotations
 
+import tempfile
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,7 @@ import pytest
 
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
-from reef.core.tasks import GeneratedTask, HarborTask, PlayArm, read_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.postgres import PostgresScenarioStorage
@@ -19,7 +20,6 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import (
     GenerationState,
     LocalTaskFileStore,
-    SplitSettings,
     StoredTask,
     TaskCandidate,
     TaskConflict,
@@ -27,26 +27,27 @@ from reef.storage.tasks import (
     files_digest,
 )
 
-SPLIT = SplitSettings(eval_fraction=0.25, seed=7)
 
-
-def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("record-1",)) -> GeneratedTask:
-    return GeneratedTask(
-        task=HarborTask(
-            name=name,
-            instruction=instruction or f"Solve {name}.",
-            tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-            environment={"Dockerfile": "FROM python:3.12-slim\n"},
-            config={
-                "verifier": {"timeout_sec": 30},
-                "environment": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
-            },
-            metadata={"designer_record_id": "designer-1"},
-            solution={"hint.txt": "look closer"},
-            source_agent_record_ids=sources,
-        ),
-        measurement_arms=(PlayArm("hinted", 2, ("solution/hint.txt",)),),
+def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("record-1",)) -> HarborTask:
+    return HarborTask(
+        name=name,
+        instruction=instruction or f"Solve {name}.",
+        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        config={
+            "verifier": {"timeout_sec": 30},
+            "environment": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
+        },
+        metadata={"designer_record_id": "designer-1"},
+        solution={"hint.txt": "look closer"},
+        source_agent_record_ids=sources,
     )
+
+
+def candidates(root: Path, *tasks: HarborTask) -> tuple[Path, ...]:
+    """Write each task in a directory of its own, as the record-to-task stage does."""
+    staging = Path(tempfile.mkdtemp(dir=root))
+    return tuple(write_harbor_task(task, staging / str(index)) for index, task in enumerate(tasks))
 
 
 @pytest.fixture(params=["memory", "sqlite", "postgres"])
@@ -66,73 +67,74 @@ def session(storage):
         yield session
 
 
-def test_a_generation_records_candidates_and_outcomes(session):
-    store = session.tasks.open("tasks", split=SPLIT)
-    candidates = (generated("alpha"), generated("beta", sources=("record-2",)), generated("gamma"))
+def test_a_generation_records_candidates_and_outcomes(session, tmp_path):
+    store = session.tasks.open("tasks")
+    tasks = (generated("alpha"), generated("beta", sources=("record-2",)), generated("gamma"))
+    directories = candidates(tmp_path, *tasks)
+    digests = [files_digest(directory) for directory in directories]
 
     assert store.begin_generation(generation=0, source_record_ids=("record-1", "record-2")) == GenerationState(
         generation=0, source_record_ids=("record-1", "record-2")
     )
-    assert store.save_candidates(generation=0, candidates=candidates).candidates == tuple(
-        TaskCandidate(item) for item in candidates
+    assert store.save_candidates(generation=0, directories=directories).candidates == tuple(
+        TaskCandidate(task.name, digest) for task, digest in zip(tasks, digests, strict=True)
     )
     alpha = store.publish_task(generation=0, index=0, split="train")
     store.publish_task(generation=0, index=1, split="eval")
     store.reject_task(generation=0, index=2, reason="the oracle failed")
     completed = store.complete_generation(generation=0)
 
-    assert alpha == StoredTask(
-        generated=candidates[0], split="train", generation=0, index=0, files_digest=alpha.files_digest
-    )
-    directory = store.path(alpha)
+    assert alpha == StoredTask(name="alpha", split="train", files_digest=digests[0])
+    directory = store.path(alpha.files_digest)
     assert directory.name == "alpha"
-    assert read_harbor_task(directory) == candidates[0].task
+    assert read_harbor_task(directory) == tasks[0]
     assert completed == GenerationState(
         generation=0,
         source_record_ids=("record-1", "record-2"),
         candidates=(
-            TaskCandidate(candidates[0], split="train"),
-            TaskCandidate(candidates[1], split="eval"),
-            TaskCandidate(candidates[2], error="the oracle failed"),
+            TaskCandidate("alpha", digests[0], split="train"),
+            TaskCandidate("beta", digests[1], split="eval"),
+            TaskCandidate("gamma", digests[2], error="the oracle failed"),
         ),
         is_complete=True,
     )
+    assert read_harbor_task(store.path(completed.candidates[2].files_digest)) == tasks[2]
     assert store.generation(0) == completed
     assert store.generation(1) is None
     assert store.generations() == (completed,)
-    assert [task.generated.task.name for task in store.tasks()] == ["alpha", "beta"]
-    assert [task.generated for task in store.tasks(split="eval")] == [candidates[1]]
+    assert [task.name for task in store.tasks()] == ["alpha", "beta"]
+    assert store.tasks(split="eval") == (StoredTask("beta", "eval", digests[1]),)
 
 
-def test_identical_retries_change_nothing(session):
-    store = session.tasks.open("tasks", split=SPLIT)
-    candidates = (generated("alpha"), generated("beta"))
+def test_identical_retries_change_nothing(session, tmp_path):
+    store = session.tasks.open("tasks")
+    tasks = (generated("alpha"), generated("beta"))
     for _ in range(2):
         store.begin_generation(generation=3, source_record_ids=("record-1",))
-        store.save_candidates(generation=3, candidates=candidates)
+        store.save_candidates(generation=3, directories=candidates(tmp_path, *tasks))
         store.publish_task(generation=3, index=0, split="train")
         store.reject_task(generation=3, index=1, reason="invalid")
         store.complete_generation(generation=3)
 
     state = store.generation(3)
     assert state is not None and state.is_complete
-    assert state.candidates == (
-        TaskCandidate(candidates[0], split="train"),
-        TaskCandidate(candidates[1], error="invalid"),
-    )
+    assert [(candidate.name, candidate.split, candidate.error) for candidate in state.candidates or ()] == [
+        ("alpha", "train", ""),
+        ("beta", None, "invalid"),
+    ]
     assert len(store.tasks()) == 1
 
 
-def test_conflicting_generation_writes_are_refused(session):
-    store = session.tasks.open("tasks", split=SPLIT)
+def test_conflicting_generation_writes_are_refused(session, tmp_path):
+    store = session.tasks.open("tasks")
     with pytest.raises(TaskStoreError, match="does not exist"):
-        store.save_candidates(generation=0, candidates=(generated("alpha"),))
+        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     store.begin_generation(generation=0, source_record_ids=("record-1",))
     with pytest.raises(TaskStoreError, match="other source records"):
         store.begin_generation(generation=0, source_record_ids=("record-2",))
-    store.save_candidates(generation=0, candidates=(generated("alpha"), generated("beta")))
+    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
     with pytest.raises(TaskStoreError, match="other candidates"):
-        store.save_candidates(generation=0, candidates=(generated("alpha"),))
+        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     with pytest.raises(TaskStoreError, match="no candidate 2"):
         store.publish_task(generation=0, index=2, split="train")
     with pytest.raises(TaskStoreError, match="candidates without outcome"):
@@ -150,14 +152,17 @@ def test_conflicting_generation_writes_are_refused(session):
         store.reject_task(generation=0, index=1, reason="duplicate")
 
 
-def test_a_task_name_is_published_once(session):
-    store = session.tasks.open("tasks", split=SPLIT)
+def test_a_task_name_is_published_once(session, tmp_path):
+    store = session.tasks.open("tasks")
     store.begin_generation(generation=0, source_record_ids=("record-1",))
-    store.save_candidates(generation=0, candidates=(generated("alpha"),))
+    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     first = store.publish_task(generation=0, index=0, split="eval")
     store.begin_generation(generation=1, source_record_ids=("record-1",))
     store.save_candidates(
-        generation=1, candidates=(generated("alpha"), generated("alpha"), generated("alpha", instruction="Other."))
+        generation=1,
+        directories=candidates(
+            tmp_path, generated("alpha"), generated("alpha"), generated("alpha", instruction="Other.")
+        ),
     )
 
     with pytest.raises(TaskConflict, match="published to eval, not train"):
@@ -168,25 +173,64 @@ def test_a_task_name_is_published_once(session):
     assert store.tasks() == (first,)
 
 
-def test_split_settings_are_fixed_and_names_are_separate(session):
-    alpha = session.tasks.open("alpha", split=SPLIT)
+def binary_task(root: Path, name: str, content: bytes = bytes(range(256))) -> Path:
+    directory = root / name
+    (directory / "environment").mkdir(parents=True)
+    (directory / "environment" / "image.png").write_bytes(content)
+    (directory / "instruction.md").write_text("Describe the image.\n")
+    return directory
+
+
+def test_an_added_task_keeps_its_binary_files_and_publication_order(session, tmp_path):
+    store = session.tasks.open("tasks")
+    store.begin_generation(generation=0, source_record_ids=("record-1",))
+    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
+    store.publish_task(generation=0, index=1, split="train")
+    source = binary_task(tmp_path, "image-task")
+
+    added = store.add_task(directory=source, split="eval")
+    store.publish_task(generation=0, index=0, split="train")
+
+    assert added == StoredTask(name="image-task", split="eval", files_digest=files_digest(source))
+    assert (store.path(added.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
+    assert store.add_task(directory=source, split="eval") == added
+    assert [task.name for task in store.tasks()] == ["beta", "image-task", "alpha"]
+    assert store.tasks(split="eval") == (added,)
+
+
+def test_an_added_task_conflicts_with_a_published_name(session, tmp_path):
+    store = session.tasks.open("tasks")
+    store.add_task(directory=binary_task(tmp_path / "first", "image-task"), split="eval")
+    with pytest.raises(TaskConflict, match="published to eval, not train"):
+        store.add_task(directory=binary_task(tmp_path / "second", "image-task"), split="train")
+    with pytest.raises(TaskConflict, match="other files"):
+        store.add_task(directory=binary_task(tmp_path / "third", "image-task", b"other"), split="eval")
+    store.begin_generation(generation=0, source_record_ids=("record-1",))
+    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("image-task")))
+    with pytest.raises(TaskConflict, match="other files"):
+        store.publish_task(generation=0, index=0, split="eval")
+    with pytest.raises(ValueError, match="split"):
+        store.add_task(directory=binary_task(tmp_path / "fourth", "other-task"), split="test")
+    assert [task.name for task in store.tasks()] == ["image-task"]
+
+
+def test_store_names_are_separate(session, tmp_path):
+    alpha = session.tasks.open("alpha")
     alpha.begin_generation(generation=0, source_record_ids=("record-1",))
-    alpha.save_candidates(generation=0, candidates=(generated("one"),))
+    alpha.save_candidates(generation=0, directories=candidates(tmp_path, generated("one")))
     alpha.publish_task(generation=0, index=0, split="train")
 
-    with pytest.raises(TaskStoreError, match=r"eval_fraction 0\.25 and seed 7"):
-        session.tasks.open("alpha", split=SplitSettings(eval_fraction=0.5, seed=7))
-    beta = session.tasks.open("beta", split=SplitSettings(eval_fraction=0.0, seed=0))
+    beta = session.tasks.open("beta")
     assert beta.tasks() == ()
     assert beta.generations() == ()
-    assert [task.generated.task.name for task in session.tasks.open("alpha", split=SPLIT).tasks()] == ["one"]
+    assert [task.name for task in session.tasks.open("alpha").tasks()] == ["one"]
 
 
 def test_a_closed_session_opens_no_task_store(storage):
     session = storage.open("math")
     session.close()
     with pytest.raises(RuntimeError, match="closed"):
-        session.tasks.open("tasks", split=SPLIT)
+        session.tasks.open("tasks")
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -197,27 +241,32 @@ def open_durable_storage(request, tmp_path):
     return lambda: SQLiteScenarioStorage(tmp_path)
 
 
-def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage):
+def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, tmp_path):
+    sources = tmp_path / "source"
+    sources.mkdir()
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        store = session.tasks.open("tasks", split=SPLIT)
+        store = session.tasks.open("tasks")
         store.begin_generation(generation=0, source_record_ids=("record-1",))
-        store.save_candidates(generation=0, candidates=(generated("alpha"), generated("beta")))
+        store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
+        added = store.add_task(directory=binary_task(sources, "image-task"), split="eval")
 
     with closing(open_durable_storage()) as storage:
         with closing(storage.open("math")) as session:
-            store = session.tasks.open("tasks", split=SPLIT)
+            store = session.tasks.open("tasks")
             state = store.generation(0)
             assert state is not None and state.pending_indices == (1,)
-            (published,) = store.tasks()
-            assert published.generated == generated("alpha")
-            assert read_harbor_task(store.path(published)) == generated("alpha").task
+            assert read_harbor_task(store.path(state.candidates[1].files_digest)) == generated("beta")
+            published, restored = store.tasks()
+            assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
+            assert restored == added
+            assert (store.path(restored.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
         storage.archive("math")
         with closing(storage.open("math")) as session:
-            store = session.tasks.open("tasks", split=SPLIT)
+            store = session.tasks.open("tasks")
             assert store.generations() == ()
             with pytest.raises(TaskStoreError, match="no files"):
-                store.path(published)
+                store.path(published.files_digest)
 
 
 def test_an_archived_postgres_session_writes_no_task(postgres_config, tmp_path):
@@ -226,7 +275,7 @@ def test_an_archived_postgres_session_writes_no_task(postgres_config, tmp_path):
         closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage,
         closing(storage.open("math")) as session,
     ):
-        store = session.tasks.open("tasks", split=SPLIT)
+        store = session.tasks.open("tasks")
         storage.archive("math")
         with pytest.raises(RuntimeError, match="archived"):
             store.begin_generation(generation=0, source_record_ids=("record-1",))
@@ -290,10 +339,10 @@ def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_roo
     )
     dispatcher = build_dispatcher(settings)
     try:
-        store = dispatcher.get_or_create_scenario("math").store.tasks.open("tasks", split=SPLIT)
+        store = dispatcher.get_or_create_scenario("math").store.tasks.open("tasks")
         store.begin_generation(generation=0, source_record_ids=("record-1",))
-        store.save_candidates(generation=0, candidates=(generated("alpha"),))
-        directory = store.path(store.publish_task(generation=0, index=0, split="train"))
+        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
+        directory = store.path(store.publish_task(generation=0, index=0, split="train").files_digest)
         assert directory.is_relative_to(tmp_path / files_root)
     finally:
         dispatcher.close()

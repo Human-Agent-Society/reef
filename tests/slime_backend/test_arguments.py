@@ -189,6 +189,13 @@ def test_finalize_arguments_rejects_nonpositive_critic_save_interval(interval: i
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("arguments", [["--save-interval", "100"], ["--save-interval=100"]])
+def test_finalize_arguments_refuses_slime_save_interval(arguments: list[str]) -> None:
+    with pytest.raises(ValueError, match="reef-checkpoint-interval"):
+        finalize_reef_slime_args(slime_args(), arguments)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("interval", [0, -1])
 def test_finalize_arguments_rejects_nonpositive_checkpoint_interval(interval: int) -> None:
     with pytest.raises(ValueError, match="reef-checkpoint-interval"):

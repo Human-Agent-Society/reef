@@ -13,11 +13,9 @@ from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import SplitSettings
+from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.surface import Surface
 from reef.train.pipeline import TrainingPipeline
-
-SPLIT = SplitSettings(eval_fraction=0.0, seed=0)
 
 
 @dataclass(frozen=True)
@@ -46,13 +44,13 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
         scenario = dispatcher.get_or_create_scenario("math")
         task_storage = recipe.contexts[-1].task_storage
         assert task_storage is not None
-        task_storage.open("tasks", split=SPLIT).begin_generation(generation=0, source_record_ids=("record-1",))
-        assert scenario.store.tasks.open("tasks", split=SPLIT).generation(0) is not None
+        task_storage.open("tasks").begin_generation(generation=0, source_record_ids=("record-1",))
+        assert scenario.store.tasks.open("tasks").generation(0) is not None
     finally:
         dispatcher.close()
 
 
-def test_each_composite_component_opens_its_own_task_stores() -> None:
+def test_each_composite_component_opens_its_own_task_stores_and_reads_the_imported_tasks() -> None:
     first, second = ContextRecipe(), ContextRecipe()
     with closing(SQLiteScenarioStorage()) as storage, closing(storage.open("math")) as session:
         trainers = CompositeRecipe(components={"first": first, "second": second}).build_trainers(
@@ -62,7 +60,12 @@ def test_each_composite_component_opens_its_own_task_stores() -> None:
             component_trainer.trainer.close()
         first_storage, second_storage = first.contexts[-1].task_storage, second.contexts[-1].task_storage
         assert first_storage is not None and second_storage is not None
-        first_storage.open("tasks", split=SPLIT).begin_generation(generation=0, source_record_ids=("record-1",))
+        first_storage.open("tasks").begin_generation(generation=0, source_record_ids=("record-1",))
 
-        assert second_storage.open("tasks", split=SPLIT).generations() == ()
-        assert session.tasks.open("first/tasks", split=SPLIT).generation(0) is not None
+        assert second_storage.open("tasks").generations() == ()
+        assert session.tasks.open("first/tasks").generation(0) is not None
+        # The scenario's imported tasks are one store that every component reads.
+        session.tasks.open(IMPORTED_TASK_STORE).begin_generation(generation=0, source_record_ids=("record-1",))
+        assert all(
+            storage.open(IMPORTED_TASK_STORE).generation(0) is not None for storage in (first_storage, second_storage)
+        )

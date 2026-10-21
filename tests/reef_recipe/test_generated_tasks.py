@@ -17,21 +17,14 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask, write_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
 from reef.recipe.generated_tasks.processor import (
     GeneratedTaskRecord2Record,
     GeneratedTaskTasks,
@@ -44,6 +37,7 @@ from reef.recipe.generated_tasks.processor import (
     rewards_of,
 )
 from reef.record2record import GroupDecision, ReportContext
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
@@ -161,17 +155,17 @@ def test_a_training_report_without_a_task_is_refused_and_keeps_its_report_retrya
         p.push(report("rep-x", "rec-x", None, 1.0))
 
 
-def test_measurement_arms_and_reports_without_an_arm_are_released_not_trained() -> None:
+def test_reports_of_other_arms_and_without_an_arm_are_released_not_trained() -> None:
     p = processor()
     played(p, "harbor-00000-000", 0, 0.0, arm="hint")
     played(p, "harbor-00000-000", 1, 1.0, arm="hint")
-    assert not p.ready(), "measurement episodes never form a group"
+    assert not p.ready(), "episodes of another arm never form a group"
     p.push(inference("rec-generator"))
     p.push(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
     assert not p.ready()
     released = p.releasable_record_ids()
     assert {"rep-generator", "rec-generator"} <= released
-    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the measurement arm's calls too"
+    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the other arm's calls too"
     played(p, "harbor-00000-000", 2, 1.0)
     played(p, "harbor-00000-000", 3, 0.0)
     played(p, "harbor-00000-001", 0, 1.0)
@@ -253,14 +247,9 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
 @pytest.mark.parametrize(
     ("build", "message"),
     [
-        (lambda: PlayArm("Hint", 1), "arm name must match"),
-        (lambda: PlayArm("hint", 0), "positive integer"),
-        (lambda: PlayArm("hint", 1, ("../hint.txt",)), "inside the task"),
-        (lambda: PlayArm("hint", 1, ("/hint.txt",)), "inside the task"),
-        (lambda: GeneratedTask(task_for("t-a", "r", 1), (PlayArm("hint", 1), PlayArm("hint", 2))), "unique"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
-        (lambda: TaskPlayResult(task_for("t-a", "r", 1), (), {"hint": [1.0]}), "tuples"),
+        (lambda: TaskPlayResult(task_for("t-a", "r", 1), [1.0]), "tuple"),
         (lambda: TaskPlayResult(task=task_for("t-a", "r", 1), training_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
@@ -277,7 +266,7 @@ class ScriptedGenerator(TaskGenerator):
 
     def __init__(
         self,
-        rounds: list[tuple[GeneratedTask, ...]] | None = None,
+        rounds: list[tuple[HarborTask, ...]] | None = None,
         *,
         invalid: Mapping[str, str] | None = None,
         failing: str | None = None,
@@ -296,7 +285,7 @@ class ScriptedGenerator(TaskGenerator):
         cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
         return cls()
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         self.requests.append(request)
         if not self.rounds:
             return ()
@@ -315,14 +304,10 @@ class ScriptedGenerator(TaskGenerator):
             raise RuntimeError("the generator lost its state directory")
 
 
-def generated(round_number: int, *indices: int, hint: bool = True) -> tuple[GeneratedTask, ...]:
-    """Tasks of one round; each asks for a hint arm of one play unless ``hint`` is off."""
-    arms = (PlayArm("hint", 1, ("solution/hint.txt",)),) if hint else ()
+def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
+    """Tasks of one round."""
     return tuple(
-        GeneratedTask(
-            task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index),
-            arms,
-        )
+        task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index)
         for index in indices
     )
 
@@ -448,7 +433,7 @@ def summary(tmp_path: Path, round_number: int) -> dict[str, Any]:
 
 
 def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
-    task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2, hint=False)])
+    task_generator = ScriptedGenerator([generated(0, 0, 1, 2)])
     p, player = rounds(tmp_path, task_generator)
     status = p.status()["task_generation"]
     assert status["generator"] == "ScriptedGenerator" and (status["next"], status["completed"], status["of"]) == (
@@ -465,29 +450,20 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
     assert task_generator.validated == names and player.writes == names
     arms = [(call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in player.plays]
-    assert arms == [
-        (names[0], "plain", 2, True, ()),
-        (names[0], "hint", 1, True, ("solution/hint.txt",)),
-        (names[1], "plain", 2, True, ()),
-        (names[1], "hint", 1, True, ("solution/hint.txt",)),
-        (names[2], "plain", 2, True, ()),
-    ]
+    assert arms == [(name, "plain", 2, True, ()) for name in names]
     assert all(call["tags"] == {"round": "0"} and call["model"] == "Qwen/Qwen3-8B" for call in player.plays)
 
     (results,) = task_generator.results
     assert [result.task.name for result in results] == names
-    assert results[0].training_rewards == (0.25, 0.25) and results[0].measurement_rewards == {"hint": (0.75,)}
-    assert results[2].training_rewards == (0.25, 0.25) and results[2].measurement_rewards == {}
-    assert results[2].is_played
+    assert all(result.training_rewards == (0.25, 0.25) and result.is_played for result in results)
     document = summary(tmp_path, 0)
     assert document["error"] == "" and [task["name"] for task in document["tasks"]] == names
     assert document["tasks"][0]["training_rewards"] == [0.25, 0.25]
-    assert document["tasks"][0]["measurement_rewards"] == {"hint": [0.75]}
     assert p.operational_metrics()["rounds_completed"] == 1
 
 
 @pytest.mark.unit
-def test_eval_tasks_are_saved_without_training_or_measurement_plays(tmp_path: Path) -> None:
+def test_eval_tasks_are_saved_without_plays(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     pipeline, player = rounds(tmp_path, task_generator, eval_fraction=1.0)
     assert not looked(pipeline)
@@ -515,11 +491,11 @@ def test_a_round_retry_uses_saved_candidates_and_validation_outcomes(tmp_path: P
     pipeline.close()
 
 
-def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> GeneratedTask:
+def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
     """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
     task = task_for(name, record_ids[0], port)
     metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
-    return GeneratedTask(dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata))
+    return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
 
 
 @pytest.mark.unit
@@ -536,7 +512,9 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
         sourced("eval-task", "eval-source", port=9101),
     )
     store.begin_generation(generation=100, source_record_ids=())
-    store.save_candidates(generation=100, candidates=earlier)
+    store.save_candidates(
+        generation=100, directories=tuple(write_harbor_task(task, tmp_path / "earlier") for task in earlier)
+    )
     store.publish_task(generation=100, index=0, split="train")
     store.publish_task(generation=100, index=1, split="eval")
     store.complete_generation(generation=100)
@@ -548,12 +526,12 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     assert "split conflict" in results["bridge"].error
     assert "other files" in results["train-task"].error
     assert player.writes == []
-    assert {task.generated.task.name: task.split for task in store.tasks()} == {
+    assert {task.name: task.split for task in store.tasks()} == {
         "train-task": "train",
         "eval-task": "eval",
         "follower": "eval",
     }
-    assert store.path(store.tasks(split="train")[0]).joinpath("instruction.md").is_file()
+    assert store.path(store.tasks(split="train")[0].files_digest).joinpath("instruction.md").is_file()
     assert pipeline.status()["task_store"] == {"train": 1, "eval": 2, "rejected": 2, "pending": 0}
     pipeline.close()
 
@@ -571,16 +549,6 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert p.status()["task_generation"]["tasks_played"] == 1
 
 
-def test_a_measurement_arm_with_the_training_arms_name_is_refused_unplayed(tmp_path: Path) -> None:
-    clashing = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm("plain", 1),))
-    task_generator = ScriptedGenerator([(clashing, *generated(0, 1))])
-    p, player = rounds(tmp_path, task_generator)
-    assert not looked(p)
-    assert task_generator.validated == ["harbor-00000-001"] and player.writes == ["harbor-00000-001"]
-    (results,) = task_generator.results
-    assert results[0].error == "the measurement arm 'plain' has the name of the training arm"
-
-
 def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp_path: Path) -> None:
     taken = StandInGenerator(tmp_path / "tasks", taken=("harbor-00000-000",))
     task_generator = ScriptedGenerator([generated(0, 0)])
@@ -593,7 +561,7 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     task_generator = ScriptedGenerator([generated(0, 0)])
     p, _ = rounds(tmp_path / "second", task_generator, unplayable)
     assert not looked(p)
-    assert [call["arm"] for call in unplayable.plays] == ["plain"], "no measurement arm for a task that cannot run"
+    assert [call["arm"] for call in unplayable.plays] == ["plain"]
     assert unplayable.deleted == ["harbor-00000-000"]
     assert task_generator.results[0][0].error == "the agent could not play the task: Failed to start tmux session."
 
@@ -993,7 +961,7 @@ def test_a_pipeline_section_that_names_no_usable_stage_is_refused(pipeline: Mapp
     [
         (f"{MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2task.config.generator"),
         ("reef.recipe.generated_tasks:GeneratedTaskRecipe", "must name a class that inherits TaskGenerator"),
-        ("reef.core.tasks:TaskGenerator", "names an abstract class"),
+        ("reef.recipe.generated_tasks:TaskGenerator", "names an abstract class"),
     ],
 )
 def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator: str, message: str) -> None:

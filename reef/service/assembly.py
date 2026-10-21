@@ -34,6 +34,7 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
+from reef.service.task_import import TaskImport, TaskImportingScenarioStorage
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -333,6 +334,11 @@ def build_dispatcher(
             # The storage owns the task file store after it exists. Until then, this code closes it.
             task_files.close()
             raise
+        if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None:
+            scenario_storage = TaskImportingScenarioStorage(
+                scenario_storage,
+                TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root)),
+            )
         # Record tracing observes storage events; the storage closes the observer with itself.
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:

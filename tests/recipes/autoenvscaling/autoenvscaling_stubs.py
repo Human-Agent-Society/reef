@@ -34,8 +34,10 @@ from recipes.beta.autoenvscaling import (
     workspace_reply,
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
-from reef.core.tasks import HarborTask, TaskGenerationRequest, TaskPlayResult
+from reef.core.tasks import HarborTask
+from reef.recipe.generated_tasks.generator import TaskPlayResult
 from reef.record2task.generator import GeneratorError, WrittenTask
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.sandbox.e2b import E2BExecutor, E2BSession
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, ProcessOutcome, SandboxProgram
 
@@ -315,12 +317,12 @@ def played(generator: AutoEnvScalingGenerator, *training: tuple[float, ...]) -> 
     rewards = training or ((0.0, 1.0),)
     results = []
     for item in asyncio.run(generator.generate(REQUEST)):
-        validation = asyncio.run(generator.validate(item.task))
+        validation = asyncio.run(generator.validate(item))
         if not validation.is_valid:
-            results.append(TaskPlayResult(item.task, error="; ".join(validation.errors)))
+            results.append(TaskPlayResult(item, error="; ".join(validation.errors)))
             continue
-        asyncio.run(generator.service.write_task(item.task))
-        results.append(TaskPlayResult(item.task, rewards[len(results) % len(rewards)]))
+        asyncio.run(generator.service.write_task(item))
+        results.append(TaskPlayResult(item, rewards[len(results) % len(rewards)]))
     return tuple(results)
 
 

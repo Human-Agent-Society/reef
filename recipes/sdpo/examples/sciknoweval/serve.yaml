@@ -91,7 +91,6 @@ training:
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    save-interval: "1000"
     no-save-optim: true
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"

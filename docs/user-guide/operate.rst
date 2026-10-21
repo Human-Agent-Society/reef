@@ -105,7 +105,7 @@ Set the checkpoint cadence
 
 ``checkpoint_every_n_versions`` (default ``1``) decides how many accepted updates go by between durable checkpoints. Between checkpoints, new weights live only in the engine's memory: their versions are recorded, but their bytes are not. A restart restores the last checkpoint, and the step counter, algorithm state, and record progress continue from the log. Raise the cadence only when checkpoint writes are the bottleneck and losing live versions on a restart is acceptable.
 
-By default, a Slime training deployment saves its training checkpoint after each training job. This checkpoint is the Megatron checkpoint and the HF export. If these saves use too much of each step, set ``--reef-checkpoint-interval N`` in ``training.options``. Then the deployment saves the checkpoint only after each ``N``-th scenario version. The jobs between two saves keep no checkpoint, thus their versions are live weights. Set ``checkpoint_every_n_versions`` to a multiple of ``N``. The driver does not start with a different value. Use this option only for full-weight training. The driver does not start with ``--release-train`` or with LoRA.
+By default, a Slime training deployment saves its training checkpoint after each training job. This checkpoint is the Megatron checkpoint and the HF export. If these saves use too much of each step, set ``--reef-checkpoint-interval N`` in ``training.options``. Then the deployment saves the checkpoint only after each ``N``-th scenario version. The jobs between two saves keep no checkpoint, thus their versions are live weights. Set ``checkpoint_every_n_versions`` to a multiple of ``N``. The driver does not start with a different value. Use this option only for full-weight training. The driver does not start with ``--release-train`` or with LoRA. Slime's ``--save-interval`` has no effect under Reef, so the driver does not start with it.
 
 A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again.
 
@@ -311,6 +311,49 @@ and ``storage.task-file-dir``. A remote store can use that directory as a
 local cache. The `Python task file store contract
 <../reference/python-api.rst#task-file-stores>`__ gives the necessary
 behavior.
+
+Import Harbor tasks
+-------------------
+
+Each scenario can hold your own Harbor tasks in its train and eval splits, for
+example a benchmark that a recipe evaluates on. A task can hold binary files,
+such as images. Name a split manifest and the directory of the tasks in the
+``task-import`` section:
+
+.. code-block:: yaml
+
+   task-import:
+     manifest: /data/benchmark/split.json
+     tasks-root: /data/benchmark/tasks
+
+The manifest is a JSON file. It names each task once, in ``train`` or ``eval``:
+
+.. code-block:: json
+
+   {"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["sum-391"], "eval": ["sort-17"]}
+
+Each name is a Harbor task directory under ``tasks-root``. A name starts
+with a lowercase letter or a digit, and holds only lowercase letters, digits,
+``.``, ``_`` and ``-``. When a scenario
+opens, Reef checks each directory with Harbor's task loader, and adds it to the
+scenario's task store ``imported-tasks`` in its split. The task file store
+keeps a copy of the files.
+
+The import runs again each time a scenario opens. To add tasks, add them to the
+manifest and the directory, and then restart the service or reload the
+scenario. A task that is already imported with the same files and split does
+not change. A scenario does not open, and the error says why, when:
+
+- a task directory is missing, or Harbor cannot load it;
+- an imported task now has other files, or it moved to the other split.
+
+To change an imported task, give it a new name.
+
+A harness evolution recipe evaluates on the imported eval tasks with
+``evolution.eval_task_store: imported-tasks`` and an adapter that plays a task
+directory, such as ``terminus``. Each step reads the eval split again, so a
+task that you import later joins the next step. See `Harness evolution keys
+<../reference/configuration.rst#harness-evolution-keys>`__.
 
 Limit the scenarios a service holds
 -----------------------------------

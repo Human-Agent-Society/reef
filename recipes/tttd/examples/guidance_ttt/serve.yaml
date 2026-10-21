@@ -57,7 +57,6 @@ training:
     ref-load: "${inference.model-path}"
     save: "${training.config.checkpoint_dir}/megatron"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    save-interval: "${recipe.config.checkpoint-every-n-versions}"
     megatron-to-hf-mode: "bridge"
     num-rollout: "${training.config.steps}"
     rollout-batch-size: "${pipeline.record2record.config.groups_per_step}"

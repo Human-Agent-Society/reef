@@ -42,13 +42,7 @@ from pathlib import Path
 from aiohttp import web
 from reef_client.client import ReefClientError
 
-from reef.core.tasks import (
-    HarborTaskConflict,
-    HarborTaskError,
-    TaskGenerationRequest,
-    read_harbor_task,
-    write_harbor_task,
-)
+from reef.core.tasks import HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
 from reef.record2task.generator.designer import (
@@ -67,6 +61,7 @@ from reef.record2task.generator.harbor import (
     harbor_task,
     oracle_check,
 )
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.record2task.generator.wire import (
     WireError,
     checked_object,
