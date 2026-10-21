@@ -107,6 +107,13 @@ training:
       # bound diff_clip would change the statistics, so it is off.
       diff_clip: null
       opd_advantage_clip: 5.0
+      # The normalized gap has unit scale; the raw gap had a standard
+      # deviation of about 0.35. With w_opd 1.0, one step from the base made
+      # the policy announce the file read in prose instead of calling the
+      # tool. With 0.4 the term keeps its earlier weight against the reward
+      # term: the same step kept the tool call and passed 9 of 16 held-out
+      # replies, against 6 of 16 with the raw gap.
+      w_opd: 0.4
 
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
@@ -209,3 +216,7 @@ evaluation:
     # restart the first candidate sets it. The floor holds in any case: without
     # it, a 0.125 candidate was selected right after a restart.
     min_reply_rate: 0.75
+    # The probe of each conversation cut after the user's request: the
+    # policy must open with a tool call that reads the homework. The base
+    # model does so in all of them.
+    min_first_turn_tool_rate: 0.75
