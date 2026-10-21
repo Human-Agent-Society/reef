@@ -204,6 +204,29 @@ def test_reply_clean_rate_needs_reply_probe_answers(tmp_path: Path) -> None:
         build_plugin(training, reply_probe_file=str(write_reply_probe(tmp_path)), regression_metric="reply_clean_rate")
 
 
+def test_the_first_turn_probe_refuses_a_candidate_that_stops_calling_tools(tmp_path: Path) -> None:
+    training, engine = probe_runtime(tmp_path)
+    plugin = build_plugin(
+        training, reply_probe_file=str(write_reply_probe(tmp_path)), min_first_turn_tool_rate=0.75, reply_margin=1.0
+    )
+    # The first turn is the conversation up to the user's request.
+    assert [message["role"] for message in engine.rendered[-1]["messages"]] == ["user"]
+
+    def run(openings: list[str]):
+        engine.replies = [CLEAN] * 6 + [TEXT_ANSWER, TEXT_ANSWER] + openings
+        candidate = UpdateCandidate(candidate_id="c")
+        evaluation = plugin.evaluate(candidate)
+        return plugin.decide(candidate, evaluation), evaluation
+
+    calls, evaluation = run([TOOL_CALL, TOOL_CALL])
+    assert evaluation.metrics["first_turn_tool_rate"] == 1.0
+    assert calls.selected
+    announced, evaluation = run(["I'll read the file first.", TOOL_CALL])
+    assert evaluation.metrics["first_turn_tool_rate"] == 0.5
+    assert not announced.selected
+    assert announced.reason.startswith("first_turn_tool_rate 0.5 is below min_first_turn_tool_rate 0.75")
+
+
 def test_min_reply_rate_refuses_the_first_candidate_too(tmp_path: Path) -> None:
     training, engine = probe_runtime(tmp_path)
     plugin = build_plugin(training, reply_probe_file=str(write_reply_probe(tmp_path)), min_reply_rate=0.75)
@@ -249,6 +272,7 @@ def test_from_config_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
         ({"reply_margin": -0.1}, "reply_margin must be non-negative"),
         ({"min_reply_rate": 1.5}, "min_reply_rate must be between 0 and 1"),
         ({"regression_metric": "gold_rate"}, "regression_metric must be one of"),
+        ({"min_first_turn_tool_rate": 2.0}, "min_first_turn_tool_rate must be between 0 and 1"),
         ({"reply_probe_file": "/nonexistent/reply_probe.json"}, "cannot read reply_probe_file"),
     ],
 )
