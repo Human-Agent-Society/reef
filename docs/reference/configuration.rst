@@ -407,12 +407,18 @@ above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
 would lift that restriction. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
-For both handlers, set ``inference.handler-config.force_reasoning`` to
-``true`` if the chat template pre-opens ``<think>``, or ``false`` if it does
-not. When omitted, the handler detects this by rendering the template and
-caches only a successful result. Tokenizer or template errors propagate to the
-request; they do not silently disable reasoning separation. An explicit value
-bypasses this detection.
+Both handlers split each reply into ``content`` and ``reasoning_content`` with
+the rules of SGLang's Qwen3 reasoning parser: ``<think>`` starts reasoning, and
+the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside
+reasoning has an empty ``content``.
+
+Set ``inference.handler-config.force_reasoning`` to ``true`` if the chat
+template pre-opens ``<think>``, or ``false`` if it does not. When omitted, the
+handler checks whether each request's rendered prompt ends with ``<think>``.
+The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
+pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
+so such a request keeps its reply in ``content``. An explicit value bypasses
+this check.
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -671,6 +677,8 @@ persistent.
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
    storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commit logs and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
+   storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
+   storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store
    storage.agent-record-retention-max-bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
 .. warning::
@@ -977,7 +985,6 @@ Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
-   evolution.on_stale | merge | what a step's result becomes when another component's commit (a weights step, in a composite) replaced the release it was evaluated against: ``merge`` commits it onto the release served now, since each pairing compared candidate and current under the same conditions when it ran (the commit metrics then carry ``merged_onto``); ``reevaluate`` keeps the candidate and runs its episodes again against the new release, under the next attempt directory of the step record; ``refuse`` drops the result and proposes again
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
@@ -1001,7 +1008,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
    evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
-   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``, and a kept candidate evaluated again under ``on_stale: reevaluate`` writes its ``episodes/`` under the next attempt directory with ``reevaluation.json`` naming the first; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
+   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
@@ -1174,8 +1181,24 @@ groups them:
    pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
    pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
    pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
+   pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before play; between 0 and 1
+   pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
    pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
    pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+
+With rounds enabled, each valid task and its split are saved in the scenario's task store before play.
+The task files go in the task file store; see `Choose the task file store
+<../user-guide/operate.rst#choose-the-task-file-store>`__.
+Related source sessions keep the same split across generations.
+A task that joins existing train and eval source groups is rejected.
+Eval tasks are saved without training plays, measurement plays or Designer rewards.
+The generator's pass-rate band does not filter the store.
+
+Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
+The defaults keep every task in train.
+The task store saves these values when the scenario opens it for the first time.
+A scenario that loads with other values fails.
+Use a new scenario for a different split.
 
 ``GeneratedTaskBatches`` batches complete task groups:
 
@@ -1208,7 +1231,7 @@ place it on the host that has Docker.
 
 .. config::
 
-   generator.tasks-root | the directory generated tasks, manifests and Harbor job files live under. Required.
+   generator.tasks-root | the directory generated tasks and Harbor job files live under. Required.
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
    generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials

@@ -118,9 +118,35 @@ file. The record-to-task stage takes no config.
    pipeline.record2record.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
    pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
    pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
+   pipeline.record2record.config.teacher_chat_template_kwargs | {} | chat-template arguments of the teacher's hint-enhanced prompt; set the policy's own (``training.options.chat_template_kwargs`` on MLX), so the teacher's prompt ends where the policy's did
+   pipeline.record2record.config.tool_turn_reward | prm | the reward of a turn whose next state is a tool result: ``prm`` asks the PRM, as upstream does; ``neutral`` gives no reward, so the turn trains only from an accepted hint; ``skip`` does not judge or train the turn
+   pipeline.record2record.config.negative_reward | prm | the reward of a turn that the PRM scores -1: ``prm`` keeps -1, as upstream does; ``neutral`` gives no reward, so the turn trains only from an accepted hint
    pipeline.task2batch.config.batch_size | 16 | judged turns per training step. Must equal the driver's ``--global-batch-size``.
    pipeline.task2batch.config.prm_record_file | "" | judged population, one JSON line per batch; empty disables it
    recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+
+The upstream judge prompt scores any tool output without an error as +1. A
+policy can then earn reward with tool calls that do nothing for the user. In
+the MLX GSM8K stream, the PRM scored 28 of 34 such calls +1, such as a
+background ``terminal`` command or a deleted homework file. It scored 7 of 20
+text replies +1. After about 20 steps, the policy stopped replying in text.
+``tool_turn_reward: neutral`` removes that reward. Only the student's reaction
+then rewards or penalizes a turn.
+
+Most student reactions then reject the reply's style, so most rewards are -1.
+A -1 lowers the probability of the whole reply, and the policy can lower it by
+calling a tool instead of replying in text. In the same stream, one step on
+five rejected replies cut the text answers of a fixed probe from 16 of 24 to 8
+of 24. One step on the same turns with no reward, trained only from their
+hints, did not. ``negative_reward: neutral`` gives a rejected turn no reward,
+so the hint teaches the correction and the reward term keeps only +1.
+
+At learning rate 1e-4, four steps from the base adapter moved the reply style
+about 40% toward plain text. Trained on all judged turns, the same steps also
+stopped the policy from answering in text: 0 of 8 probe conversations. Trained
+on the turns the student judged, it kept 8 of 8. One step on tool turns alone
+reached a loss of 4211. ``tool_turn_reward: skip`` leaves tool turns out of
+training.
 
 With ``prm_api: openai``, a hosted provider can be the judge, because the
 judge needs only generated text. The config holds the name of the credential
@@ -137,8 +163,8 @@ The values above are the defaults. The example's ``serve.yaml`` overrides
 several of them. It points ``prm_url`` and ``prm_tokenizer_path`` at the
 example's independently deployed PRM engine. It raises ``prm_timeout_s`` to
 3600 because a thinking model can spend minutes on a single vote. It sets
-``prm_record_file`` so every batch leaves one line with the reward split and
-the judge counters.
+``prm_record_file``, so each batch writes one line with its ``batch_id``, the
+reward split, and the judge counters.
 
 Reef coordinates inference and training only. OpenClawRL's example Compose
 file owns PRM and student-model startup, health checks and GPU allocation.

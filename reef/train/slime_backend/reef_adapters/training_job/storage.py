@@ -85,6 +85,17 @@ def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
     return (rollout_id + 1) % interval == 0
 
 
+def checkpoint_due(scenario_step: int, interval: int) -> bool:
+    """Return True if the job that trains ``scenario_step`` saves the paired checkpoint.
+
+    Each ``interval``-th scenario version saves. With ``interval`` 1, each
+    job saves. The count uses scenario versions, not rollout IDs, as
+    ``reef.checkpoint_every_n_versions`` does. A rejected job uses a rollout
+    ID but makes no version.
+    """
+    return (scenario_step + 1) % interval == 0
+
+
 class CheckpointStorage:
     """Own paired Slime HF and Megatron checkpoints under one local byte cap."""
 
@@ -101,9 +112,11 @@ class CheckpointStorage:
         disk_usage: Callable[[Path], Any] = shutil.disk_usage,
         lora: bool = False,
         critic_save_interval: int = 1,
+        saves_optimizer: bool = True,
     ) -> None:
         self.config = config
         self._lora = bool(lora)
+        self._saves_optimizer = saves_optimizer
         if (
             not isinstance(critic_save_interval, int)
             or isinstance(critic_save_interval, bool)
@@ -389,10 +402,12 @@ class CheckpointStorage:
         megatron_bytes = self._source_measure(megatron) if megatron is not None else 0
         # HF export + model, FP32 master weights, and two Adam moments; the
         # critic checkpoint (when configured) is a second full model plus
-        # optimizer state of roughly the same footprint.
+        # optimizer state of roughly the same footprint. With --no-save-optim
+        # a pair is only the HF export and the Megatron model.
         if self._lora:
             return int(1.2 * max(hf_bytes, megatron_bytes))
-        training_state = 8 * hf_bytes * (2 if self.critic_root is not None else 1)
+        model_copies = 8 if self._saves_optimizer else 2
+        training_state = model_copies * hf_bytes * (2 if self.critic_root is not None else 1)
         return max(hf_bytes + megatron_bytes, training_state)
 
     @cached_property

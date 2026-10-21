@@ -66,6 +66,9 @@ MAX_TURNS = 8
 #: scores as ``no-reply``. Raise it with ``OPENCLAWRL_TURN_TIMEOUT_S`` on slow
 #: runtimes.
 TURN_TIMEOUT_S = int(os.environ.get("OPENCLAWRL_TURN_TIMEOUT_S", "600"))
+#: The Reef scenario of an earlier run of this stream. Set it to resume the
+#: stream on the remaining tasks with the weights that it has trained so far.
+RESUMED_SCENARIO = os.environ.get("OPENCLAWRL_SCENARIO", "")
 SHIM_PORT = 29101
 #: How often to ask the judge whether its reaction has landed.
 REACTION_POLL_S = 2.0
@@ -193,11 +196,12 @@ class HermesStreamAgent(BaseAgent):
         existing = (await self._exec(environment, f"cat {STATE_DIR}/scenario 2>/dev/null || true")).strip()
         if existing:
             return existing
-        minted = f"{SCENARIO_PREFIX}-{uuid.uuid4().hex[:12]}"
+        # A resumed stream starts with empty state, so it continues the scenario that it names.
+        scenario = RESUMED_SCENARIO or f"{SCENARIO_PREFIX}-{uuid.uuid4().hex[:12]}"
         await self._exec(
-            environment, f"mkdir -p {STATE_DIR} && printf %s {shlex.quote(minted)} > {STATE_DIR}/scenario"
+            environment, f"mkdir -p {STATE_DIR} && printf %s {shlex.quote(scenario)} > {STATE_DIR}/scenario"
         )
-        return minted
+        return scenario
 
     def _upstream_health(self) -> tuple[int, str]:
         """``(successful reef calls so far, last upstream error seen)``.

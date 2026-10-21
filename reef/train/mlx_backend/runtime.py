@@ -26,7 +26,7 @@ from reef.runtime.interfaces import (
 )
 from reef.train.algos.registry import resolve_objective
 from reef.train.mlx_backend.config import MLXConfig
-from reef.train.mlx_backend.contracts import LossOptions, ModelEngine
+from reef.train.mlx_backend.contracts import LossOptions, ModelEngine, OptimizerSnapshot
 from reef.train.mlx_backend.serving import MLXServingRuntime
 from reef.train.types import TrainingBatch, trajectories
 
@@ -36,13 +36,25 @@ logger = logging.getLogger(__name__)
 class MLXRuntime(TrainingRuntime):
     """Train the serving runtime's adapter in this process, one optimizer step per reserved batch."""
 
-    def __init__(self, serving: MLXServingRuntime, *, checkpoint_dir: str, loss_options: LossOptions) -> None:
+    def __init__(
+        self,
+        serving: MLXServingRuntime,
+        *,
+        checkpoint_dir: str,
+        loss_options: LossOptions,
+        max_train_tokens: int = 0,
+        min_train_rows: int = 1,
+    ) -> None:
         super().__init__()
         self._serving = serving
         self._engine = serving.engine
         self._checkpoint_root = Path(checkpoint_dir)
         self._checkpoint_root.mkdir(parents=True, exist_ok=True)
         self._loss_options = loss_options
+        self._max_train_tokens = max_train_tokens
+        self._min_train_rows = min_train_rows
+        #: The optimizer state before the step of the candidate that awaits Reef's decision.
+        self._pending_optimizer: tuple[str, OptimizerSnapshot] | None = None
 
     @property
     def serving(self) -> MLXServingRuntime:
@@ -96,13 +108,24 @@ class MLXRuntime(TrainingRuntime):
         samples = trajectories(batch)
         if signal.advantages is None or len(signal.advantages) != len(samples):
             raise RuntimeContractError(f"{method.objective!r} must supply one advantage per sample")
+        kept = [
+            (sample, advantage)
+            for sample, advantage in zip(samples, signal.advantages, strict=True)
+            if not self._max_train_tokens or len(sample.training.get("tokens", ())) <= self._max_train_tokens
+        ]
+        # The backward pass of one row grows faster than its length, so a long row is left out of the step.
+        # A batch with too few rows left is a state-only skip, so the scenario moves past it: the optimizer
+        # takes a full-size step whatever the row count, and one row then sets its whole direction.
+        metrics = {**signal.metrics, "rows_over_max_train_tokens": len(samples) - len(kept)}
+        if len(kept) < self._min_train_rows:
+            return PreparedTrainingStep("skip", signal.next_algorithm_state, metrics)
         return PreparedTrainingStep(
             "train",
             signal.next_algorithm_state,
-            signal.metrics,
+            metrics,
             {
-                "samples": samples,
-                "advantages": tuple(signal.advantages),
+                "samples": tuple(sample for sample, _ in kept),
+                "advantages": tuple(advantage for _, advantage in kept),
                 "loss_family": objective.loss_family,
                 "method": method.to_dict(),
                 "scenario_step": scenario_step,
@@ -114,13 +137,17 @@ class MLXRuntime(TrainingRuntime):
 
         Requests wait for the whole step, because the step changes the weights
         that serving reads. The served weights are restored before admission
-        reopens, whether the step succeeds or fails.
+        reopens, whether the step succeeds or fails. A failed step also
+        restores the optimizer state; a rejected candidate restores it in
+        :meth:`reject_candidate`.
         """
         scenario_step = payload["scenario_step"]
         source_runtime_load_id = self._serving.current_runtime_load_id()
         engine = self.engine
+        self._pending_optimizer = None
         with self._serving.paused_admission():
             before = engine.adapter_snapshot()
+            optimizer_before = engine.optimizer_snapshot()
             try:
                 try:
                     metrics = engine.train(
@@ -149,6 +176,10 @@ class MLXRuntime(TrainingRuntime):
                     },
                 )
                 self._serving.stage_candidate(candidate_id, after)
+                self._pending_optimizer = (candidate_id, optimizer_before)
+            except BaseException:
+                engine.restore_optimizer(optimizer_before)
+                raise
             finally:
                 engine.apply_adapter(before)
         return ModelCandidate(
@@ -160,7 +191,16 @@ class MLXRuntime(TrainingRuntime):
         )
 
     def reject_candidate(self, candidate: ModelCandidate) -> None:
+        """Drop a rejected candidate, and return the optimizer to its state before the candidate's step.
+
+        The next step then trains from the served weights with the moments
+        that belong to them. Without the restore, each rejected step would
+        leave its gradient in the moments and push the next step the same way.
+        """
         self._serving.discard_candidate(candidate.candidate_id)
+        if self._pending_optimizer is not None and self._pending_optimizer[0] == candidate.candidate_id:
+            self.engine.restore_optimizer(self._pending_optimizer[1])
+            self._pending_optimizer = None
         logger.info("rejected mlx candidate %s", candidate.candidate_id)
 
     def probe_candidate(self, candidate_id: str, prompts: Sequence[Sequence[int]], *, max_tokens: int) -> list[str]:
@@ -217,6 +257,8 @@ def mlx_runtimes(settings: MLXConfig, engine: ModelEngine) -> tuple[MLXRuntime, 
         serving,
         checkpoint_dir=settings.checkpoint_dir,
         loss_options=LossOptions(settings.kl_coef, settings.loss_options),
+        max_train_tokens=settings.max_train_tokens,
+        min_train_rows=settings.min_train_rows,
     )
     return training, serving
 

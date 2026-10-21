@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import nullcontext
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -18,7 +18,7 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.committer import ScenarioCommitter, SettledTrainingResultError, StaleTrainingResultError
+from reef.scenario.committer import ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -82,6 +82,8 @@ class Scenario:
             recovered_head_record=recovered_head_record,
             experiment_observer=experiment_observer,
         )
+        #: Read-only queries of committed releases and their content. They take only the publication lock.
+        self.release_queries = self._committer.release_queries
 
     @property
     def name(self) -> str:
@@ -134,9 +136,9 @@ class Scenario:
         undrained batch warning speak of the trainer that runs steps, not of
         a component that only carries files. Every mutating path goes
         through a Scenario method so it is serialized against rollback and
-        commit by the committer lock; the one exception is a local step of a
-        scenario with several trainers, which runs outside it and meets the
-        commits made meanwhile at the commit boundary. Reading state that is
+        commit by the committer lock. The one exception is the preparation of
+        a local step in a scenario with several trainers; the dispatcher still
+        runs one step of the scenario at a time. Reading state that is
         not part of a transaction (objective identity, consumption
         watermarks, processor schema) is safe here; do not reserve batches
         or replace results through this handle.
@@ -204,28 +206,23 @@ class Scenario:
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare one local-backend step.
 
-        A lone trainer runs its step under the commit lock, excluding rollback
-        and commit. With several trainers the step runs outside it: another
-        trainer's commit lands meanwhile and the result meets it at the commit
-        boundary, where the backend's stale policy decides; a dispatched
-        trainer still reserves its batch and the status stays readable while
-        a local evaluation takes its minutes. Callers run one preparation of
-        a trainer at a time, as the dispatcher's cycle lock does.
+        The caller runs one step of the scenario at a time, as the
+        dispatcher's cycle lock does. Thus no training commit of another
+        trainer lands while the step runs, and a rollback refuses to run
+        while the batch is reserved. A lone trainer also holds the commit
+        lock. With several trainers the step runs outside that lock, so a
+        trainer without a backend advances its record cursor without waiting
+        for a long evaluation.
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            return trainer.run_once(
-                self.scenario_step,
-                base_release_id=self.current_artifact_ref().release_id,
-                serving_runtime_load_id=self.serving_runtime_load_id(),
-            )
+            return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
             return self.trainer_for(component).reserve_training_batch(
-                base_release_id=self.current_artifact_ref().release_id,
-                serving_runtime_load_id=self.serving_runtime_load_id(),
+                serving_runtime_load_id=self.serving_runtime_load_id()
             )
 
     def serving_runtime_load_id(self) -> str | None:
@@ -240,11 +237,6 @@ class Scenario:
     def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
         """Drop the reserved batch and persist its consumption."""
         self._committer.reject_pending(component, metrics)
-
-    def retry_pending(self, component: str | None = None, *, keep_candidate: bool = False) -> None:
-        """Keep the reserved batch, and with ``keep_candidate`` its candidate, for another try against the served release."""
-        with self._committer.lock:
-            self.trainer_for(component).retry_pending(keep_candidate=keep_candidate)
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
@@ -288,50 +280,18 @@ class Scenario:
         return self._committer.last_record_for(component)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
-        return self._committer.releases()
-
-    def creation_components(self, scenario_step: int) -> Mapping[str, str] | None:
-        """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
-        return self._committer.creation_components(scenario_step)
-
-    def artifact_for_version(self, release_id: str) -> Artifact:
-        """Materialize a scenario release for read-only serving; absence raises ArtifactNotFound."""
-        return self._committer.artifact_for_version(release_id)
-
-    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
-        """The ref of a scenario release without materializing it; ``None`` when the catalog has no such release."""
-        return self._committer.ref_for_version(release_id)
-
-    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries behind a scenario release, if its training commit logged them."""
-        return self._committer.entries_for_version(release_id)
-
-    def artifact_with_metrics(
-        self,
-        release_id: str | None = None,
-    ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Freeze one artifact and its gate metrics without waiting for preparation."""
-        return self._committer.artifact_with_metrics(release_id)
+        """Committed releases, newest first; the scenario step is read under the same lock as the log."""
+        with self.release_queries.publication_lock:
+            return self.release_queries.releases(self._committer.step)
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
-
-    def experiment_reporting(self) -> AbstractContextManager[None]:
-        """Deliver observed commits after the caller releases its coordination locks."""
-        return self._committer.experiment_reporting()
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
-        """Commit ``component``'s pending result as one atomic version record.
-
-        Raises :class:`StaleTrainingResultError` when the result was prepared
-        against a release another component has since replaced; the caller
-        then calls :meth:`retry_pending` and prepares the batch again. Raises
-        :class:`SettledTrainingResultError` when another trainer's commit has
-        already put the result on record.
-        """
+        """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)
 
     def publish_shipped_content(self) -> ArtifactRef | None:
@@ -387,7 +347,5 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
-    "SettledTrainingResultError",
-    "StaleTrainingResultError",
     "validate_component_trainers",
 ]

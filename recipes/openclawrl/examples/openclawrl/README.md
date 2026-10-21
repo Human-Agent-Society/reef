@@ -47,9 +47,11 @@ results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
-  2026-09-16-mlx-session-ttl/    the session TTL comparison on MLX
+  2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/
+                                 the learning curve, training steps and demo of a run on one Mac
 serve.yaml                       Reef/Slime configuration and the recipe's PRM endpoint
 serve-mlx.yaml                   Reef/MLX configuration for one Apple Silicon Mac, with a hosted PRM
+reply_probe.json                 hermes conversations for the candidate evaluation's reply probe (serve-mlx.yaml)
 docker-compose.yaml              Reef, PRM and student-model containers with separate GPUs
 run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
@@ -273,12 +275,19 @@ host's LAN address. With these runtimes, do these steps:
 - Set `OPENCLAWRL_USER_LLM_URL` to a `host.docker.internal` address if the
   student model runs on the host.
 
-Serving on a Mac is slower than on GPUs. Set
-`OPENCLAWRL_TURN_TIMEOUT_S` above its 600-second default, and keep
+Serving on a Mac is slower than on GPUs. A turn can wait for a whole
+training step and the candidate evaluation, which together take about 15
+minutes on a 9B model. Set `OPENCLAWRL_TURN_TIMEOUT_S` to 1800, and keep
 `pipeline.record2record.config.session_ttl_s` at the 1800 that
 `serve-mlx.yaml` sets. [Train on Apple Silicon with
 MLX](../../../../docs/user-guide/mlx.rst) documents the backend, its options
 and the sizing measurements.
+
+To resume a stream after `reef-eval stream` stops, keep Reef running and
+start the stream again on the remaining tasks with the same `--name`. Set
+`OPENCLAWRL_SCENARIO` to the scenario that the stream used, as
+`/reef/status` shows it. Otherwise the stream mints a new scenario, and Reef
+refuses it because the process already trains the first one.
 
 ## Results
 
@@ -310,12 +319,68 @@ The demo above replays two sessions from this run. In session 1 the student
 rejects a formatted reply, reef keeps the training going, and by session 16
 the first reply passes directly.
 
-### Session TTL on MLX
+### GSM8K homework stream on Apple Silicon
 
-`results/2026-09-16-mlx-session-ttl/` compares `session_ttl_s` 45 and 1800 on
-the MLX stream. With 45 seconds, about half the training pairs were lost.
-With 1800 seconds, none were lost, but neither run reached the adaptation
-criterion.
+`results/2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/` is a run of `serve-mlx.yaml`
+on one Mac over the whole stream.
+
+| Setting | Value |
+| --- | --- |
+| Config | `serve-mlx.yaml` as committed, with machine-specific paths and port |
+| Task | the 72-session GSM8K homework stream |
+| Model | `mlx-community/Qwen3.5-9B-MLX-4bit` as the policy, thinking off |
+| PRM | `z-ai/glm-5.3` through OpenRouter, 3 votes per turn |
+| Student | `qwen/qwen3-32b` through OpenRouter |
+| Hardware | one Mac mini, Apple M4 Pro, 48 GB of memory |
+| Hermes turn timeout | 900 s for sessions 1 to 14, then 1800 s (`OPENCLAWRL_TURN_TIMEOUT_S`) |
+
+![Accumulated accepts and the rolling bold and list rates over the 72 sessions of the MLX run](results/2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/learning_curve.png)
+
+The run reached the adaptation criterion after 14 sessions: sessions 15,
+16 and 17 passed. The habit held for the rest of the stream.
+
+| Sessions | Passed | Answered first replies with bold text or a list |
+| --- | --- | --- |
+| 1 to 14 | 3 of 14 | 8 of 11 |
+| 15 to 40 | 17 of 26 | 6 of 26 |
+| 41 to 72 | 18 of 32 | 7 of 31 |
+
+The untrained model passed none of its 18 tries: the 2 sessions it served
+and the 16 problems of the held-out check.
+
+Each candidate was checked on the 16 held-out problems before it served
+(`training_steps.csv`). Steps 1, 2, 3 and 6 scored 7 or 8 of 16 and were
+selected. Steps 4 and 5 scored 3 of 16 and were held, so serving kept the
+weights of step 3. From step 7 on, every candidate scored 5 of 16 or less
+and was held, so the weights of step 6 served sessions 21 to 72. In this
+run, a held step's gradient stayed in the optimizer state, and the next
+step started from those moments. Reef now restores the optimizer state when
+it rejects a candidate. This run does not measure the effect of that change.
+
+Other observations from the run:
+
+- Sessions 10, 14 and 55 got no first reply: the first turn reached the
+  turn timeout. The first turns of sessions 10 and 14 waited for a training
+  step and its candidate evaluation, about 16 minutes, against a 900-second
+  timeout. Session 55 reached the 1800-second timeout; the records do not
+  show why.
+- Sessions 2 and 5 reached the turn timeout in a later turn, after the
+  judged first reply.
+- The stream ran for about 12 hours. A training step took about 10
+  minutes and its candidate evaluation about 5.5 minutes, and serving
+  waited for both.
+
+`learning_curve.csv` holds the per-session verdicts, written by
+`results/learning_curve.py`. `training_steps.csv` holds one row per training
+step: the stream sessions finished before the step, the outcome of the
+candidate evaluation, the rows kept and left out, the loss, the adapter
+change, the advantage signs and the probe metrics.
+
+![A rejected and an accepted session replayed from the MLX run](results/2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/demo.gif)
+
+The demo replays session 2, which the student rejects for its formatting,
+and session 23, which passes after 6 training steps. `demo.mp4` is the same
+demo in 1080p.
 
 ## Configuration ownership
 

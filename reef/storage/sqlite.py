@@ -27,6 +27,8 @@ from reef.storage.migrations import archive_imported_files, legacy_model_configs
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_tasks import SQLTaskStorage, task_tables
+from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
 _AGENT_RECORD = Table(
@@ -84,6 +86,7 @@ _SCENARIO_SETTING = Table(
     Column("name", Text, primary_key=True),
     Column("value_json", Text, nullable=False),
 )
+TASK_TABLES = task_tables(_METADATA)
 logger = logging.getLogger(__name__)
 
 _TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
@@ -195,6 +198,10 @@ class SQLiteRecordStore(SQLRecordStore):
         values: Mapping[str, object] | Sequence[Mapping[str, object]],
     ) -> bool:
         return connection.execute(table.insert().prefix_with("OR IGNORE"), values).rowcount > 0
+
+    def task_storage(self, files: TaskFileStore, scenario: str) -> SQLTaskStorage:
+        """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
+        return SQLTaskStorage(self, TASK_TABLES, files, scenario)
 
     def close(self) -> None:
         with self._lock:
@@ -312,24 +319,30 @@ class SQLiteRecordRetention:
 class SQLiteScenarioStorage(ScenarioStorage):
     """Open existing hashed SQLite and JSONL paths and manage their lifecycle.
 
-    Each scenario has one database file for its records and settings and one
-    JSONL commit log. Without a directory, all state is in memory. Records and
-    commits then last for one session, and settings last for the storage.
+    Each scenario has one database file for its records, settings and generated
+    tasks, and one JSONL commit log. Without a directory, all state is in memory.
+    Records, commits and task states then last for one session, and settings
+    last for the storage. ``task_files`` keeps the files of published tasks.
+    The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If
+    the storage has no directory, the default store uses a temporary directory.
     """
 
-    def __init__(self, directory: Path | None = None) -> None:
+    def __init__(self, directory: Path | None = None, *, task_files: TaskFileStore | None = None) -> None:
         self._directory = None if directory is None else Path(directory)
         self._lock = RLock()
         self._closed = False
         self._memory_settings: dict[str, ScenarioSettings] = {}
+        if task_files is None:
+            task_files = LocalTaskFileStore(None if self._directory is None else self._directory / "task-files")
+        self.task_files = task_files
         if self._directory is not None:
             self._directory.mkdir(parents=True, exist_ok=True)
             self._import_model_config_files(self._directory)
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> Self:
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
         NoSettings.parse(config, plugin_class=cls)
-        return cls(directory)
+        return cls(directory, task_files=task_files)
 
     @property
     def durable(self) -> bool:
@@ -364,7 +377,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
             commit_log = None if self._directory is None else CommitLog(self._directory / f"{key}.commits.jsonl")
             records = SQLiteRecordStore(database)
             try:
-                return CommitHistoryScenarioStore(scenario, records, commit_log)
+                return CommitHistoryScenarioStore(
+                    scenario, records, commit_log, tasks=records.task_storage(self.task_files, scenario)
+                )
             except BaseException:
                 records.close()
                 raise
@@ -373,9 +388,10 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._ensure_open()
             paths = self.state_paths(scenario)
+            archived_files = self.task_files.archive(scenario)
             if self._directory is None:
                 self._memory_settings.pop(scenario, None)
-                return ()
+                return archived_files
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
             moved: list[str] = []
@@ -385,7 +401,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
                     target = destination / path.name
                     shutil.move(str(path), str(target))
                     moved.append(str(target))
-            return tuple(moved)
+            return (*moved, *archived_files)
 
     def prune(self, *, max_bytes: int) -> int:
         with self._lock:
@@ -407,7 +423,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
 
     def close(self) -> None:
         with self._lock:
-            self._closed = True
+            if not self._closed:
+                self._closed = True
+                self.task_files.close()
 
     @staticmethod
     def _import_model_config_files(directory: Path) -> None:

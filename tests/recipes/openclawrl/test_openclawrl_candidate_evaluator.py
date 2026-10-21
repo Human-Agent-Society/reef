@@ -6,6 +6,7 @@ probe goes through ``MLXRuntime.probe_candidate`` and needs no model.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -24,6 +25,8 @@ CLEAN = (
 )
 MARKDOWN = "**Answer:** 72\n- April: 48\n- May: 24\n"
 EMPTY = ""  # a turn with no reply
+TEXT_ANSWER = "<think>\nThe file holds the problem.\n</think>\n\nShe sold 72 clips altogether."
+TOOL_CALL = "<tool_call>\n<function=terminal>\n<parameter=command>\necho ymd\n</parameter>\n</function>\n</tool_call>"
 
 
 @dataclass
@@ -119,6 +122,115 @@ def test_the_plugin_accepts_the_climb_and_rejects_the_collapse(probe) -> None:
     assert probe([CLEAN] * 5 + [EMPTY])[0].selected
 
 
+def write_reply_probe(tmp_path: Path, conversation_count: int = 2, answers: list[str] | None = None) -> Path:
+    path = tmp_path / "reply_probe.json"
+    conversation = [
+        {"role": "user", "content": "Hey, I have my homework in the file homework/0.txt."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "1", "content": "Problem: ..."},
+    ]
+    path.write_text(
+        json.dumps(
+            {
+                "tools": [{"type": "function", "function": {"name": "read_file"}}],
+                "conversations": [conversation] * conversation_count,
+                **({"answers": answers} if answers else {}),
+            }
+        )
+    )
+    return path
+
+
+def test_the_reply_probe_counts_text_answers_and_refuses_a_policy_that_stops_answering(tmp_path: Path) -> None:
+    training, engine = probe_runtime(tmp_path)
+    plugin = build_plugin(training, reply_probe_file=str(write_reply_probe(tmp_path)))
+    # The conversations are rendered with the harness tools.
+    assert engine.rendered[-1]["tools"] == [{"type": "function", "function": {"name": "read_file"}}]
+
+    def run(answers: list[str]):
+        engine.replies = [CLEAN] * 6 + answers
+        candidate = UpdateCandidate(candidate_id="c")
+        evaluation = plugin.evaluate(candidate)
+        return plugin.decide(candidate, evaluation), evaluation
+
+    first, evaluation = run([TEXT_ANSWER, TEXT_ANSWER])
+    assert first.selected
+    assert evaluation.metrics["reply_rate"] == 1.0
+    # A tool call or an empty turn is not a text answer, even with a clean style probe.
+    collapse, evaluation = run([TOOL_CALL, EMPTY])
+    assert evaluation.metrics["reply_rate"] == 0.0
+    assert not collapse.selected
+    assert collapse.reason.startswith("reply_rate 0 regressed")
+    # The refused candidate does not lower the bar: 1/2 is still more than 0.25 below 1.0.
+    assert not run([TEXT_ANSWER, TOOL_CALL])[0].selected
+
+
+def test_reply_clean_rate_selects_on_the_style_of_correct_first_replies(tmp_path: Path) -> None:
+    training, engine = probe_runtime(tmp_path)
+    plugin = build_plugin(
+        training,
+        reply_probe_file=str(write_reply_probe(tmp_path, 3, answers=["72", "72", "72"])),
+        regression_metric="reply_clean_rate",
+        regression_margin=0.0,
+        reply_margin=1.0,
+    )
+    plain = "She sold 48 in April and 48 / 2 = 24 in May, so 48 + 24 = 72 clips."
+    bold = "She sold 48 in April and 48 / 2 = 24 in May, so 48 + 24 = **72** clips."
+
+    def run(answers: list[str]):
+        engine.replies = [MARKDOWN] * 6 + answers
+        candidate = UpdateCandidate(candidate_id="c")
+        evaluation = plugin.evaluate(candidate)
+        return plugin.decide(candidate, evaluation), evaluation
+
+    # A wrong answer, a styled answer and a tool call do not count; the style probe is ignored.
+    first, evaluation = run([plain, bold, "She sold 70 clips."])
+    assert evaluation.metrics["reply_clean_rate"] == pytest.approx(1 / 3)
+    assert evaluation.metrics["clean_rate"] == 0.0
+    assert first.selected
+    regressed, _ = run([bold, bold, plain.replace("72", "70")])
+    assert not regressed.selected
+    assert regressed.reason.startswith("reply_clean_rate 0 regressed")
+    assert run([plain, plain, bold])[0].selected
+
+
+def test_reply_clean_rate_needs_reply_probe_answers(tmp_path: Path) -> None:
+    training, _ = probe_runtime(tmp_path)
+    with pytest.raises(PluginConfigError, match="needs a reply_probe_file with 'answers'"):
+        build_plugin(training, reply_probe_file=str(write_reply_probe(tmp_path)), regression_metric="reply_clean_rate")
+
+
+def test_min_reply_rate_refuses_the_first_candidate_too(tmp_path: Path) -> None:
+    training, engine = probe_runtime(tmp_path)
+    plugin = build_plugin(training, reply_probe_file=str(write_reply_probe(tmp_path)), min_reply_rate=0.75)
+    engine.replies = [CLEAN] * 6 + [TEXT_ANSWER, TOOL_CALL]
+    candidate = UpdateCandidate(candidate_id="c")
+
+    decision = plugin.decide(candidate, plugin.evaluate(candidate))
+
+    # Without a best selected rate (a fresh process), the floor still holds.
+    assert not decision.selected
+    assert decision.reason.startswith("reply_rate 0.5 is below min_reply_rate 0.75")
+
+
+def test_a_turn_that_never_closes_an_opened_reasoning_block_is_not_a_text_answer() -> None:
+    from recipes.openclawrl.candidate_evaluator import answers_in_text
+
+    unclosed = "Here is the solution: 72 clips."
+    assert answers_in_text(unclosed)
+    assert not answers_in_text(unclosed, opens_reasoning=True)
+    assert answers_in_text(f"{unclosed}</think>\n\nShe sold 72 clips.", opens_reasoning=True)
+    # With a gold answer, the visible text must contain it.
+    assert answers_in_text("She sold 72 clips.", answer="72")
+    assert answers_in_text("That is 1,200 clips.", answer="1200")
+    assert not answers_in_text("import numpy as np", answer="72")
+    assert not answers_in_text("She sold 720 clips.", answer="72")
+
+
 def test_from_config_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
     with pytest.raises(PluginConfigError, match="mlx training runtime"):
         OpenClawRLCandidateEvaluation.from_config(
@@ -133,6 +245,11 @@ def test_from_config_refuses_a_runtime_that_cannot_probe_a_candidate() -> None:
         ({"probe_size": 11}, "probe_size must be between 1 and 10"),
         ({"max_tokens": 0}, "max_tokens must be positive"),
         ({"regression_margin": -0.1}, "regression_margin must be non-negative"),
+        ({"reply_max_tokens": 0}, "reply_max_tokens must be positive"),
+        ({"reply_margin": -0.1}, "reply_margin must be non-negative"),
+        ({"min_reply_rate": 1.5}, "min_reply_rate must be between 0 and 1"),
+        ({"regression_metric": "gold_rate"}, "regression_metric must be one of"),
+        ({"reply_probe_file": "/nonexistent/reply_probe.json"}, "cannot read reply_probe_file"),
     ],
 )
 def test_from_config_refuses_an_invalid_setting(tmp_path: Path, config, message) -> None:

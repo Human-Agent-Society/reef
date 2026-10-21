@@ -36,8 +36,12 @@ class MLXEngineConfig:
     learning_rate: float = config_option(1e-5, help="AdamW learning rate.")
     weight_decay: float = config_option(0.01, help="AdamW weight decay.")
     max_tokens: int = config_option(256, help="Completion tokens of a request that sets no limit.")
+    max_context_tokens: int = config_option(
+        0, help="Prompt and completion tokens of one request; 0 sets no limit. It also bounds each training row."
+    )
     temperature: float = config_option(1.0, help="Sampling temperature of a request that sets none.")
     top_p: float = config_option(1.0, help="Nucleus sampling threshold of every request.")
+    top_k: int = config_option(0, help="Candidate tokens sampled from in every request; 0 keeps every token.")
     seed: int = config_option(0, help="Seed of the MLX random generator.")
     micro_batch_size: int = config_option(8, help="Rows in one backward pass; a step accumulates over passes.")
     capture_topk: int = config_option(
@@ -72,6 +76,8 @@ class MLXEngineConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name, value in (
+            ("max_context_tokens", self.max_context_tokens),
+            ("top_k", self.top_k),
             ("capture_topk", self.capture_topk),
             ("prefill_step_size", self.prefill_step_size),
             ("log_probs_chunk_size", self.log_probs_chunk_size),
@@ -122,6 +128,12 @@ class MLXConfig(MLXEngineConfig):
         default_factory=dict, help="Settings of the selected loss family; its settings type validates them."
     )
     inference_timeout_s: float = config_option(300.0, help="Seconds to wait for admitted requests to finish.")
+    max_train_tokens: int = config_option(
+        0, help="Tokens of one training row, at most; longer rows are left out of the step. 0 sets no limit."
+    )
+    min_train_rows: int = config_option(
+        1, help="Rows a step needs after max_train_tokens; a batch with fewer is skipped."
+    )
     train_timeout_s: float | None = config_option(None, help="Unsupported; training runs in this process.")
 
     def __post_init__(self) -> None:
@@ -134,6 +146,18 @@ class MLXConfig(MLXEngineConfig):
             raise ValueError("kl_coef must be finite and non-negative")
         if not math.isfinite(self.inference_timeout_s) or self.inference_timeout_s <= 0:
             raise ValueError("inference_timeout_s must be finite and positive")
+        if (
+            isinstance(self.max_train_tokens, bool)
+            or not isinstance(self.max_train_tokens, int)
+            or self.max_train_tokens < 0
+        ):
+            raise ValueError("max_train_tokens must be a non-negative integer")
+        if (
+            isinstance(self.min_train_rows, bool)
+            or not isinstance(self.min_train_rows, int)
+            or self.min_train_rows < 1
+        ):
+            raise ValueError("min_train_rows must be a positive integer")
         if self.train_timeout_s is not None:
             raise ValueError("the mlx backend trains in the service process and has no train timeout")
 

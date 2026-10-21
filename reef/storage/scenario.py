@@ -1,4 +1,4 @@
-"""Storage boundary for a scenario's records, commits, settings, and recovery.
+"""Storage boundary for a scenario's records, commits, settings, generated tasks, and recovery.
 
 Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
@@ -17,6 +17,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
 class ScenarioStoreConflict(ReefError):
@@ -59,6 +60,15 @@ class ScenarioStore(ABC):
     @abstractmethod
     def durable(self) -> bool:
         """Whether committed state survives a process restart."""
+
+    @property
+    @abstractmethod
+    def tasks(self) -> TaskStorage:
+        """Opens the generated task stores of this scenario.
+
+        Each record-to-task stage opens its own store name. The stores close
+        with this session. They survive a restart if ``durable`` is true.
+        """
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
@@ -104,19 +114,21 @@ class ScenarioStorage(Plugin, ABC):
     shared resources only; sessions remain owned by their scenarios.
 
     Every piece of per-scenario state that Reef owns goes through this
-    interface: records and commits through sessions, settings through
-    ``read_settings`` and ``write_settings``. Archiving a scenario retires all
-    of it. A deployment names a subclass in ``storage.record_backend``.
+    interface: records, commits and generated tasks through sessions, settings
+    through ``read_settings`` and ``write_settings``. Archiving a scenario
+    retires all of it. A deployment names a subclass in ``storage.record_backend``.
     """
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> Self:
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
         """Build the storage a deployment names.
 
         ``config`` is the plugin's own configuration. ``directory`` is the
         deployment's ``storage.agent_record_dir``, which the storage may use
-        for local files.
+        for local files. ``task_files`` keeps the files of published tasks.
+        The storage owns it: ``archive`` retires the files of a scenario, and
+        ``close`` closes it.
         """
 
     @property
@@ -138,7 +150,7 @@ class ScenarioStorage(Plugin, ABC):
 
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:
-        """Archive a closed scenario's records, commits and settings; return archive locations."""
+        """Archive a closed scenario's records, commits, tasks and settings; return archive locations."""
 
     @abstractmethod
     def prune(self, *, max_bytes: int) -> int:

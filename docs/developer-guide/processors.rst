@@ -23,7 +23,7 @@ The three stages
 - The **record-to-record stage** (``Record2Record``, ``reef.record2record``)
   decides which records train, in which sets, and in what order. A set is a
   report with the inference records that it references, a ready group, one
-  judged record, or a round request.
+  judged record, or a round set.
 - The **record-to-task stage** (``Record2Task``, ``reef.record2task``) turns
   one record set into tasks. A task is a ``TrainDataItem``: a ``TrajectoryItem``
   that trains directly, or a ``TaskItem`` (a Harbor task) that an algorithm
@@ -72,10 +72,13 @@ The trainer calls it on its own thread, under its lock; no call may block:
   pipeline; every other record goes to the record stage. The pipeline gives
   each set that the stage forms to the record-to-task stage and gives the
   result back to the record stage (``settle``): ``READY`` with tasks, or a
-  skip, which ends the set's records.
+  skip, which ends the set's records. A record-to-task stage with slow work
+  returns ``TaskResult.pending()`` instead, and the pipeline holds the set
+  and its records (see `Pending tasks <#pending-tasks>`__).
 - ``ready()``: is a batch available. It first lets background work land: the
-  record-to-task stage's ``poll`` (for example a finished round), then the
-  record stage's ``poll`` (for example finished judgments).
+  results that the record-to-task stage's ``take_finished`` hands back (for
+  example a finished round), then the record stage's ``poll`` (for example
+  finished judgments, or a round that is due).
 - ``build_batch()``: reserve ``batch_size`` sets from the record stage, in
   its selection order, and give their tasks to ``make_batch``. The trainer
   validates the batch against ``output_schema``. The same batch stays
@@ -87,9 +90,12 @@ The trainer calls it on its own thread, under its lock; no call may block:
   them again. ``trained=False`` says the backend dropped the batch as stale,
   for a record stage that paces work on what trained.
 
-The pipeline also merges the record and task stages' ``status()``, metrics, background
-work (``background_jobs_running()``), and ``close()``. ``releasable_record_ids()``
-returns the completed records that no held set references, and
+The pipeline also merges the record and task stages' ``status()`` and metrics.
+``background_jobs_running()`` is true while a set is pending or the record
+stage runs a background job. The trainer then polls ``ready()`` at a fixed
+interval. ``close()`` closes the record and task stages.
+``releasable_record_ids()`` returns
+the completed records that no held or pending set references, and
 ``release_records(ids)`` frees their memory after a successful commit. New
 commits retain the stored bodies; consumption progress prevents retraining
 on restart. Storage can independently evict any body under capacity pressure,
@@ -106,6 +112,20 @@ passes such changes to the record stage as its updated ``PipelineContext``
 stage adds an entry only when a terminal outcome cannot become a batch and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
+
+Pending tasks
+-------------
+
+A record-to-task stage that needs slow work, such as task generation, must
+not block the trainer. Its ``make_tasks`` submits the work to a worker that the
+stage owns and returns ``TaskResult.pending()``. The pipeline holds the set
+and its records. Each time the pipeline looks for a batch, it calls the
+stage's ``take_finished()``, which returns ``(set_id, TaskResult)`` pairs for
+the work that finished. The pipeline then settles each set in the record
+stage, the same way as an immediate result. Each set settles one time. A
+result from ``take_finished`` must not be pending, and its set must be
+pending; otherwise ``ready()`` raises ``ValueError``. The stage's ``close``
+stops its worker.
 
 The record-to-record stage
 --------------------------
@@ -179,10 +199,10 @@ storage.
 - ``hybrid`` batches on either, and a queued instruction goes first. The
   instruction's batch takes the sets that an automatic batch would.
 
-The pipeline attaches the instruction to ``batch.request`` and replaces the
-batch id with ``<scenario>:instruction:<request id>``, the oldest instruction
-first, one per step. Acknowledgement also consumes the instruction. Batch
-construction must not call models or perform training.
+The pipeline runs the oldest instruction first, one per step. It gives the
+instruction's batch the id ``<scenario>:instruction:<request id>`` and attaches
+the instruction to ``batch.request``. Acknowledgement also consumes the
+instruction. Batch construction must not call models or perform training.
 
 The trainer gives TRAIN records to the pipeline when ``RequestType.TRAIN`` is
 in the ``Task2Batch``'s ``required_request_types``. The pipeline queues them
@@ -235,9 +255,10 @@ A reported-feedback recipe writes:
   its record-to-task stage: assemble an ATIF trajectory or Harbor task
   directly. Use ``context.require_score()`` when the method needs a reward.
   The stage attaches the source and report ids to the returned item.
-- ``make_batch(tasks, batch_number)`` on a ``Task2Batch`` subclass: assemble
-  the flat tuple of selected tasks into a batch. The pipeline tracks
-  consumption by set, including tasks that the recipe removes from training.
+- ``make_batch(tasks, batch_id)`` on a ``Task2Batch`` subclass: assemble
+  the flat tuple of selected tasks into a batch with the ID ``batch_id``.
+  The pipeline tracks consumption by set, including tasks that the recipe
+  removes from training.
 
 ``exclusive_sources`` makes a terminal report own its referenced inference
 records outright, and ``ordered_groups`` batches ready groups in key order.
@@ -317,28 +338,36 @@ plays of a task. Each play shows the agent the files that
 ``solution/hint.txt``. The recipe never trains on a measurement arm.
 
 A ``TaskPlayResult`` holds the task, ``training_rewards``,
-``measurement_rewards`` (by arm name), and an ``error``. The rewards include
+``measurement_rewards`` (by arm name), a ``split`` (``train`` by default), and an ``error``. The rewards include
 only episodes that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
+
+An eval result has ``split="eval"``, no rewards, and no error. The task was
+not played. A generator must not use an eval result as training feedback or as
+experience for later generations.
 
 The generator service scores an episode whose verifier ran past its timeout
 as 0, and reports it, so a training play of that kind trains. The task's
 oracle passed the same verifier, so the timeout is the agent's.
 
 The recipe splits the rounds across its stages. The record stage
-(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due
-and holds the source sessions. The record-to-task stage (``GeneratedTaskTasks``) runs one round
-at a time, on its own ``BackgroundJobWorker``, outside the trainer lock: each
-time the pipeline looks for a batch, it starts a round when one is due. In each round it:
+(``GeneratedTaskRecord2Record``, a ``RoundRecord2Record``) decides when a round is due,
+holds the source sessions, and forms a round set with the round number and its sessions.
+The record-to-task stage (``GeneratedTaskTasks``) takes the round set. It runs the
+round on its own ``BackgroundJobWorker``, outside the trainer lock, and returns
+pending until the round finishes. One round runs at a time. In each round it:
 
 1. Asks the generator for tasks with the configured ``description`` and the
    request's source sessions.
-2. Validates each task with the generator.
-3. Writes each valid task through the generator service and plays it
-   ``plays_per_task`` times on the training arm, then plays each measurement arm.
-4. Sends the results to ``record_results``.
+2. Saves the candidates in the scenario's task store, then validates each
+   task with the generator.
+3. Publishes each valid task with its train/eval split.
+4. Writes each training task through the generator service and plays it
+   ``plays_per_task`` times on the training arm, then plays each measurement
+   arm. It does not play eval tasks.
+5. Sends the results to ``record_results``.
 
 The training plays carry the arm ``plain``, and only reports with that label
 train. A generated task whose measurement arm is
@@ -360,20 +389,31 @@ header ``x-reef-tag-<name>: <value>``, is a source session. The record stage
 holds source sessions in arrival order. Each round takes at most
 ``source_records_per_round`` of them, and a round without a waiting session
 has none. The generator receives each session's inference records and then
-its report as ``source_records``. The record stage keeps a session's records
-until its round finishes, then releases them. A session that arrives after the
-last round is released at once. A restart before the release can use a
+its report as ``source_records``. The pipeline keeps a session's records
+while its round set is pending, then releases them. A session that arrives
+after the last round is released at once. A restart before the release can use a
 session again.
 
 The first round starts when the pipeline first looks for a batch. The next
 round starts after ``batches_per_round`` batches trained since the previous
 round started; a batch that the backend dropped as stale does not count. A
-round that played no task is followed at once. An exception from the
-generator stops the round. The record-to-task stage still sends the results
-it has to ``record_results``. A summary of each round goes to
-``state_dir/<scenario>/round-<round>.json``, with the IDs of its source records. After a restart, the
-record-to-task stage continues with the next round. ``GET /reef/status`` shows the generator, the
+round that played no task is followed at once. A round whose job failed waits
+for batches like a played round, so a failing worker does not start round
+after round. If the worker is closed or broken, it refuses the next round and
+no round runs again. An exception from the generator stops the round. The
+record-to-task stage still sends the results it has to ``record_results``. A
+summary of each round goes to ``state_dir/<scenario>/round-<round>.json``,
+with the IDs of its source records. After a restart, the record-to-task stage
+continues with the next round. ``GET /reef/status`` shows the generator, the
 round, the task counts, and the last error under ``task_generation``.
+
+The record-to-task stage keeps its tasks in the task store ``generated-tasks``
+of the scenario session (see `Where the stages live`_). It records each
+publication or rejection before play. Thus a retry of a round uses the saved
+candidates and does not generate the tasks again. Tasks that share a source
+record get the same split, and a published task keeps its split. A task whose
+sources join tasks of both splits is rejected. ``GET /reef/status`` shows the
+number of train, eval, rejected, and pending tasks under ``task_store``.
 
 Container operations run in the generator service, ``reef.record2task.generator``.
 The record-to-task stage calls this service over HTTP. The ``generator`` deployment
@@ -397,7 +437,12 @@ Where the stages live
 
 Each stage has its own package: ``reef/record2record/``, ``reef/record2task/``,
 and ``reef/task2batch/``. The pipeline lives in ``reef/train/pipeline.py``, and
-the context that the stages read in ``reef/pipeline_context.py``. The stage
+the context that the stages read in ``reef/pipeline_context.py``. A stage that
+saves generated tasks opens a store with
+``context.task_storage.open(name, split=...)`` (see `Generated task stores
+<../reference/python-api.rst#generated-task-stores>`__). In a composite recipe,
+each component opens its store names under its component name.
+``task_storage`` is ``None`` if the trainer has no scenario session. The stage
 packages also hold shared implementations: ``SampleAssembly``
 (``reef/record2task/assembly.py``), and ``DistillTasks``
 (``reef/record2task/distill.py``) with ``DistillBatches``

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from recipes.sdft import SDFTBatches, SdftObjective, SDFTRecipe
+from recipes.sdft import SdftObjective, SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSettings, SDFTTasks
 from recipes.sdft.slime import SdftSettings
 from reef.artifact.artifact import LiveWeightArtifactRef
@@ -29,6 +29,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
+from reef.task2batch import DistillBatches
 from reef.train import PipelineContext
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
@@ -120,7 +121,7 @@ def _processor(**config: Any) -> TrainingPipeline:
         context,
         record2record=ExclusiveReportRecord2Record(context),
         record2task=SDFTTasks(SDFTSettings(tokenizer_path=TOKENIZER_PATH, **config)),
-        task2batch=SDFTBatches(context, 1),
+        task2batch=DistillBatches(context, 1),
     )
 
 
@@ -181,7 +182,7 @@ def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: Countin
     batch = processor.build_batch()
 
     assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "science:sdft:1"
+    assert batch.batch_id == "science:batch:1"
     (sample,) = batch.items
     assert source_record_id(sample) == "i1"
     prompt_ids = tokenizer.count_ids(tokenizer.calls[0][0])
@@ -226,7 +227,7 @@ def test_sdft_recipe_resolves_by_dotted_reference(tokenizer: CountingTokenizer) 
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, SDFTTasks)
-    assert isinstance(pipeline.task2batch, SDFTBatches)
+    assert isinstance(pipeline.task2batch, DistillBatches)
     assert pipeline.task2batch.batch_size == 1
     assert pipeline.record2task.max_teacher_tokens == 0
     assert pipeline.record2task.template == DEFAULT_CONTEXT_TEMPLATE

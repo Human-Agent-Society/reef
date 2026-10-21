@@ -12,7 +12,7 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 ```text
 opd/
   recipe.py          OPDRecipe: training spec, loss family "opd", and its stages; its report contract is TeacherContextReport
-  processor.py       OPDTasks and OPDBatches: the recorded prompt and response ids as the teacher sequence
+  processor.py       OPDTasks: the recorded prompt and response ids as the teacher sequence
   objective.py       selects the opd loss; one optimizer step per batch
   slime/             the loss family: OPD's defaults on the Slime backend's distillation base
   examples/

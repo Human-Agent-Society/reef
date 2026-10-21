@@ -571,7 +571,7 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     processor.build_batch()
 
     line = json.loads(record.read_text().splitlines()[0])
-    assert line["batch"] == 1
+    assert line["batch_id"] == "s:batch:1"
     assert line["samples"] == 1
     assert line["rewards"] == {"+1": 1}
 

@@ -183,3 +183,30 @@ def test_a_cached_prompt_gives_the_whole_gradient_when_only_the_last_layer_train
     _, cached = tttd_gradients(last_layer_parts[True], rows, prefill_step_size=128, **LAST_LAYER)
 
     assert worst_relative_deviation(whole, cached) < 1e-3
+
+
+def test_a_restored_optimizer_state_repeats_the_step_that_it_was_taken_before(parts32: ModelParts) -> None:
+    steps = trainer(parts32)
+    rows = tttd_rows()
+    packed = steps.pack(rows)
+    untrained = steps.adapter_tensors()
+
+    def step() -> dict[str, mx.array]:
+        steps.optimizer_step([(packed, ImportanceSamplingSurrogate(packed, rows))])
+        return steps.adapter_tensors()
+
+    try:
+        step()
+        weights, state = steps.adapter_tensors(), steps.optimizer_state()
+        rejected = step()
+        # The copy did not change when the second step updated the live state.
+        assert int(state["step"].item()) == 1
+
+        steps.load_adapter_tensors(weights)
+        steps.load_optimizer_state(state)
+        repeated = step()
+
+        assert worst_relative_deviation(rejected, repeated) == 0.0
+        assert int(steps.optimizer_state()["step"].item()) == 2
+    finally:
+        steps.load_adapter_tensors(untrained)

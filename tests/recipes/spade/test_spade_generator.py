@@ -13,14 +13,7 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import (
-    PlayArm,
-    TaskGenerationRequest,
-    TaskPlayResult,
-    read_harbor_task,
-    read_split_manifest,
-    write_harbor_task,
-)
+from reef.core.tasks import PlayArm, TaskGenerationRequest, TaskPlayResult, read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
 from reef.recipe.generated_tasks.processor import (
@@ -30,6 +23,7 @@ from reef.recipe.generated_tasks.processor import (
     TaskGroupSettings,
 )
 from reef.record2task.generator import TaskNameConflict
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
 REQUEST = TaskGenerationRequest((), DESCRIPTION)
@@ -44,8 +38,6 @@ def spade(tmp_path: Path, service: StandInGenerator | None = None, **fields: Any
             "count": 3,
             "hint_plays": 1,
             "skills": ("inspection", "repair"),
-            "eval_fraction": 0.3,
-            "seed": 7,
             "served_model": "Qwen/Qwen3-8B",
             **fields,
         },
@@ -136,7 +128,7 @@ def test_a_history_task_never_replaces_a_conflicting_name(tmp_path: Path) -> Non
     assert service.deleted == []
 
 
-def test_the_results_close_the_generation_with_regret_reports_a_manifest_and_the_next_experience(
+def test_the_results_close_the_generation_with_regret_reports_and_the_next_experience(
     tmp_path: Path,
 ) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
@@ -153,9 +145,6 @@ def test_the_results_close_the_generation_with_regret_reports_a_manifest_and_the
     assert metadata["regret"] == 0.5 and metadata["skill"] == "inspection" and metadata["generation"] == 0
     assert service.reports[1]["metadata"]["refusal"] == "reply refused: no json"
     names = ["harbor-00000-000-inspection", "harbor-00000-002-inspection"]
-    assert service.manifests == [{"generation": 0, "names": names, "eval_fraction": 0.3, "seed": 7}]
-    manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
-    assert sorted([*manifest.train, *manifest.eval]) == names
 
     document = report(tmp_path, 0)
     assert document["error"] == "" and [task["name"] for task in document["tasks"]] == names
@@ -179,7 +168,22 @@ def test_an_unplayed_task_scores_zero_with_its_error(tmp_path: Path) -> None:
     asyncio.run(generator.record_results((TaskPlayResult(item.task, error="the agent could not play the task"),)))
     assert service.reports[0]["score"] == 0.0
     assert service.reports[0]["metadata"]["refusal"] == "the agent could not play the task"
-    assert service.manifests == [] and report(tmp_path, 0)["tasks"] == []
+    assert report(tmp_path, 0)["tasks"] == []
+
+
+@pytest.mark.unit
+def test_eval_tasks_receive_no_designer_reward_or_training_experience(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = spade(tmp_path, service, count=1)
+    (generated,) = asyncio.run(generator.generate(REQUEST))
+    assert asyncio.run(generator.validate(generated.task)).is_valid
+    asyncio.run(generator.record_results((TaskPlayResult(task=generated.task, split="eval"),)))
+    assert service.reports == []
+    assert generator.experience == ()
+    document = report(tmp_path, 0)
+    assert document["tasks"] == []
+    assert document["proposals"][0]["split"] == "eval"
+    assert document["proposals"][0]["refusal"] == ""
 
 
 def test_a_restarted_generator_carries_on_from_the_reports_on_disk(tmp_path: Path) -> None:
@@ -203,7 +207,6 @@ def test_a_service_that_goes_away_ends_the_generation_with_what_ran(tmp_path: Pa
     assert document["error"] == "the generator went away" and [t["name"] for t in document["tasks"]] == [
         "harbor-00000-000"
     ]
-    assert service.manifests == [], "a generation that stopped writes no manifest"
 
 
 def test_a_check_that_could_not_run_raises_and_is_named_in_the_report(tmp_path: Path) -> None:
@@ -253,7 +256,7 @@ def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_sc
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", refusals={1: "reply refused: no json"})
     generator = spade(tmp_path, service)
-    context = PipelineContext("spade")
+    context = PipelineContext("spade", task_storage=SQLiteScenarioStorage(tmp_path / "records").open("spade").tasks)
     generation = GeneratedTaskTasks(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION, state_dir=str(tmp_path / "rounds")),
@@ -274,5 +277,6 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
         ("designer-2", 0.0),
         ("designer-3", 0.5),
     ]
-    assert len(service.manifests) == 1 and report(tmp_path, 0)["error"] == ""
+    assert report(tmp_path, 0)["error"] == ""
+    assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert read_harbor_task(tmp_path / "tasks" / "harbor-00000-000-inspection").name == "harbor-00000-000-inspection"

@@ -711,7 +711,11 @@ Every marker records both, and the coordinator's health reports the job's
 invalid; a settled one an earlier release left behind is read as it is.
 
 Reef records ``RUNNING`` before calling ``train``, then invokes
-``save_checkpoint`` and verifies the checkpoint directory. Training metrics and
+``save_checkpoint`` and verifies the checkpoint directory. When the backend
+sets ``TrainingCheckpoint.writes_checkpoint`` to false, Reef does not do
+these two steps. Slime does this with ``--reef-checkpoint-interval`` above 1.
+Then the marker records a null ``checkpoint_path``, and the committer
+publishes the version of the job as live weights. Training metrics and
 method telemetry are recorded together with ``CHECKPOINT`` in one durable write,
 so a crash cannot leave a replayable checkpoint without its training metrics.
 The coordinator performs colocated inference offload and selects the scenario
@@ -743,7 +747,11 @@ out names it by that release's identity, so the job is refused with
 batch's job. Nothing trains. Finish the job with the earlier release, then
 start this one. Do not delete the marker to get past the refusal: from
 ``CHECKPOINT`` on, the optimizer step is in the checkpoint, and a job trained
-again from the start would apply the batch twice.
+again from the start would apply the batch twice. A marker with a null
+``checkpoint_path`` is different. Its job saved no checkpoint, thus the
+workers load an earlier checkpoint. The coordinator does not start with such
+a marker. Before the coordinator starts, the Slime preflight deletes such a
+marker if the checkpoints show the saved rollout that the workers load.
 
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

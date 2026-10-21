@@ -18,7 +18,7 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from mlx_lm.models.cache import make_prompt_cache
 
 from reef.core.batches import TrajectoryItem
@@ -288,6 +288,19 @@ class MLXTrainer:
     def load_adapter_tensors(self, tensors: Mapping[str, mx.array]) -> None:
         self._parts.model.update(tree_unflatten(list(tensors.items())))
         mx.eval(self._parts.model.parameters())
+
+    # -- Optimizer state
+
+    def optimizer_state(self) -> dict[str, Any]:
+        """A copy of the AdamW state tree: the moments of each tensor and the step count.
+
+        An update assigns new arrays into the tree's dictionaries, so the copy
+        rebuilds every container. The arrays are immutable and stay shared.
+        """
+        return tree_map(lambda value: value, self._optimizer.state)
+
+    def load_optimizer_state(self, state: Mapping[str, Any]) -> None:
+        self._optimizer.state = tree_map(lambda value: value, dict(state))
 
     @contextmanager
     def base_model(self) -> Iterator[None]:

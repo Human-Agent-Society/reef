@@ -54,9 +54,10 @@ def test_a_deployment_can_default_a_template_flag() -> None:
         ({"lora_rank": 0}, "lora_rank"),
         ({"learning_rate": 0.0}, "learning_rate"),
         ({"top_p": 1.5}, "top_p"),
+        ({"top_k": -1}, "top_k"),
         ({"lora_keys": ()}, "lora_keys"),
     ],
-    ids=["negative-chunk", "chunk-not-power-of-two", "rank", "learning-rate", "top-p", "no-keys"],
+    ids=["negative-chunk", "chunk-not-power-of-two", "rank", "learning-rate", "top-p", "top-k", "no-keys"],
 )
 def test_an_invalid_engine_setting_is_refused(options: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):

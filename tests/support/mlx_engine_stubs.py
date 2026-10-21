@@ -10,7 +10,14 @@ from typing import Any
 
 from reef.core.chat_protocol import ParsedToolCall, template_messages
 from reef.train.mlx_backend.config import MLXEngineConfig
-from reef.train.mlx_backend.contracts import AdapterSnapshot, GenerationListener, LossOptions, ModelEngine, Rollout
+from reef.train.mlx_backend.contracts import (
+    AdapterSnapshot,
+    GenerationListener,
+    LossOptions,
+    ModelEngine,
+    OptimizerSnapshot,
+    Rollout,
+)
 
 #: The rendered prompt of every request.
 PROMPT_TOKENS = (11, 12, 13)
@@ -30,6 +37,11 @@ DEFAULT_ROLLOUT = Rollout(
 @dataclass(frozen=True)
 class FakeAdapterSnapshot(AdapterSnapshot):
     weights: Mapping[str, float]
+
+
+@dataclass(frozen=True)
+class FakeOptimizerSnapshot(OptimizerSnapshot):
+    steps: int
 
 
 @dataclass(frozen=True)
@@ -61,6 +73,8 @@ class FakeMLXEngine(ModelEngine):
     loss_families: frozenset[str] = frozenset({"tttd", "openclawrl"})
     engine_config: MLXEngineConfig = field(default_factory=MLXEngineConfig)
     weights: dict[str, float] = field(default_factory=lambda: {"layer.lora_a": 0.0, "layer.lora_b": 0.0})
+    #: The optimizer state: the number of steps that ``train`` has taken.
+    optimizer_steps: int = 0
     rendered: list[dict[str, Any]] = field(default_factory=list)
     generated: list[dict[str, Any]] = field(default_factory=list)
     streamed: list[str] = field(default_factory=list)
@@ -136,6 +150,14 @@ class FakeMLXEngine(ModelEngine):
             raise TypeError("the fake engine reads only its own snapshots")
         self.weights = dict(snapshot.weights)
 
+    def optimizer_snapshot(self) -> FakeOptimizerSnapshot:
+        return FakeOptimizerSnapshot(self.optimizer_steps)
+
+    def restore_optimizer(self, snapshot: OptimizerSnapshot) -> None:
+        if not isinstance(snapshot, FakeOptimizerSnapshot):
+            raise TypeError("the fake engine reads only its own snapshots")
+        self.optimizer_steps = snapshot.steps
+
     def adapter_delta(self, before: AdapterSnapshot, after: AdapterSnapshot) -> tuple[float, int]:
         if not isinstance(before, FakeAdapterSnapshot) or not isinstance(after, FakeAdapterSnapshot):
             raise TypeError("the fake engine reads only its own snapshots")
@@ -148,6 +170,7 @@ class FakeMLXEngine(ModelEngine):
 
     def train(self, loss_family, samples, advantages, options: LossOptions) -> dict[str, float | int]:
         self.trained.append(TrainCall(loss_family, tuple(samples), tuple(advantages), options))
+        self.optimizer_steps += 1
         if self.moves_weights:
             self.weights = {name: value + 1.0 for name, value in self.weights.items()}
         return {"loss": -1.0, "rows": len(samples)}

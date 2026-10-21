@@ -24,8 +24,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
+    CLIENT_COMMANDS,
     doctor,
     harness,
     main,

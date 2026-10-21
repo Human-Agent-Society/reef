@@ -18,6 +18,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention, RecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import TaskFileStore, TaskStorage
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
@@ -39,6 +40,10 @@ class OpaqueStore(ScenarioStore):
     @property
     def durable(self) -> bool:
         return self._inner.durable
+
+    @property
+    def tasks(self) -> TaskStorage:
+        return self._inner.tasks
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()
@@ -74,7 +79,7 @@ class OpaqueStorage(ScenarioStorage):
         self.close_count = 0
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path) -> OpaqueStorage:
+    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> OpaqueStorage:
         return cls(directory)
 
     @property
@@ -116,6 +121,7 @@ class FailingRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")
 
@@ -247,7 +253,7 @@ def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
             dispatcher.get_or_create_scenario("math")
-        assert dispatcher._registry.get_optional("math") is None
+        assert dispatcher.registry.get_optional("math") is None
         assert len(factory.sessions) == 1
         assert factory.sessions[0].close_count == 1
     finally:
@@ -280,7 +286,7 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
             else:
                 patch.setattr(Trainer, "restore_record_progress", fail_restore)
             with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
-                dispatcher._registry.reload("math")
+                dispatcher.registry.reload("math")
         assert dispatcher.get_or_create_scenario("math") is current
         assert len(closed_trainers) == 1
         assert closed_trainers[0] is not current.trainer

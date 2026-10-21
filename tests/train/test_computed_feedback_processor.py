@@ -94,8 +94,8 @@ class _ToyTasks(JudgedTasks):
 class ToyBatches(Task2Batch):
     """Batches the judged samples in the order that the stage selected them."""
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class _ToyProcessor(TrainingPipeline):

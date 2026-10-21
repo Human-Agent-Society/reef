@@ -135,6 +135,23 @@ def test_train_checkpoint_and_telemetry_are_recorded_before_releasing_reservatio
     assert backend.events == []
 
 
+def test_a_job_that_is_not_due_records_no_checkpoint(backend):
+    backend.checkpoint = TrainingCheckpoint(0, backend.checkpoint.path, scenario_step=0, writes_checkpoint=False)
+    result = coordinator(backend).execute(PAYLOAD)
+    assert (result.outcome, result.checkpoint_path) == ("checkpoint", None)
+    assert backend.events == [("prepare", None), ("train", "RUNNING"), ("release", "CHECKPOINT")]
+    assert markers.read_marker(backend.path)["checkpoint_path"] is None
+    assert not backend.checkpoint.path.exists()
+    assert coordinator(backend).execute(PAYLOAD) == result
+
+
+def test_restart_refuses_the_marker_of_a_job_without_a_checkpoint(backend):
+    backend.checkpoint = TrainingCheckpoint(0, backend.checkpoint.path, scenario_step=0, writes_checkpoint=False)
+    coordinator(backend).execute(PAYLOAD)
+    with pytest.raises(RuntimeError, match="saved no checkpoint"):
+        coordinator(backend).recover()
+
+
 @pytest.mark.parametrize("outcome", ["stale", "storage_blocked"])
 def test_admission_can_decline_without_a_running_marker(backend, outcome):
     backend.early = TrainingJobResult(outcome=outcome, runtime_load_id="engine:0")

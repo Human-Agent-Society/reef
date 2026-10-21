@@ -101,8 +101,12 @@ All keys are under ``training.options``. Only ``checkpoint_dir`` is required.
    training.options.kl_coef | 0.0 | weight of the frozen-base KL term, as described under Loss families below
    training.options.loss_options | {} | settings of the selected loss family; for ``openclawrl``: ``w_rl`` 1.0, ``w_opd`` 1.0, ``eps_lo`` 0.2, ``eps_hi`` 0.28, ``diff_clip`` 1.0 (null for no limit), ``hint_selection`` sequence_optimal or shortest, ``native_k`` 20, ``kl_coef`` (default: ``training.options.kl_coef``); ``tttd`` reads only ``kl_coef``
    training.options.max_tokens | 256 | response token limit when a request sets none
+   training.options.max_context_tokens | 0 | prompt and response token limit of one request; a request's response limit is lowered to fit, and a prompt that reaches the limit fails with HTTP 400; 0 sets no limit
+   training.options.max_train_tokens | 0 | token limit of one training row; a longer row is left out of its step, the step reports the count as ``rows_over_max_train_tokens``, and a batch whose rows are all longer is skipped; 0 sets no limit
+   training.options.min_train_rows | 1 | rows a step needs once ``max_train_tokens`` has left long rows out; a batch with fewer is skipped, because the optimizer takes a full-size step toward the rows that remain
    training.options.temperature | 1.0 | sampling temperature when a request sets none; must be positive
    training.options.top_p | 1.0 | top-p for every request
+   training.options.top_k | 0 | top-k for every request; 0 keeps every token
    training.options.seed | 0 | MLX random seed
    training.options.capture_topk | 0 | top-K candidates recorded for each generated token; the ``openclawrl`` loss needs a value above 0
    training.options.chat_template_kwargs | {} | default chat-template values for every request, such as ``enable_thinking``
@@ -176,11 +180,12 @@ Anthropic routes, return HTTP 404. The backend reads these request fields:
 - ``tools`` and ``tool_choice``;
 - ``chat_template_kwargs``, which overrides the deployment default.
 
-``training.options.top_p`` applies to every request. A request that sets
-``top_p`` to another value fails with HTTP 400. The request also fails when
-it sets ``n`` above 1, or sets any of ``top_k``, ``min_p``, ``seed``,
-``stop``, ``frequency_penalty``, ``presence_penalty``,
-``repetition_penalty``, ``logit_bias``, ``logprobs`` or ``top_logprobs``.
+``training.options.top_p`` and ``training.options.top_k`` apply to every
+request. A request that sets ``top_p`` or ``top_k`` to another value fails
+with HTTP 400. The request also fails when it sets ``n`` above 1, or sets
+any of ``min_p``, ``seed``, ``stop``, ``frequency_penalty``,
+``presence_penalty``, ``repetition_penalty``, ``logit_bias``, ``logprobs``
+or ``top_logprobs``.
 ``max_tokens`` must be a positive integer, and ``temperature`` must be finite
 and not negative.
 
@@ -280,6 +285,15 @@ memory for one sequence per backward pass:
 
 The last column sets ``log_probs_chunk_size: 1024``.
 
+A sequence also costs more than linear memory: on Qwen3.5-9B with all 32
+blocks adapted and ``checkpoint_layers: true``, one row of 4096, 8192 and
+10240 tokens peaked at 13.5, 26.2 and 35.9 GiB. Lowering ``lora_layers``
+does not remove this cost: 16 adapted blocks peaked at 45.5 GiB for 12288
+tokens. A harness can send long prompts and ask for long responses, so set
+``max_train_tokens`` to the longest row that fits. Generation needs much less
+memory than a training step, so ``max_context_tokens`` can stay higher: a
+request then still gets a reply, and only its training row is left out.
+
 When a step runs out of memory, change these options in this order:
 
 1. Set ``checkpoint_layers: true``. This matters most when many blocks are
@@ -287,7 +301,8 @@ When a step runs out of memory, change these options in this order:
    700-token row), peak memory fell from 50.5 GB to 18.3 GB, and the
    backward pass fell from 744 s to 41.6 s.
 2. Lower ``micro_batch_size``.
-3. Lower ``max_tokens``.
+3. Lower ``max_tokens``. When requests set their own limit, set
+   ``max_context_tokens``.
 4. Lower ``lora_layers``.
 
 ``log_probs_chunk_size`` reduces peak memory by about 27% at 8192 tokens,
@@ -312,14 +327,19 @@ Serving on a Mac is slower than on the reference GPUs. Two settings depend on
 that speed:
 
 - ``OPENCLAWRL_TURN_TIMEOUT_S`` sets the harness's limit for one agent turn,
-  600 seconds by default. In a 72-session stream with Qwen3.5-9B on an M4 Pro,
-  the median turn took 397 s and the slowest took 1141 s. Turns that reach
-  the limit are recorded as failed sessions. Raise the limit on this backend.
+  600 seconds by default. A turn waits while a training step and its
+  candidate evaluation hold the engine, about 16 minutes with Qwen3.5-9B on
+  an M4 Pro. A first turn that reaches the limit leaves its session without
+  a reply. Set 1800 seconds on this backend.
 - ``pipeline.record2record.config.session_ttl_s`` must be longer than the gap
   between a reply and the reaction that judges it. ``serve-mlx.yaml`` sets
-  1800. The `session TTL result
-  <../../recipes/openclawrl/examples/openclawrl/results/2026-09-16-mlx-session-ttl/README.md>`__
-  shows that 45 seconds lost about half of the training pairs.
+  1800. With 45 seconds, about half of the judging-stage sessions expired
+  before they bound a reply to its reaction, and those replies were not
+  trained.
+
+The `Apple Silicon result
+<../../recipes/openclawrl/examples/openclawrl/README.md#gsm8k-homework-stream-on-apple-silicon>`__
+of the OpenClaw-RL example records a full stream with these settings.
 
 Verification scope
 ------------------

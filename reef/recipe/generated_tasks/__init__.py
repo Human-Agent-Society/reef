@@ -6,7 +6,7 @@ names the generator (:class:`reef.core.tasks.TaskGenerator`) in
 generator's method:
 
 - ``processor``: the three stages. ``GeneratedTaskRecord2Record`` groups the
-  training plays by task and requests rounds; ``GeneratedTaskTasks`` runs the
+  training plays by task and forms the round sets; ``GeneratedTaskTasks`` runs the
   rounds (generate, validate, play through the generator service, send the
   results back) and turns the training arm's episodes into tasks; and
   ``GeneratedTaskBatches`` batches complete task groups.

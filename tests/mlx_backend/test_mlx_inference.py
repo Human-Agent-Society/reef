@@ -13,6 +13,7 @@ from tests.support.mlx_engine_stubs import DEFAULT_ROLLOUT, FakeMLXEngine
 
 from reef.artifact.artifact import Artifact
 from reef.runtime.interfaces import UpstreamStatusError
+from reef.train.mlx_backend.config import MLXEngineConfig
 from reef.train.mlx_backend.inference import MLXToolCallParser
 from reef.train.mlx_backend.serving import MLXServingRuntime
 
@@ -57,6 +58,18 @@ def test_a_response_carries_the_tensors_that_make_it_trainable() -> None:
     assert response["choices"][0]["meta_info"] == {"runtime_load_id": serving.serving_runtime_load_id()}
     assert training["topk_indices"] == [[21, 99], [22, 98]]
     assert engine.generated[0]["max_tokens"] == 8
+
+
+def test_max_context_tokens_shortens_the_completion_and_refuses_a_prompt_that_fills_it() -> None:
+    # The fake engine renders every prompt as three tokens.
+    engine = FakeMLXEngine(engine_config=MLXEngineConfig(max_context_tokens=7))
+    serve({"messages": HI, "max_tokens": 8}, engine)
+    serve({"messages": HI, "max_tokens": 2}, engine)
+    assert [call["max_tokens"] for call in engine.generated] == [4, 2]
+
+    with pytest.raises(UpstreamStatusError, match="max_context_tokens is 3") as refused:
+        serve({"messages": HI}, FakeMLXEngine(engine_config=MLXEngineConfig(max_context_tokens=3)))
+    assert refused.value.status == 400
 
 
 def test_no_candidate_channel_when_the_engine_captured_none() -> None:
@@ -120,6 +133,7 @@ def test_the_request_steers_the_chat_template(payload: dict, rendered: dict) -> 
         ({"messages": HI, "stop": ["\n"]}, 400, "'stop'"),
         ({"messages": HI, "n": 2}, 400, "n must be 1"),
         ({"messages": HI, "top_p": 0.9}, 400, "training.options.top_p"),
+        ({"messages": HI, "top_k": 20}, 400, "training.options.top_k"),
         (
             {"messages": [{"role": "assistant", "tool_calls": [{"function": {"name": "f", "arguments": "{"}}]}]},
             400,
@@ -138,6 +152,7 @@ def test_the_request_steers_the_chat_template(payload: dict, rendered: dict) -> 
         "stop",
         "n",
         "top-p",
+        "top-k",
         "tool-call-arguments",
     ],
 )
@@ -148,8 +163,8 @@ def test_a_request_the_backend_cannot_serve_is_a_client_error(payload: dict, sta
     assert caught.value.status == status
 
 
-def test_the_configured_top_p_is_accepted() -> None:
-    assert serve({"messages": HI, "top_p": 1.0, "n": 1})["choices"][0]["finish_reason"] == "stop"
+def test_the_configured_top_p_and_top_k_are_accepted() -> None:
+    assert serve({"messages": HI, "top_p": 1.0, "top_k": 0, "n": 1})["choices"][0]["finish_reason"] == "stop"
 
 
 def test_an_empty_completion_is_a_server_error() -> None:

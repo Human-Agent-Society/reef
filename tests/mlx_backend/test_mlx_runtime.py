@@ -69,6 +69,43 @@ def train(runtime: MLXRuntime, scenario_step: int = 0):
     return runtime.train_candidate(prepared.payload)
 
 
+def test_rows_longer_than_max_train_tokens_are_left_out_and_an_all_long_batch_is_skipped(tmp_path: Path) -> None:
+    engine = FakeMLXEngine()
+    runtime = build(tmp_path, engine, max_train_tokens=5)
+    long_sample = policy_trajectory("rec-long", (1, 2, 3, 4, 5, 6), (1, 1), (-0.5, -0.25), 1.0)
+    prepared = runtime.prepare_training_step(
+        TrainingBatch("batch-1", (sample(1.0), long_sample)), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0
+    )
+
+    runtime.train_candidate(prepared.payload)
+
+    [call] = engine.trained
+    assert [s.training["tokens"] for s in call.samples] == [[1, 2, 3, 4]]
+    assert call.advantages == (1.0,)
+    assert prepared.metrics["rows_over_max_train_tokens"] == 1
+
+    only_long = runtime.prepare_training_step(
+        TrainingBatch("batch-2", (long_sample, long_sample)), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 1
+    )
+    assert only_long.action == "skip"
+    assert only_long.metrics["rows_over_max_train_tokens"] == 2
+
+
+def test_a_batch_with_fewer_rows_than_min_train_rows_is_skipped(tmp_path: Path) -> None:
+    runtime = build(tmp_path, max_train_tokens=5, min_train_rows=2)
+    long_sample = policy_trajectory("rec-long", (1, 2, 3, 4, 5, 6), (1, 1), (-0.5, -0.25), 1.0)
+
+    one_left = runtime.prepare_training_step(
+        TrainingBatch("batch-1", (sample(1.0), long_sample)), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0
+    )
+    two_left = runtime.prepare_training_step(
+        TrainingBatch("batch-2", (sample(1.0), sample(0.0))), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 1
+    )
+
+    assert one_left.action == "skip"
+    assert two_left.action == "train"
+
+
 def test_the_first_request_is_served_under_a_runtime_load_id(tmp_path: Path) -> None:
     runtime = build(tmp_path)
 
@@ -280,6 +317,30 @@ def test_a_rejected_candidate_never_reaches_serving(tmp_path: Path) -> None:
     assert serving.inference_admission_status["open"] is True
     with pytest.raises(RuntimeContractError, match="no pending mlx candidate"):
         serving.activate_candidate(candidate)
+
+
+def test_a_rejected_candidate_returns_the_optimizer_to_its_state_before_the_step(tmp_path: Path) -> None:
+    runtime = build(tmp_path)
+    scheduler = RuntimeScheduler(runtime, runtime.serving)
+    selected = train(runtime, 0)
+    scheduler.activate_candidate(selected)
+    scheduler.finish_committed_training_job(selected.training_job_id)
+    assert runtime.engine.optimizer_steps == 1
+
+    scheduler.reject_candidate(train(runtime, 1))
+
+    # The next step trains from the served weights with their own moments.
+    assert runtime.engine.optimizer_steps == 1
+
+
+def test_a_failed_step_returns_the_optimizer_to_its_state_before_the_step(tmp_path: Path) -> None:
+    engine = FakeMLXEngine(moves_weights=False)
+    runtime = build(tmp_path, engine)
+
+    with pytest.raises(RuntimeContractError, match="unchanged"):
+        train(runtime)
+
+    assert engine.optimizer_steps == 0
 
 
 def published_adapter(tmp_path: Path, metadata: dict | None = None) -> Artifact:

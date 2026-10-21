@@ -173,7 +173,11 @@ def test_shared_sql_record_operations_do_not_select_sqlite() -> None:
 
 def test_dispatcher_does_not_select_a_record_backend() -> None:
     module = importlib.import_module("reef.dispatcher")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef")
+    imported = [
+        target
+        for path in sorted((REPO_ROOT / "reef/dispatcher").rglob("*.py"))
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.dispatcher")
+    ]
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
@@ -204,7 +208,8 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
 def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
-        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits"),
+        "reef.storage.tasks": ("reef.core",),
+        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits", "reef.storage.tasks"),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)
@@ -241,6 +246,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     # is the allowed escape hatch.
     core_packages = (
         "reef/core",
+        "reef/dispatcher",
         "reef/service",
         "reef/scenario",
         "reef/storage",
@@ -249,9 +255,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/runtime",
         "reef/surface",
     )
-    core_modules = ["reef/dispatcher.py"]
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
-    files += [REPO_ROOT / module for module in core_modules]
     # A method package's public half too; its ``slime`` subpackage is the
     # backend half, imported by the training driver and workers only.
     files += [
@@ -571,6 +575,7 @@ def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
         "reef.pipeline_context",
         "reef.record2record",
         "reef.record2task",
+        "reef.storage.tasks",
         "reef.task2batch",
     )
     paths = [*sorted((REPO_ROOT / "reef" / "task2batch").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]

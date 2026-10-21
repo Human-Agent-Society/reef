@@ -16,6 +16,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+# The reasoning tags and the tool-call start that SGLang's Qwen3 reasoning
+# parser reads; a tool call that starts before ``</think>`` ends the reasoning.
+THINK_START = "<think>"
+THINK_END = "</think>"
+TOOL_CALL_START = "<tool_call>"
+
 
 @dataclass(frozen=True)
 class ParsedToolCall:
@@ -36,56 +42,54 @@ def held_suffix(value: str, delimiter: str) -> int:
 class ReasoningStreamSplitter:
     """Split sampled thinking tags without waiting for the full completion.
 
-    With ``tool_call_start``, a tool call that opens before ``</think>`` ends
-    the thinking: the call and the text after it are text. Without it, only
-    the closing tag ends the thinking.
+    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
+    reasoning and is dropped, the first ``</think>`` or ``tool_call_start``
+    ends it, and a stream that ends inside it is reasoning. A slice that may
+    be the start of one of these tags is held until the next delta. With
+    ``tool_call_start`` set to ``None``, only ``</think>`` ends the reasoning.
     """
 
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
-
-    def __init__(self, *, enabled: bool, force_reasoning: bool, tool_call_start: str | None = None) -> None:
-        self._mode = "thinking" if enabled and force_reasoning else ("undecided" if enabled else "text")
+    def __init__(self, *, enabled: bool, force_reasoning: bool, tool_call_start: str | None = TOOL_CALL_START) -> None:
+        self._enabled = enabled
+        self._in_reasoning = enabled and force_reasoning
+        self._stripped_think_start = False
         self._buffer = ""
         self._tool_call_start = tool_call_start
 
     def feed(self, delta: str) -> list[tuple[str, str]]:
         if not delta:
             return []
-        if self._mode == "text":
+        if not self._enabled:
             return [("text", delta)]
         self._buffer += delta
-        if self._mode == "undecided":
-            if self._OPEN.startswith(self._buffer) and len(self._buffer) < len(self._OPEN):
-                return []
-            if self._buffer.startswith(self._OPEN):
-                self._buffer = self._buffer[len(self._OPEN) :]
-                self._mode = "thinking"
-            else:
-                value, self._buffer = self._buffer, ""
-                self._mode = "text"
-                return [("text", value)]
+        end_tags = [THINK_END] if self._tool_call_start is None else [THINK_END, self._tool_call_start]
+        if any(tag.startswith(self._buffer) and tag != self._buffer for tag in (THINK_START, *end_tags)):
+            return []
+        if not self._stripped_think_start and THINK_START in self._buffer:
+            self._buffer = self._buffer.replace(THINK_START, "", 1)
+            self._stripped_think_start = True
+            self._in_reasoning = True
+        if not self._in_reasoning:
+            value, self._buffer = self._buffer, ""
+            return [("text", value)]
 
-        if self._tool_call_start:
-            call = self._buffer.find(self._tool_call_start)
-            close = self._buffer.find(self._CLOSE)
-            if call != -1 and (close == -1 or call < close):
-                thinking, text = self._buffer[:call], self._buffer[call:]
-                self._buffer = ""
-                self._mode = "text"
-                return [*([("thinking", thinking)] if thinking else []), ("text", text)]
-        before, separator, after = self._buffer.partition(self._CLOSE)
+        before, separator, after = self._buffer.partition(THINK_END)
         if separator:
             self._buffer = ""
-            self._mode = "text"
+            self._in_reasoning = False
             parts = [("thinking", before)] if before else []
             visible = after.lstrip("\n")
             if visible:
                 parts.append(("text", visible))
             return parts
-        held = held_suffix(self._buffer, self._CLOSE)
-        if self._tool_call_start:
-            held = max(held, held_suffix(self._buffer, self._tool_call_start))
+        tool_start = -1 if self._tool_call_start is None else self._buffer.find(self._tool_call_start)
+        if tool_start != -1:
+            before, after = self._buffer[:tool_start], self._buffer[tool_start:]
+            self._buffer = ""
+            self._in_reasoning = False
+            return [("thinking", before), ("text", after)] if before else [("text", after)]
+        held_tags = end_tags if self._stripped_think_start else [THINK_START, *end_tags]
+        held = max(held_suffix(self._buffer, tag) for tag in held_tags)
         if held:
             value = self._buffer[:-held]
             self._buffer = self._buffer[-held:]
@@ -97,8 +101,10 @@ class ReasoningStreamSplitter:
         if not self._buffer:
             return []
         value, self._buffer = self._buffer, ""
-        kind = "thinking" if self._mode == "thinking" else "text"
-        return [(kind, value)]
+        if self._in_reasoning:
+            value = value.removeprefix(THINK_START)
+            return [("thinking", value)] if value else []
+        return [("text", value)]
 
 
 def sse_data(event: Mapping[str, Any]) -> bytes:
@@ -408,35 +414,38 @@ def assistant_message(
     *,
     split_reasoning: bool = True,
     force_reasoning: bool = False,
-    tool_call_start: str | None = None,
+    tool_call_start: str | None = TOOL_CALL_START,
 ) -> tuple[dict[str, Any], bool]:
     """Split sampled text into an OpenAI assistant message; ``True`` when it carries tool calls.
 
-    Reasoning before the last ``</think>`` goes to ``reasoning_content``; the
-    chat template usually inserts the opening tag, so the sample often lacks
-    it. With ``force_reasoning`` the template opened the block, and a sample
-    with no closing tag is reasoning that hit the token cap: all of it is
-    ``reasoning_content`` and ``content`` is empty. With ``tool_call_start``,
-    a tool call that opens inside unclosed thinking ends the thinking there.
+    OpenAI-shaped clients render ``content`` verbatim, so reasoning goes to
+    ``reasoning_content``. The split follows SGLang's Qwen3 reasoning parser:
+    leading ``<think>`` tags are dropped and the first ``</think>`` ends the
+    reasoning. The chat template often inserts the opening tag, so the sample
+    may carry only the closing tag. In a sample with no ``</think>``, a
+    ``tool_call_start`` ends the reasoning; ``None`` turns that rule off. With
+    ``force_reasoning`` the template opened the block. A sample that opens
+    reasoning and never closes it hit the token cap: all of it is
+    ``reasoning_content`` and ``content`` is empty.
 
     The training tensors come from the raw token stream; this split changes
     only what the client reads. A parser that cannot parse text it
     recognised as a call raises ``ValueError``.
     """
     reasoning: str | None = None
-    if split_reasoning:
-        close = text.rfind("</think>")
-        thinking_open = force_reasoning or text.lstrip().startswith("<think>")
-        call = text.find(tool_call_start) if tool_call_start and thinking_open and close == -1 else -1
-        if call != -1:
-            reasoning = text[:call].replace("<think>", "").strip()
-            text = text[call:]
-        elif close != -1:
-            reasoning = text[:close].replace("<think>", "").strip()
-            text = text[close + len("</think>") :].lstrip("\n")
-        elif force_reasoning:
-            reasoning = text.replace("<think>", "").strip()
-            text = ""
+    if split_reasoning and (force_reasoning or THINK_START in text or THINK_END in text):
+        body = text
+        while body.startswith(THINK_START):
+            body = body[len(THINK_START) :]
+        head, separator, tail = body.partition(THINK_END)
+        tool_start = -1 if tool_call_start is None else body.find(tool_call_start)
+        if separator:
+            reasoning, text = head, tail.lstrip("\n")
+        elif tool_start != -1:
+            reasoning, text = body[:tool_start], body[tool_start:]
+        else:
+            reasoning, text = body, ""
+        reasoning = reasoning.strip()
     message: dict[str, Any] = {"role": "assistant", "content": text}
     if reasoning:
         message["reasoning_content"] = reasoning

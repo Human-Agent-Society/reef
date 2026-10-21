@@ -1024,6 +1024,44 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
 
 
 @pytest.mark.unit
+def test_a_job_between_checkpoints_saves_nothing_and_takes_no_checkpoint_storage(tmp_path) -> None:
+    root = tmp_path / "checkpoints"
+    template = str(root / "hf" / "{rollout_id}")
+    megatron_root = root / "megatron"
+    source_hf = tmp_path / "source-hf"
+    source_hf.mkdir()
+    (source_hf / "weights").write_text("hf", encoding="utf-8")
+    group = _DurableGroup(template, megatron_root)
+    manager = _FakeRolloutManager(["packed"])
+    actor = build_slime_coordinator(
+        group,
+        manager,
+        batch_processor=manager,
+        save_hf_template=template,
+        storage_config=RetentionConfig(max_storage_bytes=10**9, min_free_space_bytes=0),
+        megatron_save_root=str(megatron_root),
+        source_hf=str(source_hf),
+        checkpoint_interval=2,
+    )
+    payload = _payload(loss="sft")
+    payload.update(scenario_step=0, parent_runtime_load_id="v1", parent_release_id="parent-0")
+    records = actor._training._storage.records_root
+
+    first = _execute_and_update_weights(actor, payload)
+    assert first.training_job_id is not None
+    actor.acknowledge_training_commit(first.training_job_id)
+    assert (first.outcome, first.checkpoint_path) == ("complete", None)
+    assert group.save_calls == []
+    assert not list(records.glob("*.json"))
+
+    second = {**payload, "scenario_step": 1, "samples": [_row("d"), _row("e", reward=1.0), _row("f", reward=-1.0)]}
+    saved = _execute_and_update_weights(actor, second)
+    assert saved.checkpoint_path == template.format(rollout_id=1)
+    assert group.save_calls == [(1, True)]
+    assert [path.name for path in records.glob("*.json")] == [f"{1:020d}.json"]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("status", "checkpoint_exists", "error"),
     [
@@ -1627,7 +1665,9 @@ def test_training_preparation_keeps_a_resolvable_loss_family_reference(tmp_path,
         assert prepared.loss_family == "external_family_pkg:ALGORITHM"
     finally:
         unregister_loss_family("external_family")
-    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "sft"
+    # A family registered by reference travels as its reference; a family registered directly keeps its name.
+    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "reef.train.slime_backend.sft:SftAlgorithm"
+    assert bridge.prepare_bridge(args, loss_family="pg").loss_family == "pg"
     assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}")
 
 

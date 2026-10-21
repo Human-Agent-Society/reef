@@ -10,6 +10,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.scenario.registry import InstanceState
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -244,11 +245,32 @@ def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
     original = dropped.close
     dropped.close = lambda: (closed.append("dropped"), original())[-1]
 
-    recovered = dispatcher._registry.reload("math")
+    recovered = dispatcher.registry.reload("math")
 
     assert closed == ["dropped"]
     assert recovered is not dropped
     assert dispatcher.get_or_create_scenario("math") is recovered
+
+
+def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    registry = dispatcher.registry
+    try:
+        dropped = dispatcher.get_or_create_scenario("math")
+        with registry.lock_instance(dropped) as state:
+            assert state is InstanceState.CURRENT
+
+        recovered = registry.reload("math")
+        with registry.lock_instance(dropped) as state:
+            assert state is InstanceState.REPLACED
+
+        with registry.lock_for("math"):
+            registry.unload("math")
+        recovered.close()
+        with registry.lock_instance(recovered) as state:
+            assert state is InstanceState.REMOVED
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.parametrize("operation", [None, "training", "rollback", "promote"])

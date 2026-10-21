@@ -13,6 +13,8 @@ packages that do not depend on each other need it, and it carries no I/O.
 by runtimes and training; ``requirements`` validates training-request requirements
 and reads their release-chain records. ``chat_protocol`` holds the OpenAI and
 Anthropic chat helpers that inference handlers and the MLX training backend share.
+``training_request`` validates TRAIN bodies at admission and holds the queued
+instruction carried by a training batch.
 Anything with one consumer stays in that consumer — the ``x-reef-*`` header
 parsing and the HTTP report envelope live in ``service/wire.py`` — while the
 typed report *body* is ``reports/`` here because four packages parse it.

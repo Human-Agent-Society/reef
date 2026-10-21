@@ -54,6 +54,10 @@ class AdapterSnapshot(ABC):  # noqa: B024 - a typed handle; each engine defines 
     """Adapter weights copied out of an engine. Only the engine that made a snapshot reads it."""
 
 
+class OptimizerSnapshot(ABC):  # noqa: B024 - a typed handle; each engine defines its own contents
+    """The optimizer state of an engine at one point. Only the engine that made a snapshot reads it."""
+
+
 @dataclass(frozen=True)
 class LossOptions:
     """The loss settings of a deployment: the KL coefficient and the family's own options."""
@@ -114,6 +118,13 @@ class ModelEngine(ABC):
     def apply_adapter(self, snapshot: AdapterSnapshot) -> None: ...
 
     @abstractmethod
+    def optimizer_snapshot(self) -> OptimizerSnapshot: ...
+
+    @abstractmethod
+    def restore_optimizer(self, snapshot: OptimizerSnapshot) -> None:
+        """Return the optimizer to a snapshot: its moments and its step count."""
+
+    @abstractmethod
     def adapter_delta(self, before: AdapterSnapshot, after: AdapterSnapshot) -> tuple[float, int]:
         """The L2 distance between two snapshots and the number of tensors that differ."""
 
@@ -144,4 +155,4 @@ class ModelEngine(ABC):
         """Stop the engine thread."""
 
 
-__all__ = ["AdapterSnapshot", "GenerationListener", "LossOptions", "ModelEngine", "Rollout"]
+__all__ = ["AdapterSnapshot", "GenerationListener", "LossOptions", "ModelEngine", "OptimizerSnapshot", "Rollout"]

@@ -30,7 +30,14 @@ from reef.core.batches import TrajectoryItem
 from reef.core.chat_protocol import ParsedToolCall, template_messages
 from reef.runtime.recovery import fsync_dir, mkdir_durable, write_json
 from reef.train.mlx_backend.config import MLXEngineConfig, check_template_kwargs
-from reef.train.mlx_backend.contracts import AdapterSnapshot, GenerationListener, LossOptions, ModelEngine, Rollout
+from reef.train.mlx_backend.contracts import (
+    AdapterSnapshot,
+    GenerationListener,
+    LossOptions,
+    ModelEngine,
+    OptimizerSnapshot,
+    Rollout,
+)
 from reef.train.mlx_backend.losses import resolve_mlx_loss
 from reef.train.mlx_backend.training import (
     BYTES_PER_GIB,
@@ -46,6 +53,13 @@ MLX_ADAPTER_WEIGHTS = "adapters.safetensors"
 
 #: The chat template writes the opening thinking tag last, so the last few prompt tokens show it.
 REASONING_TAIL_TOKENS = 8
+
+
+@dataclass(frozen=True)
+class MLXOptimizerSnapshot(OptimizerSnapshot):
+    """The AdamW state tree of the trainer at one point."""
+
+    state: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -216,7 +230,7 @@ class MLXEngine(ModelEngine):
         tokenizer = self._loaded.tokenizer
         stop_ids = set(tokenizer.eos_token_ids)
         capture_topk = self._config.capture_topk
-        sampler = make_sampler(temp=temperature, top_p=self._config.top_p)
+        sampler = make_sampler(temp=temperature, top_p=self._config.top_p, top_k=self._config.top_k)
         detokenizer = tokenizer.detokenizer
         detokenizer.reset()
         output: list[int] = []
@@ -288,6 +302,15 @@ class MLXEngine(ModelEngine):
     def apply_adapter(self, snapshot: AdapterSnapshot) -> None:
         tensors = self._tensors_of(snapshot)
         self.run(lambda: self._loaded.trainer.load_adapter_tensors(tensors))
+
+    def optimizer_snapshot(self) -> MLXOptimizerSnapshot:
+        return MLXOptimizerSnapshot(self.run(self._loaded.trainer.optimizer_state))
+
+    def restore_optimizer(self, snapshot: OptimizerSnapshot) -> None:
+        if not isinstance(snapshot, MLXOptimizerSnapshot):
+            raise MLXEngineError(f"the mlx engine cannot read a {type(snapshot).__name__}")
+        state = snapshot.state
+        self.run(lambda: self._loaded.trainer.load_optimizer_state(state))
 
     def adapter_delta(self, before: AdapterSnapshot, after: AdapterSnapshot) -> tuple[float, int]:
         old, new = self._tensors_of(before), self._tensors_of(after)

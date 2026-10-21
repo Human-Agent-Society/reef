@@ -23,6 +23,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioStoreConflict
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 
 
 def record(record_id: str, *, scenario: str = "math") -> AgentRecord:
@@ -207,11 +208,15 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
         _ = store.records
 
 
+def sqlite_session(journal=None, *, database=None, initial_step=0):
+    records = SQLiteRecordStore(database)
+    tasks = records.task_storage(LocalTaskFileStore(), "math")
+    return CommitHistoryScenarioStore("math", records, journal, tasks=tasks, initial_step=initial_step)
+
+
 def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(
-        CommitHistoryScenarioStore("math", SQLiteRecordStore(tmp_path / "records.sqlite3"), journal)
-    ) as session:
+    with closing(sqlite_session(journal, database=tmp_path / "records.sqlite3")) as session:
         for step in range(1, 4):
             session.records.append(record(f"record-{step}"))
             journal.append(commit(step))
@@ -227,7 +232,7 @@ def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
 @pytest.mark.parametrize("durable_append", [False, True])
 def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch, durable_append):
     journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session:
+    with closing(sqlite_session(journal)) as session:
         session.records.append(record("record-1"))
         append = journal.append
 
@@ -254,7 +259,7 @@ def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, checkpoint_step
     for step in steps:
         journal.append(commit(step))
     with (
-        closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session,
+        closing(sqlite_session(journal)) as session,
         pytest.raises(ReefError, match=message),
     ):
         session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
@@ -264,14 +269,14 @@ def test_recovery_rejects_journal_for_another_scenario(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
     journal.append(commit(scenario="code"))
     with (
-        closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), journal)) as session,
+        closing(sqlite_session(journal)) as session,
         pytest.raises(ReefError, match="holds records for 'code'"),
     ):
         session.recover(checkpoint=None)
 
 
 def test_existing_initial_step_is_fenced_without_history():
-    with closing(CommitHistoryScenarioStore("math", SQLiteRecordStore(), initial_step=3)) as session:
+    with closing(sqlite_session(initial_step=3)) as session:
         with pytest.raises(ScenarioStoreConflict, match="current step is 3"):
             session.commit_step(expected_step=0, commit=commit())
         session.commit_step(expected_step=3, commit=commit(4))

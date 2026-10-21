@@ -454,6 +454,9 @@ class DirectiveTeacher:
     """
 
     tokenizer_path: str
+    #: Chat-template arguments of the hint-enhanced prompt; the policy's own (``enable_thinking``, say),
+    #: so the teacher's prompt ends where the policy's did.
+    template_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     async def candidate_tokens(
         self,
@@ -471,7 +474,7 @@ class DirectiveTeacher:
             tokenizer = await asyncio.to_thread(load_tokenizer, self.tokenizer_path)
             normalized = normalize_messages_for_template(enhanced_messages)
             prompt_text = tokenizer.apply_chat_template(
-                normalized, tools=tools, tokenize=False, add_generation_prompt=True
+                normalized, tools=tools, tokenize=False, add_generation_prompt=True, **dict(self.template_kwargs)
             )
             prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
         except Exception:

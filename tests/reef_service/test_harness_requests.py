@@ -190,11 +190,11 @@ def test_training_request_parses_requires_and_names_the_first_bad_item() -> None
         {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"},
         {"name": "REEF_SMS_FROM", "kind": "env"},
     ]
-    longest = TrainingRequest("t", "s", "r", requires=[{"name": "x", "kind": "env", "prompt": "p" * 200}])
+    longest = TrainingRequest.from_dict({**base, "requires": [{"name": "x", "kind": "env", "prompt": "p" * 200}]})
     assert longest.requires[0]["prompt"] == "p" * 200
-    # The id a record fills in leaves the list as parsed, and the constructor parses a list of its own.
+    # The id a record fills in leaves the list as parsed.
     assert dataclasses.replace(request, id="ask-1").to_dict() == request.to_dict()
-    assert TrainingRequest("t", "s", "r", requires=[{"name": "x", "kind": "env", "extra": 1}]).requires == (
+    assert TrainingRequest.from_dict({**base, "requires": [{"name": "x", "kind": "env", "extra": 1}]}).requires == (
         {"name": "x", "kind": "env"},
     )
     assert TrainingRequest.from_dict({**base, "requires": None}).requires == ()
@@ -430,7 +430,7 @@ def test_the_merge_takes_the_proposers_items_by_name_wherever_it_put_them(caplog
 def test_a_training_request_with_requires_hashes_like_one_without() -> None:
     """``requires`` holds dicts and stays out of the hash, so the frozen request hashes either way."""
     plain = TrainingRequest("text me", "s", "r")
-    with_items = TrainingRequest("text me", "s", "r", requires=REQUIRES)
+    with_items = TrainingRequest("text me", "s", "r", requires=tuple(REQUIRES))
     assert hash(with_items) == hash(plain) and with_items != plain
 
 
@@ -444,7 +444,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
         requests[0]["requires"].extend([*person, *added, *added])
         return MARKER
 
-    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=person)
+    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     batch = TrainingBatch("demo:instruction:ask-1", (), request=request)
     candidate_backend = backend(tmp_path, extending)
     initial = candidate_backend.initial_state()
@@ -495,7 +495,7 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
 
 def test_no_proposal_keeps_the_requests_requires(tmp_path: Path) -> None:
     person = [{"name": "P0", "kind": "env"}]
-    request = TrainingRequest("ask", "s", "rel-0", "ask-2", requires=person)
+    request = TrainingRequest("ask", "s", "rel-0", "ask-2", requires=tuple(person))
     batch = TrainingBatch("demo:instruction:ask-2", (), request=request)
     candidate_backend = backend(tmp_path, lambda n, s, m, *, requests=(): None)
     result = run_backend_step(candidate_backend, batch, candidate_backend.initial_state())
@@ -754,9 +754,14 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             assert "metrics" not in row
             # The promote serves the pending release's tree, so its entries are that release's: what the install
             # binding re-renders the config from, and the base release's seed is not what it falls back to.
-            assert scenario.entries_for_version(promoted) == scenario.entries_for_version(pending["release_id"])
-            assert any(entry["id"] == "r1" for entry in scenario.entries_for_version(promoted))
-            assert scenario.entries_for_version(base) is None and scenario.entries_for_version("nope") is None
+            assert scenario.release_queries.entries_for_version(
+                promoted
+            ) == scenario.release_queries.entries_for_version(pending["release_id"])
+            assert any(entry["id"] == "r1" for entry in scenario.release_queries.entries_for_version(promoted))
+            assert (
+                scenario.release_queries.entries_for_version(base) is None
+                and scenario.release_queries.entries_for_version("nope") is None
+            )
             # Installing a promoted or rolled-back release rebinds the model endpoint without losing evolved settings.
             rolled_back = scenario.rollback(promoted).release_id
             service = RequestService(dispatcher)

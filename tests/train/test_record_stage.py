@@ -13,6 +13,7 @@ from tests.train.test_record_stage_batch_parity import CountingBackend, inferenc
 from reef.core import AgentRecord
 from reef.record2record import (
     GroupDecision,
+    InferenceRecord2Record,
     PassThroughRecord2Record,
     RecordSet,
     ReportContext,
@@ -81,8 +82,8 @@ class RecordingBatches(Task2Batch):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, 1)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"recording:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class RecordingPipeline(TrainingPipeline):
@@ -93,6 +94,35 @@ class RecordingPipeline(TrainingPipeline):
         self.recording = RecordingTasks()
         self.batches = RecordingBatches(context)
         super().__init__(context, record2record=self.stage, record2task=self.recording, task2batch=self.batches)
+
+
+class PendingTasks(Record2Task):
+    """Returns pending for every set; ``finish`` queues a result that ``take_finished`` hands back."""
+
+    def __init__(self) -> None:
+        self.finished: list[tuple[Hashable, TaskResult]] = []
+
+    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+        return TaskResult.pending()
+
+    def finish(self, set_id: Hashable, result: TaskResult) -> None:
+        self.finished.append((set_id, result))
+
+    def take_finished(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+        finished, self.finished = tuple(self.finished), []
+        return finished
+
+
+class PendingPipeline(TrainingPipeline):
+    """Holds each inference record as one set whose tasks ``PendingTasks`` makes later."""
+
+    def __init__(self, context: PipelineContext | None = None) -> None:
+        context = PipelineContext("s") if context is None else context
+        self.pending_tasks = PendingTasks()
+        self.batches = RecordingBatches(context)
+        super().__init__(
+            context, record2record=InferenceRecord2Record(), record2task=self.pending_tasks, task2batch=self.batches
+        )
 
 
 class DroppingReportRecord2Record(ReportRecord2Record):
@@ -135,8 +165,8 @@ class PairTasks(ReportTasks):
 
 
 class PairBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"pairs:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class PairPipeline(TrainingPipeline):
@@ -302,3 +332,52 @@ def test_the_default_pipeline_makes_no_tasks_and_no_batch() -> None:
     assert processor.record2task.make_tasks(record_set) == TaskResult(TaskStatus.INGESTED)
     processor.ingest(inference("i1"))
     assert not processor.ready() and not processor.releasable_record_ids()
+
+
+@pytest.mark.unit
+def test_a_pending_set_holds_its_records_and_settles_when_its_result_comes_back() -> None:
+    processor = PendingPipeline()
+    processor.ingest(inference("i1"))
+    processor.ingest(inference("i2"))
+    assert not processor.ready() and processor.background_jobs_running()
+    processor.pending_tasks.finish("i2", TaskResult.skipped())
+    assert not processor.ready() and processor.releasable_record_ids() == {"i2"}
+    processor.pending_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    assert processor.ready(), "the result alone makes a batch, without another record"
+    assert not processor.background_jobs_running()
+    assert [str(item.task_path) for item in processor.build_batch().items] == ["t1"]
+
+
+@pytest.mark.unit
+def test_a_second_result_for_a_settled_set_is_refused() -> None:
+    processor = PendingPipeline()
+    processor.ingest(inference("i1"))
+    result = TaskResult.ready((TaskItem(Path("t1")),))
+    processor.pending_tasks.finish("i1", result)
+    assert processor.ready()
+    processor.pending_tasks.finish("i1", result)
+    with pytest.raises(ValueError, match="set 'i1', which is not pending"):
+        processor.ready()
+
+
+@pytest.mark.unit
+def test_take_finished_must_not_hand_back_a_pending_result() -> None:
+    processor = PendingPipeline()
+    processor.ingest(inference("i1"))
+    processor.pending_tasks.finish("i1", TaskResult.pending())
+    with pytest.raises(ValueError, match="returned a pending result"):
+        processor.ready()
+
+
+@pytest.mark.unit
+def test_the_trainer_reserves_a_batch_when_a_pending_set_finishes() -> None:
+    records = SQLiteRecordStore()
+    records.append(inference("i1"))
+    trainer = Trainer.build("s", records, pipeline_factory=PendingPipeline, candidate_backend=CountingBackend())
+    assert trainer.reserve_training_batch() is None
+    assert trainer.holds_untrained_records(), "the trainer keeps polling while the set is pending"
+    processor = trainer.pipeline
+    assert isinstance(processor, PendingPipeline)
+    processor.pending_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    batch = trainer.reserve_training_batch()
+    assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]

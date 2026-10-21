@@ -360,7 +360,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         """Forward SGLang's incremental events as client frames, then record the exact sample."""
         capture = NativeStreamCapture()
         reasoning = ReasoningStreamSplitter(
-            enabled=self.SPLIT_REASONING, force_reasoning=self.reasoning_is_pre_opened()
+            enabled=self.SPLIT_REASONING, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
         wants_logprobs = not call.anthropic and call.request.get("logprobs") is True
         try:

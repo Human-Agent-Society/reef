@@ -1,22 +1,20 @@
-"""Translate landed scenario commits into experiment events.
+"""Translate landed scenario commits into experiment events, and deliver them.
 
 Preparation preserves transient runtime metadata and adds correlation metrics
-before persistence. Storage notifications capture the final recorded metrics;
-provider calls wait until the committer has released its publication locks.
-Delivery is best effort: retries in this session are suppressed, but commits
-are not replayed to the tracker after a process restart.
+before persistence. Storage notifications capture the final recorded metrics
+and put an event on :class:`ExperimentReportQueue`. One background thread sends
+the events to the tracker in the order the commits landed, so no tracker call
+runs under a serving lock. Delivery is best effort: a failed call is logged,
+and a process restart does not send events again.
 """
 
 from __future__ import annotations
 
 import logging
-from collections import deque
-from collections.abc import Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext
-from contextvars import ContextVar
+import queue
+from collections.abc import Mapping
 from dataclasses import dataclass
-from threading import Event, Lock, RLock
-from weakref import WeakValueDictionary
+from threading import Lock, Thread
 
 from reef.core.artifact_ref import ArtifactRef
 from reef.observability.base import (
@@ -31,6 +29,8 @@ from reef.storage.scenario import ScenarioStore
 
 logger = logging.getLogger(__name__)
 
+ExperimentEvent = TrainingExperimentEvent | RollbackExperimentEvent
+
 
 @dataclass(frozen=True)
 class PreparedExperiment:
@@ -40,44 +40,63 @@ class PreparedExperiment:
     checkpoint_path: str | None
 
 
-class ExperimentReportDelivery:
-    """One scenario's in-process FIFO, shared by observers across reloads.
+class ExperimentReportQueue:
+    """Send experiment events to one tracker on a background thread, in the order they arrive.
 
-    Storage callbacks enqueue without waiting for the provider. Each event's
-    readiness signal belongs to the outer reporting scope, which releases its
-    serving locks before setting it. Only the delivery lock spans provider I/O.
+    The thread starts with the first event. After :meth:`close`, an event is
+    sent at once on the caller's thread, because no serving lock is held then.
     """
 
     def __init__(self, tracker: ExperimentTracker) -> None:
         self.tracker = tracker
-        self.lock = RLock()
-        self.queue_lock = Lock()
-        self.events: deque[tuple[TrainingExperimentEvent | RollbackExperimentEvent, Event]] = deque()
+        self.events: queue.Queue[ExperimentEvent | None] = queue.Queue()
+        self.lock = Lock()
+        self.thread: Thread | None = None
+        self.closed = False
 
-    def enqueue(self, event: TrainingExperimentEvent | RollbackExperimentEvent, ready: Event) -> None:
-        with self.queue_lock:
-            self.events.append((event, ready))
+    def put(self, event: ExperimentEvent) -> None:
+        with self.lock:
+            if not self.closed:
+                if self.thread is None:
+                    self.thread = Thread(target=self.run, name="reef-experiment-reports", daemon=True)
+                    self.thread.start()
+                self.events.put(event)
+                return
+        self.send(event)
 
     def flush(self) -> None:
-        """Deliver the ready prefix outside serving locks; an unfinished scope flushes on exit."""
+        """Wait until the thread has sent every event that is on the queue."""
+        self.events.join()
+
+    def close(self) -> None:
+        """Send the events that are on the queue, then stop the thread."""
         with self.lock:
-            while True:
-                with self.queue_lock:
-                    if not self.events:
-                        return
-                    event, ready = self.events[0]
-                    if not ready.is_set():
-                        # Recovery may load an observer inside an older reporting
-                        # scope. Never wait for that same caller to exit itself.
-                        return
-                    self.events.popleft()
-                try:
-                    if isinstance(event, RollbackExperimentEvent):
-                        self.tracker.record_rollback(event)
-                    else:
-                        self.tracker.record(event)
-                except Exception:
-                    logger.exception("experiment tracker failed to report a committed step")
+            if self.closed:
+                return
+            self.closed = True
+            thread = self.thread
+        if thread is not None:
+            self.events.put(None)
+            thread.join()
+
+    def run(self) -> None:
+        while True:
+            event = self.events.get()
+            try:
+                if event is None:
+                    return
+                self.send(event)
+            finally:
+                self.events.task_done()
+
+    def send(self, event: ExperimentEvent) -> None:
+        try:
+            if isinstance(event, RollbackExperimentEvent):
+                self.tracker.record_rollback(event)
+            else:
+                self.tracker.record(event)
+        except Exception:
+            logger.exception("experiment tracker failed to report a committed step")
 
 
 class CommitExperimentObserver(RecordObserver):
@@ -92,8 +111,9 @@ class CommitExperimentObserver(RecordObserver):
         source_artifact_ref: ArtifactRef,
         scenario_step: int,
         store: ScenarioStore,
-        delivery: ExperimentReportDelivery | None = None,
+        reports: ExperimentReportQueue | None = None,
     ) -> None:
+        """``reports`` delivers the events; the dispatcher shares one queue across its scenarios."""
         self.tracker = tracker
         self.scenario = scenario
         self.recipe = recipe
@@ -103,44 +123,7 @@ class CommitExperimentObserver(RecordObserver):
         self.durable = store.durable
         self.store: ScenarioStore = ObservedScenarioStore(store, self)
         self.prepared: PreparedExperiment | None = None
-        self.reporting_lock = RLock()
-        self.delivery = delivery if delivery is not None else ExperimentReportDelivery(tracker)
-        self.report_ready: Event | None = None
-
-    @contextmanager
-    def reporting(self, *, loading: bool = False) -> Iterator[None]:
-        """Collect events until publication, admission and registry locks release.
-
-        Ordinary operations wait for previous observers before taking serving
-        locks. A factory is already under the registry lock, so loading only
-        enqueues; the registry's outer scope flushes after all loads finish.
-        """
-        with self.reporting_lock:
-            if self.report_ready is not None:
-                yield
-                return
-            with nullcontext() if loading else self.delivery.lock:
-                if not loading:
-                    self.delivery.flush()
-                ready = Event()
-                self.report_ready = ready
-                try:
-                    yield
-                finally:
-                    self.report_ready = None
-                    ready.set()
-                    if not loading:
-                        self.delivery.flush()
-
-    def deliver(self, event: TrainingExperimentEvent | RollbackExperimentEvent) -> None:
-        ready = self.report_ready
-        if ready is None:
-            ready = Event()
-            ready.set()
-            self.delivery.enqueue(event, ready)
-            self.delivery.flush()
-        else:
-            self.delivery.enqueue(event, ready)
+        self.reports = reports if reports is not None else ExperimentReportQueue(tracker)
 
     def prepare(
         self,
@@ -180,7 +163,7 @@ class CommitExperimentObserver(RecordObserver):
             target = commit.rollback_target_release_id
             if target is None:
                 raise ValueError("a rollback or promote commit must name its target")
-            self.deliver(
+            self.reports.put(
                 RollbackExperimentEvent(
                     scenario=commit.scenario,
                     recipe=self.recipe,
@@ -208,7 +191,7 @@ class CommitExperimentObserver(RecordObserver):
                 component=commit.component,
             )
         metrics = dict(commit.metrics or {})
-        self.deliver(
+        self.reports.put(
             TrainingExperimentEvent(
                 context=context,
                 produced_artifact_ref=self.source_artifact_ref,
@@ -220,52 +203,3 @@ class CommitExperimentObserver(RecordObserver):
                 checkpoint_path=None if prepared is None else prepared.checkpoint_path,
             )
         )
-
-
-class LoadedExperimentReports:
-    """Keep per-scenario delivery order and defer loads past the outer registry lock."""
-
-    def __init__(self) -> None:
-        self.active_scope: ContextVar[tuple[ExitStack, list[tuple[CommitExperimentObserver, int]]] | None] = (
-            ContextVar("loaded_experiment_reports", default=None)
-        )
-        # Observers and active delivery calls own queues. Keep the same queue
-        # through reloads while either exists, then release unused scenario names.
-        self.deliveries: WeakValueDictionary[str, ExperimentReportDelivery] = WeakValueDictionary()
-        self.lock = Lock()
-
-    def delivery_for(self, scenario: str, tracker: ExperimentTracker) -> ExperimentReportDelivery:
-        with self.lock:
-            delivery = self.deliveries.get(scenario)
-            if delivery is None:
-                delivery = ExperimentReportDelivery(tracker)
-                self.deliveries[scenario] = delivery
-            return delivery
-
-    @contextmanager
-    def scope(self) -> Iterator[None]:
-        if self.active_scope.get() is not None:
-            yield
-            return
-        observers: list[tuple[CommitExperimentObserver, int]] = []
-        try:
-            with ExitStack() as reports:
-                token = self.active_scope.set((reports, observers))
-                try:
-                    yield
-                finally:
-                    self.active_scope.reset(token)
-        finally:
-            # ExitStack marks every load ready before any flush waits, including
-            # multiple reloads in one outer registry scope and failed loads.
-            for observer, initial_step in observers:
-                if observer.last_reported_step > initial_step:
-                    observer.delivery.flush()
-
-    def defer(self, observer: CommitExperimentObserver) -> None:
-        """Retain a new observer through registration, including failed loads."""
-        scope = self.active_scope.get()
-        if scope is not None:
-            reports, observers = scope
-            reports.enter_context(observer.reporting(loading=True))
-            observers.append((observer, observer.last_reported_step))

@@ -10,7 +10,6 @@ from reef.core.config import config_option
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2task.distill import DistillSettings, DistillTasks, normalize_messages_for_template
-from reef.task2batch import DistillBatches
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (
@@ -74,10 +73,4 @@ class SDFTTasks(DistillTasks):
         return [*rendered, {"role": "user", "content": block}], tools
 
 
-class SDFTBatches(DistillBatches):
-    """SDFT's batches: distillation tasks as they come, ``batch_size`` reports to a batch."""
-
-    batch_label = "sdft"
-
-
-__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTBatches", "SDFTSettings", "SDFTTasks"]
+__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTSettings", "SDFTTasks"]

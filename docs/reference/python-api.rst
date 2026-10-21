@@ -131,6 +131,7 @@ Recipe
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
    from reef.recipe.cordis import CordisRecipe
    from reef.recipe.reefine import ReefineRecipe
+   from reef.recipe.sft import SFTRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
 for every scenario in a deployment.
@@ -139,6 +140,7 @@ for every scenario in a deployment.
 
    Recipe                       record-only by default   reef.recipe
    ├── WeightTrainingRecipe     training objective, loss family, separate runtimes
+   │   ├── SFTRecipe                                        reef.recipe.sft
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
@@ -188,10 +190,13 @@ Common members
 | ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
 |                                                   |                             | ``EveryNVersions(1)``          |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build(scenario, records, algorithm_state=...)`` | ``Trainer``                 | construct the scenario trainer |
+| ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
+| ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
+|                                                   |                             | ``Trainer.build``              |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
-| ``surface=..., algorithm_states=...)``            | ...]``                      | component; defaults to the     |
+| ``surface=..., algorithm_states=...,``            | ...]``                      | component; defaults to the     |
+| ``task_storage=...)``                             |                             |                                |
 |                                                   |                             | single trainer ``build``       |
 |                                                   |                             | returns, bound to the          |
 |                                                   |                             | surface's one component        |
@@ -419,7 +424,9 @@ directory preserves SQLite schemas, JSONL format, and scenario filenames.
 The storage service keeps all per-scenario state. This includes the
 ``ScenarioSettings`` of each scenario: the model configuration and the
 selected training mode. The scenario registry uses ``read_settings`` and
-``write_settings``. ``archive`` retires the settings with the records and commits.
+``write_settings``. The per-scenario state also includes the tasks that
+record-to-task stages generate (see `Generated task stores`_). ``archive``
+retires the settings and tasks with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
 ``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
@@ -447,9 +454,10 @@ removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostic
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
 Concrete storage classes live under ``reef.storage``:
-``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore`` and a
-``CommitHistory``, either the JSONL ``commit_log.CommitLog`` or the
-``postgres.PostgresCommitTable``; ``sqlite.SQLiteScenarioStorage`` and
+``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
+``TaskStorage`` (``tasks=``), and a ``CommitHistory``, either the JSONL
+``commit_log.CommitLog`` or the ``postgres.PostgresCommitTable``. The bundled
+record stores give their ``TaskStorage`` from ``task_storage()``. ``sqlite.SQLiteScenarioStorage`` and
 ``postgres.PostgresScenarioStorage`` assemble their respective backends. The
 scenario package depends only on storage contracts. The storage contract is:
 
@@ -459,10 +467,12 @@ scenario package depends only on storage contracts. The storage contract is:
 
    * - Member
      - Contract
-   * - ``from_config(config, *, directory)``
+   * - ``from_config(config, *, directory, task_files)``
      - Class method that builds the storage a deployment names in
        ``storage.record_backend``. ``config`` is the plugin's own mapping;
-       ``directory`` is ``storage.agent_record_dir``.
+       ``directory`` is ``storage.agent_record_dir``. ``task_files`` is the
+       ``TaskFileStore`` of the deployment (see `Task file stores`_). The
+       storage owns it: ``archive`` and ``close`` also apply to it.
    * - ``durable``
      - Whether new sessions and settings survive a process restart.
    * - ``open(scenario)``
@@ -472,8 +482,8 @@ scenario package depends only on storage contracts. The storage contract is:
    * - ``write_settings(scenario, settings)``
      - Replace the settings durably. The caller serializes writers of one scenario.
    * - ``archive(scenario)``
-     - Retire the scenario's records, commits and settings, so a recreated
-       scenario starts empty; return the archive locations.
+     - Retire the scenario's records, commits, tasks and settings, so a
+       recreated scenario starts empty; return the archive locations.
    * - ``prune(max_bytes=...)``
      - Evict the oldest record bodies over the byte budget.
    * - ``close()``
@@ -493,6 +503,10 @@ The session contract is:
    * - ``durable``
      - Whether committed history survives session/process restart. A durable
        store requires a repository backend supporting staged releases.
+   * - ``tasks``
+     - The ``TaskStorage`` that opens the generated task stores of the
+       scenario (see `Generated task stores`_). The stores close with the
+       session and survive restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order, including rollback and
        pending releases. This is authoritative after an ambiguous commit error.
@@ -544,6 +558,116 @@ of exposing local file paths. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
+
+Generated task stores
+~~~~~~~~~~~~~~~~~~~~~
+
+A record-to-task stage that generates tasks saves them in a ``TaskStore``
+before any rollout. Thus generation and rollout can recover independently
+after a restart. The contract and its values are in ``reef.storage.tasks``.
+
+To open a store, call
+``task_storage.open(name, split=SplitSettings(eval_fraction=..., seed=...))``.
+Each record-to-task stage uses its own ``name``. The first open saves the
+split settings. A later open with different settings raises
+``TaskStoreError``.
+
+A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
+The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
+which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
+give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
+component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
+components never share a store.
+
+A store holds generations. A generation holds its source record ids and its
+candidates. Each ``TaskCandidate`` holds a ``GeneratedTask`` and its outcome:
+
+- A published candidate has a ``split``, ``train`` or ``eval``. The stage
+  chooses the split, and the store keeps it.
+- A rejected candidate has an ``error`` that gives the reason.
+- A pending candidate has neither. After a restart, the stage validates the
+  candidates in ``GenerationState.pending_indices``.
+
+A published task is a Harbor task directory. ``publish_task`` saves the
+directory in the task file store first, and then it records the publication
+in the database. The database keeps the digest of the files
+(``StoredTask.files_digest``). The task file store accepts text and binary
+files. A ``GeneratedTask`` holds text files only.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``begin_generation(generation=..., source_record_ids=...)``
+     - Create the checkpoint of a generation. A retry with the same source
+       record ids returns the checkpoint.
+   * - ``save_candidates(generation=..., candidates=...)``
+     - Save the candidates once, before validation or play.
+   * - ``publish_task(generation=..., index=..., split=...)``
+     - Publish one candidate and return its ``StoredTask``. Each task name is
+       published once. A later candidate with the same files must give the
+       same split. It then returns the published task.
+   * - ``reject_task(generation=..., index=..., reason=...)``
+     - Save the rejection of one candidate.
+   * - ``complete_generation(generation=...)``
+     - Mark the generation complete. Each candidate must have an outcome.
+   * - ``generation(generation)``, ``generations()``
+     - Return one checkpoint or all checkpoints.
+   * - ``tasks(split=None)``
+     - Return the published tasks in generation and candidate order. Give a
+       ``split`` to return only the tasks of that split.
+   * - ``path(task)``
+     - Return the local Harbor task directory of a published task, for
+       example for ``TaskPlayer.play``. Do not change it.
+
+Each write is durable when it returns. An identical retry of a write changes
+nothing. A write that conflicts with the stored state raises
+``TaskStoreError``. If a task name is published with other files or in the
+other split, the store raises ``TaskConflict``, a subclass of
+``TaskStoreError``. The caller serializes the writers of one store.
+
+SQLite keeps the task tables in the database file of the scenario.
+PostgreSQL keeps them in the deployment schema, with a key for each store
+generation. ``archive`` retires the task tables and the task files with the
+records and commits. Record retention does not delete tasks.
+
+Task file stores
+~~~~~~~~~~~~~~~~
+
+A ``TaskFileStore`` (``reef.storage.tasks``) keeps the directories of the
+published tasks, addressed by the digest of their files. The digest covers the
+directory name, and the path and bytes of each file. Thus a repeated save of
+the same files changes nothing. A deployment selects the store in
+``storage.task_file_backend`` (see `Choose the task file store
+<../user-guide/operate.rst#choose-the-task-file-store>`__).
+``LocalTaskFileStore`` is the built-in store. An embedded caller can give a
+store to ``SQLiteScenarioStorage(..., task_files=...)`` or
+``PostgresScenarioStorage(..., task_files=...)``. Without one, the storage
+uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory)``
+     - Class method that builds the store a deployment names. ``directory``
+       is ``storage.task_file_dir``. A remote store can use it as a local cache.
+   * - ``put(scenario, source)``
+     - Save a copy of the task directory ``source`` and return the digest.
+       The copy is durable when the method returns. Raise ``TaskStoreError``
+       for a symbolic link or a special file.
+   * - ``path(scenario, digest)``
+     - Return a local directory with the files of ``digest``. The directory
+       has the name of the saved directory. Raise ``TaskStoreError`` if the
+       store does not hold the digest.
+   * - ``archive(scenario)``
+     - Retire the files of the scenario and return the archive locations.
+   * - ``close()``
+     - Release the resources of the store. A second call does nothing.
 
 Artifact backends
 -----------------
@@ -800,9 +924,15 @@ record2task=..., task2batch=...)``):
   (``TrainDataItem`` values). Reported feedback supplies a ``make_sample`` hook
   on ``ReportTasks`` that assembles valid reports; computed feedback supplies
   a ``JudgedTasks`` after an asynchronous ``judge`` derives new feedback.
+  A stage with slow work returns ``TaskResult.pending()`` from ``make_tasks``
+  and hands the result back through ``take_finished()`` (see `pending tasks
+  <../developer-guide/processors.rst#pending-tasks>`__).
 - ``task2batch``: the task-to-batch stage (``reef.task2batch.Task2Batch``).
-  Its ``make_batch(tasks, batch_number)`` shapes the tasks of the selected
-  sets into a batch.
+  Its ``make_batch(tasks, batch_id)`` shapes the tasks of the selected
+  sets into a batch with the ID ``batch_id``. The pipeline assigns the ID.
+  An automatic batch gets ``<scenario>:batch:<number>``. An instruction's
+  batch gets ``<scenario>:instruction:<request id>``. The number counts the
+  batches of one pipeline. It is not a training step.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
@@ -855,8 +985,8 @@ A reported-feedback recipe implements these hooks:
    * - ``ReportTasks.make_sample(context) -> TrainDataItem | SkippedReport``
      - Assemble one valid report and its resolved inferences; raise on data errors. Return
        ``SkippedReport(reason)`` for a valid report that cannot train; the stage releases it.
-   * - ``Task2Batch.make_batch(tasks, batch_number) -> TrainingBatch``
-     - Shape the flat tuple of selected tasks into a batch.
+   * - ``Task2Batch.make_batch(tasks, batch_id) -> TrainingBatch``
+     - Shape the flat tuple of selected tasks into a batch with the ID ``batch_id``.
 
 The recipe owns the report policy. Its record stage is a subclass of
 ``ReportRecord2Record(context, grouping, *, exclusive_sources=False,
@@ -929,7 +1059,7 @@ the judged samples into batches.
 | ``JudgedTasks.make_sample(record,``      | a ``TrajectoryItem``, or ``None`` |
 | ``judgment)``                            | to retire the record              |
 +------------------------------------------+-----------------------------------+
-| ``make_batch(tasks, batch_number)``      | the declared batch type           |
+| ``make_batch(tasks, batch_id)``          | the declared batch type           |
 +------------------------------------------+-----------------------------------+
 | ``required_request_types``               | optionally restrict which record  |
 |                                          | types reach the pipeline          |

@@ -8,7 +8,7 @@ request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
 The service accepts request bodies up to 64 MiB so coding agents can send
-large contexts. Record import routes retain their 1 MiB limit.
+large contexts. Record import routes accept request bodies up to 10 MiB.
 
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
@@ -209,7 +209,7 @@ Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
 
 For existing datasets, use the batch endpoint and resumable JSONL importer
-below. Both endpoints retain the existing 1 MiB HTTP request-body limit.
+below. Both endpoints accept request bodies up to 10 MiB.
 
 Imported records enter the same scenario storage and wake the same training
 worker as live traffic. Keep the same scenario header when subsequently calling
@@ -235,7 +235,7 @@ Batch imports and resume
 
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
 record uses the same three-field envelope as ``POST /reef/records``. The batch
-must contain 1 to 1000 records and fit within the 1 MiB request-body limit.
+must contain 1 to 1000 records and fit within the 10 MiB request-body limit.
 All records share the request's scenario, release and tag headers. Put an
 inference before reports that reference it, including within the same batch.
 
@@ -1148,15 +1148,10 @@ or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
 not be read. ``batch_ready`` says whether the processor has a batch waiting.
 A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
-``training_mode``, ``processor`` status, ``last_committed_step`` (with
-the ``base_release_id`` that step was prepared against), and
-``stale_refusals_total``, how many of its results were refused because
-another trainer's commit had replaced their base since this process
-started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
+``training_mode``, ``processor`` status and ``last_committed_step``. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
 ``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
-trainer that made it, and ``base_release_id``, the release its batch was
-reserved against; a scenario of one trainer, and rows written before Reef
-named components, carry neither.
+trainer that made it; a scenario of one trainer, and rows written before Reef
+named components, carry none.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed

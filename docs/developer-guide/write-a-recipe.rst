@@ -167,7 +167,7 @@ configured learning rate. To train several phases in one run, override
    class SupervisedThenPolicy(TrainingMethodSelector):
        def select(self, batch, algorithm_state):
            if algorithm_state.get("steps", 0) < 200:
-               return TrainingMethod("my_pkg.objectives:SupervisedObjective")
+               return TrainingMethod("reef.recipe.sft:SftObjective")
            return TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
 
 
@@ -178,7 +178,8 @@ configured learning rate. To train several phases in one run, override
 - ``select`` must depend only on its arguments. A retry calls it again, and
   the method is part of the job's identity.
 - The backend resolves the objective in its own process. Use a dotted
-  reference for an objective from another package.
+  reference for an objective from another package, such as the built-in
+  `SFT <../user-guide/recipes/sft.rst>`__ objective above.
 - The backend refuses a method that it cannot train before the job starts.
   `Per-job families <loss-families.rst#per-job-families>`__, `Train with
   Tinker <../user-guide/tinker.rst>`__ and `Train on Apple Silicon with MLX

@@ -10,8 +10,8 @@ row's position in the catalog oldest first, the creation row being 0: a
 rejected step publishes nothing and its row carries the head's release id,
 so only the step names it.
 
-The chrome, the palette and the status wording come from
-:mod:`reef.service.page_chrome`, which the request page draws with too, so a
+The layout, the palette and the status wording come from
+:mod:`reef.service.page_layout`, which the request page draws with too, so a
 person moving between the two pages by their links reads one design. The
 page carries its data inline and loads no asset, so one curl with the
 scenario header is the whole read.
@@ -34,7 +34,7 @@ from reef.harness.step_result import (
     reef_installs,
     unscored_failures,
 )
-from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
+from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
 #: wins, losses and ties; a floor writes passed, failed and floor_score, and evaluation_sides when it ran one side only.
@@ -111,7 +111,7 @@ def failed_words(metrics: Mapping[str, Any]) -> str:
 #: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
 TEXT_KINDS = ("rules", "skill", "agent_command")
 
-# What the shared chrome does not draw: the reading column, the diff, the metric grid and the chain list.
+# What the shared layout does not draw: the reading column, the diff, the metric grid and the chain list.
 STYLE = """
 main{max-width:1040px;margin:auto;padding:48px 40px 24px}
 .stack{display:grid;gap:24px}

@@ -25,6 +25,9 @@ inference:
   # The engine loads the model from a local path or the Hub. There is no
   # separate inference service.
   model-path: mlx-community/Qwen3.5-9B-MLX-4bit
+  # A request waits while a training step holds the engine. A step on long
+  # rows takes more than the 300-second default.
+  timeout-s: 1800
 
 training:
   backend: mlx
@@ -50,8 +53,40 @@ training:
       - self_attn.v_proj
       - self_attn.o_proj
       - linear_attn.in_proj_qkv
+    # With thinking off, one step at 3e-5 from the base cut the probe's style
+    # violations from 2.5 to 0.44 with 15 of 16 answers still correct. At 1e-4
+    # the same step cut them to 0.25, but two more steps left 0 of 16 correct.
     learning_rate: 3.0e-5
     max_tokens: 2048
+    # The sampling of the reference run: requests from hermes set none.
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    # With the reasoning block opened by the template, this 9B model often
+    # writes its answer inside it and stops without closing it: the client
+    # then reads an empty reply (2 of 5 samples on one stream prompt closed
+    # it, and greedy decoding never did). Training made it worse: after one
+    # step, 35 of 50 answer turns were empty. Without thinking, the base model answered
+    # 16 of 16 reply-probe turns in visible text.
+    chat_template_kwargs:
+      enable_thinking: false
+    # The tokens of one training row. Hermes asks for 8192 completion tokens,
+    # and its prompts grow during a session. The backward pass of one row
+    # grows faster than linearly with its length: on this 9B config, 8192
+    # tokens peak at 26 GiB, 10240 tokens at 36 GiB, and 12288 tokens exceeded
+    # a 48 GB Mac. Longer rows are left out of training. Lower this value on a
+    # Mac with less memory.
+    max_train_tokens: 10240
+    # Rows a step needs once long rows are left out. A step on one row moves
+    # the adapter a full step toward that row alone: one step that trained on
+    # 1 of 8 rows dropped reply_rate from 1.0 to 0.125.
+    min_train_rows: 4
+    # The prompt and completion tokens of one request, as the reference's
+    # rollout-max-context-len. Generation needs much less memory than
+    # training: a 60,000-token prompt peaked at 12.2 GiB. Hermes conversations
+    # grow past 16,384 tokens, so a lower limit fails their late turns with
+    # HTTP 400; a long turn still gets a reply, and only its row is left out.
+    max_context_tokens: 65536
     # Chunk the [response, vocab] head so the backward pass of a long response
     # fits in memory.
     log_probs_chunk_size: 512
@@ -84,7 +119,8 @@ pipeline:
       # Allow for one generation, the student round trip, and one training
       # step, which blocks the engine. On this runtime each of these can take
       # minutes. A longer value only delays the retirement of the last turn of
-      # a finished session. See results/ for the measured gaps.
+      # a finished session. With 45 seconds on this runtime, about half of the
+    # judging-stage sessions expired before they bound a reply to its reaction.
       session_ttl_s: 1800
       prm_url: https://openrouter.ai/api/v1/chat/completions
       prm_api: openai
@@ -100,6 +136,20 @@ pipeline:
       # The tokenizer of the policy. The teacher renders hint-enhanced prompts
       # with it for every prm_api.
       prm_tokenizer_path: mlx-community/Qwen3.5-9B-MLX-4bit
+      # The upstream judge scores any tool output without an error as +1, so
+      # the policy learned to call tools that do nothing for the student.
+      # After about 20 steps it stopped answering in text. Training those
+      # turns from their hints alone also moved the policy toward tool calls
+      # at learning rate 1e-4. With skip, a turn whose next state is a tool
+      # result is not trained; the student's reactions train the rest.
+      tool_turn_reward: skip
+      # Most student reactions reject the style, so most rewards are -1. A -1
+      # on the whole reply taught the policy to call a tool instead of
+      # replying. With neutral, a rejected turn trains only from its hint.
+      negative_reward: neutral
+      # The teacher renders its hint-enhanced prompt as the policy's was.
+      teacher_chat_template_kwargs:
+        enable_thinking: false
   task2batch:
     config:
       # Judged turns per optimizer step. The reference uses 16. A value of 8
@@ -113,10 +163,12 @@ storage:
   artifact-work-dir: work/mlx/artifact-work
   artifact-cache-dir: work/mlx/artifact-cache
 
-# Candidate evaluation: each candidate runs a fixed style probe before Reef
-# publishes it. Reef does not publish a candidate whose clean rate drops more
-# than the margin below the best. Without this section, Reef uses the `always`
-# policy and publishes every step.
+# Candidate evaluation: each candidate runs a fixed style probe and a reply
+# probe before Reef publishes it. Reef does not publish a candidate whose
+# reply_clean_rate or reply_rate drops more than its margin below the best.
+# Serving then keeps the last selected weights, and the next step trains from
+# them. Without this section, Reef uses the `always` policy and publishes every
+# step.
 #
 # The probe generates from the weights of the candidate, so it needs a training
 # runtime that holds an unpublished candidate, such as this one. Reef refuses a
@@ -129,8 +181,24 @@ evaluation:
     # full reply with its arithmetic. A cut reply can fail the shown-work check
     # because of its length, not its style.
     max_tokens: 320
-    # The allowed drop of the clean rate below the best selected candidate.
-    # One probe problem is worth 1 / probe_size, which is 0.125 here. A margin
-    # of 0.17 accepts a drop of one problem and refuses a drop of two or more.
-    # The check stops a collapse, not small changes between steps.
-    regression_margin: 0.17
+    # The reply probe holds hermes conversations where the policy has read
+    # the homework and should answer: 16 GSM8K test problems that are not in
+    # the stream. reply_clean_rate is the fraction of first replies that the
+    # student accepts: the correct answer, the work shown, and no style
+    # marker. The style probe has no tools and no harness context; its
+    # clean_rate stayed at 0 for every candidate of a run whose stream passed
+    # 7 of 19 sessions, so it is reported but does not select.
+    regression_metric: reply_clean_rate
+    # One conversation is worth 1 / 16 = 0.0625. A margin of 0.07 accepts a
+    # drop of one accepted reply and refuses a drop of two.
+    regression_margin: 0.07
+    reply_probe_file: recipes/openclawrl/examples/openclawrl/reply_probe.json
+    reply_max_tokens: 512
+    # Reef also refuses a candidate whose reply_rate drops more than this
+    # below the best. With 16 conversations, 0.25 accepts a drop of four
+    # answers and refuses five.
+    reply_margin: 0.25
+    # The best selected reply_rate lives in the Reef process, so after a
+    # restart the first candidate sets it. The floor holds in any case: without
+    # it, a 0.125 candidate was selected right after a restart.
+    min_reply_rate: 0.75
