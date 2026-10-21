@@ -588,6 +588,7 @@ def bridge_args(**overrides) -> SlimeArguments:
         "use_critic": False,
         "critic_save": None,
         "critic_save_interval": 1,
+        "save_interval": 1,
         "hf_checkpoint": None,
         "load": None,
         "custom_megatron_init_path": None,

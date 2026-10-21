@@ -90,6 +90,7 @@ training:
     hf-checkpoint: "${inference.model-path}"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "1"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     no-save-optim: true
     num-rollout: "100000000"

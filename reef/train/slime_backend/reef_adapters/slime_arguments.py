@@ -96,18 +96,6 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         ),
     )
     parser.add_argument(
-        "--reef-checkpoint-interval",
-        type=int,
-        default=1,
-        help=(
-            "The number of scenario versions between two saved training checkpoints (Megatron and HF export). "
-            "1 saves after each training job. With a larger value, the jobs between two saves are faster. "
-            "A crash or a stop loses the training of the jobs after the last save. "
-            "reef.checkpoint_every_n_versions must be a multiple of this value. "
-            "Use it only for full-weight training without --release-train."
-        ),
-    )
-    parser.add_argument(
         "--critic-lr",
         type=float,
         default=None,
@@ -156,9 +144,10 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         argument == "--use-critic" or argument.startswith("--use-critic=") for argument in arguments
     )
     explicitly_resident = "--no-offload-train" in arguments
-    if any(argument == "--save-interval" or argument.startswith("--save-interval=") for argument in arguments):
-        # Only Slime's own training loop reads --save-interval; the Reef bridge saves by its own interval.
-        raise ValueError("--save-interval has no effect under Reef; set --reef-checkpoint-interval instead")
+    save = args.save
+    if not isinstance(save, str) or not save.strip():
+        # Megatron requires --save-interval only with --save, and the bridge reads both.
+        raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is
@@ -169,8 +158,6 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
 
     if args.critic_save_interval < 1:
         raise ValueError("--critic-save-interval must be positive")
-    if args.reef_checkpoint_interval < 1:
-        raise ValueError("--reef-checkpoint-interval must be positive")
     if args.critic_steps_per_actor is not None and args.critic_steps_per_actor <= 0:
         raise ValueError("--critic-steps-per-actor must be positive")
     if args.megatron_lora_alpha is None and args.megatron_lora_rank:
