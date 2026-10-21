@@ -9,7 +9,14 @@ mx = pytest.importorskip("mlx.core", reason="the MLX losses need the optional ml
 
 import recipes.openclawrl
 import recipes.tttd  # noqa: F401  (registers the tttd loss family)
-from recipes.openclawrl.mlx import OpenClawRLMLXLoss, OpenClawRLMLXSettings, select_hint
+from recipes.openclawrl.mlx import (
+    OPDNormalization,
+    OpenClawRLMLXLoss,
+    OpenClawRLMLXSettings,
+    opd_gap_statistics,
+    opd_one_sample,
+    select_hint,
+)
 from recipes.tttd.mlx import TttdMLXLoss, frozen_base_kl_advantages
 from reef.train.mlx_backend.contracts import LossOptions
 from reef.train.mlx_backend.losses import resolve_mlx_loss
@@ -108,8 +115,10 @@ def test_the_openclawrl_defaults_match_the_slime_recipe() -> None:
         ({"hint_selection": "token_optimal"}, "hint_selection"),
         ({"w_rl": 0.0, "w_opd": 0.0}, "non-zero w_rl or w_opd"),
         ({"w_rl": 1.0, "temperature": 0.6}, "unknown config fields: temperature"),
+        ({"opd_advantage_clip": 5.0}, "set diff_clip to null"),
+        ({"opd_advantage_clip": 0.0, "diff_clip": None}, "opd_advantage_clip must be finite and positive"),
     ],
-    ids=["hint-selection", "no-term", "unknown-option"],
+    ids=["hint-selection", "no-term", "unknown-option", "two-clips", "zero-advantage-clip"],
 )
 def test_invalid_openclawrl_options_are_refused(options: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
@@ -123,3 +132,46 @@ def test_sequence_optimal_takes_the_hint_whose_tokens_the_policy_considered() ->
 
     assert select_hint([unrelated, overlapping], student, "sequence_optimal") == 1
     assert select_hint([unrelated, overlapping], student, "shortest") == 0
+
+
+def test_the_gap_statistics_cover_the_masked_tokens_of_every_row() -> None:
+    # One candidate per token, so each token's gap is teacher minus rollout.
+    captured = [mx.array([[-1.0], [-1.0]]), mx.array([[-2.0], [-2.0]])]
+    teacher = [mx.array([[0.0], [-3.0]]), mx.array([[0.0], [9.0]])]
+    masks = [mx.array([1.0, 1.0]), mx.array([1.0, 0.0])]
+
+    statistics = opd_gap_statistics(captured, teacher, masks, diff_clip=1.5, advantage_clip=None)
+
+    # The gaps 1, -2 and 2; the masked 11 is left out.
+    assert statistics.tokens == 3
+    assert statistics.mean == pytest.approx(1 / 3)
+    assert statistics.std == pytest.approx((((2 / 3) ** 2 + (7 / 3) ** 2 + (5 / 3) ** 2) / 3) ** 0.5)
+    assert statistics.clip_fraction == pytest.approx(2 / 3)
+    normalized = opd_gap_statistics(captured, teacher, masks, diff_clip=None, advantage_clip=1.0)
+    assert normalized.clip_fraction == pytest.approx(1 / 3)
+
+
+def test_the_normalized_advantage_is_the_centered_scaled_and_clipped_rollout_gap() -> None:
+    indices = mx.array([[1, 2], [3, 4]])
+    captured = mx.array([[-0.5, -1.0], [-0.2, -2.0]])
+    teacher = mx.array([[0.5, -4.0], [-0.2, 10.0]])
+    current = mx.array([[-0.6, -0.9], [-0.3, -1.9]])
+    normalization = OPDNormalization(center=0.5, scale=2.0, clip=3.0)
+
+    result = opd_one_sample(
+        current,
+        student_indices=indices,
+        student_captured_log_probs=captured,
+        teacher_indices=indices,
+        teacher_log_probs=teacher,
+        eps_lo=0.2,
+        eps_hi=0.28,
+        diff_clip=None,
+        normalization=normalization,
+    )
+
+    gap = mx.clip((teacher - captured - 0.5) / 2.0, -3.0, 3.0)
+    weight = mx.softmax(current, axis=-1)
+    # At ratio 1 the surrogate is minus the advantage, summed over the candidates.
+    assert mx.allclose(result.per_token_pg, -mx.sum(gap * weight, axis=-1), atol=1e-6)
+    assert float(gap[1, 1].item()) == 3.0

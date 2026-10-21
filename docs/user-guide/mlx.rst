@@ -99,7 +99,7 @@ All keys are under ``training.options``. Only ``checkpoint_dir`` is required.
    training.options.learning_rate | 1e-5 | AdamW learning rate, constant for the whole run
    training.options.weight_decay | 0.01 | AdamW weight decay
    training.options.kl_coef | 0.0 | weight of the frozen-base KL term, as described under Loss families below
-   training.options.loss_options | {} | settings of the selected loss family; for ``openclawrl``: ``w_rl`` 1.0, ``w_opd`` 1.0, ``eps_lo`` 0.2, ``eps_hi`` 0.28, ``diff_clip`` 1.0 (null for no limit), ``hint_selection`` sequence_optimal or shortest, ``native_k`` 20, ``kl_coef`` (default: ``training.options.kl_coef``); ``tttd`` reads only ``kl_coef``
+   training.options.loss_options | {} | settings of the selected loss family; for ``openclawrl``: ``w_rl`` 1.0, ``w_opd`` 1.0, ``eps_lo`` 0.2, ``eps_hi`` 0.28, ``diff_clip`` 1.0 (null for no limit), ``opd_advantage_clip`` null (a number centers and scales the distillation gap over the training job, then bounds it; needs ``diff_clip`` null), ``hint_selection`` sequence_optimal or shortest, ``native_k`` 20, ``kl_coef`` (default: ``training.options.kl_coef``); ``tttd`` reads only ``kl_coef``
    training.options.max_tokens | 256 | response token limit when a request sets none
    training.options.max_context_tokens | 0 | prompt and response token limit of one request; a request's response limit is lowered to fit, and a prompt that reaches the limit fails with HTTP 400; 0 sets no limit
    training.options.max_train_tokens | 0 | token limit of one training row; a longer row is left out of its step, the step reports the count as ``rows_over_max_train_tokens``, and a batch whose rows are all longer is skipped; 0 sets no limit

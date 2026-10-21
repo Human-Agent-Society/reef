@@ -100,6 +100,13 @@ training:
     # term to the loss, as the slime reference does. Set `loss_options.kl_coef`
     # to set that term separately.
     kl_coef: 0.05
+    loss_options:
+      # Center and scale the distillation gap over each training job, then
+      # bound it to +-5, as the OPD recipe does. The raw gap of the hinted
+      # teacher changes its mean and scale from batch to batch. The raw-gap
+      # bound diff_clip would change the statistics, so it is off.
+      diff_clip: null
+      opd_advantage_clip: 5.0
 
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
