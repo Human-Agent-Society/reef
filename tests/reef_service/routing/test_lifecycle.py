@@ -40,9 +40,9 @@ from reef.core import AgentRecord
 from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing.routing_control import ReefLifecycleClient, RoutingControlError
-from reef.service.deploy.routing.routing_controller import RoutingDeploymentController
+from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
+from reef.service.deploy.routing.reef_lifecycle_client import ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import (
     INFERENCE_FINALIZATION,

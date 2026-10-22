@@ -23,7 +23,7 @@ from pathlib import Path
 import yaml
 
 from reef.runtime.recovery import fsync_dir
-from reef.service.deploy.routing.routing_registry import DeploymentOwnership, RoutingOwnershipError
+from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
 
 # Kept in sync with the submodule gitlink by the source dependency test; wheels need no Git checkout.
 SEMANTIC_ROUTER_REVISION = "c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59"
@@ -173,7 +173,7 @@ class GuardedCommand:
     (the executable) is non-empty; later arguments may be empty. ``timeout_seconds`` is a finite positive
     number. Both are checked before any pipe or process exists. If the guard cannot be spawned, both ends
     of the owner pipe are closed before the error propagates.
-    State: ``process`` is the guard (``routing_command.py``), leader of a new process group that also holds
+    State: ``process`` is the guard (``command_runner.py``), leader of a new process group that also holds
     the CLI and its descendants. ``owner_descriptor`` is the write end of the guard's owner pipe while this
     object holds it, and None once released. ``release_owner`` closes it at most once, from any thread, and
     makes the guard stop the group; ``close`` also waits for the guard and kills the group if the guard does
@@ -210,7 +210,7 @@ class GuardedCommand:
             self.process = subprocess.Popen(
                 [
                     sys.executable,
-                    str(Path(__file__).with_name("routing_command.py")),
+                    str(Path(__file__).with_name("command_runner.py")),
                     str(read_descriptor),
                     str(timeout_seconds),
                     *command,

@@ -35,11 +35,11 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing.routing_control import RoutingControlError
-from reef.service.deploy.routing.routing_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.routing_policy import PolicyStateStore, RouterManagementClient, document_etag
-from reef.service.deploy.routing.routing_renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing.policy import PolicyStateStore, RouterManagementClient, document_etag
+from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
+from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import LifecycleSettings
 from reef.service.routing import RoutingAdapter, RoutingSnapshot

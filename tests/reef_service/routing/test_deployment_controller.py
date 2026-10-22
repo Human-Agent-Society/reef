@@ -25,20 +25,20 @@ from tests.reef_service.routing.routing_fakes import (
     routing_manifest,
 )
 
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing.routing_containers import (
+from reef.service.deploy.routing.containers import (
     ContainerCommandError,
     ContainerEvent,
     ContainerInventory,
     ContainerState,
 )
-from reef.service.deploy.routing.routing_control import RoutingControlError, RoutingControlTimeout
-from reef.service.deploy.routing.routing_controller import (
+from reef.service.deploy.routing.deployment_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
     RoutingReadinessTimeout,
 )
-from reef.service.deploy.routing.routing_registry import DeploymentOwnership, RoutingOwnershipError
+from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError, RoutingControlTimeout
+from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import RoutingAdapter
 from reef.service.routing_preview import PreviewSettings
@@ -422,7 +422,7 @@ class SteppingClock:
 def test_reconnect_readiness_keeps_the_configured_deadline(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch, ready_timeout_seconds: float
 ) -> None:
-    import reef.service.deploy.routing.routing_controller as controller_module
+    import reef.service.deploy.routing.deployment_controller as controller_module
 
     opened(case)
     clock = SteppingClock()
@@ -608,7 +608,7 @@ def test_failed_write_diagnostic_does_not_stickily_disable_completed_requests(ca
 def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import reef.service.deploy.routing.routing_controller as controller_module
+    import reef.service.deploy.routing.deployment_controller as controller_module
 
     def broken_renderer(*args: object, **kwargs: object) -> None:
         raise ValueError("invalid renderer input")
@@ -718,7 +718,7 @@ def test_control_directory_release_removes_only_its_socket(case: ControllerCase,
 def test_invalid_candidate_cannot_touch_an_existing_generation(
     case: ControllerCase, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import reef.service.deploy.routing.routing_controller as controller_module
+    import reef.service.deploy.routing.deployment_controller as controller_module
 
     def invalid_candidate() -> str:
         raise ValueError("invalid routing candidate")

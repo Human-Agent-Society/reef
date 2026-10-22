@@ -14,7 +14,7 @@ from socketserver import ThreadingUnixStreamServer
 
 import pytest
 
-from reef.service.deploy.routing.routing_control import (
+from reef.service.deploy.routing.reef_lifecycle_client import (
     ReefLifecycleClient,
     RoutingControlError,
     RoutingControlTimeout,

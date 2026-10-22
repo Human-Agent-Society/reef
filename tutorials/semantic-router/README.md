@@ -101,7 +101,7 @@ used:
 
 ```bash
 for target in 8101:code-student 8102:code-teacher 8103:math-student 8104:math-teacher; do
-  python tutorials/semantic-router/cpu_provider.py --port "${target%%:*}" --model "${target#*:}" &
+  python tutorials/semantic-router/fake_provider.py --port "${target%%:*}" --model "${target#*:}" &
 done
 curl -sS http://127.0.0.1:8102/v1/models
 ```
@@ -284,7 +284,7 @@ uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 
 ```bash
-python -m reef.service.deploy.routing.routing_ops validate --config /path/to/candidate-reef.yaml
+python -m reef.service.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
 ```
 
 ## Stop, inspect and clean up
@@ -296,8 +296,8 @@ killed, the SR container can remain until the next start or an explicit
 cleanup:
 
 ```bash
-python -m reef.service.deploy.routing.routing_ops status --deployment-id opd-routing
-python -m reef.service.deploy.routing.routing_ops cleanup --deployment-id opd-routing
+python -m reef.service.deploy.routing.cli status --deployment-id opd-routing
+python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing
 ```
 
 Both use the same per-user ownership registry as `reef serve`
@@ -308,7 +308,7 @@ proceed; cleanup keeps the operation ID that `status` reports. Only after
 checking that Docker has finished that operation, acknowledge it:
 
 ```bash
-python -m reef.service.deploy.routing.routing_ops cleanup --deployment-id opd-routing \
+python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing \
   --acknowledge-unknown "<operation-id-from-status>"
 ```
 

@@ -675,17 +675,17 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
         )
 
 
-def test_the_tutorial_cpu_provider_serves_auto_pin_json_sse_and_feedback(tmp_path: Path) -> None:
+def test_the_tutorial_fake_provider_serves_auto_pin_json_sse_and_feedback(tmp_path: Path) -> None:
     """The provider the tutorial starts passes Reef's provider check and answers both response modes."""
-    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/cpu_provider.py"
-    spec = importlib.util.spec_from_file_location("reef_tutorial_cpu_provider", script)
+    script = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/fake_provider.py"
+    spec = importlib.util.spec_from_file_location("reef_tutorial_fake_provider", script)
     if spec is None or spec.loader is None:
-        raise RuntimeError("the tutorial CPU provider is missing")
-    cpu_provider = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(cpu_provider)
+        raise RuntimeError("the tutorial fake provider is missing")
+    fake_provider = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fake_provider)
 
     async def run() -> None:
-        provider_app = cpu_provider.chat_completion_app(tuple(PROVIDER_MODELS.values()))
+        provider_app = fake_provider.chat_completion_app(tuple(PROVIDER_MODELS.values()))
         async with TestServer(provider_app) as provider_server:
             path = write_manifest(tmp_path / "routing.json", str(provider_server.make_url("")).rstrip("/"))
             adapter = RoutingAdapter.from_manifest(path, router_config_hash=ROUTER_HASH, environ={})

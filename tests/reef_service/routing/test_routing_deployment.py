@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings, routing_deployment_settings
-from reef.service.deploy.routing.routing_renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
+from reef.service.deploy.routing.renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.service.routing import RoutingSnapshot
 
@@ -301,12 +301,12 @@ def test_directly_made_routing_values_keep_their_definitions() -> None:
 def test_the_documented_validate_command_reads_a_public_configuration_without_docker(
     deployment_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from reef.service.deploy.routing import routing_ops
+    from reef.service.deploy.routing import cli
 
     def no_docker(*args: object, **kwargs: object) -> None:
         pytest.fail("validate must not use Docker")
 
-    monkeypatch.setattr(routing_ops.DockerComposeRuntime, "ensure_available", no_docker)
+    monkeypatch.setattr(cli.DockerComposeRuntime, "ensure_available", no_docker)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("REEF_TOKEN", "validate-test-token")
     config = tmp_path / "reef.yaml"
@@ -324,7 +324,7 @@ def test_the_documented_validate_command_reads_a_public_configuration_without_do
             }
         )
     )
-    routing_ops.main(["validate", "--config", str(config)])
+    cli.main(["validate", "--config", str(config)])
     result = json.loads(capsys.readouterr().out)
     assert result["valid"] is True and result["docker_mutations"] == 0
     assert not (tmp_path / "state").exists()

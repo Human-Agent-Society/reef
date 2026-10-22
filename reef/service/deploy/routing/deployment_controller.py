@@ -24,26 +24,26 @@ from pathlib import Path
 
 import yaml
 
-from reef.service.deploy.routing.routing_containers import (
+from reef.service.deploy.routing.containers import (
     ContainerCommandError,
     ContainerEventStream,
     ContainerInventory,
     ContainerRuntime,
 )
-from reef.service.deploy.routing.routing_control import (
-    MAX_SOCKET_PATH_BYTES,
-    ReefLifecycleClient,
-    RoutingControlError,
-    RoutingControlTimeout,
-)
-from reef.service.deploy.routing.routing_policy import (
+from reef.service.deploy.routing.policy import (
     PolicyStateStore,
     RouterManagementClient,
     RouterPolicyError,
     document_etag,
 )
-from reef.service.deploy.routing.routing_registry import DeploymentOwnership, DeploymentRegistry
-from reef.service.deploy.routing.routing_renderer import (
+from reef.service.deploy.routing.reef_lifecycle_client import (
+    MAX_SOCKET_PATH_BYTES,
+    ReefLifecycleClient,
+    RoutingControlError,
+    RoutingControlTimeout,
+)
+from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry
+from reef.service.deploy.routing.renderer import (
     MANAGEMENT_TOKEN_ENV,
     SELECTION_TOKEN_ENV,
     ManagedRoutingRender,

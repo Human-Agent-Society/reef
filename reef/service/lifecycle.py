@@ -37,7 +37,7 @@ from typing import TypeVar, cast
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
-from reef.service.deploy.routing.routing_control import MAX_SOCKET_PATH_BYTES
+from reef.service.deploy.routing.reef_lifecycle_client import MAX_SOCKET_PATH_BYTES
 from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")

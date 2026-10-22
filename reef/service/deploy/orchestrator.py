@@ -63,11 +63,11 @@ from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
-from reef.service.deploy.routing.routing_containers import ContainerCommandError, DockerComposeRuntime
-from reef.service.deploy.routing.routing_control import RoutingControlError
-from reef.service.deploy.routing.routing_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.routing_policy import RouterPolicyError
-from reef.service.deploy.routing.routing_registry import RoutingOwnershipError
+from reef.service.deploy.routing.containers import ContainerCommandError, DockerComposeRuntime
+from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing.policy import RouterPolicyError
+from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
+from reef.service.deploy.routing.registry import RoutingOwnershipError
 from reef.service.deploy.service_config import (
     normalize_service_config,
     service_config_arguments,

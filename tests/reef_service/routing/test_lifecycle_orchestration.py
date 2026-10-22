@@ -14,7 +14,7 @@ import pytest
 import yaml
 
 from reef.service.deploy import orchestrator
-from reef.service.deploy.routing.routing_containers import ContainerRuntime
+from reef.service.deploy.routing.containers import ContainerRuntime
 from reef.service.deploy.service_config import ServiceConfig
 
 pytestmark = pytest.mark.unit

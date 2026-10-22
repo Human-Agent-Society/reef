@@ -24,11 +24,11 @@ from tests.reef_service.routing.routing_fakes import (
 
 from reef.service.app import create_app
 from reef.service.deploy import orchestrator
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
-from reef.service.deploy.routing.routing_containers import ContainerEvent
-from reef.service.deploy.routing.routing_control import RoutingControlError
-from reef.service.deploy.routing.routing_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.routing_registry import DeploymentOwnership
+from reef.service.deploy.routing.containers import ContainerEvent
+from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
+from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
+from reef.service.deploy.routing.registry import DeploymentOwnership
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
 

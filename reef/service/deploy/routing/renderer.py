@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 
-from reef.service.deploy.routing.routing_config import RoutingDeploymentSettings
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.routing import DEFAULT_RULE, RoutingScenario, RoutingSnapshot, RoutingTarget, scenario_entrypoint
 
 #: Container variables holding the router's bearer tokens; Compose passes the values from the owner's environment.
