@@ -1018,7 +1018,9 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
             tasks = records.task_storage(LocalTaskFileStore(tmp_path / "task-files"), "math")
             trajectories = records.trajectory_store()
             with closing(
-                CommitHistoryScenarioStore("math", records, tasks=tasks, trajectories=trajectories)
+                CommitHistoryScenarioStore(
+                    "math", records, records.commit_history(), tasks=tasks, trajectories=trajectories
+                )
             ) as session:
                 consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
                 trainer.replay_retained(up_to_sequence=0, consumed_ids=consumed)

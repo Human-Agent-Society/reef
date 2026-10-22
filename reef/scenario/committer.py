@@ -8,6 +8,7 @@ settlement, surfaces, and artifact operations.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from contextlib import suppress
@@ -867,12 +868,13 @@ class ScenarioCommitter:
 
     @staticmethod
     def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
+        # A stored record is read back from JSON, where tuples become lists.
         return (
-            record.algorithm_state == prepared.algorithm_state
+            record.algorithm_state == json.loads(json.dumps(prepared.algorithm_state))
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
             and record.consumed_ids == prepared.consumed_ids
-            and record.metrics == prepared.metrics
+            and record.metrics == json.loads(json.dumps(prepared.metrics))
             and record.training_job_id == prepared.training_job_id
         )
 

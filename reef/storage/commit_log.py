@@ -1,23 +1,18 @@
-"""Commit history storage and its scenario store implementation.
+"""Commit history contract and the scenario store that combines it with a record store.
 
-CommitHistory is the contract for the ordered commits of one scenario generation.
-CommitLog implements it as a JSONL file. It does append, fsync, idempotent
-retries, torn-tail repair, and caching. Stable POSIX file locks serialize
-commit writers across sessions and processes. CommitHistoryScenarioStore combines
-a CommitHistory with an injected RecordStore. The history append is the
-durable commit point; recovery restores consumption progress. Artifact
-publication is not in this module.
+CommitHistory is the contract for the ordered commits of one scenario
+generation. ``sql_commits`` implements it as a table in the scenario's record
+database. CommitHistoryScenarioStore combines a CommitHistory with an injected
+RecordStore. The history append is the durable commit point; recovery restores
+consumption progress. Artifact publication is not in this module.
 """
 
 from __future__ import annotations
 
 import itertools
-import json
-import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
-from pathlib import Path
 from threading import RLock
 
 from reef.core.errors import ReefError
@@ -35,21 +30,8 @@ def same_commit(left: CommitRecord, right: CommitRecord) -> bool:
     }
 
 
-def training_run_position(records: Sequence[CommitRecord]) -> tuple[int, int]:
-    """The latest rollback step and the training steps after it."""
-    run_segment = 0
-    run_step = 0
-    for record in records:
-        if record.operation == "rollback":
-            run_segment = record.step
-            run_step = 0
-        elif record.operation == "training" and record.step > run_segment:
-            run_step += 1
-    return run_segment, run_step
-
-
 class CommitHistory(ABC):
-    """The durable, ordered commits of one scenario generation.
+    """The ordered commits of one scenario generation.
 
     ``append`` is the commit point. Appending a commit identical to the one at
     its step (ignoring ``recorded_at``) is a no-op. A different commit at an
@@ -61,226 +43,42 @@ class CommitHistory(ABC):
     def label(self) -> str:
         """Where the history is kept, for error messages."""
 
+    @property
+    @abstractmethod
+    def durable(self) -> bool:
+        """Whether the commits survive a process restart."""
+
     @abstractmethod
     def records(self) -> tuple[CommitRecord, ...]:
         """Every commit in increasing step order."""
 
     @abstractmethod
     def append(self, record: CommitRecord) -> None:
-        """Persist one commit durably before returning."""
-
-    @abstractmethod
-    def training_run_position(self) -> tuple[int, int]:
-        """Return the latest rollback step and training steps after it."""
+        """Persist one commit before returning."""
 
     @abstractmethod
     def locked(self) -> AbstractContextManager[None]:
         """Serialize a read-check-append sequence with other sessions and processes."""
 
-
-class CommitLog(CommitHistory):
-    """Append-only JSONL commit log for one scenario.
-
-    Appends serialize the record to a single line and fsync before returning;
-    that is the commit point. Retrying the same scenario step is a no-op, while
-    different content for an existing step is a conflict. Reads tolerate
-    exactly one torn tail (a crash mid-append) and reject corruption elsewhere.
-    """
-
-    def __init__(self, path: Path) -> None:
-        self._path = Path(path)
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = RLock()
-        self._cached_records: list[CommitRecord] | None = None
-        self._cached_steps: dict[int, CommitRecord] | None = None
-        self._cached_snapshot: tuple[CommitRecord, ...] | None = None
-        self._cached_signature: tuple[int, int, int, int] | None = None
-        self._run_segment = 0
-        self._run_step = 0
-
-    @property
-    def path(self) -> Path:
-        return self._path
-
-    @property
-    def label(self) -> str:
-        return str(self._path)
-
-    @contextmanager
-    def locked(self) -> Iterator[None]:
-        try:
-            import fcntl
-        except ImportError as exc:
-            raise ReefError("durable JSONL commit logs require POSIX file locking (fcntl)") from exc
-        lock_path = self._path.parent / ".locks" / f"{self._path.name}.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-    def append(self, record: CommitRecord) -> None:
-        encoded = (
-            json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
-        ).encode("utf-8")
-        with self._lock:
-            self._truncate_partial_tail()
-            previous_signature = self._file_signature()
-            cached_records = self._cached_records
-            records: Sequence[CommitRecord]
-            if cached_records is None or previous_signature != self._cached_signature:
-                records = self._reload_cache(previous_signature)
-            else:
-                records = cached_records
-            cached_steps = self._cached_steps
-            existing = (
-                cached_steps.get(record.step)
-                if cached_steps is not None
-                else next((item for item in records if item.step == record.step), None)
-            )
-            if existing is not None:
-                if same_commit(existing, record):
-                    return
-                raise CommitLogError(f"commit step {record.step} conflicts with its existing record")
-            if records and record.step < records[-1].step:
-                raise CommitLogError(f"commit step {record.step} precedes existing step {records[-1].step}")
-            with open(self._path, "ab") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            current_signature = self._file_signature()
-            cached_records = self._cached_records
-            if (
-                cached_records is not None
-                and previous_signature == self._cached_signature
-                and self._is_exclusive_append(previous_signature, current_signature, len(encoded))
-            ):
-                cached_records.append(record)
-                if cached_steps is not None:
-                    cached_steps[record.step] = record
-                self._cached_snapshot = None
-                self._advance_run_position(record)
-                self._cached_signature = current_signature
-            else:
-                self._invalidate_cache()
-
-    def records(self) -> tuple[CommitRecord, ...]:
-        with self._lock:
-            signature = self._file_signature()
-            cached_records = self._cached_records
-            if cached_records is not None and signature == self._cached_signature:
-                if self._cached_snapshot is None:
-                    self._cached_snapshot = tuple(cached_records)
-                return self._cached_snapshot
-            return self._reload_cache(signature)
-
     def training_run_position(self) -> tuple[int, int]:
-        """Return the latest rollback step and training steps after it."""
-        with self._lock:
-            signature = self._file_signature()
-            if self._cached_records is not None and signature == self._cached_signature:
-                return self._run_segment, self._run_step
-            records = self._reload_cache(signature)
-            if self._cached_records is not None and signature == self._cached_signature:
-                return self._run_segment, self._run_step
-            return training_run_position(records)
-
-    def _file_signature(self) -> tuple[int, int, int, int] | None:
-        try:
-            stat = self._path.stat()
-        except FileNotFoundError:
-            return None
-        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
-
-    def _truncate_partial_tail(self) -> None:
-        try:
-            with open(self._path, "r+b") as handle:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    return
-                handle.seek(-1, os.SEEK_END)
-                if handle.read(1) == b"\n":
-                    return
-                handle.seek(0)
-                content = handle.read()
-                handle.truncate(content.rfind(b"\n") + 1)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except FileNotFoundError:
-            return
-
-    def _cache(self, records: tuple[CommitRecord, ...], signature: tuple[int, int, int, int] | None) -> None:
-        self._cached_records = list(records)
-        self._cached_steps = {record.step: record for record in records}
-        self._cached_snapshot = records
-        self._cached_signature = signature
-        self._run_segment, self._run_step = training_run_position(records)
-
-    @staticmethod
-    def _is_exclusive_append(
-        previous: tuple[int, int, int, int] | None,
-        current: tuple[int, int, int, int] | None,
-        appended_bytes: int,
-    ) -> bool:
-        if current is None:
-            return False
-        if previous is None:
-            return current[2] == appended_bytes
-        return current[:2] == previous[:2] and current[2] == previous[2] + appended_bytes
-
-    def _reload_cache(self, signature: tuple[int, int, int, int] | None) -> tuple[CommitRecord, ...]:
-        self._invalidate_cache()
-        records, complete = self._read_records()
-        if complete and signature == self._file_signature():
-            self._cache(records, signature)
-        return records
-
-    def _invalidate_cache(self) -> None:
-        self._cached_records = None
-        self._cached_steps = None
-        self._cached_snapshot = None
-        self._cached_signature = None
-
-    def _advance_run_position(self, record: CommitRecord) -> None:
-        if record.operation == "rollback":
-            self._run_segment = record.step
-            self._run_step = 0
-        elif record.operation == "training" and record.step > self._run_segment:
-            self._run_step += 1
-
-    def _read_records(self) -> tuple[tuple[CommitRecord, ...], bool]:
-        if not self._path.exists():
-            return (), True
-        records: list[CommitRecord] = []
-        with open(self._path, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-        for index, line in enumerate(lines):
-            if not line.strip():
-                continue
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError as exc:
-                if index == len(lines) - 1:
-                    return tuple(records), False  # torn tail from a crash mid-append
-                raise CommitLogError(f"commit log {self._path} has a corrupt record at line {index + 1}") from exc
-            if not isinstance(value, dict):
-                raise CommitLogError(f"commit log {self._path} line {index + 1} is not a record object")
-            try:
-                records.append(CommitRecord.from_dict(value))
-            except CommitLogError as exc:
-                raise CommitLogError(f"commit log {self._path} line {index + 1}: {exc}") from exc
-        return tuple(records), True
+        """Return the latest rollback step and the training steps after it."""
+        run_segment = 0
+        run_step = 0
+        for record in self.records():
+            if record.operation == "rollback":
+                run_segment = record.step
+                run_step = 0
+            elif record.operation == "training" and record.step > run_segment:
+                run_step += 1
+        return run_segment, run_step
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """Own one records connection, its task stores and uploaded trajectories, and an optional durable commit history.
+    """Own one records connection, its task stores and uploaded trajectories, and its commit history.
 
-    Passing no commit history preserves the existing in-memory configuration. Its
-    commits still enforce step fencing and retries for the session lifetime.
-    ``tasks`` opens the task stores, and ``trajectories`` keeps the uploaded trajectories.
-    Usually, both are in the same database as the records.
+    ``tasks`` opens the task stores, and ``trajectories`` keeps the uploaded
+    trajectories. Usually, both are in the same database as the records and the
+    commits. The store is durable when its commit history is durable.
     ``initial_step`` supports existing scenarios constructed at a saved step.
     """
 
@@ -288,7 +86,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self,
         scenario: str,
         records: RecordStore,
-        commit_history: CommitHistory | None = None,
+        commit_history: CommitHistory,
         *,
         tasks: TaskStorage,
         trajectories: TrajectoryStore,
@@ -304,9 +102,6 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._trajectories = trajectories
         self._commit_history = commit_history
         self._initial_step = initial_step
-        self._memory_history: list[CommitRecord] = []
-        self._memory_run_segment = 0
-        self._memory_run_step = 0
         self._cached_history: tuple[CommitRecord, ...] = ()
         self._commits_by_step: dict[int, CommitRecord] = {}
         self._lock = RLock()
@@ -320,7 +115,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
 
     @property
     def durable(self) -> bool:
-        return self._commit_history is not None
+        return self._commit_history.durable
 
     @property
     def tasks(self) -> TaskStorage:
@@ -335,7 +130,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._trajectories
 
     @property
-    def commit_history(self) -> CommitHistory | None:
+    def commit_history(self) -> CommitHistory:
         """The commit history, for callers of the concrete storage adapters."""
         with self._lock:
             self._ensure_open()
@@ -347,9 +142,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
 
     def training_run_position(self) -> tuple[int, int]:
         with self._locked():
-            if self._commit_history is not None:
-                return self._commit_history.training_run_position()
-            return self._memory_run_segment, self._memory_run_step
+            return self._commit_history.training_run_position()
 
     def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
         with self._locked():
@@ -368,7 +161,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
             current_step = history[-1].step if history else self._initial_step
             if expected_step != current_step:
                 raise ScenarioStoreConflict(f"expected scenario step {expected_step}, current step is {current_step}")
-            self._append(commit)
+            self._commit_history.append(commit)
             return commit
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
@@ -380,7 +173,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
                     raise ReefError("recovery requires an activated checkpoint commit")
             checkpoint_step = 0 if checkpoint is None else checkpoint.step
             records = self._history()
-            history_label = "<no commit history>" if self._commit_history is None else self._commit_history.label
+            history_label = self._commit_history.label
             applicable = [record for record in records if record.step > checkpoint_step]
             for previous, current in itertools.pairwise(applicable):
                 if current.step != previous.step + 1:
@@ -397,8 +190,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
             last_step = records[-1].step if records else 0
             if checkpoint is not None and checkpoint_step > last_step:
                 head = checkpoint
-                self._append(head)
-                records = (*records, head)
+                self._commit_history.append(head)
             elif applicable:
                 head = applicable[-1]
             elif records and last_step == checkpoint_step:
@@ -423,14 +215,11 @@ class CommitHistoryScenarioStore(ScenarioStore):
     def _locked(self) -> Iterator[None]:
         with self._lock:
             self._ensure_open()
-            if self._commit_history is None:
-                yield
-                return
             with self._commit_history.locked():
                 yield
 
     def _history(self) -> tuple[CommitRecord, ...]:
-        records = tuple(self._memory_history) if self._commit_history is None else self._commit_history.records()
+        records = self._commit_history.records()
         if records is self._cached_history:
             return records
         previous = self._cached_history
@@ -439,33 +228,20 @@ class CommitHistoryScenarioStore(ScenarioStore):
             self._commits_by_step.clear()
         for record in records[len(previous) if appended else 0 :]:
             if record.scenario != self._scenario:
-                history_label = "<no commit history>" if self._commit_history is None else self._commit_history.label
                 raise ReefError(
-                    f"commit history {history_label} holds records for {record.scenario!r}, not {self._scenario!r}"
+                    f"commit history {self._commit_history.label} holds records for {record.scenario!r}, "
+                    f"not {self._scenario!r}"
                 )
             self._commits_by_step[record.step] = record
         self._cached_history = records
         return records
-
-    def _append(self, commit: CommitRecord) -> None:
-        if self._commit_history is None:
-            self._memory_history.append(commit)
-            if commit.operation == "rollback":
-                self._memory_run_segment = commit.step
-                self._memory_run_step = 0
-            elif commit.operation == "training" and commit.step > self._memory_run_segment:
-                self._memory_run_step += 1
-        else:
-            self._commit_history.append(commit)
 
 
 __all__ = [
     "RECORD_KIND",
     "CommitHistory",
     "CommitHistoryScenarioStore",
-    "CommitLog",
     "CommitLogError",
     "CommitRecord",
     "same_commit",
-    "training_run_position",
 ]

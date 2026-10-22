@@ -9,7 +9,6 @@ from contextlib import closing
 import pytest
 
 from reef.core.artifact_ref import ArtifactRef
-from reef.storage.commit_log import CommitLog
 from reef.storage.commits import CommitLogError, CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
@@ -110,28 +109,21 @@ def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postg
             assert store.recover(checkpoint=None) == committed(2)
 
 
-def test_postgres_imports_commit_logs_and_model_files_of_its_own_schema(postgres_config, tmp_path):
+def test_postgres_imports_model_files_of_its_own_schema(postgres_config, tmp_path):
     url, schema = postgres_config
     with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        storage_id = database.storage_id("math")
-    log = CommitLog(tmp_path / f"postgres-{storage_id}.commits.jsonl")
-    log.append(committed())
-    log.append(committed(2))
-    (tmp_path / f"{hashlib.sha256(b'math').hexdigest()}-model.json").write_text(json.dumps(MODEL))
-    other_schema_log = tmp_path / f"postgres-{'0' * 32}.commits.jsonl"
-    other_schema_log.write_text("")
+        database.storage_id("math")
+    model_file = tmp_path / f"{hashlib.sha256(b'math').hexdigest()}-model.json"
+    model_file.write_text(json.dumps(MODEL))
+    other_schema_file = tmp_path / f"{hashlib.sha256(b'other').hexdigest()}-model.json"
+    other_schema_file.write_text(json.dumps(MODEL))
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
         assert storage.read_settings("math") == ScenarioSettings(model_config=MODEL)
-        with closing(storage.open("math")) as store:
-            assert store.history() == (committed(), committed(2))
-    assert not log.path.exists()
-    assert other_schema_log.exists()
-    assert len(list((tmp_path / "archived").glob("imported-*/*"))) == 2
-    with (
-        closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage,
-        closing(storage.open("math")) as store,
-    ):
-        assert store.history() == (committed(), committed(2))
+    assert not model_file.exists()
+    assert other_schema_file.exists()
+    assert len(list((tmp_path / "archived").glob("imported-*/*"))) == 1
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
+        assert storage.read_settings("math") == ScenarioSettings(model_config=MODEL)
 
 
 def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_content(postgres_config, tmp_path):

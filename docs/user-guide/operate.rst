@@ -143,7 +143,7 @@ What survives a restart, provided the storage paths are persistent:
    * - records
      - persisted before the processor sees them; never trained twice
    * - the commit log
-     - append-only per scenario; the fsynced append is the commit point
+     - append-only per scenario; the database transaction that adds a step is the commit point
    * - checkpointed versions
      - in the Git LFS repository; the recovered head is what is served
    * - algorithm state and record progress
@@ -187,8 +187,8 @@ Select the backend with ``storage.record-backend``:
    * - Value
      - Where scenario state is kept
    * - ``sqlite`` (default)
-     - One SQLite database per scenario (records and settings) and one JSONL
-       commit log per scenario, both under ``agent_record_dir``
+     - One SQLite database per scenario (records, commits and settings) under
+       ``agent_record_dir``
    * - ``postgres``
      - Tables in one PostgreSQL schema; ``agent_record_dir`` holds no scenario state
    * - a plugin reference
@@ -223,10 +223,12 @@ scenario gets a new identifier. The same retention settings apply across all
 active and archived stores in the configured schema, while preserving active
 records and retry hashes.
 
-When you upgrade, Reef imports the files that earlier versions kept in
-``agent_record_dir``. PostgreSQL imports its commit logs and model configuration
-files. SQLite imports its model configuration files. Reef then moves the
-imported files to ``agent_record_dir/archived/imported-*``.
+When you upgrade, Reef imports the model configuration files that earlier
+versions kept in ``agent_record_dir`` into the storage backend. Reef then moves
+the imported files to ``agent_record_dir/archived/imported-*``. Reef does not
+read the ``*.commits.jsonl`` files of earlier versions. A deployment upgraded
+from such a version recovers each scenario from its last checkpointed release,
+as after a lost commit log.
 
 A change from one backend to another does not move records or commit history.
 Use a new deployment directory or schema for a new backend.

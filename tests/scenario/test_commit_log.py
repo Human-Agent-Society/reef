@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
+import sqlite3
 import time
+from contextlib import closing
 from dataclasses import KW_ONLY, dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
@@ -34,9 +35,9 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
-from reef.storage.commit_log import RECORD_KIND, CommitHistoryScenarioStore, CommitLog, CommitLogError
+from reef.storage.commit_log import RECORD_KIND, CommitHistoryScenarioStore, CommitLogError
 from reef.storage.commits import CommitRecord
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
@@ -74,9 +75,23 @@ def sample_record(
     )
 
 
+@pytest.fixture
+def open_history(tmp_path):
+    """Open commit histories over one SQLite database file; the fixture closes them."""
+    stores: list[SQLiteRecordStore] = []
+
+    def open_one():
+        stores.append(SQLiteRecordStore(tmp_path / "records.sqlite3"))
+        return stores[-1].commit_history()
+
+    yield open_one
+    for store in stores:
+        store.close()
+
+
 @pytest.mark.unit
-def test_commit_record_round_trips_through_the_log(tmp_path) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
+def test_commit_record_round_trips_through_the_history(open_history) -> None:
+    log = open_history()
     log.append(sample_record(step=1))
     log.append(sample_record(step=2, runtime_load_id="w2"))
 
@@ -92,18 +107,18 @@ def test_commit_record_round_trips_through_the_log(tmp_path) -> None:
     assert first.high_water_offset == 2
     assert first.consumed_ids == frozenset({"i1"})
     assert first.recorded_at == 1001.0
-    # A fresh reader over the same file sees the same history.
-    assert CommitLog(tmp_path / "commits.jsonl").records() == records
+    # A fresh reader over the same database sees the same history.
+    assert open_history().records() == records
 
 
 @pytest.mark.unit
-def test_commit_record_round_trips_gate_metrics(tmp_path) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
+def test_commit_record_round_trips_gate_metrics(open_history) -> None:
+    log = open_history()
     log.append(sample_record(step=1))
     metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
     log.append(sample_record(step=2, runtime_load_id="w2", metrics=metrics))
 
-    first, second = CommitLog(tmp_path / "commits.jsonl").records()
+    first, second = open_history().records()
     assert first.metrics is None  # pre-metrics records stay readable
     assert second.metrics == metrics
 
@@ -121,8 +136,8 @@ def test_commit_record_detaches_nested_metrics() -> None:
 
 
 @pytest.mark.unit
-def test_commit_record_round_trips_training_job_identity(tmp_path) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
+def test_commit_record_round_trips_training_job_identity(open_history) -> None:
+    log = open_history()
     log.append(sample_record(training_job_id="job-1"))
 
     [record] = log.records()
@@ -131,8 +146,8 @@ def test_commit_record_round_trips_training_job_identity(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_commit_log_tracks_the_current_training_run_position(tmp_path) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
+def test_commit_history_tracks_the_current_training_run_position(open_history) -> None:
+    log = open_history()
     log.append(sample_record(step=1))
     log.append(sample_record(step=2, runtime_load_id="w2"))
     assert log.training_run_position() == (0, 2)
@@ -156,8 +171,8 @@ def test_commit_log_tracks_the_current_training_run_position(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_commit_log_retry_is_idempotent_but_conflicting_step_is_rejected(tmp_path) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
+def test_commit_history_retry_is_idempotent_but_conflicting_step_is_rejected(open_history) -> None:
+    log = open_history()
     original = sample_record(step=1)
     retry = CommitRecord.from_dict({**original.to_dict(), "recorded_at": original.recorded_at + 1})
 
@@ -173,51 +188,20 @@ def test_commit_log_retry_is_idempotent_but_conflicting_step_is_rejected(tmp_pat
 
 
 @pytest.mark.unit
-def test_commit_log_retry_reconciles_an_fsync_error_after_the_write(tmp_path, monkeypatch) -> None:
-    log = CommitLog(tmp_path / "commits.jsonl")
-    record = sample_record(step=1)
-    original_fsync = os.fsync
-    should_fail = True
-
-    def fail_after_sync(fd):
-        nonlocal should_fail
-        original_fsync(fd)
-        if should_fail:
-            should_fail = False
-            raise OSError("injected fsync failure")
-
-    monkeypatch.setattr(os, "fsync", fail_after_sync)
-
-    with pytest.raises(OSError, match="injected fsync failure"):
-        log.append(record)
-    log.append(record)
-
-    assert log.records() == (record,)
-
-
-@pytest.mark.unit
-def test_commit_log_invalidates_its_cache_when_another_writer_interleaves(tmp_path, monkeypatch) -> None:
-    path = tmp_path / "commits.jsonl"
-    first = CommitLog(path)
-    second = CommitLog(path)
+def test_commit_history_reads_the_appends_of_another_writer(open_history) -> None:
+    first = open_history()
+    second = open_history()
     first.append(sample_record(step=1))
     assert len(first.records()) == 1
 
-    file_signature = first._file_signature
-    interleave = True
-
-    def signature_with_interleaved_append():
-        nonlocal interleave
-        signature = file_signature()
-        if interleave:
-            interleave = False
-            second.append(sample_record(step=2, runtime_load_id="w2"))
-        return signature
-
-    monkeypatch.setattr(first, "_file_signature", signature_with_interleaved_append)
+    second.append(sample_record(step=2, runtime_load_id="w2"))
+    # The first writer's cache stops at step 1, but the append still sees step 2.
+    with pytest.raises(CommitLogError, match="conflicts"):
+        first.append(sample_record(step=2, runtime_load_id="other"))
     first.append(sample_record(step=3, runtime_load_id="w3"))
 
     assert [record.step for record in first.records()] == [1, 2, 3]
+    assert second.records() == first.records()
 
 
 @pytest.mark.unit
@@ -290,47 +274,6 @@ def test_commit_record_validates_its_schema() -> None:
                 "recorded_at": 1.0,
             }
         )
-
-
-@pytest.mark.unit
-def test_records_tolerate_a_torn_tail(tmp_path) -> None:
-    path = tmp_path / "commits.jsonl"
-    log = CommitLog(path)
-    log.append(sample_record())
-    # A crash mid-append leaves a partial final line; the commit never happened.
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write('{"record":"reef-commit/5","scenario":"ma')
-
-    records = log.records()
-    assert [record.step for record in records] == [1]
-
-
-@pytest.mark.unit
-def test_append_discards_a_torn_tail_before_writing_the_retry(tmp_path) -> None:
-    path = tmp_path / "commits.jsonl"
-    log = CommitLog(path)
-    first = sample_record(step=1)
-    second = sample_record(step=2, runtime_load_id="w2")
-    log.append(first)
-    with open(path, "ab") as handle:
-        handle.write(b'{"record":"reef-commit/5","scenario":"ma')
-
-    log.append(second)
-
-    assert log.records() == (first, second)
-
-
-@pytest.mark.unit
-def test_records_reject_corruption_before_the_tail(tmp_path) -> None:
-    path = tmp_path / "commits.jsonl"
-    log = CommitLog(path)
-    log.append(sample_record(step=1))
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write("not json\n")
-    log.append(sample_record(step=2))
-
-    with pytest.raises(CommitLogError, match="line 2"):
-        log.records()
 
 
 class RecordingRuntime(StubTrainingRuntime):
@@ -436,9 +379,21 @@ def build_training_dispatcher(
     )
 
 
-def commit_log_path(agent_record_dir, scenario: str = "math"):
+def scenario_database(agent_record_dir, scenario: str = "math"):
     key = hashlib.sha256(scenario.encode("utf-8")).hexdigest()
-    return agent_record_dir / f"{key}.commits.jsonl"
+    return agent_record_dir / f"{key}.sqlite3"
+
+
+def committed_records(agent_record_dir, scenario: str = "math") -> tuple[CommitRecord, ...]:
+    with SQLiteRecordStore(scenario_database(agent_record_dir, scenario)) as records:
+        return records.commit_history().records()
+
+
+def delete_commits(agent_record_dir, *steps: int) -> None:
+    """Remove committed steps behind the store's back, as a lost write or a damaged file would."""
+    with closing(sqlite3.connect(scenario_database(agent_record_dir))) as connection, connection:
+        deleted = connection.executemany("DELETE FROM scenario_commit WHERE step = ?", [(step,) for step in steps])
+        assert deleted.rowcount == len(steps)
 
 
 def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") -> None:
@@ -528,7 +483,7 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     dispatcher.accept_record(sft_report("r2", "i2"))
     wait_for_step(dispatcher, 2)
 
-    records = CommitLog(commit_log_path(agent_record_dir)).records()
+    records = committed_records(agent_record_dir)
     assert [record.step for record in records] == [1, 2]
     first, second = records
     assert isinstance(first.artifact_ref, LiveWeightArtifactRef)
@@ -564,7 +519,7 @@ def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
     wait_for_step(dispatcher, 1)
 
     scenario = dispatcher.get_or_create_scenario("math")
-    [record] = CommitLog(commit_log_path(agent_record_dir)).records()
+    [record] = committed_records(agent_record_dir)
     assert record.training_job_id == "job-0"
     assert scenario.committed_training_job_id == "job-0"
     assert scenario.committed_training_without_job_id is False
@@ -703,7 +658,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     assert first_runtime.trained_batches == [["i1"]]
     # The step-2 inference sits below the committed watermark yet survives
     # compaction: it is protected, and only processor memory knew about it.
-    assert CommitLog(commit_log_path(agent_record_dir)).records()[-1].high_water_sequence == 3
+    assert committed_records(agent_record_dir)[-1].high_water_sequence == 3
     assert first.get_or_create_scenario("math").records.get("math", "i2") is not None
 
     second_runtime = RecordingRuntime()
@@ -786,11 +741,8 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
 
-    # Simulate the crash: the log loses its last (only) record.
-    path = commit_log_path(agent_record_dir)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    path.write_text("", encoding="utf-8")
+    # Simulate the crash: the history loses its last (only) record.
+    delete_commits(agent_record_dir, 1)
 
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
@@ -798,9 +750,9 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state == {"steps": 1}
-    # The healed log carries the adopted checkpoint record, with the record
-    # high-water mark taken from the checkpoint's metadata metadata.
-    records = CommitLog(path).records()
+    # The healed history carries the adopted checkpoint record, with the record
+    # high-water mark taken from the checkpoint's metadata.
+    records = committed_records(agent_record_dir)
     assert len(records) == 1
     adopted = records[0]
     assert adopted.step == 1
@@ -855,9 +807,7 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
         first.accept_record(sft_report(f"r{index}", f"i{index}"))
         wait_for_step(first, index)
 
-    path = commit_log_path(agent_record_dir)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    path.write_text("\n".join([lines[0], lines[2]]) + "\n", encoding="utf-8")
+    delete_commits(agent_record_dir, 2)
 
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
@@ -909,7 +859,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
-    assert not list(tmp_path.rglob("*.commits.jsonl"))
+    assert not list(tmp_path.rglob("*.sqlite3"))
 
     # Recovery still works from the release chain: the live head is forgotten, as
     # before the log existed, and the step reverts to the checkpointed 0.
@@ -950,7 +900,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
-    assert not list(tmp_path.rglob("*.commits.jsonl"))
+    assert not list(tmp_path.rglob("*.sqlite3"))
 
 
 @dataclass(frozen=True)
@@ -1273,7 +1223,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["advance", "commit_log"])
+@pytest.mark.parametrize("failure_point", ["advance", "commit_step"])
 def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch, failure_point) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -1300,10 +1250,9 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
         target = scenario._committer._artifacts
         method_name = "advance"
     else:
-        assert isinstance(scenario.store, CommitHistoryScenarioStore)
-        target = scenario.store.commit_history
-        method_name = "append"
-        assert target is not None
+        # The step is stored, but the caller sees an error.
+        target = scenario.store
+        method_name = "commit_step"
     original = getattr(target, method_name)
     should_fail = True
 
@@ -1311,7 +1260,7 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
         nonlocal should_fail
         if should_fail:
             should_fail = False
-            if failure_point == "commit_log":
+            if failure_point == "commit_step":
                 original(*args, **kwargs)
             raise RuntimeError(f"injected {failure_point} failure")
         return original(*args, **kwargs)
@@ -1411,8 +1360,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     assert status["scenario_step"] == 1
     assert status["last_committed_step"]["step"] == 1
     assert status["last_committed_step"]["metrics"]["skipped"] == "no proposal"
-    log = CommitLog(commit_log_path(agent_record_dir, scenario="skills"))
-    records = log.records()
+    records = committed_records(agent_record_dir, scenario="skills")
     assert [record.step for record in records] == [1]
     assert records[0].metrics is not None
     assert records[0].metrics["skipped"] == "no proposal"
@@ -1421,7 +1369,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     dispatcher.accept_record(trace_report("r2", "i2"))
     wait_for_step(dispatcher, 2, scenario="skills")
 
-    assert [record.step for record in log.records()] == [1, 2]
+    assert [record.step for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2]
     status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 2
     assert status["last_committed_step"]["step"] == 2
@@ -1454,7 +1402,7 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     head = scenario.repository.require_current_artifact()
     assert not isinstance(head, LiveWeightArtifactRef)  # harness surface is pull-based
 
-    records = CommitLog(commit_log_path(agent_record_dir, scenario="skills")).records()
+    records = committed_records(agent_record_dir, scenario="skills")
     assert len(records) == 1
     record = records[0]
     assert record.step == 1
