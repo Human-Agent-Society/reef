@@ -103,7 +103,11 @@ Rollback republishes the target as a new commit and makes it current; history is
 Set the checkpoint cadence
 --------------------------
 
-``checkpoint_every_n_versions`` (default ``1``) decides how many accepted updates go by between durable checkpoints. Between checkpoints, new weights live only in the engine's memory: their versions are recorded, but their bytes are not. A restart restores the last checkpoint, and the step counter, algorithm state, and record progress continue from the log. Raise the cadence only when checkpoint writes are the bottleneck and losing live versions on a restart is acceptable.
+Each version whose checkpoint the training backend saves becomes a durable artifact. A Tinker deployment saves each version. A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts.
+
+Set ``1`` to save and publish after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, thus their versions are live weights: their versions are recorded, but their bytes are not. Use a value above 1 only for full-weight training. The driver does not start with ``--release-train`` or with LoRA when the value is above 1. A scenario that serves several components cannot publish live weights, so it needs ``1``.
+
+A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again.
 
 On a training deployment, checkpoint retention runs under ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``) with storage-fraction limits; when storage is blocked the step is deferred rather than failed, and ``/reef/status`` shows ``checkpoint_storage``.
 
@@ -112,7 +116,7 @@ Track experiments with W&B
 
 Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and the Slime driver refuses ``--wandb-key`` so a credential never enters a command line or a run config.
 
-What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit log, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Tracking failures are logged and never fail a training step or its commit.
+What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit log, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
@@ -164,7 +168,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits and settings, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. A scenario whose weight training job is out at its backend answers 409 until the job has landed.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. A scenario whose weight training job is out at its backend answers 409 until the job has landed.
 
 Choose the storage backend
 --------------------------
@@ -278,6 +282,79 @@ A change from one backend to another does not move releases. Keep the old
 store readable while scenarios refer to its releases, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
+Choose the task file store
+--------------------------
+
+A recipe that generates tasks saves each published task as a Harbor task
+directory. The scenario storage keeps the state of the tasks. The task file
+store keeps the files of the task directories, which can be text or binary.
+
+The default, ``local``, keeps the files in ``storage.task-file-dir``
+(default: ``.reef/task-files``). Put this directory on a persistent volume.
+Archiving a scenario moves its files under ``archived/`` in that directory.
+
+To use a different store, name a subclass of
+``reef.storage.tasks.TaskFileStore`` in ``storage.task-file-backend``.
+Give ``package.module:ClassName``, or give the name and a ``config`` mapping:
+
+.. code-block:: yaml
+
+   storage:
+     task-file-backend:
+       module: my_package.tasks:ObjectStoreTaskFileStore
+       config:
+         bucket: reef-tasks
+     task-file-dir: .reef/task-files
+
+Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping
+and ``storage.task-file-dir``. A remote store can use that directory as a
+local cache. The `Python task file store contract
+<../reference/python-api.rst#task-file-stores>`__ gives the necessary
+behavior.
+
+Import Harbor tasks
+-------------------
+
+Each scenario can hold your own Harbor tasks in its train and eval splits, for
+example a benchmark that a recipe evaluates on. A task can hold binary files,
+such as images. Name a split manifest and the directory of the tasks in the
+``task-import`` section:
+
+.. code-block:: yaml
+
+   task-import:
+     manifest: /data/benchmark/split.json
+     tasks-root: /data/benchmark/tasks
+
+The manifest is a JSON file. It names each task once, in ``train`` or ``eval``:
+
+.. code-block:: json
+
+   {"version": 1, "seed": 0, "eval_fraction": 0.5, "train": ["sum-391"], "eval": ["sort-17"]}
+
+Each name is a Harbor task directory under ``tasks-root``. A name starts
+with a lowercase letter or a digit, and holds only lowercase letters, digits,
+``.``, ``_`` and ``-``. When a scenario
+opens, Reef checks each directory with Harbor's task loader, and adds it to the
+scenario's task store ``imported-tasks`` in its split. The task file store
+keeps a copy of the files.
+
+The import runs again each time a scenario opens. To add tasks, add them to the
+manifest and the directory, and then restart the service or reload the
+scenario. A task that is already imported with the same files and split does
+not change. A scenario does not open, and the error says why, when:
+
+- a task directory is missing, or Harbor cannot load it;
+- an imported task now has other files, or it moved to the other split.
+
+To change an imported task, give it a new name.
+
+A harness evolution recipe evaluates on the imported eval tasks with
+``evolution.eval_task_store: imported-tasks`` and an adapter that plays a task
+directory, such as ``terminus``. Each step reads the eval split again, so a
+task that you import later joins the next step. See `Harness evolution keys
+<../reference/configuration.rst#harness-evolution-keys>`__.
+
 Limit the scenarios a service holds
 -----------------------------------
 
@@ -324,9 +401,6 @@ A scenario is idle when all of these conditions are true:
   ``max-loaded-scenarios``, Reef does not wait for the idle time.
 - No request or local training cycle runs on it.
 - No trainer has records that it would still train on.
-- No release exists only in memory. With ``checkpoint_every_n_versions``
-  above 1 (see `Set the checkpoint cadence`_), Reef keeps a release between
-  two checkpoints only in memory. Thus the scenario stays loaded.
 - The storage backend is durable.
 
 Reef never unloads a weight-training scenario, because only a delete releases
@@ -380,8 +454,12 @@ artifact repository.
    * - a plugin
      - The plugin's own store and the artifact repository
 
-With PostgreSQL and a remote artifact repository, a new host with the same
-configuration continues every scenario from the database and the Git remote.
+With all backends, also back up the task file store: ``task_file_dir`` with
+the ``local`` store, or the plugin's own store.
+
+With PostgreSQL, a remote artifact repository and a remote task file store, a
+new host with the same configuration continues every scenario from the
+database and the two remote stores.
 
 Some recipes have their own directories, for example Reefine's
 ``step_record_dir`` and ``proposals_dir``. These directories are not scenario

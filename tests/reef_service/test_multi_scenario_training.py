@@ -12,7 +12,6 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord
 from reef.core.errors import ReefError
 from reef.core.records_types import RequestType
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService
 from reef.surface import adapter_name
 
@@ -87,7 +86,7 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         _feed(dispatcher, "code", 2, "w2")
         wait_for_step(dispatcher, 2, scenario="code")
 
-        assert dispatcher._registry.training_scenario_names == ("math", "code")
+        assert dispatcher.registry.training_scenario_names == ("math", "code")
         assert runtime.scenarios == ["math", "code", "code"], "every job names the scenario whose adapter it trains"
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
@@ -134,7 +133,6 @@ def test_a_checkpointed_release_still_routes_requests_to_its_adapter(tmp_path) -
         runtime,
         tmp_path,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        checkpoint_strategy=EveryNVersions(1),
     )
     try:
         _feed(dispatcher, "math", 1)

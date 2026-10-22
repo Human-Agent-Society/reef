@@ -4,10 +4,9 @@ A recipe is *how records and their feedback become a new version of the
 weights or the harness*. This package holds everything a method binds to:
 
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
-  ``build``, ``build_surface``, the ``CheckpointStrategy``) and
+  ``build``, ``build_surface``) and
   ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (training objective and data processor).
-- ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per release component
   and runs their trainers side by side in one scenario.
@@ -26,7 +25,8 @@ prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``;
 and configuration live in ``reef.evaluation``. The recipe chooses and
 configures the policy.
 
-Reefine is bundled; other learning methods live outside the core package. The repository's sibling
+Reefine and supervised fine-tuning (``sft``) are bundled; other learning
+methods live outside the core package. The repository's sibling
 ``recipes`` tree contains cookbook implementations, but Reef neither imports
 them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.

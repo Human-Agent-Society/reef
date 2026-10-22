@@ -1,35 +1,30 @@
-"""Suite-wide fixtures: two plain loss families and a plain training objective.
+"""Suite-wide fixtures: the built-in SFT recipe, the cookbook, and one plain loss family.
 
-Reef bundles no method-neutral objective, but many contracts want the
-simplest possible family to drive the bridge, the runtime and the driver:
-``sft`` (Slime's stock ``sft_loss``, advantages forbidden) and ``pg``
-(Slime's stock ``policy_loss`` over one advantage per sample). They are
-registered here as *external* families and the matching ``sft`` objective as
-an external objective, through the same public extension points a cookbook
-method would use, so every test that names them sees a registry shaped like
-a deployment that brought its own plain objective.
+Many contracts use the simplest families to drive the bridge, the runtime,
+and the driver:
+
+- ``sft`` is the family of the built-in SFT recipe (``reef.recipe.sft``).
+  It uses Slime's ``sft_loss`` and refuses advantages.
+- ``pg`` uses Slime's ``policy_loss`` with one advantage for each sample.
+  This module registers it as an *external* family, through the public
+  extension point that a cookbook method uses.
 """
 
 from __future__ import annotations
 
 import importlib
 from argparse import Namespace
-from collections.abc import Mapping
-from typing import Any
 
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective
-from reef.train.algos.signals import StepSignal
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
-from reef.train.types import TrainingBatch, trajectories
 
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
 # not, while importing a selected cookbook package registers its objective and
-# lazy loss-family reference in this test process.
+# lazy loss-family reference in this test process. The built-in SFT recipe
+# is loaded the same way: ``import reef`` does not import it either.
 for _cookbook_package in (
+    "reef.recipe.sft",
     "reef.train.cordis_backend",
     "recipes.openclawrl",
     "recipes.opd",
@@ -39,24 +34,6 @@ for _cookbook_package in (
     "recipes.tttd",
 ):
     importlib.import_module(_cookbook_package)
-
-#: The plain families the suite registers alongside cookbook families.
-TEST_FAMILIES = ("pg", "sft")
-
-
-class SftAlgorithm(SlimeAlgorithm):
-    loss_family = "sft"
-    loss_type = "sft_loss"
-    advantages = "forbidden"
-    forbidden_advantages_message = (
-        "sft ignores advantages: Slime's sft_loss_function trains every token unweighted, so the "
-        "payload's advantages would be silently discarded. For a reward-weighted objective use the "
-        "pg loss family (one advantage per sample), or register a custom loss family "
-        "(register_loss_family) whose loss consumes them."
-    )
-
-    def validate_specific_args(self, args: Namespace, source: str) -> None:
-        pass
 
 
 class PgAlgorithm(SlimeAlgorithm):
@@ -69,18 +46,4 @@ class PgAlgorithm(SlimeAlgorithm):
         pass
 
 
-class SftObjective(TrainingObjective):
-    """Train every sample in the batch, unweighted."""
-
-    name = "sft"
-    loss_family = "sft"
-
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        samples = trajectories(batch)
-        steps = next_steps(state)
-        return StepSignal("train", {"steps": steps}, {"samples": len(samples), "steps": steps})
-
-
-register_loss_family(SftAlgorithm())
 register_loss_family(PgAlgorithm())
-register_objective(SftObjective())

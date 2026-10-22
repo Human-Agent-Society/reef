@@ -380,7 +380,7 @@ def test_the_route_admits_against_the_head_commits_entries_not_the_live_state(tm
         assert result is not None
         scenario.commit(result)
         head = scenario.repository.require_current_artifact().release_id
-        logged = scenario.entries_for_version(head)
+        logged = scenario.release_queries.entries_for_version(head)
         assert logged is not None and [entry["id"] for entry in logged] == ["models", "settings", "r1"]
         state = scenario.trainer.state
         assert isinstance(state, dict)

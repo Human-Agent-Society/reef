@@ -212,10 +212,10 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
 
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
+    reef = config.get("reef", {})
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
     from reef.train.slime_backend.inference import inference_config
 
-    reef = config.get("reef", {})
     inference_backend = reef.get("inference_backend") or "sglang"
     training = SlimeTrainingService(
         args,

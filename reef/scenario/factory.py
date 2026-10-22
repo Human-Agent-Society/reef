@@ -37,9 +37,8 @@ from reef.core.components import (
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.observability.commits import CommitExperimentObserver, LoadedExperimentReports
+from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
 from reef.recipe.base import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
@@ -78,7 +77,7 @@ def recovered_trainer_states(
     the state and the cursor stay the last commit's.
 
     Rehydration must skip consumed rows: retention may keep a consumed row
-    stored (audit-only retention is contract-legal), and re-ingesting one would
+    stored (audit-only retention is contract-legal), and pushing one again would
     train it twice. Consumption is permanent, so the union over the whole log
     and every receipt is the exclusion set; with several trainers each keeps
     its own share, the rows of its own commits and of its own stale drops.
@@ -122,15 +121,15 @@ class ScenarioFactory:
         local_artifact_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
-        loaded_experiment_reports: LoadedExperimentReports | None = None,
+        experiment_reports: ExperimentReportQueue | None = None,
     ) -> None:
         self._recipe = recipe
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
         self._storage = scenario_storage
-        self.loaded_experiment_reports = (
-            loaded_experiment_reports if loaded_experiment_reports is not None else LoadedExperimentReports()
+        self.experiment_reports = (
+            experiment_reports if experiment_reports is not None else ExperimentReportQueue(experiment_tracker)
         )
 
     def has_registration(self, scenario: str) -> bool:
@@ -355,24 +354,18 @@ class ScenarioFactory:
                     default=0,
                 ),
             )
-            if not surface.single and recipe.checkpoint_strategy != EveryNVersions(1):
-                # A composed release binds the other components from the checkpoint: a step that published
-                # no checkpoint would see its component dropped from the next release.
-                raise ReefError(
-                    f"scenario {name!r} serves components {list(surface.names)}: every step checkpoints, "
-                    "so the checkpoint interval must be 1"
-                )
             trainers = recipe.build_trainers(
                 name,
                 store.records,
                 surface=surface,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
+                task_storage=store.tasks,
             )
             if any(
-                bound.trainer.candidate_backend is not None
-                and bound.trainer.pipeline.training_mode != recipe.training_mode
-                for bound in trainers
+                component_trainer.trainer.candidate_backend is not None
+                and component_trainer.trainer.pipeline.training_mode != recipe.training_mode
+                for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
                 raise ValueError("recipe.build must pass its training_mode to Trainer.build")
@@ -390,7 +383,7 @@ class ScenarioFactory:
                     source_artifact_ref=repository.require_current_artifact(),
                     scenario_step=scenario_step,
                     store=store,
-                    delivery=self.loaded_experiment_reports.delivery_for(name, self._experiment_tracker),
+                    reports=self.experiment_reports,
                 )
                 store = experiment_observer.store
             scenario = Scenario(
@@ -406,7 +399,6 @@ class ScenarioFactory:
                     report_type=recipe.report_type,
                 ),
                 repository=repository,
-                checkpoint_strategy=recipe.checkpoint_strategy,
                 trainers=trainers,
                 scenario_step=scenario_step,
                 store=store,
@@ -416,26 +408,27 @@ class ScenarioFactory:
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed
             # rows for audit.
-            for bound in trainers:
+            for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the surface serves: each has a state.
-                recovered = recovered_states[bound.component]
+                recovered = recovered_states[component_trainer.component]
                 if recovered.high_water is not None:
-                    scenario.reingest(
+                    scenario.replay_retained(
                         up_to_sequence=recovered.high_water[0],
                         consumed_ids=recovered.consumed_ids,
-                        component=bound.component,
+                        component=component_trainer.component,
                     )
                     scenario.restore_record_progress(
                         after_sequence=recovered.high_water[0],
                         offset=recovered.high_water[1],
-                        component=bound.component,
+                        component=component_trainer.component,
                     )
                 elif recovered.consumed_ids:
-                    scenario.reingest(up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=bound.component)
+                    scenario.replay_retained(
+                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
+                    )
+                component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
-            if experiment_observer is not None:
-                self.loaded_experiment_reports.defer(experiment_observer)
             scenario.publish_shipped_content()
             return scenario
         except BaseException:
@@ -443,8 +436,8 @@ class ScenarioFactory:
                 scenario.close()
             else:
                 try:
-                    for bound in trainers:
-                        bound.trainer.close()
+                    for component_trainer in trainers:
+                        component_trainer.trainer.close()
                 finally:
                     store.close()
             raise

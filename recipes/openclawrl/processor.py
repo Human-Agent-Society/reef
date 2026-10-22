@@ -138,17 +138,17 @@ class OpenClawRLBatches(Task2Batch):
             )
         return cls(context, settings, record2record)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         samples = tuple(task for task in tasks if isinstance(task, TrajectoryItem))
         if len(samples) != len(tasks):
             raise TypeError("OpenClaw-RL tasks must be trajectories")
-        self.write_record_line(samples, batch_number)
+        self.write_record_line(samples, batch_id)
         return TrainingBatch(
-            f"{self.scenario}:openclawrl:{batch_number}",
+            batch_id,
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def write_record_line(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> None:
+    def write_record_line(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> None:
         """Append this batch's judged population to the PRM record file.
 
         One line per batch: what the judges returned since the previous one,
@@ -158,7 +158,7 @@ class OpenClawRLBatches(Task2Batch):
         states are being judged.
         """
         record = {
-            "batch": batch_number,
+            "batch_id": batch_id,
             "scenario": self.scenario,
             "samples": len(samples),
             "rewards": dict(sorted(collections.Counter(f"{trajectory_reward(s):+.0f}" for s in samples).items())),

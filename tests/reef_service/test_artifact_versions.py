@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
 
@@ -24,13 +23,11 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.types import TrainStepResult
 
 
 class BlockingBackend(InferenceHandler):
@@ -117,6 +114,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
     assert len(scenario.store.history()) == 2
+    # The tracker hears about the rollback on the report thread; wait for it rather than race it.
+    value.registry.experiment_reports.flush()
     assert len(tracker.rollbacks) == 1
     assert tracker.rollbacks[0].produced_artifact_ref == recorded.artifact_ref
 
@@ -170,7 +169,6 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     restarted = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(RollbackRuntime(tmp_path / "restarted-export")),
-            checkpoint_strategy=EveryNVersions(1),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
@@ -199,7 +197,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(restarted_runtime), checkpoint_strategy=EveryNVersions(1)),
+        TestPolicyRecipe(**runtime_bindings(restarted_runtime)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -215,7 +213,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_live_version_is_listed_but_cannot_be_a_rollback_target(tmp_path) -> None:
-    value, _, _ = dispatcher(tmp_path, checkpoint_every=2)
+    value, _, _ = dispatcher(tmp_path, save_interval=2)
     train(value, 1)
     train(value, 2)
 
@@ -378,6 +376,7 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
             time.sleep(0.001)
         trained = scenario.current_artifact_ref()
         restored = value.rollback("math", initial.release_id)
+        value.registry.experiment_reports.flush()
         assert observed == [(1, 1, trained), (2, 2, restored), True]
     finally:
         value.close()
@@ -385,7 +384,7 @@ def test_experiment_events_follow_settled_state_and_resumed_rollback(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("operation", ["rollback", "promote"])
-def test_slow_rollback_tracker_does_not_block_scenario_resolution(
+def test_a_slow_rollback_tracker_holds_up_neither_the_rollback_nor_scenario_resolution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
     tracker = RecordingExperimentTracker()
@@ -403,17 +402,12 @@ def test_slow_rollback_tracker_does_not_block_scenario_resolution(
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_rollback", record)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            rollback = executor.submit(value.rollback, "math", initial.release_id, operation=operation)
-            try:
-                assert entered.wait(5), "rollback tracker was not called"
-                assert runtime.inference.inference_admission_status["open"]
-                lookup = executor.submit(value.get_or_create_scenario, "math")
-                assert lookup.result(timeout=2) is scenario
-                assert not rollback.done(), "tracker must remain blocked during the read"
-            finally:
-                release.set()
-            restored = rollback.result(timeout=5)
+        restored = value.rollback("math", initial.release_id, operation=operation)
+        assert entered.wait(5), "rollback tracker was not called"
+        assert runtime.inference.inference_admission_status["open"]
+        assert value.get_or_create_scenario("math") is scenario
+        release.set()
+        value.registry.experiment_reports.flush()
         assert tracker.rollbacks[0].produced_artifact_ref == restored
         assert scenario.store.history()[-1].operation == operation
     finally:
@@ -449,7 +443,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
                 assert entered.wait(5), "correlation tracker was not called"
-                read = executor.submit(scenario.artifact_with_metrics)
+                read = executor.submit(scenario.release_queries.artifact_with_metrics)
                 artifact, _ = read.result(timeout=2)
                 assert artifact.ref == initial
                 assert not recorded.is_set(), "commit must wait for correlation metadata"
@@ -503,60 +497,14 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
 
 
 @pytest.mark.unit
-def test_rollback_uses_reloaded_scenario_after_waiting_for_reporting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tracker = RecordingExperimentTracker()
-    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
-    scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
-    reporting = scenario.experiment_reporting
-
-    @contextmanager
-    def reload_before_reporting():
-        with value._registry.lock_for("math"):
-            value._registry.reload("math")
-        with reporting():
-            yield
-
-    try:
-        train(value, 1)
-        monkeypatch.setattr(scenario, "experiment_reporting", reload_before_reporting)
-        restored = value.rollback("math", initial.release_id)
-        current = value.get_or_create_scenario("math")
-        assert current is not scenario
-        assert current.current_artifact_ref() == restored
-        assert current.scenario_step == 2
-        assert len(tracker.rollbacks) == 1
-        assert tracker.rollbacks[0].produced_artifact_ref == restored
-    finally:
-        value.close()
-
-
-class CountingCheckpoints(CheckpointStrategy):
-    """Record each policy decision while selecting the configured cadence."""
-
-    def __init__(self, every: int) -> None:
-        self.every = every
-        self.versions: list[int] = []
-
-    def should_checkpoint(self, scenario: str, version: int, result: TrainStepResult) -> bool:
-        self.versions.append(version)
-        return version % self.every == 0
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("checkpoint_every", [1, 2])
-def test_exported_weights_use_one_checkpoint_decision_per_step(tmp_path, monkeypatch, checkpoint_every: int) -> None:
-    value, runtime, _ = dispatcher(tmp_path, checkpoint_every=checkpoint_every)
+@pytest.mark.parametrize("save_interval", [1, 2])
+def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, save_interval: int) -> None:
+    value, runtime, _ = dispatcher(tmp_path, save_interval=save_interval)
     try:
         scenario = value.get_or_create_scenario("math")
-        strategy = CountingCheckpoints(checkpoint_every)
-        monkeypatch.setattr(scenario._committer, "_checkpoint_strategy", strategy)
         train(value, 1)
         train(value, 2)
-        assert strategy.versions == [1, 2]
-        assert [record.checkpoint for record in scenario.store.history()] == [checkpoint_every == 1, True]
+        assert [record.checkpoint for record in scenario.store.history()] == [save_interval == 1, True]
         assert scenario.trainer.state["steps"] == 2
         assert runtime.trained == 2
     finally:

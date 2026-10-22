@@ -8,8 +8,7 @@ import pytest
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.scenario.registry import InstanceState
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -58,28 +57,6 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
     assert not hasattr(scenario, "base_artifact")
     assert not hasattr(scenario, "current_artifact")
     assert not hasattr(scenario, "checkpoint_artifact")
-
-
-def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend_factory = InMemoryRepositoryBackend.factory(initial)
-    fast_dispatcher = Dispatcher(
-        Recipe(name="fast", checkpoint_strategy=EveryNVersions(1)),
-        backend_factory,
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-    slow_dispatcher = Dispatcher(
-        Recipe(name="slow", checkpoint_strategy=EveryNVersions(3)),
-        backend_factory,
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-
-    fast = fast_dispatcher.get_or_create_scenario("fast")
-    slow = slow_dispatcher.get_or_create_scenario("slow")
-
-    assert fast._committer._checkpoint_strategy.n == 1
-    assert slow._committer._checkpoint_strategy.n == 3
 
 
 def test_scenario_metadata_round_trips() -> None:
@@ -244,11 +221,32 @@ def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
     original = dropped.close
     dropped.close = lambda: (closed.append("dropped"), original())[-1]
 
-    recovered = dispatcher._registry.reload("math")
+    recovered = dispatcher.registry.reload("math")
 
     assert closed == ["dropped"]
     assert recovered is not dropped
     assert dispatcher.get_or_create_scenario("math") is recovered
+
+
+def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    registry = dispatcher.registry
+    try:
+        dropped = dispatcher.get_or_create_scenario("math")
+        with registry.lock_instance(dropped) as state:
+            assert state is InstanceState.CURRENT
+
+        recovered = registry.reload("math")
+        with registry.lock_instance(dropped) as state:
+            assert state is InstanceState.REPLACED
+
+        with registry.lock_for("math"):
+            registry.unload("math")
+        recovered.close()
+        with registry.lock_instance(recovered) as state:
+            assert state is InstanceState.REMOVED
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.parametrize("operation", [None, "training", "rollback", "promote"])

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
+from reef.storage.tasks import TaskStorage
 
 
 @dataclass(frozen=True)
@@ -26,9 +27,11 @@ class PipelineContext:
     admitted_report_type: type[ReportBase] | None = None
     #: How many versions a sample may lag behind and still train; the recipe's ``max_staleness``.
     max_staleness: int = 0
-    #: The most unreserved sets the record stage holds, or None for no limit. The pipeline bounds the
-    #: held sets in manual mode, where batches follow instructions instead of sets.
-    held_set_limit: int | None = None
+    #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
+    task_storage: TaskStorage | None = None
+    #: The most unreserved batch units the record stage holds, or None for no limit. The pipeline bounds
+    #: the held units in manual mode, where batches follow instructions instead of units.
+    held_unit_limit: int | None = None
     #: Whether the pipeline takes training instructions; a recipe whose proposer reads none turns it off.
     manual_enabled: bool = True
 
@@ -37,9 +40,9 @@ class PipelineContext:
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
-        if self.held_set_limit is not None and (
-            not isinstance(self.held_set_limit, int)
-            or isinstance(self.held_set_limit, bool)
-            or self.held_set_limit < 0
+        if self.held_unit_limit is not None and (
+            not isinstance(self.held_unit_limit, int)
+            or isinstance(self.held_unit_limit, bool)
+            or self.held_unit_limit < 0
         ):
-            raise ValueError("held_set_limit must be None or a non-negative integer")
+            raise ValueError("held_unit_limit must be None or a non-negative integer")

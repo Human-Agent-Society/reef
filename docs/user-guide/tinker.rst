@@ -123,10 +123,8 @@ Already admitted requests retain their immutable sampler snapshot. The weight
 loader binds the materialized, recovered artifact before serving a scenario;
 restart creates a fresh runtime-load incarnation and starts subsequent training
 from that artifact's optimizer state. Rollback binds the republished older
-snapshot, including its optimizer. The default checkpoint cadence of one is
-recommended: non-checkpoint live releases can only be served during their
-original runtime incarnation and fall back to the last durable checkpoint on
-restart, following Reef's normal weight recovery contract.
+snapshot, including its optimizer. Each Tinker version is a durable
+checkpoint, so a restart does not lose a version.
 
 Serve with a local SGLang engine
 --------------------------------

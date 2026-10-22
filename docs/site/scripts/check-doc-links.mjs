@@ -70,7 +70,7 @@ function compileForHeadings(source) {
       generatorState.visitNodes(node.children);
     },
   });
-  return compiler.compile(source).body;
+  return compiler.compile(source.replace(/\r\n/g, "\n")).body;
 }
 
 const headingCache = new Map();
@@ -85,7 +85,7 @@ function documentHeadings(file) {
   } else {
     const slugger = new GithubSlugger();
     let inCodeBlock = false;
-    for (const line of readFileSync(file, "utf8").split("\n")) {
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
       if (line.trimStart().startsWith("```")) {
         inCodeBlock = !inCodeBlock;
         continue;

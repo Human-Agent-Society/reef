@@ -58,11 +58,16 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S, SlimeTrainGroup
+from reef.train.slime_backend.reef_adapters.train_groups import (
+    DEFAULT_TRAIN_RPC_TIMEOUT_S,
+    SlimeTrainGroup,
+    merge_rank_metrics,
+)
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     LEARNING_RATE_SCHEDULES_FILENAME,
     CheckpointStorage,
     RetentionConfig,
+    checkpoint_due,
     critic_checkpoint_due,
 )
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
@@ -130,6 +135,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         critic_steps_per_actor: int | None = None,
         critic_only_steps: int = 0,
         critic_save_interval: int = 1,
+        checkpoint_interval: int = 1,
         loss_family: str | None = None,
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
@@ -149,6 +155,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         ):
             raise ValueError("critic_save_interval must be a positive integer")
         self.critic_save_interval = critic_save_interval
+        self.checkpoint_interval = checkpoint_interval
         self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
         self._config = TrainingCoordinationConfig(
@@ -196,6 +203,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 source_hf=source_hf,
                 source_megatron=source_megatron,
                 lora=lora,
+                saves_optimizer=not args.no_save_optim,
             )
             if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
             else None
@@ -246,7 +254,8 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         # The checkpoint index is the bridge's own sequence, not the scenario step.
         rollout_id = self._next_rollout_id
         checkpoint = Path(self._checkpoint_path(rollout_id))
-        if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
+        writes_checkpoint = checkpoint_due(scenario_step, self.checkpoint_interval)
+        if self._storage is None and writes_checkpoint and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
         algorithm = self.algorithm_for_loss_family(payload["loss"])
@@ -268,7 +277,8 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 )
             optimizer_steps = len(optimizer_step_sizes(rollout_data, self.args.global_batch_size))
         context: Any = nullcontext(None)
-        if self._storage is not None:
+        # A job that saves no checkpoint does not admit storage. Thus it does not delete an older checkpoint.
+        if self._storage is not None and writes_checkpoint:
             protected = marker_rollouts(prior_marker)
             if self._history is not None:
                 # Every scenario's latest checkpoint is its restart source.
@@ -298,7 +308,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             yield _SlimePreparedTrainingJob(
                 self,
                 checkpoint=TrainingCheckpoint(
-                    rollout_id=rollout_id, path=checkpoint, scenario_step=scenario_step, scenario=scenario
+                    rollout_id=rollout_id,
+                    path=checkpoint,
+                    scenario_step=scenario_step,
+                    scenario=scenario,
+                    writes_checkpoint=writes_checkpoint,
                 ),
                 job_id=job_id,
                 rollout_data=rollout_data,
@@ -329,7 +343,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
             {},
         )
-        train_metrics.update(self.resolve_training_result(self._group.async_pop_rank0_metrics()))
+        train_metrics.update(merge_rank_metrics(self.resolve_training_result(self._group.async_pop_metrics())))
         train_metrics.update(job.algorithm_metrics)
         if training.actor_trained:
             # The actor fetched the job's data, and with it any worker switch.
@@ -337,6 +351,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             schedule_state = job.worker_settings.schedule_state
             if schedule_state is not None:
                 job.next_schedule_state = schedule_state.advanced(job.optimizer_steps)
+                # The next job continues from this progress. The file records it only with a saved checkpoint.
+                self.learning_rate_schedules[checkpoint.scenario or ""] = {
+                    "rollout_id": checkpoint.rollout_id,
+                    **job.next_schedule_state.to_dict(),
+                }
                 train_metrics.update(
                     learning_rate_metrics(schedule_state.learning_rates(job.optimizer_steps), job.next_schedule_state)
                 )
@@ -362,8 +381,8 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
-        if job.next_schedule_state is not None:
-            self.record_learning_rate_schedule_state(checkpoint.scenario, rollout_id, job.next_schedule_state)
+        if self.learning_rate_schedules:
+            self.write_learning_rate_schedules()
 
     def algorithm_for_loss_family(self, loss_family: str) -> SlimeAlgorithm:
         """The bound algorithm of a job's loss family; a new family is validated against the workers first.
@@ -433,13 +452,15 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         record = self.learning_rate_schedules.get(scenario or "")
         return None if record is None else LearningRateScheduleState.from_dict(record)
 
-    def record_learning_rate_schedule_state(
-        self, scenario: str | None, rollout_id: int, schedule_state: LearningRateScheduleState
-    ) -> None:
-        """Keep the schedule state a saved checkpoint trained to, beside the job marker."""
+    def write_learning_rate_schedules(self) -> None:
+        """Write the schedule progress of a saved checkpoint beside the job marker.
+
+        Each record names the rollout that trained it. A saved checkpoint
+        includes all earlier rollouts. Thus the file does not name a rollout
+        after the checkpoint that a restart loads.
+        """
         if self.learning_rate_schedules_path is None:
             raise RuntimeError("the Slime bridge keeps learning-rate schedule progress beside --save-hf")
-        self.learning_rate_schedules[scenario or ""] = {"rollout_id": rollout_id, **schedule_state.to_dict()}
         write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
@@ -631,6 +652,7 @@ def create_training_backend(
         critic_steps_per_actor=args.critic_steps_per_actor,
         critic_only_steps=args.num_critic_only_steps,
         critic_save_interval=args.critic_save_interval,
+        checkpoint_interval=args.save_interval,
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),

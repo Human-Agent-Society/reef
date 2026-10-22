@@ -25,7 +25,6 @@ from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
@@ -81,7 +80,7 @@ class _TreeRecipe(Recipe):
     def base_artifact_files(self) -> Mapping[str, str] | None:
         return self.seed
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -109,7 +108,7 @@ def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
 class _HybridTreeRecipe(_TreeRecipe):
     """The tree recipe with a pipeline that runs in every mode."""
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
@@ -163,14 +162,13 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
         "harness/AGENTS.md": "seed",
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
     }
-    assert recipe.checkpoint_strategy == EveryNVersions(1)
     assert recipe.report_type is None
     # No weight-training component: a bootstrap model snapshot would sit at the release root.
     assert recipe.bootstrap_artifact_component() is None
     trainers = recipe.build_trainers(
         "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}
     )
-    assert [bound.component for bound in trainers] == ["harness", "config"]
+    assert [component_trainer.component for component_trainer in trainers] == ["harness", "config"]
     assert trainers[0].trainer.candidate_backend is not None
     assert trainers[1].trainer.candidate_backend is None
 
@@ -408,50 +406,6 @@ def test_composite_recipe_reads_components_from_the_file_layout() -> None:
 
 
 @pytest.mark.unit
-def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
-    components = {
-        "harness": {"implementation": "tests.reef_recipe.test_composite_recipe:_TreeRecipe"},
-        "config": {"implementation": "tests.reef_recipe.test_composite_recipe:_ConfigRecipe"},
-    }
-    base = {"implementation": "reef.recipe.composite:CompositeRecipe", "model": {"path": "served-model"}}
-    with pytest.raises(RecipeConfigError, match=r"artifact\.checkpoint_every_n_versions has no effect"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={**base, "artifact": {"checkpoint_every_n_versions": 5}, "components": components},
-        )
-    with pytest.raises(RecipeConfigError, match=r"does not consume config key\(s\) 'checkpoint_every_n_versions'"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={
-                **base,
-                "components": {
-                    **components,
-                    "harness": {**components["harness"], "config": {"checkpoint-every-n-versions": 5}},
-                },
-            },
-        )
-    # The flat deployment spelling is refused too.
-    with pytest.raises(RecipeConfigError, match=r"recipe\.checkpoint_every_n_versions has no effect"):
-        build_recipe(
-            base["implementation"], {}, config={**base, "checkpoint_every_n_versions": 5, "components": components}
-        )
-    with pytest.raises(RecipeConfigError, match=r"does not consume config key\(s\) 'artifact'"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={
-                **base,
-                "components": {
-                    **components,
-                    "harness": {**components["harness"], "config": {"artifact": {"checkpoint_every_n_versions": 5}}},
-                },
-            },
-        )
-
-
-@pytest.mark.unit
 def test_composite_recipe_shares_one_runtime_resolved_from_the_environment() -> None:
     # No runtime is injected: the deployment relies on REEF_UPSTREAM_URL, as a flat recipe may.
     recipe = build_recipe(
@@ -518,7 +472,6 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
 
         rows = scenario.releases()
         assert rows[0]["component"] == "harness"
-        assert rows[0]["base_release_id"] == rows[1]["release_id"]
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's, naming the rows it consumed.
         assert scenario.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
@@ -620,7 +573,10 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         surface=mixed.build_surface("agent"),
         algorithm_states={},
     )
-    assert [bound.trainer.pipeline.context.admitted_report_type is mixed.report_type for bound in trainers] == [
+    assert [
+        component_trainer.trainer.pipeline.context.admitted_report_type is mixed.report_type
+        for component_trainer in trainers
+    ] == [
         True,
         True,
     ]
@@ -802,7 +758,7 @@ class _EpisodeTreeRecipe(_TreeRecipe):
     closing: threading.Event = field(default_factory=threading.Event)
     episode_done: threading.Event = field(default_factory=threading.Event)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,

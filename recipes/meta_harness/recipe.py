@@ -41,6 +41,7 @@ from reef.observability import ExperimentLogger
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.trainer import Trainer
@@ -149,6 +150,7 @@ class MetaHarnessRecipe(CordisRecipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         store = PopulationStore(scenario_population_path(self.archive_dir, scenario))
         population_state = None if algorithm_state is None else algorithm_state.get(POPULATION_STATE_KEY)
@@ -185,6 +187,7 @@ class MetaHarnessRecipe(CordisRecipe):
             MetaHarnessPlugin(backend, store),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            task_storage=task_storage,
         )
 
 

@@ -11,15 +11,17 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class RollbackRuntime(StubTrainingRuntime):
-    def __init__(self, checkpoint_dir) -> None:
+    """A runtime that saves the checkpoint of each ``save_interval``-th version, as Slime's ``--save-interval``."""
+
+    def __init__(self, checkpoint_dir, save_interval: int = 1) -> None:
         super().__init__(base_url="http://trainer")
         self.checkpoint_dir = checkpoint_dir
+        self.save_interval = save_interval
         self.trained = 0
         self.restored: list[str] = []
         self.restore_order = []
@@ -43,15 +45,20 @@ class RollbackRuntime(StubTrainingRuntime):
     def train_candidate(self, payload):
         self.trained += 1
         version = f"w{self.trained}"
-        checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
-        checkpoint.mkdir(parents=True)
-        (checkpoint / "model.txt").write_text(version)
+        if (payload["scenario_step"] + 1) % self.save_interval:
+            # A job between two saves publishes live weights.
+            checkpoint_path = None
+        else:
+            checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
+            checkpoint.mkdir(parents=True)
+            (checkpoint / "model.txt").write_text(version)
+            checkpoint_path = str(checkpoint)
         job_id = f"job-{payload['scenario_step']}"
         self.candidate_versions[job_id] = version
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
-            checkpoint_path=str(checkpoint),
+            checkpoint_path=checkpoint_path,
             current_runtime_load_id=None,
         )
 
@@ -127,17 +134,16 @@ def report(index: int) -> AgentRecord:
     )
 
 
-def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
+def dispatcher(tmp_path, *, save_interval: int = 1, experiment_tracker=None):
     initial = tmp_path / "initial"
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("w0")
-    runtime = RollbackRuntime(tmp_path / "exported")
+    runtime = RollbackRuntime(tmp_path / "exported", save_interval)
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     value = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(runtime),
             batch_size=1,
-            checkpoint_strategy=EveryNVersions(checkpoint_every),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",

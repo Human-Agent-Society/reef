@@ -17,18 +17,18 @@ from typing import Any
 import pytest
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from recipes.sdft import SDFTBatches, SdftObjective, SDFTRecipe
+from recipes.sdft import SdftObjective, SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSettings, SDFTTasks
 from recipes.sdft.slime import SdftSettings
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
+from reef.task2batch import DistillBatches
 from reef.train import PipelineContext
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
@@ -120,7 +120,7 @@ def _processor(**config: Any) -> TrainingPipeline:
         context,
         record2record=ExclusiveReportRecord2Record(context),
         record2task=SDFTTasks(SDFTSettings(tokenizer_path=TOKENIZER_PATH, **config)),
-        task2batch=SDFTBatches(context, 1),
+        task2batch=DistillBatches(context, 1),
     )
 
 
@@ -175,13 +175,13 @@ def test_the_template_needs_the_placeholder() -> None:
 @pytest.mark.unit
 def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: CountingTokenizer) -> None:
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
 
     batch = processor.build_batch()
 
     assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "science:sdft:1"
+    assert batch.batch_id == "science:batch:1"
     (sample,) = batch.items
     assert source_record_id(sample) == "i1"
     prompt_ids = tokenizer.count_ids(tokenizer.calls[0][0])
@@ -219,14 +219,13 @@ def test_sdft_recipe_resolves_by_dotted_reference(tokenizer: CountingTokenizer) 
     assert isinstance(recipe, SDFTRecipe)
     assert recipe.name == "sdft"
     assert recipe.report_type is TeacherContextReport
-    assert recipe.checkpoint_strategy == EveryNVersions(1)
     spec = SDFTRecipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("sdft", "sdft")
     assert spec.scheduling == StepScheduling(unit="sample")
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, SDFTTasks)
-    assert isinstance(pipeline.task2batch, SDFTBatches)
+    assert isinstance(pipeline.task2batch, DistillBatches)
     assert pipeline.task2batch.batch_size == 1
     assert pipeline.record2task.max_teacher_tokens == 0
     assert pipeline.record2task.template == DEFAULT_CONTEXT_TEMPLATE
@@ -246,11 +245,9 @@ def test_sdft_recipe_hands_each_stage_its_pipeline_config(tokenizer: CountingTok
                 },
                 "task2batch": {"config": {"batch_size": 4}},
             },
-            "artifact": {"checkpoint_every_n_versions": 4},
         }
     )
 
-    assert recipe.checkpoint_strategy == EveryNVersions(4)
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2task, SDFTTasks)
     assert pipeline.task2batch.batch_size == 4
@@ -297,8 +294,8 @@ def test_sdft_recipe_refuses_stage_settings_in_the_recipe_config() -> None:
 def test_objective_trains_every_batch_and_refuses_multiple_epochs(tokenizer: CountingTokenizer) -> None:
     objective = SdftObjective()
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
     signal = objective.prepare(batch, {"steps": 2})
@@ -312,8 +309,8 @@ def test_objective_trains_every_batch_and_refuses_multiple_epochs(tokenizer: Cou
 @pytest.mark.unit
 def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokenizer: CountingTokenizer) -> None:
     processor = _processor()
-    processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",)))
+    processor.push(_inference("i1"))
+    processor.push(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
     prepared = prepare_slime_step(batch, TrainingMethod("sdft"), {}, StepScheduling(unit="sample"))

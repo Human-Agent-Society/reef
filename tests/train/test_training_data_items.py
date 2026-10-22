@@ -240,8 +240,8 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
             )
 
     class MixedBatches(Task2Batch):
-        def make_batch(self, tasks, batch_number):
-            return TrainingBatch(str(batch_number), tasks)
+        def make_batch(self, tasks, batch_id):
+            return TrainingBatch(batch_id, tasks)
 
     from reef.record2record import ReportGrouping, ReportRecord2Record
 
@@ -255,7 +255,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
     ):
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="mixed",
                 request_type=RequestType.INFERENCE,
@@ -263,7 +263,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 payload=payload,
             )
         )
-        processor.ingest(
+        processor.push(
             AgentRecord.create(
                 scenario="mixed",
                 request_type=RequestType.REPORT,

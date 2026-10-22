@@ -37,7 +37,7 @@ class ScenarioReleases:
         self._name = name
         self._artifacts = artifacts
         self._store = store
-        self._publication_lock = publication_lock
+        self.publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
         self.recorded_creation_components: Mapping[str, str] | None = None
         self.creation_components_read = False
@@ -71,7 +71,7 @@ class ScenarioReleases:
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
-        with self._publication_lock:
+        with self.publication_lock:
             records = () if not self._store.durable else self._store.history()
             rows = [
                 self._release_row(
@@ -95,7 +95,6 @@ class ScenarioReleases:
                     metrics=record.metrics,
                     pending=record.pending,
                     component=record.component,
-                    base_release_id=record.base_release_id,
                     components=record.components,
                 )
                 for record in records
@@ -111,6 +110,12 @@ class ScenarioReleases:
                     )
                 )
             return tuple(reversed(rows))
+
+    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
+        """The ref of a scenario release without materializing it; ``None`` when the catalog has no such release."""
+        with self.publication_lock:
+            found = self.find_release(release_id)
+        return None if found is None else found[0]
 
     def find_release(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
         """The release and whether it has durable bytes; a step that published nothing does not hide them.
@@ -215,7 +220,7 @@ class ScenarioReleases:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._publication_lock:
+        with self.publication_lock:
             found = self.find_release(release_id)
         if found is None:
             raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
@@ -234,7 +239,7 @@ class ScenarioReleases:
         release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
         """Capture one artifact and its metrics without waiting for preparation."""
-        with self._publication_lock:
+        with self.publication_lock:
             artifact = (
                 Artifact(self._artifacts.current, self._artifacts.repository)
                 if release_id is None
@@ -257,7 +262,6 @@ class ScenarioReleases:
         metrics: Mapping[str, Any] | None = None,
         pending: bool = False,
         component: str | None = None,
-        base_release_id: str | None = None,
         components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
@@ -284,8 +288,6 @@ class ScenarioReleases:
             row["metrics"] = dict(metrics)
         if component is not None:
             row["component"] = component
-        if base_release_id is not None:
-            row["base_release_id"] = base_release_id
         if components is not None:
             row["components"] = dict(components)
         return row

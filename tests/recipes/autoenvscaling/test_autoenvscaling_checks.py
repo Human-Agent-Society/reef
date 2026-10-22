@@ -29,7 +29,8 @@ from recipes.beta.autoenvscaling import AutoEnvScalingGenerator, checks
 from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling.author import REVIEW_TEXT
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import HarborTask, TaskPlayResult
+from reef.core.tasks import HarborTask
+from reef.recipe.generated_tasks.generator import TaskPlayResult
 
 
 @pytest.fixture(autouse=True)
@@ -63,8 +64,8 @@ def reef_url(server: ThreadingHTTPServer) -> str:
 
 def validated(generator: AutoEnvScalingGenerator) -> tuple[HarborTask, tuple[str, ...]]:
     """Generate one task and validate it: the task and its validation errors."""
-    (item,) = asyncio.run(generator.generate(REQUEST))
-    return item.task, asyncio.run(generator.validate(item.task)).errors
+    (task,) = asyncio.run(generator.generate(REQUEST))
+    return task, asyncio.run(generator.validate(task)).errors
 
 
 def closed_with(generator: AutoEnvScalingGenerator, task: HarborTask, errors: tuple[str, ...]) -> dict[str, Any]:

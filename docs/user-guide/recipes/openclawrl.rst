@@ -128,8 +128,8 @@ The values above are the defaults. The example's ``serve.yaml`` overrides
 several of them. It points ``prm_url`` and ``prm_tokenizer_path`` at the
 example's independently deployed PRM engine. It raises ``prm_timeout_s`` to
 3600 because a thinking model can spend minutes on a single vote. It sets
-``prm_record_file`` so every batch leaves one line with the reward split and
-the judge counters.
+``prm_record_file``, so each batch writes one line with its ``batch_id``, the
+reward split, and the judge counters.
 
 Reef coordinates inference and training only. OpenClawRL's example Compose
 file owns PRM and student-model startup, health checks and GPU allocation.

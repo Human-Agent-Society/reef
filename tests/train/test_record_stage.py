@@ -13,24 +13,23 @@ from tests.train.test_record_stage_batch_parity import CountingBackend, inferenc
 from reef.core import AgentRecord
 from reef.record2record import (
     GroupDecision,
-    PassThroughRecord2Record,
+    InferenceRecord2Record,
+    NoRecordSets,
     RecordSet,
     ReportContext,
     ReportGrouping,
     ReportRecord2Record,
-    SingleRecordSet,
-    TaskStatus,
 )
-from reef.record2task import Record2Task, ReportTasks, SkippedReport, TaskResult
+from reef.record2task import ImmediateRecord2Task, Record2Task, ReportTasks, SkippedReport, TaskResult
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import Task2Batch
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch
+from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 
-class WithholdingRecord2Record(PassThroughRecord2Record):
-    """Passes records through, except records whose ID starts with ``drop``: it ends those itself."""
+class WithholdingRecord2Record(InferenceRecord2Record):
+    """Forms a set of each inference record, except records whose ID starts with ``drop``: it ends those itself."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -39,11 +38,11 @@ class WithholdingRecord2Record(PassThroughRecord2Record):
         self.pending = False
         self.closed = False
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         if record.agent_record_id.startswith("drop"):
             self.ended.add(record.agent_record_id)
             return
-        super().ingest(record)
+        super().push(record)
 
     def releasable_record_ids(self) -> frozenset[str]:
         return frozenset(self.ended)
@@ -62,15 +61,16 @@ class WithholdingRecord2Record(PassThroughRecord2Record):
         self.closed = True
 
 
-class RecordingTasks(Record2Task):
-    """Keeps the record IDs of every set that it sees, and makes no tasks."""
+class RecordingTasks(ImmediateRecord2Task):
+    """Keeps the record IDs of every set that it sees, and skips the set."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.assembled: list[str] = []
 
     def make_tasks(self, record_set: RecordSet) -> TaskResult:
         self.assembled.extend(record_set.record_ids())
-        return TaskResult(TaskStatus.INGESTED)
+        return TaskResult.skipped()
 
 
 class RecordingBatches(Task2Batch):
@@ -81,8 +81,8 @@ class RecordingBatches(Task2Batch):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, 1)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"recording:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class RecordingPipeline(TrainingPipeline):
@@ -95,14 +95,43 @@ class RecordingPipeline(TrainingPipeline):
         super().__init__(context, record2record=self.stage, record2task=self.recording, task2batch=self.batches)
 
 
+class LaterTasks(Record2Task):
+    """Returns no result when a set arrives; ``finish`` queues a result that ``pull`` returns."""
+
+    def __init__(self) -> None:
+        self.finished: list[tuple[Hashable, TaskResult]] = []
+
+    def push(self, record_set: RecordSet) -> None:
+        return
+
+    def finish(self, set_id: Hashable, result: TaskResult) -> None:
+        self.finished.append((set_id, result))
+
+    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+        finished, self.finished = tuple(self.finished), []
+        return finished
+
+
+class WaitingPipeline(TrainingPipeline):
+    """Holds each inference record as one set whose tasks ``LaterTasks`` makes later."""
+
+    def __init__(self, context: PipelineContext | None = None) -> None:
+        context = PipelineContext("s") if context is None else context
+        self.later_tasks = LaterTasks()
+        self.batches = RecordingBatches(context)
+        super().__init__(
+            context, record2record=InferenceRecord2Record(), record2task=self.later_tasks, task2batch=self.batches
+        )
+
+
 class DroppingReportRecord2Record(ReportRecord2Record):
     """A report stage that ends every record whose ID starts with ``drop``, so the record is releasable."""
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         if record.agent_record_id.startswith("drop"):
             self.end_report(record)
             return
-        super().ingest(record)
+        super().push(record)
 
 
 def dropping_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -124,6 +153,7 @@ class PairTasks(ReportTasks):
     """Each report becomes a task named after it. Reports whose ID starts with ``skip`` cannot train."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.fail_assembly = False
 
     def make_sample(self, context: ReportContext) -> TrainDataItem | SkippedReport:
@@ -135,8 +165,8 @@ class PairTasks(ReportTasks):
 
 
 class PairBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"pairs:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 class PairPipeline(TrainingPipeline):
@@ -158,23 +188,24 @@ def slotted(record_id: str, reference: str, slot: str) -> AgentRecord:
 
 
 @pytest.mark.unit
-def test_the_pass_through_stage_forms_one_set_per_record_in_arrival_order() -> None:
-    stage = PassThroughRecord2Record()
-    for record_id in ("i1", "r1", "i2"):
-        stage.ingest(inference(record_id))
-    formed = stage.take_formed()
-    assert [record_set.record_ids() for record_set in formed] == [("i1",), ("r1",), ("i2",)]
-    assert [record_set.arrival_index for record_set in formed] == [1, 2, 3]
-    assert stage.take_formed() == ()
-    assert stage.releasable_record_ids() == frozenset() and not stage.background_jobs_running()
+def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order() -> None:
+    stage = InferenceRecord2Record()
+    for record_id in ("i1", "i2"):
+        stage.push(inference(record_id))
+    stage.push(report("r1", "i1"))
+    formed = stage.pull()
+    assert [record_set.record_ids() for record_set in formed] == [("i1",), ("i2",)]
+    assert [record_set.arrival_index for record_set in formed] == [1, 2]
+    assert stage.pull() == ()
+    assert stage.releasable_record_ids() == {"r1"} and not stage.background_jobs_running()
 
 
 @pytest.mark.unit
 def test_the_pipeline_keeps_instructions_and_sends_other_records_through_its_stage() -> None:
     processor = RecordingPipeline(PipelineContext("s", training_mode="hybrid"))
-    processor.ingest(inference("i1"))
-    processor.ingest(inference("drop-1"))
-    processor.ingest(instruction("train-1"))
+    processor.push(inference("i1"))
+    processor.push(inference("drop-1"))
+    processor.push(instruction("train-1"))
     assert processor.recording.assembled == ["i1"]
     assert processor.buffered_requests() == 1
     assert processor.releasable_record_ids() == {"drop-1"}
@@ -232,10 +263,10 @@ def test_the_trainer_reports_the_stages_background_work() -> None:
 def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2", "i3"):
-        processor.ingest(inference(record_id))
-    processor.ingest(slotted("r1", "i1", "a"))
-    processor.ingest(slotted("r2", "i2", "a"))
-    processor.ingest(slotted("r3", "i3", "b"))
+        processor.push(inference(record_id))
+    processor.push(slotted("r1", "i1", "a"))
+    processor.push(slotted("r2", "i2", "a"))
+    processor.push(slotted("r3", "i3", "b"))
     batch = processor.build_batch()
     assert [str(item.task_path) for item in batch.items] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
@@ -246,22 +277,22 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
 def test_a_failed_assembly_keeps_the_report_and_leaves_its_slot_free() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2"):
-        processor.ingest(inference(record_id))
+        processor.push(inference(record_id))
     processor.pair_tasks.fail_assembly = True
     with pytest.raises(ValueError, match="broken training data"):
-        processor.ingest(slotted("r1", "i1", "a"))
+        processor.push(slotted("r1", "i1", "a"))
     assert not processor.releasable_record_ids() & {"r1", "i1"}
     processor.pair_tasks.fail_assembly = False
-    processor.ingest(slotted("r1", "i1", "a"))
-    processor.ingest(slotted("r2", "i2", "b"))
+    processor.push(slotted("r1", "i1", "a"))
+    processor.push(slotted("r2", "i2", "b"))
     assert [str(item.task_path) for item in processor.build_batch().items] == ["r1", "r2"]
 
 
 @pytest.mark.unit
 def test_a_skipped_report_is_released_and_never_batched() -> None:
     processor = PairPipeline()
-    processor.ingest(inference("i1"))
-    processor.ingest(slotted("skip-1", "i1", "a"))
+    processor.push(inference("i1"))
+    processor.push(slotted("skip-1", "i1", "a"))
     assert {"skip-1", "i1"} <= processor.releasable_record_ids()
     assert not processor.ready()
 
@@ -270,9 +301,9 @@ def test_a_skipped_report_is_released_and_never_batched() -> None:
 def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2"):
-        processor.ingest(inference(record_id))
-    processor.ingest(slotted("r2", "i2", "b"))
-    processor.ingest(slotted("r1", "i1", "a"))
+        processor.push(inference(record_id))
+    processor.push(slotted("r2", "i2", "b"))
+    processor.push(slotted("r1", "i1", "a"))
     batch = processor.build_batch()
     assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
     assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
@@ -283,11 +314,11 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
 def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
     processor = threshold_pipeline(PipelineContext("s"))
     processor.observe_serving_runtime_load_id("e:1")
-    processor.ingest(inference("i1", version="e:1"))
-    processor.ingest(report("r1", "i1"))
+    processor.push(inference("i1", version="e:1"))
+    processor.push(report("r1", "i1"))
     processor.observe_serving_runtime_load_id("e:2")
-    processor.ingest(inference("i2", version="e:2"))
-    processor.ingest(report("r2", "i2"))
+    processor.push(inference("i2", version="e:2"))
+    processor.push(report("r2", "i2"))
     batch = processor.build_batch()
     assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
@@ -296,9 +327,107 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
 
 
 @pytest.mark.unit
-def test_the_default_pipeline_makes_no_tasks_and_no_batch() -> None:
+def test_the_default_pipeline_forms_no_record_set_and_makes_no_batch() -> None:
     processor = TrainingPipeline(PipelineContext("s"))
-    record_set = SingleRecordSet(set_id="i1", arrival_index=1, record=inference("i1"))
-    assert processor.record2task.make_tasks(record_set) == TaskResult(TaskStatus.INGESTED)
-    processor.ingest(inference("i1"))
+    assert isinstance(processor.record2record, NoRecordSets)
+    processor.push(inference("i1"))
+    processor.push(report("r1", "i1"))
+    assert processor.record2record.pull() == ()
     assert not processor.ready() and not processor.releasable_record_ids()
+
+
+@pytest.mark.unit
+def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back() -> None:
+    processor = WaitingPipeline()
+    processor.push(inference("i1"))
+    processor.push(inference("i2"))
+    assert not processor.ready() and processor.background_jobs_running()
+    processor.later_tasks.finish("i2", TaskResult.skipped())
+    assert not processor.ready() and processor.releasable_record_ids() == {"i2"}
+    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    assert processor.ready(), "the result alone makes a batch, without another record"
+    assert not processor.background_jobs_running()
+    assert [str(item.task_path) for item in processor.build_batch().items] == ["t1"]
+
+
+@pytest.mark.unit
+def test_a_second_result_for_a_settled_set_is_refused() -> None:
+    processor = WaitingPipeline()
+    processor.push(inference("i1"))
+    result = TaskResult.ready((TaskItem(Path("t1")),))
+    processor.later_tasks.finish("i1", result)
+    assert processor.ready()
+    processor.later_tasks.finish("i1", result)
+    with pytest.raises(ValueError, match="set 'i1', which no set waits for"):
+        processor.ready()
+
+
+@pytest.mark.unit
+def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
+    records = SQLiteRecordStore()
+    records.append(inference("i1"))
+    trainer = Trainer.build("s", records, pipeline_factory=WaitingPipeline, candidate_backend=CountingBackend())
+    assert trainer.reserve_training_batch() is None
+    assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
+    processor = trainer.pipeline
+    assert isinstance(processor, WaitingPipeline)
+    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    batch = trainer.reserve_training_batch()
+    assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
+
+
+class InferenceTasks(ImmediateRecord2Task):
+    """Each inference set becomes one task named after its record."""
+
+    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+        record_ids = record_set.record_ids()
+        return TaskResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
+
+
+class UploadBatches(PairBatches):
+    accepts_trajectories = True
+
+
+TRAJECTORY = TrajectoryItem({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
+
+
+@pytest.mark.unit
+def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_units() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=UploadBatches(context, 2),
+    )
+    processor.push(inference("i1"))
+    assert not processor.ready()
+    processor.push_trajectory("t1", TRAJECTORY)
+    processor.push_trajectory("t2", TRAJECTORY)
+    assert processor.status()["ready_units"] == 3
+
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    processor.release_batch(batch.batch_id)
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    assert processor.acknowledge(batch.batch_id) == {"trajectory:t1", "trajectory:t2"}
+
+    # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
+    processor.push_trajectory("t1", TRAJECTORY)
+    processor.push_trajectory("t3", TRAJECTORY)
+    batch = processor.build_batch()
+    assert batch.items == (TRAJECTORY, TaskItem(Path("i1"), source_agent_record_ids=("i1",)))
+    assert processor.acknowledge(batch.batch_id) == {"trajectory:t3", "i1"}
+    consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
+    assert consumed <= processor.releasable_record_ids()
+    processor.release_records(consumed)
+    assert not processor.consumed_trajectory_ids
+
+
+@pytest.mark.unit
+def test_a_pipeline_refuses_a_trajectory_that_its_batch_stage_does_not_accept() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(context, task2batch=PairBatches(context, 1))
+    with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
+        processor.push_trajectory("t1", TRAJECTORY)

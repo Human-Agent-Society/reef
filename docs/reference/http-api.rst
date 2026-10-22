@@ -8,7 +8,7 @@ request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
 The service accepts request bodies up to 64 MiB so coding agents can send
-large contexts. Record import routes retain their 1 MiB limit.
+large contexts. Record import routes accept request bodies up to 10 MiB.
 
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
@@ -56,6 +56,8 @@ Routes
 | ``POST /reef/records``                                                           | import one existing inference or report           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/trajectories``                                                      | upload ATIF trajectories to train on directly     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -207,9 +209,11 @@ understands. Import does not synthesize missing training tensors, run inference,
 or assign the current serving artifact to externally generated examples.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
+To upload ATIF trajectories that are already complete, see
+`Upload trajectories <#upload-trajectories>`__.
 
 For existing datasets, use the batch endpoint and resumable JSONL importer
-below. Both endpoints retain the existing 1 MiB HTTP request-body limit.
+below. Both endpoints accept request bodies up to 10 MiB.
 
 Imported records enter the same scenario storage and wake the same training
 worker as live traffic. Keep the same scenario header when subsequently calling
@@ -235,7 +239,7 @@ Batch imports and resume
 
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
 record uses the same three-field envelope as ``POST /reef/records``. The batch
-must contain 1 to 1000 records and fit within the 1 MiB request-body limit.
+must contain 1 to 1000 records and fit within the 10 MiB request-body limit.
 All records share the request's scenario, release and tag headers. Put an
 inference before reports that reference it, including within the same batch.
 
@@ -292,6 +296,50 @@ may retain inference records while waiting for feedback; placing all inferences
 before all reports can therefore build a large in-memory backlog. Where possible,
 place reports close to their referenced inferences. Large-dataset throughput and
 end-to-end memory use require measurement with the selected recipe.
+
+Upload trajectories
+-------------------
+
+Use this route when your data is already a complete ATIF trajectory. An
+uploaded trajectory is not a record. Reef keeps it in the scenario storage and
+gives it directly to the recipe's task-to-batch stage. The scenario's recipe
+must accept uploaded trajectories. If it does not, Reef refuses the upload with
+400. For the recipe side, see
+`Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+
+The route uses the usual Bearer token and ``x-reef-scenario`` header. Send 1
+to 1000 trajectories in one request to ``POST /reef/trajectories``. Each one
+has a ``trajectory_id`` that you choose. Each document must have an ``ATIF-v``
+``schema_version``, an ``agent`` object and at least one step. Reef saves all
+of them in one transaction, or none. The request body can be at most 10 MiB:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/trajectories \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'x-reef-scenario: my-agent' \
+     -H 'Content-Type: application/json' \
+     -d '{"trajectories": [{
+       "trajectory_id": "trajectory-0001",
+       "trajectory": {
+         "schema_version": "ATIF-v1.4",
+         "session_id": "trajectory-0001",
+         "agent": {"name": "my-agent", "version": "1"},
+         "steps": [{"step_id": 1, "source": "user", "message": "What is 2 + 2?"}]
+       }
+     }]}'
+
+The response is ``{"scenario": "my-agent", "trajectory_ids":
+["trajectory-0001"]}``. An identical retry returns the same receipt, also
+after training. The same ID with a different trajectory returns 409. An
+invalid upload returns 400 and saves nothing.
+
+Each uploaded trajectory counts as one batch unit toward the recipe's
+``batch_size``. A batch takes uploaded trajectories first, in upload order,
+and then the units of recorded traffic. Thus a large upload can delay the
+training of live traffic. The delay continues until the batches use all of
+the upload. Archiving the scenario retires its uploaded trajectories with its
+records. Record retention does not delete them.
 
 Manual training
 ---------------
@@ -1148,15 +1196,10 @@ or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
 not be read. ``batch_ready`` says whether the processor has a batch waiting.
 A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
-``training_mode``, ``processor`` status, ``last_committed_step`` (with
-the ``base_release_id`` that step was prepared against), and
-``stale_refusals_total``, how many of its results were refused because
-another trainer's commit had replaced their base since this process
-started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
+``training_mode``, ``processor`` status and ``last_committed_step``. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
 ``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
-trainer that made it, and ``base_release_id``, the release its batch was
-reserved against; a scenario of one trainer, and rows written before Reef
-named components, carry neither.
+trainer that made it; a scenario of one trainer, and rows written before Reef
+named components, carry none.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed

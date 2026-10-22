@@ -19,6 +19,7 @@ def slime_args(**overrides):
     values = {
         "critic_steps_per_actor": 2,
         "critic_save_interval": 1,
+        "save": "/tmp/megatron",
         "use_critic": False,
         "offload_train": False,
         "disable_grad_buffers_cpu_backup": False,
@@ -138,6 +139,7 @@ def test_keeping_the_lora_base_resident_needs_lora_and_colocation() -> None:
             "offload_rollout": True,
             "megatron_lora_rank": 32,
             "keep_lora_base_resident": True,
+            "save_interval": 1,
         }
         values.update(overrides)
         return SlimeArguments(**values)
@@ -169,6 +171,7 @@ def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
             offload_rollout=True,
             megatron_lora_rank=rank,
             keep_lora_base_resident=True,
+            save_interval=1,
         )
 
     for rank in (0, 32):
@@ -185,6 +188,50 @@ def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
 def test_finalize_arguments_rejects_nonpositive_critic_save_interval(interval: int) -> None:
     with pytest.raises(ValueError, match="critic-save-interval"):
         finalize_reef_slime_args(slime_args(critic_save_interval=interval), [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("save", [None, " "])
+def test_finalize_arguments_requires_save(save: str | None) -> None:
+    # Megatron checks --save-interval only with --save, and the bridge reads --save-interval.
+    with pytest.raises(ValueError, match="requires --save"):
+        finalize_reef_slime_args(slime_args(save=save), [])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "refusal"),
+    [
+        ({}, None),
+        ({"release_train": True}, "--release-train"),
+        ({"megatron_lora_rank": 32}, "not LoRA"),
+    ],
+)
+def test_a_checkpoint_interval_needs_full_weight_training_that_keeps_its_workers(overrides, refusal) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    values = {
+        "compute_advantages_and_returns": False,
+        "num_rollout": 1,
+        "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
+        "save": "/tmp/megatron",
+        "debug_train_only": False,
+        "debug_rollout_only": False,
+        "rollout_num_gpus": 1,
+        "rollout_external": False,
+        "colocate": True,
+        "offload_train": True,
+        "offload_rollout": True,
+        "megatron_lora_rank": 0,
+        "keep_lora_base_resident": False,
+        "save_interval": 4,
+        **overrides,
+    }
+    if refusal is None:
+        validate_bridge_args(SlimeArguments(**values), None)
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            validate_bridge_args(SlimeArguments(**values), None)
 
 
 @pytest.mark.unit

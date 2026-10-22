@@ -15,7 +15,6 @@ from tests.support.runtime_stubs import StubTrainingRuntime
 
 
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.deploy.service_config import ServiceConfig
@@ -74,10 +73,7 @@ def stub_runtimes(**kwargs):
 
 
 def _settings(**overrides) -> ServiceConfig:
-    recipe_settings = {
-        "checkpoint_every_n_versions": 3,
-        **overrides.pop("recipe_settings", {}),
-    }
+    recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
         "host": "0.0.0.0",
         "port": 8900,
@@ -290,7 +286,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         connector=connector,
     )
 
-    assert dispatcher._recipe.name == "openclawrl"
+    assert dispatcher.recipe.name == "openclawrl"
     assert connected == {
         "inference_url": "http://ray-head:30000",
         "actor_name": "reef-train-bridge",
@@ -321,7 +317,7 @@ def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_pa
         )
     )
 
-    assert dispatcher._recipe.name == "recipe"
+    assert dispatcher.recipe.name == "recipe"
 
 
 @pytest.mark.unit
@@ -341,7 +337,7 @@ def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatc
         environ={},
     )
 
-    assert dispatcher._recipe.name == "recipe"
+    assert dispatcher.recipe.name == "recipe"
 
 
 @pytest.mark.unit
@@ -378,7 +374,7 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
         environ={},
     )
 
-    recipe = dispatcher._recipe
+    recipe = dispatcher.recipe
     assert recipe.adapter == "pi"
     assert recipe.tasks == ("task one",)
 
@@ -394,18 +390,16 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            recipe_settings={"checkpoint_every_n_versions": 5},
             pipeline_settings={"task2batch": {"config": {"batch_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
         connector=lambda **kwargs: stub_runtimes(),
     )
-    recipe = dispatcher._recipe
+    recipe = dispatcher.recipe
     captured["batch_size"] = recipe.stages().task2batch.config["batch_size"]
-    captured["checkpoint_strategy"] = recipe.checkpoint_strategy
 
-    assert captured == {"batch_size": 4, "checkpoint_strategy": EveryNVersions(5)}
+    assert captured == {"batch_size": 4}
 
 
 @pytest.mark.unit
@@ -430,7 +424,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         connector=lambda **kwargs: stub_runtimes(),
     )
 
-    recipe = dispatcher._recipe
+    recipe = dispatcher.recipe
     assert recipe.candidate_evaluation is not None
     assert recipe.candidate_evaluation.plugin.plugin_class.__name__ == evaluation["module"].rpartition(":")[2]
 
@@ -476,7 +470,7 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
         dataclasses.replace(settings, recipe_settings={}), connector=lambda **kwargs: stub_runtimes()
     )
 
-    stages = dispatcher._recipe.pipeline_stages
+    stages = dispatcher.recipe.pipeline_stages
     # A stage the section leaves out is the recipe's own, with no config.
     assert stages is not None and stages.task2batch.plugin_class.__name__ == "GeneratedTaskBatches"
     assert stages.task2batch.config == {}
@@ -544,7 +538,6 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
         )
     # The error lists what the recipe would consume.
     assert "reef.max_staleness" in str(excinfo.value)
-    assert "reef.checkpoint_every_n_versions" in str(excinfo.value)
 
 
 @pytest.mark.unit
@@ -623,12 +616,12 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
         connector=connector,
     )
 
-    assert dispatcher._recipe.name == "sao"
+    assert dispatcher.recipe.name == "sao"
     # The runtime connector was invoked (inference branch never connects).
     assert connected["actor_name"] == "reef-train-bridge"
     # The window belongs to the recipe's pipeline; the runtime connection never receives it.
     assert "max_staleness" not in connected
-    assert dispatcher._recipe.max_staleness == 2
+    assert dispatcher.recipe.max_staleness == 2
 
 
 @pytest.mark.unit
@@ -656,7 +649,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_the_recipe(
     )
 
     assert "max_staleness" not in connected
-    assert dispatcher._recipe.max_staleness == max_staleness
+    assert dispatcher.recipe.max_staleness == max_staleness
 
 
 @pytest.mark.unit

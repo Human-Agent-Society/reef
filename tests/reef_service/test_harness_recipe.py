@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,6 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ReefError
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
@@ -31,7 +31,6 @@ from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.mutations import admit_mutations
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.sandbox.process import LocalExecutor
@@ -836,22 +835,17 @@ def _report_once(scenario, name: str, suffix: str) -> None:
     )
 
 
-@pytest.mark.parametrize("checkpoint_every", [1, 2])
-def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(
-    tmp_path: Path,
-    checkpoint_every: int,
-) -> None:
+def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(tmp_path: Path) -> None:
     """Cordis owns its temporary render, while the repository owns its copy."""
 
     def propose(nodes, samples, model):
         del nodes, samples, model
         return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 
-    built = dataclasses.replace(recipe(tmp_path, propose), checkpoint_strategy=EveryNVersions(checkpoint_every))
     initial = tmp_path / "initial"
     initial.mkdir()
     dispatcher = Dispatcher(
-        built,
+        recipe(tmp_path, propose),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -2379,15 +2373,15 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert row["pending"] is True and row["restorable"] is True
         tree = scenario.surface.files
         assert tree is not None
-        pending_files = tree.read_files(scenario.artifact_for_version(row["release_id"]))
+        pending_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
         assert pending_files is not None and any("marker" in text for text in pending_files.values())
-        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
+        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert not served_files or not any("marker" in text for text in served_files.values())
 
         promoted = dispatcher.promote("review", row["release_id"])
         assert promoted.release_id != row["release_id"]
         assert scenario.current_artifact_ref() == promoted
-        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
+        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
         assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
@@ -2512,40 +2506,6 @@ def test_pending_requires_durable_bytes() -> None:
         TrainStepResult({}, {}, pending=True)
     with pytest.raises(ValueError, match="pending must be a boolean"):
         TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
-
-
-def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) -> None:
-    """Checkpoint policy runs after the result is built, so a durable-weights
-    step can still land on the live path; holding it back there is not
-    expressible and must fail loudly rather than serve the tree anyway."""
-    built = CordisRecipe(
-        resolve_proposer(lambda nodes, samples, model: None),
-        resolve_episode_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=(SEED_MODELS, SEED_SETTINGS),
-        runtime=runtime(),
-        checkpoint_strategy=EveryNVersions(1000),
-    )
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("live-pending")
-        assert scenario is not None
-        held = TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path=str(tmp_path / "ckpt"), pending=True)
-        with pytest.raises(ReefError, match="pending release requires a durable checkpoint"):
-            scenario.commit(held)
-    finally:
-        dispatcher.close()
-
-
-# -- the tree travels as a file, and the adapter's kinds are an admission rule ----------
 
 
 def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:
@@ -2675,9 +2635,8 @@ def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: 
     assert not (published / "tree.json").exists()
 
 
-def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
-    from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
-
+def write_demo_evolution(tmp_path: Path, monkeypatch) -> None:
+    """A proposer that proposes nothing and a scorer, importable as ``demo_evolution``."""
     module = tmp_path / "demo_evolution.py"
     module.write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
@@ -2688,17 +2647,29 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
+
+
+def task_directory(root: Path, name: str) -> Path:
+    from reef.core.tasks import HarborTask, write_harbor_task
+
+    return write_harbor_task(
+        HarborTask(
+            name=name,
+            instruction=f"task {name}",
+            tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+            environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        ),
+        root,
+    )
+
+
+def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
+    from reef.core.tasks import TaskSplit, write_split_manifest
+
+    write_demo_evolution(tmp_path, monkeypatch)
     root = tmp_path / "tasks"
     for name in ("held-1", "held-2", "train-1"):
-        write_harbor_task(
-            HarborTask(
-                name=name,
-                instruction=f"task {name}",
-                tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-                environment={"Dockerfile": "FROM python:3.12-slim\n"},
-            ),
-            root,
-        )
+        task_directory(root, name)
     write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
     evolution = {
         "propose": "demo_evolution:Propose",
@@ -2736,3 +2707,44 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
     (root / "held-2" / "instruction.md").write_text("changed")
     with pytest.raises(RecipeConfigError, match=r"held-2.*does not match its digest"):
         CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+
+
+def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from reef.storage.tasks import IMPORTED_TASK_STORE
+    from reef.train.cordis_backend.backend import eval_task_paths
+
+    write_demo_evolution(tmp_path, monkeypatch)
+    root = tmp_path / "tasks"
+    evolution = {
+        "propose": "demo_evolution:Propose",
+        "evaluate": "demo_evolution:Evaluate",
+        "eval_task_store": IMPORTED_TASK_STORE,
+        "adapter": "terminus",
+    }
+    built = CordisRecipe.from_environment({}, config={"evolution": evolution}, runtime=runtime())
+    assert built.tasks == () and built.eval_task_store == IMPORTED_TASK_STORE
+
+    with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
+        store = session.tasks.open(IMPORTED_TASK_STORE)
+        with pytest.raises(RecipeConfigError, match="holds no task"):
+            built.build("s", session.records, task_storage=session.tasks)
+        first = store.add_task(directory=task_directory(root, "held-1"), split="eval")
+        store.add_task(directory=task_directory(root, "train-1"), split="train")
+        candidate_backend = built.build("s", session.records, task_storage=session.tasks).candidate_backend
+        assert isinstance(candidate_backend, CordisBackend)
+        prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
+        assert prepared.metrics["evaluation_task_count"] == 1
+        # A task that the store gets after the build is in the next step's list.
+        second = store.add_task(directory=task_directory(root, "held-2"), split="eval")
+        prepared = candidate_backend.prepare_step(batch(), candidate_backend.initial_state(), 0)
+        assert prepared.metrics["evaluation_task_count"] == 2
+        assert eval_task_paths(store) == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
+        with pytest.raises(RecipeConfigError, match="needs the task storage"):
+            built.build("s", session.records)
+
+    with pytest.raises(RecipeConfigError, match=r"cannot be set with evolution\.tasks"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "tasks": ["x"]}}, runtime=runtime())
+    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
+        CordisRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}}, runtime=runtime())

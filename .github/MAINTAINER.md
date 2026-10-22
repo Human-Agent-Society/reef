@@ -187,6 +187,7 @@ Reviewers evaluate the change at the appropriate level:
 - local correctness and failure behavior;
 - public contracts and backwards compatibility;
 - package and trust boundaries;
+- rigorous type definitions;
 - tests, documentation, and migration needs;
 - operational cost and observability; and
 - long-term maintenance burden.
@@ -198,6 +199,13 @@ changes. Check the author's Documentation impact explanation against the
 change. Identify specific obstacles to understanding, such as using a concept
 before defining it or omitting a prerequisite, rather than only asking for
 clearer writing.
+
+Each new or changed type must have an exact, complete, and consistent
+definition of its values and its purpose, as
+[Define every type with mathematical rigor](../CONTRIBUTING.md#define-every-type-with-mathematical-rigor)
+describes. A type without such a definition is a blocking finding. Name the
+missing part, such as an unstated invariant, a state that the definition does
+not cover, a second role, or a subclass that breaks its base class definition.
 
 Review feedback should be actionable and identify whether it is blocking,
 optional, or suitable for a follow-up. Authors should respond to substantive
@@ -211,32 +219,17 @@ and combined coverage checks after lint succeeds. Documentation and real-harness
 smoke workflows select their jobs from changed paths, including renamed files.
 No maintainer action is needed for this routine feedback.
 
-Before merging, a contributor with repository write access requests a complete
-Python 3.10/3.11/3.12 run on the final revision:
+Reef supports Python 3.12 only, so the routine run is the complete
+validation. Keep the required `lint`, `test (3.12)`, and `package (3.12)` checks
+in the `protect-main` ruleset. Skipped suites must not turn the test gates
+green. The `docs-gate` permits a skipped build only for a draft or a
+successfully evaluated change set that does not affect documentation.
 
-```bash
-gh run rerun RUN_ID --repo Human-Agent-Society/reef
-```
-
-Use the latest ready `ci` run and **Re-run all jobs**, not a partial rerun. The
-matrix selection job executes again and expands coverage on subsequent attempts.
-Failed-jobs-only reruns may reuse an earlier matrix; they are useful for retrying
-failures but do not replace the full-run request. This uses GitHub's native write
-permission for reruns, with no maintainer-only role check or protected environment.
-Authors without write access can ask any collaborator with that permission.
-
-Keep the existing required `lint`, `test (3.10)`, `test (3.11)`, `test (3.12)`,
-and package checks in the `protect-main` ruleset. Routine runs produce only the
-3.12 checks; the missing 3.10/3.11 checks remain pending and block merging until
-full validation succeeds on the current revision. Skipped suites must not turn
-the test gates green. The `docs-gate` permits a skipped build only for a draft
-or a successfully evaluated change set that does not affect documentation.
-
-New pushes and conversion to draft cancel previous runs. A new ready revision
-starts with the routine matrix; full reruns validate that the PR is still open,
-ready, and at the original head SHA. Main pushes and manual dispatches always
-run the full matrix. Manual dispatches are diagnostic runs; use the original
-PR workflow's full rerun to satisfy merge checks for that PR.
+New pushes and conversion to draft cancel previous runs. To retry a failure, a
+contributor with repository write access reruns the latest `ci` run of the pull
+request (`gh run rerun RUN_ID --repo Human-Agent-Society/reef`). A rerun fails if
+the pull request is closed, is a draft, or has newer commits. Manual dispatches
+are diagnostic runs.
 
 Required checks must pass on the reviewed revision. CI is a gate, not a
 substitute for review. Reviewers may request focused or environment-specific

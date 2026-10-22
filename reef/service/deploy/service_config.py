@@ -22,13 +22,14 @@ from reef.service.deploy.config_utils import config_value, interpolate_config, i
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.tasks import TaskFileStore
 
 
 @dataclass(frozen=True)
 class ServiceConfig:
     """The HTTP service's settings, translated from a deployment config.
 
-    Recipe-specific config fields (batch sizes, group counts, checkpoint cadence)
+    Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
@@ -189,6 +190,27 @@ class ServiceConfig:
         public_path=("storage", "record_backend"),
         help="Scenario storage backend: sqlite, postgres, or a ScenarioStorage plugin reference.",
     )
+    #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
+    task_file_backend: str | Mapping[str, Any] = config_option(
+        "local",
+        public_path=("storage", "task_file_backend"),
+        help="Store of the files of generated tasks: local, or a TaskFileStore plugin reference.",
+    )
+    task_file_dir: str = config_option(
+        ".reef/task-files",
+        public_path=("storage", "task_file_dir"),
+        help="Directory of the generated task files, or the local cache of a plugin store.",
+    )
+    task_import_manifest: str | None = config_option(
+        None,
+        public_path=("task_import", "manifest"),
+        help="Split manifest of the Harbor tasks that each scenario imports into its task store imported-tasks.",
+    )
+    task_import_tasks_root: str | None = config_option(
+        None,
+        public_path=("task_import", "tasks_root"),
+        help="Directory that holds a Harbor task directory for each task name of task-import.manifest.",
+    )
     record_database_url: str | None = field(
         default=None,
         repr=False,
@@ -294,6 +316,14 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.task_file_backend != "local":
+            if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
+                raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
+            TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
+            raise ValueError("task-import needs both manifest and tasks-root")
+        if self.task_import_manifest == "" or self.task_import_tasks_root == "":
+            raise ValueError("task-import.manifest and task-import.tasks-root must be non-empty paths")
         if self.record_backend == "postgres":
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
                 raise ValueError("reef.record_database_url is required for the postgres backend")

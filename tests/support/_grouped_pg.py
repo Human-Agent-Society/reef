@@ -70,6 +70,7 @@ class ComparisonSetTasks(ReportTasks):
     """One report as one sample in its comparison set."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
@@ -80,8 +81,8 @@ class ComparisonSetTasks(ReportTasks):
 
 
 class GroupedPolicyBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:grouped:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 def grouped_policy_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:

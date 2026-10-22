@@ -1,7 +1,7 @@
 {
  "computed_exact_version": [
   {
-   "batch_id": "s:toy:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "a",
     "b",
@@ -65,7 +65,7 @@
  ],
  "computed_window": [
   {
-   "batch_id": "s:toy:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "a",
     "b",
@@ -129,7 +129,7 @@
  ],
  "coral": [
   {
-   "batch_id": "s:coral:p0:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i1",
     "i1-retry",
@@ -223,7 +223,7 @@
    "request": null
   },
   {
-   "batch_id": "s:coral:__coral_root__:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "i3",
     "i4",
@@ -315,7 +315,7 @@
  ],
  "cordis_hybrid": [
   {
-   "batch_id": "s:harness_evolve:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-c-0",
     "i-c-1",
@@ -353,7 +353,7 @@
    "request": null
   },
   {
-   "batch_id": "s:harness_evolve:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "i-c-2",
     "i-c-3",
@@ -391,7 +391,7 @@
    "request": null
   },
   {
-   "batch_id": "s:harness_evolve:3",
+   "batch_id": "s:batch:3",
    "consumed": [
     "i-c-4",
     "i-c-5",
@@ -504,7 +504,7 @@
  ],
  "distill_overflow": [
   {
-   "batch_id": "s:teacher:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i0",
     "r0"
@@ -557,7 +557,7 @@
    "request": null
   },
   {
-   "batch_id": "s:teacher:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "i1",
     "i2",
@@ -616,7 +616,7 @@
  ],
  "generated_tasks": [
   {
-   "batch_id": "s:generated-tasks:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-0",
     "i-1",
@@ -776,7 +776,7 @@
  ],
  "ordered_groups": [
   {
-   "batch_id": "s:slots:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-a-0",
     "i-single-0",
@@ -878,7 +878,7 @@
  ],
  "sdpo": [
   {
-   "batch_id": "s:sdpo:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "report-s0r0",
     "report-s0r1",
@@ -1025,7 +1025,7 @@
    "request": null
   },
   {
-   "batch_id": "s:sdpo:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "report-s1r0",
     "report-s1r1",
@@ -1182,7 +1182,7 @@
  ],
  "slots_and_discards": [
   {
-   "batch_id": "s:slots:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-g1-0",
     "i-g1-1",
@@ -1256,7 +1256,7 @@
    "request": null
   },
   {
-   "batch_id": "s:slots:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "i-g1-2",
     "i-g1-3",
@@ -1340,7 +1340,7 @@
  ],
  "tttd": [
   {
-   "batch_id": "s:tttd:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-0-0-0",
     "i-0-0-1",
@@ -1516,7 +1516,7 @@
  ],
  "ungrouped": [
   {
-   "batch_id": "s:threshold:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
@@ -1586,7 +1586,7 @@
    "request": null
   },
   {
-   "batch_id": "s:threshold:2",
+   "batch_id": "s:batch:2",
    "consumed": [
     "i-a-2",
     "i-a-3",
@@ -1658,7 +1658,7 @@
  ],
  "ungrouped_reload": [
   {
-   "batch_id": "s:threshold:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
@@ -1728,7 +1728,7 @@
    "request": null
   },
   {
-   "batch_id": "s:threshold:1",
+   "batch_id": "s:batch:1",
    "consumed": [
     "i-a-2",
     "i-a-3",

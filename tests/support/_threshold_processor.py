@@ -18,6 +18,7 @@ class ThresholdTasks(ReportTasks):
     """One report becomes one sample, with no score filtering."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     @classmethod
@@ -50,8 +51,8 @@ class ThresholdBatches(Task2Batch):
     ) -> Self:
         return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:threshold:{batch_number}", tasks)
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tasks)
 
 
 def threshold_pipeline(

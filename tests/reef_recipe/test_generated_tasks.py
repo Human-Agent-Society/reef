@@ -17,21 +17,14 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask, write_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
 from reef.recipe.generated_tasks.processor import (
     GeneratedTaskRecord2Record,
     GeneratedTaskTasks,
@@ -44,6 +37,9 @@ from reef.recipe.generated_tasks.processor import (
     rewards_of,
 )
 from reef.record2record import GroupDecision, ReportContext
+from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrainingBatch, trajectory_groups
@@ -116,8 +112,8 @@ def processor(**config: object) -> TrainingPipeline:
 
 
 def played(processor: TrainingPipeline, task: str, index: int, score: float, **fields: Any) -> None:
-    processor.ingest(inference(f"rec-{task}-{index}"))
-    processor.ingest(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
+    processor.push(inference(f"rec-{task}-{index}"))
+    processor.push(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
@@ -143,7 +139,7 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
     played(p, "harbor-00000-001", 1, 1.0)
     assert p.ready()
     batch = p.build_batch()
-    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:generated-tasks:1"
+    assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:batch:1"
     groups = trajectory_groups(batch)
     assert [[sample.group_id for sample in group] for group in groups] == [
         ["harbor-00000-000", "harbor-00000-000"],
@@ -154,22 +150,22 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
 
 def test_a_training_report_without_a_task_is_refused_and_keeps_its_report_retryable() -> None:
     p = processor()
-    p.ingest(inference("rec-x"))
+    p.push(inference("rec-x"))
     with pytest.raises(ValueError, match=r"requires metadata\.task\.name"):
-        p.ingest(report("rep-x", "rec-x", None, 1.0))
+        p.push(report("rep-x", "rec-x", None, 1.0))
 
 
-def test_measurement_arms_and_reports_without_an_arm_are_released_not_trained() -> None:
+def test_reports_of_other_arms_and_without_an_arm_are_released_not_trained() -> None:
     p = processor()
     played(p, "harbor-00000-000", 0, 0.0, arm="hint")
     played(p, "harbor-00000-000", 1, 1.0, arm="hint")
-    assert not p.ready(), "measurement episodes never form a group"
-    p.ingest(inference("rec-generator"))
-    p.ingest(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
+    assert not p.ready(), "episodes of another arm never form a group"
+    p.push(inference("rec-generator"))
+    p.push(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
     assert not p.ready()
     released = p.releasable_record_ids()
     assert {"rep-generator", "rec-generator"} <= released
-    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the measurement arm's calls too"
+    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the other arm's calls too"
     played(p, "harbor-00000-000", 2, 1.0)
     played(p, "harbor-00000-000", 3, 0.0)
     played(p, "harbor-00000-001", 0, 1.0)
@@ -209,10 +205,10 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
         )
 
     p = processor(tasks_per_step=1)
-    p.ingest(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
-    p.ingest(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
+    p.push(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
+    p.push(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
     payload = {**report("rep-0", "rec-0", "harbor-00000-000", 1.0).payload, "references": ["rec-0", "rec-1"]}
-    p.ingest(
+    p.push(
         AgentRecord.create(scenario="tasks", request_type=RequestType.REPORT, payload=payload, agent_record_id="rep-0")
     )
     played(p, "harbor-00000-000", 1, 0.0)
@@ -251,14 +247,10 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
 @pytest.mark.parametrize(
     ("build", "message"),
     [
-        (lambda: PlayArm("Hint", 1), "arm name must match"),
-        (lambda: PlayArm("hint", 0), "positive integer"),
-        (lambda: PlayArm("hint", 1, ("../hint.txt",)), "inside the task"),
-        (lambda: PlayArm("hint", 1, ("/hint.txt",)), "inside the task"),
-        (lambda: GeneratedTask(task_for("t-a", "r", 1), (PlayArm("hint", 1), PlayArm("hint", 2))), "unique"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
-        (lambda: TaskPlayResult(task_for("t-a", "r", 1), (), {"hint": [1.0]}), "tuples"),
+        (lambda: TaskPlayResult(task_for("t-a", "r", 1), [1.0]), "tuple"),
+        (lambda: TaskPlayResult(task=task_for("t-a", "r", 1), training_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
 )
@@ -274,7 +266,7 @@ class ScriptedGenerator(TaskGenerator):
 
     def __init__(
         self,
-        rounds: list[tuple[GeneratedTask, ...]] | None = None,
+        rounds: list[tuple[HarborTask, ...]] | None = None,
         *,
         invalid: Mapping[str, str] | None = None,
         failing: str | None = None,
@@ -293,7 +285,7 @@ class ScriptedGenerator(TaskGenerator):
         cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
         return cls()
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         self.requests.append(request)
         if not self.rounds:
             return ()
@@ -312,14 +304,10 @@ class ScriptedGenerator(TaskGenerator):
             raise RuntimeError("the generator lost its state directory")
 
 
-def generated(round_number: int, *indices: int, hint: bool = True) -> tuple[GeneratedTask, ...]:
-    """Tasks of one round; each asks for a hint arm of one play unless ``hint`` is off."""
-    arms = (PlayArm("hint", 1, ("solution/hint.txt",)),) if hint else ()
+def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
+    """Tasks of one round."""
     return tuple(
-        GeneratedTask(
-            task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index),
-            arms,
-        )
+        task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index)
         for index in indices
     )
 
@@ -393,6 +381,11 @@ class DeferredWorker(BackgroundJobWorker):
         self.generation = None
 
 
+def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
+    """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
+    return SQLiteScenarioStorage(tmp_path / "records").open(scenario).tasks
+
+
 def rounds(
     tmp_path: Path,
     task_generator: ScriptedGenerator,
@@ -403,7 +396,7 @@ def rounds(
 ) -> tuple[TrainingPipeline, StandInGenerator]:
     player = player if player is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     group_settings, round_settings, batch_settings = stage_settings(
         {
             "tasks_per_step": 2,
@@ -440,7 +433,7 @@ def summary(tmp_path: Path, round_number: int) -> dict[str, Any]:
 
 
 def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
-    task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2, hint=False)])
+    task_generator = ScriptedGenerator([generated(0, 0, 1, 2)])
     p, player = rounds(tmp_path, task_generator)
     status = p.status()["task_generation"]
     assert status["generator"] == "ScriptedGenerator" and (status["next"], status["completed"], status["of"]) == (
@@ -457,25 +450,90 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
     assert task_generator.validated == names and player.writes == names
     arms = [(call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in player.plays]
-    assert arms == [
-        (names[0], "plain", 2, True, ()),
-        (names[0], "hint", 1, True, ("solution/hint.txt",)),
-        (names[1], "plain", 2, True, ()),
-        (names[1], "hint", 1, True, ("solution/hint.txt",)),
-        (names[2], "plain", 2, True, ()),
-    ]
+    assert arms == [(name, "plain", 2, True, ()) for name in names]
     assert all(call["tags"] == {"round": "0"} and call["model"] == "Qwen/Qwen3-8B" for call in player.plays)
 
     (results,) = task_generator.results
     assert [result.task.name for result in results] == names
-    assert results[0].training_rewards == (0.25, 0.25) and results[0].measurement_rewards == {"hint": (0.75,)}
-    assert results[2].training_rewards == (0.25, 0.25) and results[2].measurement_rewards == {}
-    assert results[2].is_played
+    assert all(result.training_rewards == (0.25, 0.25) and result.is_played for result in results)
     document = summary(tmp_path, 0)
     assert document["error"] == "" and [task["name"] for task in document["tasks"]] == names
     assert document["tasks"][0]["training_rewards"] == [0.25, 0.25]
-    assert document["tasks"][0]["measurement_rewards"] == {"hint": [0.75]}
     assert p.operational_metrics()["rounds_completed"] == 1
+
+
+@pytest.mark.unit
+def test_eval_tasks_are_saved_without_plays(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    pipeline, player = rounds(tmp_path, task_generator, eval_fraction=1.0)
+    assert not looked(pipeline)
+    assert player.plays == [] and player.writes == []
+    assert all(
+        result.split == "eval" and not result.is_played and not result.error for result in task_generator.results[0]
+    )
+    assert pipeline.status()["task_store"] == {"train": 0, "eval": 2, "rejected": 0, "pending": 0}
+    assert pipeline.record2task.task_store.generation(0).is_complete
+    pipeline.close()
+
+
+@pytest.mark.unit
+def test_a_round_retry_uses_saved_candidates_and_validation_outcomes(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)], failing="harbor-00000-001")
+    pipeline, _ = rounds(tmp_path, task_generator)
+    assert not looked(pipeline)
+    assert len(task_generator.requests) == 1
+    assert pipeline.record2task.task_store.generation(0).pending_indices == (1,)
+    task_generator.failing = None
+    asyncio.run(pipeline.record2task.run_round(RoundJob(receipt="round-00000", round_number=0)))
+    assert len(task_generator.requests) == 1
+    assert task_generator.validated == ["harbor-00000-000", "harbor-00000-001", "harbor-00000-001"]
+    assert pipeline.record2task.task_store.generation(0).is_complete
+    pipeline.close()
+
+
+def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    task = task_for(name, record_ids[0], port)
+    metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
+    return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
+
+
+@pytest.mark.unit
+def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits_is_refused(tmp_path: Path) -> None:
+    follower = sourced("follower", "designer-1", "eval-source", port=9102, designer_record_id="designer-1")
+    bridge = sourced("bridge", "train-source", "eval-source", port=9103)
+    renamed = sourced("train-task", "other-source", port=9104)
+    task_generator = ScriptedGenerator([(follower, bridge, renamed)])
+    pipeline, player = rounds(tmp_path, task_generator)
+    store = pipeline.record2task.task_store
+    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    earlier = (
+        sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
+        sourced("eval-task", "eval-source", port=9101),
+    )
+    store.begin_generation(generation=100, source_record_ids=())
+    store.save_candidates(
+        generation=100, directories=tuple(write_harbor_task(task, tmp_path / "earlier") for task in earlier)
+    )
+    store.publish_task(generation=100, index=0, split="train")
+    store.publish_task(generation=100, index=1, split="eval")
+    store.complete_generation(generation=100)
+
+    assert not looked(pipeline)
+
+    results = {result.task.name: result for result in task_generator.results[0]}
+    assert results["follower"].split == "eval" and not results["follower"].error
+    assert "split conflict" in results["bridge"].error
+    assert "other files" in results["train-task"].error
+    assert player.writes == []
+    assert {task.name: task.split for task in store.tasks()} == {
+        "train-task": "train",
+        "eval-task": "eval",
+        "follower": "eval",
+    }
+    assert store.path(store.tasks(split="train")[0].files_digest).joinpath("instruction.md").is_file()
+    assert pipeline.status()["task_store"] == {"train": 1, "eval": 2, "rejected": 2, "pending": 0}
+    pipeline.close()
 
 
 def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_path: Path) -> None:
@@ -491,16 +549,6 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert p.status()["task_generation"]["tasks_played"] == 1
 
 
-def test_a_measurement_arm_with_the_training_arms_name_is_refused_unplayed(tmp_path: Path) -> None:
-    clashing = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm("plain", 1),))
-    task_generator = ScriptedGenerator([(clashing, *generated(0, 1))])
-    p, player = rounds(tmp_path, task_generator)
-    assert not looked(p)
-    assert task_generator.validated == ["harbor-00000-001"] and player.writes == ["harbor-00000-001"]
-    (results,) = task_generator.results
-    assert results[0].error == "the measurement arm 'plain' has the name of the training arm"
-
-
 def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp_path: Path) -> None:
     taken = StandInGenerator(tmp_path / "tasks", taken=("harbor-00000-000",))
     task_generator = ScriptedGenerator([generated(0, 0)])
@@ -513,7 +561,7 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     task_generator = ScriptedGenerator([generated(0, 0)])
     p, _ = rounds(tmp_path / "second", task_generator, unplayable)
     assert not looked(p)
-    assert [call["arm"] for call in unplayable.plays] == ["plain"], "no measurement arm for a task that cannot run"
+    assert [call["arm"] for call in unplayable.plays] == ["plain"]
     assert unplayable.deleted == ["harbor-00000-000"]
     assert task_generator.results[0][0].error == "the agent could not play the task: Failed to start tmux session."
 
@@ -633,6 +681,17 @@ def test_a_round_that_played_no_task_does_not_block_the_next_one(tmp_path: Path)
     assert [job.round_number for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
 
 
+def test_a_round_whose_job_failed_waits_for_batches_instead_of_starting_the_next_one(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
+    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    worker.finished.append(Failed("round-00000"))
+    assert not looked(p) and [job.round_number for job in worker.submitted] == [0]
+    assert (
+        not p.background_jobs_running() and "round-00000 did not finish" in p.status()["task_generation"]["last_error"]
+    )
+
+
 def test_a_restarted_processor_carries_on_from_the_round_summaries(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), rounds=2)
     assert not looked(p) and p.status()["task_generation"]["completed"] == 1
@@ -666,15 +725,17 @@ def test_a_generator_failure_ends_the_round_with_what_ran(
     assert summary(tmp_path, 0)["error"] == error
 
 
-def test_a_round_that_never_finishes_is_named_in_the_status(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]))
-    p.close()
-    assert not looked(p)
+def test_a_worker_that_refuses_a_round_stops_the_rounds_with_the_reason(tmp_path: Path) -> None:
+    worker = InlineWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, rounds=2)
+    worker.close()
+    assert not looked(p) and not p.background_jobs_running()
+    assert [job.round_number for job in worker.submitted] == [0], "no round is tried after the refusal"
     assert "no further round runs" in p.status()["task_generation"]["last_error"]
 
 
 def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) -> None:
-    context = PipelineContext("tasks")
+    context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
     stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
     generation = GeneratedTaskTasks(
         context,
@@ -721,7 +782,7 @@ def session(name: str, tags: Mapping[str, str]) -> tuple[AgentRecord, AgentRecor
 def sessions(p: TrainingPipeline, *names: str, tags: Mapping[str, str] | None = None) -> None:
     for name in names:
         for record in session(name, {"source": "session"} if tags is None else tags):
-            p.ingest(record)
+            p.push(record)
 
 
 def source_ids(request: TaskGenerationRequest) -> list[str]:
@@ -796,7 +857,7 @@ def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str
         processor(**config)
 
 
-def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> None:
+def test_rounds_need_a_description_a_state_dir_the_generator_service_and_task_storage() -> None:
     def built(**config: object) -> GeneratedTaskTasks:
         context = PipelineContext("tasks")
         group_settings, round_settings, _ = stage_settings({"rounds": 1, **config})
@@ -809,6 +870,8 @@ def test_rounds_need_a_description_a_state_dir_and_the_generator_service() -> No
         built(description="x", state_dir="s")
     with pytest.raises(ValueError, match="generator_url"):
         built(description="x", state_dir="s", generator_url="${endpoints.generator}")
+    with pytest.raises(ValueError, match="task storage"):
+        built(description="x", state_dir="s", generator_url="http://g:8910")
 
 
 # ------------------------------------------------------------------------------------------------- the recipe
@@ -870,7 +933,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
         },
     )
     ScriptedGenerator.built.clear()
-    built = recipe.build_pipeline(PipelineContext("one"))
+    built = recipe.build_pipeline(PipelineContext("one", task_storage=task_storage(tmp_path, "one")))
     assert isinstance(built.record2task, GeneratedTaskTasks)
     assert isinstance(built.record2task.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
@@ -898,7 +961,7 @@ def test_a_pipeline_section_that_names_no_usable_stage_is_refused(pipeline: Mapp
     [
         (f"{MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2task.config.generator"),
         ("reef.recipe.generated_tasks:GeneratedTaskRecipe", "must name a class that inherits TaskGenerator"),
-        ("reef.core.tasks:TaskGenerator", "names an abstract class"),
+        ("reef.recipe.generated_tasks:TaskGenerator", "names an abstract class"),
     ],
 )
 def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator: str, message: str) -> None:

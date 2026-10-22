@@ -32,7 +32,7 @@ DEFAULT_READY_TIMEOUT = 60
 class GeneratorSettings(Settings):
     """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section."""
 
-    tasks_root: str = config_option(help="The directory generated tasks, manifests and Harbor job files live under.")
+    tasks_root: str = config_option(help="The directory generated tasks and Harbor job files live under.")
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
     port: int = config_option(DEFAULT_PORT, help="The generator's bind port.")
     work_dir: str | None = config_option(

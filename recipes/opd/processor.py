@@ -14,7 +14,6 @@ from reef.record2record import Record2Record, ReportContext
 from reef.record2task import ReportTasks, SkippedReport
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.distill import recorded_sample, teacher_overflow
-from reef.task2batch import DistillBatches
 
 
 @dataclass(frozen=True)
@@ -43,6 +42,7 @@ class OPDTasks(ReportTasks):
     """
 
     def __init__(self, settings: OPDSettings) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
         self.overflow_count = 0
@@ -76,10 +76,4 @@ class OPDTasks(ReportTasks):
         return sample.with_training(teacher_tokens=teacher_tokens)
 
 
-class OPDBatches(DistillBatches):
-    """OPD's batches: tasks as they come, ``batch_size`` reports to a batch."""
-
-    batch_label = "opd"
-
-
-__all__ = ["OPDBatches", "OPDSettings", "OPDTasks"]
+__all__ = ["OPDSettings", "OPDTasks"]

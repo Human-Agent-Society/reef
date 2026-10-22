@@ -39,7 +39,7 @@ class SAORecipe(WeightTrainingRecipe):
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
     parameters belong to the training backend. For Slime they are configured by
-    ``training.options``; this recipe owns only Reef-side checkpoint cadence.
+    ``training.options``.
     """
 
     name: str = "sao"

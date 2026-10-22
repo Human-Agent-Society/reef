@@ -46,10 +46,10 @@ from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor, deployment_owner
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.storage.records import RecordStore
+from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
-from reef.train.cordis_backend.backend import CordisBackend
+from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
 from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
 from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
@@ -166,6 +166,25 @@ def _selection_reference(value: object) -> PluginReference:
         raise RecipeConfigError(f"{exc}; built-in selections: {', '.join(_SELECTION_PLUGINS)}") from exc
 
 
+def require_task_directories(evolution: Mapping[str, Any], setting: str) -> None:
+    """Refuse ``evolution.<setting>``, whose tasks are directories, with an adapter that takes a prompt.
+
+    ``promote_failures`` is refused too: it adds prompts, which an evaluation of task directories cannot play.
+    """
+    adapter_name = str(evolution.get("adapter", "pi"))
+    try:
+        descriptor = get_adapter(adapter_name)
+    except DescriptorError as exc:
+        raise RecipeConfigError(str(exc)) from exc
+    if not descriptor.is_prompt_task_directory:
+        raise RecipeConfigError(
+            f"evolution.{setting} needs an adapter that takes a task directory, not a prompt; "
+            f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
+        )
+    if evolution.get("promote_failures", False):
+        raise RecipeConfigError("evolution.promote_failures adds prompts to an evaluation whose tasks are directories")
+
+
 @dataclass(frozen=True)
 class CordisRecipe(Recipe):
     """The harness evolution loop as a bootable recipe class.
@@ -173,7 +192,8 @@ class CordisRecipe(Recipe):
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
     ``evaluate`` (:class:`Proposer` and :class:`EpisodeScorer` class references), ``tasks`` (the episode
-    prompts scored per step), optional ``binary`` (a path to the harness
+    prompts scored per step; or ``eval_task_store``, a task store such as ``imported-tasks`` whose eval split
+    each step reads), optional ``binary`` (a path to the harness
     binary; left unset, backend construction installs the adapter descriptor's
     pinned version through the vendor's own channel, into the same prefix a
     client's install script uses - see :mod:`reef.harness.episodes.vendor_install`),
@@ -244,6 +264,8 @@ class CordisRecipe(Recipe):
     propose: Proposer
     score_episode: EpisodeScorer
     tasks: tuple[str, ...]
+    #: A task store whose eval split each step evaluates on, in place of ``tasks``.
+    eval_task_store: str | None = None
     adapter: str = "pi"
     binary: str | None = None
     episode_timeout_s: float = 600.0
@@ -271,9 +293,6 @@ class CordisRecipe(Recipe):
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
-    #: What a result becomes when another component's commit replaced its base while it was evaluated:
-    #: merged onto the release served now, evaluated again, or refused and proposed again.
-    on_stale: StaleResultPolicy = "merge"
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin), repr=False)
     #: Default proposal inbox root, with one directory per scenario.
     proposals_dir: str = ".reef/proposals"
@@ -311,15 +330,13 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_episode, EpisodeScorer):
             raise ValueError("harness evolution requires an EpisodeScorer")
-        if not self.tasks:
-            raise ValueError("harness evolution requires tasks")
+        if not self.tasks and self.eval_task_store is None:
+            raise ValueError("harness evolution requires tasks or an eval task store")
         evaluation_selection(self.score_episode, self.worker_executor)
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
-        if self.on_stale not in STALE_RESULT_POLICIES:
-            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -355,7 +372,18 @@ class CordisRecipe(Recipe):
         tasks = evolution.get("tasks")
         manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
-        if manifest_path is not None:
+        eval_task_store = evolution.get("eval_task_store")
+        if eval_task_store is not None:
+            if tasks is not None or manifest_path is not None or tasks_root is not None:
+                raise RecipeConfigError(
+                    "evolution.eval_task_store cannot be set with evolution.tasks or evolution.task_manifest"
+                )
+            if not isinstance(eval_task_store, str) or not eval_task_store:
+                raise RecipeConfigError("evolution.eval_task_store must be the name of a task store")
+            require_task_directories(evolution, "eval_task_store")
+            # The tasks are the store's eval split, which build reads from the scenario session.
+            tasks = []
+        elif manifest_path is not None:
             if tasks is not None:
                 raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
             if (
@@ -367,20 +395,7 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(
                     "evolution.task_manifest and evolution.tasks_root must both be non-empty paths"
                 )
-            adapter_name = str(evolution.get("adapter", "pi"))
-            try:
-                descriptor = get_adapter(adapter_name)
-            except DescriptorError as exc:
-                raise RecipeConfigError(str(exc)) from exc
-            if not descriptor.is_prompt_task_directory:
-                raise RecipeConfigError(
-                    f"evolution.task_manifest needs an adapter that takes a task directory, not a prompt; "
-                    f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
-                )
-            if evolution.get("promote_failures", False):
-                raise RecipeConfigError(
-                    "evolution.promote_failures adds prompts to an evaluation whose tasks are directories"
-                )
+            require_task_directories(evolution, "task_manifest")
             try:
                 task_paths = manifest_task_paths(
                     Path(manifest_path).expanduser(), Path(tasks_root).expanduser(), "eval"
@@ -394,7 +409,8 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
             raise RecipeConfigError(
-                "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with evolution.tasks_root"
+                "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with "
+                "evolution.tasks_root, or evolution.eval_task_store"
             )
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
@@ -405,9 +421,6 @@ class CordisRecipe(Recipe):
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
-        on_stale = evolution.get("on_stale", "merge")
-        if on_stale not in STALE_RESULT_POLICIES:
-            raise RecipeConfigError(f"evolution.on_stale must be one of {STALE_RESULT_POLICIES}")
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
@@ -562,11 +575,11 @@ class CordisRecipe(Recipe):
             "score_episode": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
+            "eval_task_store": eval_task_store,
             "adapter": adapter,
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
-            "on_stale": on_stale,
             "forbid_residue": forbid_residue,
             **budgets,
             "floor_score": float(floor_score),
@@ -687,6 +700,7 @@ class CordisRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
@@ -696,6 +710,14 @@ class CordisRecipe(Recipe):
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
             kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
+        if self.eval_task_store is not None:
+            if task_storage is None:
+                raise RecipeConfigError("evolution.eval_task_store needs the task storage of a scenario session")
+            store = task_storage.open(self.eval_task_store)
+            kwargs["tasks"] = eval_task_paths(store)
+            if not kwargs["tasks"]:
+                raise RecipeConfigError(f"the eval split of task store {self.eval_task_store!r} holds no task")
+            kwargs["eval_task_store"] = store
         candidate_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
@@ -704,6 +726,7 @@ class CordisRecipe(Recipe):
             self.selection_plugin(candidate_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            task_storage=task_storage,
         )
 
     def _backend_kwargs(self, scenario: str | None = None) -> dict[str, Any]:
@@ -714,7 +737,6 @@ class CordisRecipe(Recipe):
             "score_episode": self.score_episode,
             "tasks": self.tasks,
             "models": self.model_bindings(scenario),
-            "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
             "episode_repeats": self.episode_repeats,
@@ -754,6 +776,7 @@ class CordisRecipe(Recipe):
         *,
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
+        task_storage: TaskStorage | None = None,
     ) -> Trainer:
         if self.training_mode != "auto" and not self.propose.reads_requests:
             raise RecipeConfigError(
@@ -772,4 +795,5 @@ class CordisRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            task_storage=task_storage,
         )

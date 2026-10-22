@@ -2,16 +2,18 @@
 
 One ``generate`` call is one generation: ``count`` proposals across the configured ``skills``, each a
 Designer call through the generator service (``reef.record2task.generator``), with the last generation's
-results in the prompt as SPADE's experience section. A task with ``solution/hint.txt`` asks for a
-``hint`` arm of ``hint_plays`` plays with that file appended to the instruction.
+results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
 and removes it again: the generated-task recipe writes the valid task once more to play it.
 
-``record_results`` closes the generation. It reports each proposal's regret against the Designer's
-receipt (0 for a refused one), writes the split manifest of the played tasks, and keeps the
-generation's report under ``state_dir``. A restart reads the last report to continue with the next
-generation and the last experience.
+``record_results`` closes the generation. For each train task that the recipe played and that has
+``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
+file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
+them. It reports each proposal's regret against the Designer's receipt (0 for a refused one) and keeps
+the generation report under ``state_dir``. An eval task gets no hint plays and no Designer report, and does
+not go into the experience. A restart reads the last report to continue with the next generation and the
+last experience.
 """
 
 from __future__ import annotations
@@ -38,15 +40,9 @@ from recipes.beta.spade.generation import (
     write_generation_report,
 )
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.processor import rewards_of
 from reef.record2task.generator.client import (
     DuplicateTask,
     Generator,
@@ -57,12 +53,12 @@ from reef.record2task.generator.client import (
     WrittenTask,
 )
 from reef.record2task.generator.designer import DIFFICULTIES, DesignerRequest
+from reef.record2task.generator.inputs import TaskGenerationRequest
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
 DEFAULT_HINT_PLAYS = 2
-DEFAULT_EVAL_FRACTION = 0.25
 HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 HINT_ARM = "hint"
@@ -76,8 +72,6 @@ CONFIG_KEYS = frozenset(
         "turn_limit",
         "grounding_path",
         "hint_plays",
-        "eval_fraction",
-        "seed",
         "designer_report",
         "served_model",
     }
@@ -108,8 +102,6 @@ class SpadeTaskGenerator(TaskGenerator):
         turn_limit: int = DesignerRequest.turn_limit,
         grounding: str | None = None,
         hint_plays: int = DEFAULT_HINT_PLAYS,
-        eval_fraction: float = DEFAULT_EVAL_FRACTION,
-        seed: int = 0,
         is_reporting_designer: bool = True,
         served_model: str | None = None,
     ) -> None:
@@ -119,8 +111,6 @@ class SpadeTaskGenerator(TaskGenerator):
             raise ValueError(f"difficulty must be one of {DIFFICULTIES}")
         if turn_limit < 2:
             raise ValueError("turn_limit must be at least 2")
-        if not 0 <= eval_fraction < 1:
-            raise ValueError("eval_fraction must be in [0, 1)")
         self.scenario = scenario
         self.service = service
         self.state_dir = state_dir
@@ -130,8 +120,6 @@ class SpadeTaskGenerator(TaskGenerator):
         self.turn_limit = turn_limit
         self.grounding = grounding
         self.hint_plays = hint_plays
-        self.eval_fraction = eval_fraction
-        self.seed = seed
         self.is_reporting_designer = is_reporting_designer
         self.served_model = served_model
         # What the last generation measured, for the next prompt; read back from the state directory.
@@ -175,20 +163,18 @@ class SpadeTaskGenerator(TaskGenerator):
                 turn_limit=int(config.get("turn_limit", DesignerRequest.turn_limit)),
                 grounding=Path(grounding_path).read_text(encoding="utf-8") if grounding_path else None,
                 hint_plays=int(config.get("hint_plays", DEFAULT_HINT_PLAYS)),
-                eval_fraction=float(config.get("eval_fraction", DEFAULT_EVAL_FRACTION)),
-                seed=int(config.get("seed", 0)),
                 is_reporting_designer=bool(config.get("designer_report", True)),
                 served_model=str(served_model) if served_model else None,
             )
         except (OSError, ValueError) as exc:
             raise PluginConfigError(f"invalid SpadeTaskGenerator config: {exc}") from exc
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         """One generation: ``count`` Designer proposals; a failed service call ends it with what ran."""
         if any(record.scenario != self.scenario for record in request.source_records):
             raise ValueError("source records must belong to the generator's scenario")
         self.refused, self.pending, self.error = [], {}, ""
-        tasks: list[GeneratedTask] = []
+        tasks: list[HarborTask] = []
         try:
             for index in range(self.count):
                 skill = self.skills[index % len(self.skills)] if self.skills else None
@@ -197,12 +183,7 @@ class SpadeTaskGenerator(TaskGenerator):
                     self.refused.append(ProposalRecord(index, skill, proposed.record_id, None, proposed.refusal))
                     continue
                 self.pending[proposed.task.name] = PendingProposal(index, skill, proposed.record_id)
-                arms = (
-                    (PlayArm(HINT_ARM, self.hint_plays, (HINT_FILE,)),)
-                    if self.hint_plays and HINT_NAME in proposed.task.solution
-                    else ()
-                )
-                tasks.append(GeneratedTask(proposed.task, arms))
+                tasks.append(proposed.task)
         except GeneratorError as exc:
             self.error = str(exc)
             logger.error("SPADE generation %d stopped: %s", self.generation, exc)
@@ -242,6 +223,26 @@ class SpadeTaskGenerator(TaskGenerator):
         await self.service.delete_task(task.name)
         return TaskValidationResult(() if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",))
 
+    async def hint_rewards(self, task: HarborTask) -> tuple[float, ...]:
+        """Play a task that the recipe played ``hint_plays`` times with its hint, and return the rewards of the plays.
+
+        The recipe wrote the task to play it, and a second write of the same task is refused, so the task is
+        written again in place. The plays report on the ``hint`` arm, which the recipe does not train on.
+        """
+        await self.service.delete_task(task.name)
+        written = await self.service.write_task(task)
+        plays = await self.service.play(
+            written.path,
+            scenario=self.scenario,
+            arm=HINT_ARM,
+            plays=self.hint_plays,
+            is_reporting=True,
+            extra_instruction_files=(HINT_FILE,),
+            tags={"generation": str(self.generation)},
+            model=self.served_model,
+        )
+        return rewards_of(plays)
+
     async def write(self, task: HarborTask) -> WrittenTask:
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""
         try:
@@ -254,19 +255,28 @@ class SpadeTaskGenerator(TaskGenerator):
             return await self.service.write_task(task)
 
     async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Close the generation: the Designer's reports, the manifest, the report file and the next experience."""
+        """Close the generation: the Designer's reports for train tasks, the report file and the next experience."""
         proposals: list[tuple[ProposalRecord, TaskMeasure | None]] = [(proposal, None) for proposal in self.refused]
         for result in results:
             pending = self.pending.pop(result.task.name, None)
             if pending is None:
                 continue
             proposal = ProposalRecord(pending.index, pending.skill, pending.designer_record_id, None, result.error)
+            if result.split == "eval":
+                proposals.append((replace(proposal, task_name=result.task.name, split="eval"), None))
+                continue
             if not result.is_played:
                 proposals.append((proposal, None))
                 continue
             plain = result.training_rewards
-            hint = result.measurement_rewards.get(HINT_ARM, ())
-            record = PlayRecord(
+            hint: tuple[float, ...] = ()
+            if self.hint_plays and HINT_NAME in result.task.solution:
+                try:
+                    hint = await self.hint_rewards(result.task)
+                except GeneratorError as exc:
+                    self.error = self.error or f"the hint plays of {result.task.name} failed: {exc}"
+                    logger.error("SPADE hint plays of %s failed: %s", result.task.name, exc)
+            play_record = PlayRecord(
                 name=result.task.name,
                 skill=pending.skill,
                 return_without_hint=mean_reward(plain),
@@ -279,22 +289,14 @@ class SpadeTaskGenerator(TaskGenerator):
                 digest=result.task.digest,
                 plain_rewards=plain,
                 hint_rewards=hint,
-                record=record,
+                record=play_record,
             )
             proposals.append((replace(proposal, task_name=result.task.name), measure))
         proposals.sort(key=lambda entry: entry[0].index)
         reported = [await self.reported(proposal, measure) for proposal, measure in proposals]
         measures = tuple(measure for _, measure in proposals if measure is not None)
-        manifest_path: Path | None = None
-        if measures and not self.error:
-            manifest_path = await self.service.write_manifest(
-                generation=self.generation,
-                names=[measure.name for measure in measures],
-                eval_fraction=self.eval_fraction,
-                seed=self.seed,
-            )
-        record = GenerationRecord(self.generation, tuple(reported), measures, manifest_path, self.error)
-        report_path = write_generation_report(self.state_dir, record)
+        generation_record = GenerationRecord(self.generation, tuple(reported), measures, self.error)
+        report_path = write_generation_report(self.state_dir, generation_record)
         logger.info(
             "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",
             self.generation,
@@ -303,13 +305,13 @@ class SpadeTaskGenerator(TaskGenerator):
             len(reported),
             report_path,
         )
-        self.experience = record.experience
+        self.experience = generation_record.experience
         self.generation += 1
         self.refused, self.pending = [], {}
 
     async def reported(self, proposal: ProposalRecord, measure: TaskMeasure | None) -> ProposalRecord:
         """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
-        if not self.is_reporting_designer:
+        if not self.is_reporting_designer or proposal.split == "eval":
             return proposal
         metadata: dict[str, object] = {"generation": self.generation, **skill_tag(proposal.skill)}
         if measure is None:

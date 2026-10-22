@@ -173,7 +173,11 @@ def test_shared_sql_record_operations_do_not_select_sqlite() -> None:
 
 def test_dispatcher_does_not_select_a_record_backend() -> None:
     module = importlib.import_module("reef.dispatcher")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef")
+    imported = [
+        target
+        for path in sorted((REPO_ROOT / "reef/dispatcher").rglob("*.py"))
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.dispatcher")
+    ]
     assert all(
         any(
             target == contract or target.startswith(contract + ".")
@@ -204,7 +208,15 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
 def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
-        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits"),
+        "reef.storage.tasks": ("reef.core",),
+        "reef.storage.trajectories": ("reef.core",),
+        "reef.storage.scenario": (
+            "reef.core",
+            "reef.storage.records",
+            "reef.storage.commits",
+            "reef.storage.tasks",
+            "reef.storage.trajectories",
+        ),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)
@@ -241,6 +253,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     # is the allowed escape hatch.
     core_packages = (
         "reef/core",
+        "reef/dispatcher",
         "reef/service",
         "reef/scenario",
         "reef/storage",
@@ -249,9 +262,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/runtime",
         "reef/surface",
     )
-    core_modules = ["reef/dispatcher.py"]
     files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
-    files += [REPO_ROOT / module for module in core_modules]
     # A method package's public half too; its ``slime`` subpackage is the
     # backend half, imported by the training driver and workers only.
     files += [
@@ -289,15 +300,6 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
     # interpreter import in either direction must not deadlock on a cycle.
     _assert_isolated_import("from reef.scenario.factory import ScenarioFactory; assert ScenarioFactory")
     _assert_isolated_import("import reef; from reef.scenario.factory import ScenarioFactory")
-
-
-def test_checkpoint_strategy_is_a_leaf_module() -> None:
-    module = importlib.import_module("reef.recipe.checkpoint_strategy")
-    tree = ast.parse(inspect.getsource(module))
-    reef_imports = [
-        node for node in tree.body if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("reef")
-    ]
-    assert reef_imports == []
 
 
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
@@ -517,11 +519,16 @@ def test_training_backends_never_import_inference_implementations() -> None:
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
 
 
-def test_task_generation_input_definition_does_not_depend_on_consumers() -> None:
-    module = importlib.import_module("reef.core.tasks.generation")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.core.tasks")
-    for dependency in ("reef.train", "reef.record2task.generator", "recipes"):
-        assert _imports_of(imported, dependency) == []
+def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
+    # The generator service owns the request; the generated-task recipe owns the generator contract.
+    for module_name, package, consumers in (
+        ("reef.record2task.generator.inputs", "reef.record2task.generator", ("reef.train", "reef.recipe", "recipes")),
+        ("reef.recipe.generated_tasks.generator", "reef.recipe.generated_tasks", ("reef.train", "recipes")),
+    ):
+        module = importlib.import_module(module_name)
+        imported = _imported_modules(ast.parse(inspect.getsource(module)), package=package)
+        for dependency in consumers:
+            assert _imports_of(imported, dependency) == [], module_name
 
 
 def test_background_jobs_depend_only_on_the_standard_library() -> None:
@@ -571,6 +578,7 @@ def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
         "reef.pipeline_context",
         "reef.record2record",
         "reef.record2task",
+        "reef.storage.tasks",
         "reef.task2batch",
     )
     paths = [*sorted((REPO_ROOT / "reef" / "task2batch").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]

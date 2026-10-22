@@ -205,10 +205,20 @@ def test_null_is_kept_for_optional_fields(tmp_path):
     }
     with pytest.raises(DeployConfigError, match=r"recipe\.config\.max-staleness does not accept null"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
-    raw["recipe"]["config"] = {"checkpoint-every-n-versions": None}
+    raw["recipe"]["config"] = {}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
     config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
-    assert config["reef"]["checkpoint_every_n_versions"] is None
+    assert config["reef"]["upstream_api_key"] is None
+
+
+def test_recipe_config_refuses_the_removed_artifact_cadence(tmp_path):
+    # The training backend's saves decide which versions become artifacts; no recipe setting does.
+    raw = {
+        "inference": {"model-path": "/models/demo"},
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"checkpoint-every-n-versions": 1}},
+    }
+    with pytest.raises(DeployConfigError, match=r"unknown recipe\.config field: checkpoint_every_n_versions"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
 
 
 def test_recipe_config_refuses_a_stage_setting(tmp_path):

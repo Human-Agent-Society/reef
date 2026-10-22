@@ -144,6 +144,10 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         argument == "--use-critic" or argument.startswith("--use-critic=") for argument in arguments
     )
     explicitly_resident = "--no-offload-train" in arguments
+    save = args.save
+    if not isinstance(save, str) or not save.strip():
+        # Megatron requires --save-interval only with --save, and the bridge reads both.
+        raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is

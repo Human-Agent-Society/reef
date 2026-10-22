@@ -16,6 +16,7 @@ import statistics
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
@@ -142,6 +143,7 @@ class ProposalRecord:
     task_name: str | None
     refusal: str
     designer_report_id: str = ""
+    split: Literal["train", "eval"] = "train"
 
     @property
     def is_written(self) -> bool:
@@ -175,7 +177,6 @@ class GenerationRecord:
     generation: int
     proposals: tuple[ProposalRecord, ...]
     measures: tuple[TaskMeasure, ...]
-    manifest_path: Path | None
     error: str = ""
 
     @property
@@ -203,7 +204,6 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
     state_dir.mkdir(parents=True, exist_ok=True)
     document = {
         "generation": record.generation,
-        "manifest": str(record.manifest_path) if record.manifest_path is not None else None,
         "error": record.error,
         "proposals": [asdict(proposal) for proposal in record.proposals],
         "tasks": [
