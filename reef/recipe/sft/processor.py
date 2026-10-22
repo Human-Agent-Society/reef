@@ -45,7 +45,14 @@ class SFTRecord2Record(ExclusiveReportRecord2Record):
 
 @dataclass(frozen=True)
 class SFTSettings(PluginSettings):
-    """The config of ``SFTTasks``: the tokenizer, the target, and the maximum sample length."""
+    """Validated configuration used to construct ``SFTTasks``.
+
+    Values: ``tokenizer_path`` is a non-blank str, ``target`` is a member of
+    ``SFT_TARGETS``, and ``max_tokens`` is a non-negative int, excluding bool.
+    Zero disables the sample length limit. Construction checks all domains.
+    Purpose: ``SFTTasks.from_config`` parses these settings; ``SFTTasks``
+    loads the named tokenizer and uses the target and sample length limit.
+    """
 
     tokenizer_path: str = config_option(
         "", help="The served model's tokenizer. It renders the request and the target."
@@ -59,6 +66,12 @@ class SFTSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.tokenizer_path, str):
+            raise TypeError("tokenizer_path must be a str")
+        if not isinstance(self.target, str):
+            raise TypeError("target must be a str")
+        if not isinstance(self.max_tokens, int) or isinstance(self.max_tokens, bool):
+            raise TypeError("max_tokens must be an int, excluding bool")
         if not self.tokenizer_path.strip():
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the sample")
         if self.target not in SFT_TARGETS:
@@ -86,11 +99,9 @@ class SFTTasks(ReportTasks):
     loads from the settings' ``tokenizer_path``) and ``overflow_count`` (the
     number of samples it skipped as too long: 0 at construction, and only
     ``make_sample`` adds to it). The constructor copies ``target`` and
-    ``max_tokens`` from an ``SFTSettings``. ``SFTSettings.__post_init__``
-    checks that ``tokenizer_path`` is not blank, that ``target`` is in
-    ``SFT_TARGETS``, and that ``max_tokens`` is not negative. The
-    constructor itself checks nothing more. The int type of ``max_tokens``
-    is the annotation, which mypy checks.
+    ``max_tokens`` from a validated ``SFTSettings``; bool is not a token count.
+    Construction rejects other settings types before loading the tokenizer.
+    The tokenizer's loading and rendering contract belongs to transformers.
     Purpose: ``SFTRecipe`` names it as the record-to-task stage, and
     ``from_config`` makes it from the stage config. For each
     ``ReportContext``, ``make_sample`` returns one ``TrajectoryItem``, or
@@ -103,6 +114,8 @@ class SFTTasks(ReportTasks):
     """
 
     def __init__(self, settings: SFTSettings) -> None:
+        if not isinstance(settings, SFTSettings):
+            raise TypeError("settings must be an SFTSettings")
         # transformers is part of the training environment. The service never renders a sample.
         super().__init__()
         from transformers import AutoTokenizer

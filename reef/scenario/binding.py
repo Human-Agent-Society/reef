@@ -17,9 +17,8 @@ class ScenarioBinding:
     ``inference_handler`` and ``training_runtime`` are an instance of their
     interface or ``None``; ``report_type`` is a ``ReportBase`` subclass or
     ``None``; and ``refuses_image_content`` is a bool. Construction raises
-    ``TypeError`` when ``refuses_image_content`` is not a bool. The other
-    domains are the annotations, which mypy checks. The type puts no
-    condition between fields.
+    ``TypeError`` for any value outside these domains. There are no
+    additional conditions between fields.
     Purpose: ``ScenarioFactory`` makes one binding for each scenario from the
     scenario's recipe (``refuses_image_content`` is the recipe's
     ``refuses_image_content``). ``Scenario`` holds it. The service, record
@@ -41,5 +40,17 @@ class ScenarioBinding:
     refuses_image_content: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.surface, Surface):
+            raise TypeError("surface must be a Surface")
+        if self.runtime is not None and not isinstance(self.runtime, InferenceRuntime):
+            raise TypeError("runtime must be an InferenceRuntime or None")
+        if self.inference_handler is not None and not isinstance(self.inference_handler, InferenceHandler):
+            raise TypeError("inference_handler must be an InferenceHandler or None")
+        if self.training_runtime is not None and not isinstance(self.training_runtime, TrainingRuntime):
+            raise TypeError("training_runtime must be a TrainingRuntime or None")
+        if self.report_type is not None and (
+            not isinstance(self.report_type, type) or not issubclass(self.report_type, ReportBase)
+        ):
+            raise TypeError("report_type must be a ReportBase subclass or None")
         if not isinstance(self.refuses_image_content, bool):
             raise TypeError("refuses_image_content must be a bool")

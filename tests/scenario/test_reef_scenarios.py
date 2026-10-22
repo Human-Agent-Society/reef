@@ -370,3 +370,57 @@ def test_a_scenario_binding_refuses_a_refuses_image_content_flag_that_is_not_a_b
     with pytest.raises(TypeError, match="refuses_image_content must be a bool"):
         ScenarioBinding(**fields, refuses_image_content=value)
     assert ScenarioBinding(**fields, refuses_image_content=True).refuses_image_content is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("surface", "invalid"),
+        ("runtime", object()),
+        ("inference_handler", object()),
+        ("training_runtime", object()),
+        ("report_type", str),
+        ("report_type", object()),
+    ],
+)
+def test_scenario_binding_rejects_invalid_field_domains(field, value) -> None:
+    fields = {"surface": Surface(), "runtime": None, "inference_handler": None, field: value}
+    with pytest.raises(TypeError, match=field):
+        ScenarioBinding(**fields)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("name", 1, TypeError),
+        ("binding", object(), TypeError),
+        ("repository", object(), TypeError),
+        ("store", object(), TypeError),
+        ("trainers", [], TypeError),
+        ("model_config", object(), TypeError),
+        ("scenario_step", -1, ValueError),
+        ("scenario_step", 1.5, ValueError),
+        ("scenario_step", True, ValueError),
+        ("process_id", 1, TypeError),
+        ("recovered_head_record", object(), TypeError),
+        ("experiment_observer", object(), TypeError),
+    ],
+)
+def test_scenario_rejects_invalid_constructor_domains(field, value, error) -> None:
+    from reef.scenario.scenario import Scenario
+
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    try:
+        scenario = dispatcher.get_or_create_scenario("math")
+        fields = {
+            "name": scenario.name,
+            "binding": ScenarioBinding(surface=scenario.surface, runtime=None, inference_handler=None),
+            "repository": scenario.repository,
+            "store": scenario.store,
+            "trainers": scenario.trainers,
+        }
+        fields[field] = value
+        with pytest.raises(error, match=field):
+            Scenario(**fields)
+    finally:
+        dispatcher.close()
