@@ -28,6 +28,7 @@ from reef.core.errors import ReefError
 from reef.runtime.interfaces import (
     AdapterEngine,
     InferenceBackend,
+    InferenceMemoryHandoffBackend,
     RuntimeLoadId,
     ScenarioHistoryStore,
     TrainingBackend,
@@ -715,6 +716,15 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.inference = inference
         self.context = training.context
         self.config = training.config
+        # The receiver's GPU-memory handoff, used only by colocated training: set exactly when
+        # training is colocated, so a receiver without the handoff serves every other deployment.
+        self.memory_handoff: InferenceMemoryHandoffBackend | None
+        if not self.config.colocate:
+            self.memory_handoff = None
+        elif isinstance(inference, InferenceMemoryHandoffBackend):
+            self.memory_handoff = inference
+        else:
+            raise TypeError(f"colocated training cannot share GPUs with {type(inference).__name__}")
         self.state = state
         self.history = self.context.history
         self.residency = AdapterResidencyManager(self.config.adapter_capacity) if self.config.lora else None
@@ -757,9 +767,11 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def load_adapter(self, name: str, payload: Any) -> None:
         scenario, version = parse_adapter_name(name)
-        files = self.training.adapter_files(scenario, version)
+        files = self.training.weight_files(scenario, version)
         if files is not None:
-            self.inference.load_adapter_files(name, files, None)
+            if files.layout != "adapter":
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=None)
             return
         self.training.send_adapter(scenario, name)
 
@@ -791,19 +803,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Colocated memory handoff
 
     def prepare_training(self) -> None:
-        if self.config.colocate:
+        if self.memory_handoff is not None:
             self.pause_generation()
-            self.inference.offload(self.release_tags)
+            self.memory_handoff.offload(self.release_tags)
 
     def restore_incumbent(self) -> None:
-        if not self.config.colocate:
+        if self.memory_handoff is None:
             return
         # Pairs with the training step's offload: resuming a region that was
         # never released fails, because the receiver resumes by removing the tag
         # from the set release added it to.
         if self.release_tags is None:
-            self.inference.onload_weights()
-        self.inference.onload_kv()
+            self.memory_handoff.onload_weights()
+        self.memory_handoff.onload_kv()
         self.resume()
 
     # -- Version identity
@@ -871,25 +883,28 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def _transfer(self, target: str, *, force_full: bool, scenario: str | None = None) -> str:
         """Send the trainer's weights as ``target`` and verify every engine received them."""
-        if scenario is not None:
-            files = self.training.adapter_files(scenario, target)
-            if files is not None:
-                # A trainer that delivers files never sends: Reef's receiver loads the adapter.
-                self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
-                self._verify_engines_serve(target, "after update")
-                return target
-        if self.config.colocate:
+        files = self.training.weight_files(scenario, target)
+        if files is not None:
+            # A trainer that delivers files never sends: Reef's receiver loads them.
+            if files.layout != ("full" if scenario is None else "adapter"):
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            name = None if scenario is None else adapter_name(scenario, target)
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=target)
+            self._verify_engines_serve(target, "after update")
+            return target
+        handoff = self.memory_handoff
+        if handoff is not None:
             # Repeatable release also covers retry after a partial receive:
             # a released sender may need to reconstruct GPU workers.
-            self.inference.offload(self.release_tags)
+            handoff.offload(self.release_tags)
         self.training.prepare_weights(target, force_full=force_full)
-        if self.config.colocate and self.release_tags is None:
-            self.inference.onload_weights()
+        if handoff is not None and self.release_tags is None:
+            handoff.onload_weights()
         version = self.training.send_weights(target, force_full=force_full)
         if version != target:
             raise RuntimeError(f"weight sender returned runtime load ID {version!r}; expected {target!r}")
-        if self.config.colocate:
-            self.inference.onload_kv()
+        if handoff is not None:
+            handoff.onload_kv()
         self._verify_engines_serve(version, "after update")
         return version
 
@@ -938,8 +953,8 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if not pending and active is None:
             return
         self.pause_generation()
-        if self.config.colocate:
-            self.inference.onload_weights()
+        if self.memory_handoff is not None:
+            self.memory_handoff.onload_weights()
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(scenario, version, self)

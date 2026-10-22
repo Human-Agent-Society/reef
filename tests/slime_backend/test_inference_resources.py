@@ -95,7 +95,7 @@ def plan_for(state, *, colocate=False):
     )
 
     class Training:
-        weight_transfer_protocol = inference_service.INFERENCE_PROTOCOL
+        weight_transfer_protocols = (inference_service.INFERENCE_PROTOCOL,)
 
         def start(self, supplied):
             assert supplied is allocation

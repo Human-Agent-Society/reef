@@ -132,7 +132,7 @@ def _training_rows(client):
 
 
 def _steps_before(client):
-    """How many training steps the scenario already recorded; work/ keeps the commit log across runs."""
+    """How many training steps the scenario already recorded; work/ keeps the commit history across runs."""
     try:
         return len(_training_rows(client))
     except ReefClientError as exc:
@@ -170,7 +170,7 @@ def _wait_for_steps(client, before, expected, deadline):
             return steps[before:]
         time.sleep(2.0)
     print(
-        f"{expected - (shown - before)} step(s) still pending at the deadline; their verdicts land in the commit log"
+        f"{expected - (shown - before)} step(s) still pending at the deadline; their verdicts land in the commit history"
     )
     return steps[before:]
 

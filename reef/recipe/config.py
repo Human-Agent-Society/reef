@@ -28,19 +28,12 @@ def recipe_config_from_mapping(loaded: Any) -> dict[str, Any]:
     config = dict(loaded)
     if not isinstance(config.get("implementation"), str) or not config["implementation"]:
         raise RecipeConfigError("recipe config must contain a non-empty 'implementation'")
-    for section in ("data", "artifact", "runtime", "model", "rollout", "optimization"):
+    for section in ("data", "runtime", "model", "rollout", "optimization"):
         value = config.get(section, {})
         if not isinstance(value, Mapping):
             raise RecipeConfigError(f"recipe config '{section}' must be an object")
         config[section] = dict(value)
     return config
-
-
-def config_positive_int(config: Mapping[str, Any], name: str, default: int) -> int:
-    value = config.get(name, default)
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise RecipeConfigError(f"{name} must be a positive integer")
-    return value
 
 
 def recipe_config_from_section(section: Any, path: str, framework_sections: tuple[str, ...] = ()) -> dict[str, Any]:

@@ -39,7 +39,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 18
-    checkpoint-every-n-versions: 1
 # SAO's stages. The batch stage trains on batch_size scored rollouts per optimizer step.
 pipeline:
   task2batch:

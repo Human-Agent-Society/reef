@@ -115,7 +115,7 @@ class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
     Optional capabilities are separate base classes. To find or list stored
     scenarios, also inherit ``RegistrationAwareRepositoryBackendFactory`` or
     ``EnumerableRepositoryBackendFactory``. ``CachedRepositoryBackendFactory``
-    gives both. To work with a scenario commit log, the backends must
+    gives both. To work with a scenario commit history, the backends must
     subclass ``StagedReleaseRepositoryBackend``.
     """
 
@@ -245,11 +245,6 @@ class Repository(ArtifactRepository):
     @property
     def local_root(self) -> Path:
         return self._local_root
-
-    @property
-    def holds_local_releases(self) -> bool:
-        """Whether a release that this process staged exists only in memory. A close of the repository loses it."""
-        return bool(self._local_artifacts)
 
     @property
     def backend(self) -> RepositoryBackend:

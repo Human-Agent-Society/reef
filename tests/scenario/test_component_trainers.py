@@ -41,7 +41,6 @@ from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.record2record import (
     GroupDecision,
     JudgingRecord2Record,
@@ -58,7 +57,7 @@ from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
-    CommitLogError,
+    CommitHistoryError,
     CommitRecord,
     parse_scenario_metadata,
     scenario_metadata_for,
@@ -797,17 +796,6 @@ def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(
         dispatcher.delete_scenario("again")
     marker["commit_acknowledged"] = True
     assert dispatcher.delete_scenario("again")["scenario"] == "again"
-
-
-@pytest.mark.unit
-def test_a_scenario_of_several_components_refuses_a_checkpoint_interval_above_one(
-    tmp_path: Path, dispatchers: _Dispatchers
-) -> None:
-    """A step that published no checkpoint would see its component dropped from the next release."""
-    recipe = _TwoTrainerRecipe(backends=_local_pair(tmp_path), checkpoint_strategy=EveryNVersions(2))
-    dispatcher, _ = dispatchers.open(recipe=recipe)
-    with pytest.raises(ReefError, match="checkpoint interval must be 1"):
-        dispatcher.get_or_create_scenario("agent")
 
 
 @dataclass(frozen=True)
@@ -1718,7 +1706,7 @@ def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path, dispa
 def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A checkpoint read back from the artifact head names its component, so a lost commit log resets no trainer."""
+    """A checkpoint read back from the artifact head names its component, so a lost commit history resets no trainer."""
     backend_factory = _seeded_repository(tmp_path)
     dispatcher, _ = dispatchers.open(records_dir=tmp_path / "records-1", backend_factory=backend_factory)
     scenario = _scenario(dispatcher, 1)
@@ -1807,7 +1795,7 @@ def test_commit_record_carries_its_component() -> None:
     assert encoded["component"] == HARNESS
     assert CommitRecord.from_dict(encoded) == record
     assert "component" not in CommitRecord.from_dict({**encoded, "component": None}).to_dict()
-    with pytest.raises(CommitLogError, match="only training commits may carry component"):
+    with pytest.raises(CommitHistoryError, match="only training commits may carry component"):
         CommitRecord(
             scenario="agent",
             step=4,

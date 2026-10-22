@@ -410,8 +410,8 @@ class _FakeGroup:
         self.train_calls.append((rollout_id, rollout_data_ref))
         return ["train-ref"]
 
-    def async_pop_rank0_metrics(self):
-        return self._actor_handlers[0].pop_metrics.remote()
+    def async_pop_metrics(self):
+        return [rank.pop_metrics.remote() for rank in self._actor_handlers]
 
     def async_get_rank0_runtime_load_id(self):
         return self._actor_handlers[0].get_runtime_load_id.remote()
@@ -1953,6 +1953,30 @@ def test_training_backend_factory_passes_timeout_to_worker_results(monkeypatch, 
         result = job.train()
     assert result.training["loss"] == 0.1
     assert waits == [expected]
+
+
+def test_training_metrics_include_the_last_pipeline_stage(monkeypatch):
+    # Slime logs a train step on the last pipeline stage, not on rank 0.
+    group = _FakeGroup()
+    group._actor_handlers = [
+        _FakeRank(metrics={"train/step": 0, "perf/update_weights_time": 1.5}),
+        _FakeRank(metrics={"train/step": 0, "train/loss": 1.25, "train/grad_norm": 2.0}),
+    ]
+    group.train_parallel_config = {"dp_size": 1}
+    backend = bridge.create_training_backend(
+        bridge_args(
+            save=None, start_rollout_id=0, critic_steps_per_actor=None, num_critic_only_steps=0, score_centering=False
+        ),
+        group,
+        None,
+        preparation=bridge.BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=False),
+    )
+    monkeypatch.setattr(backend._batch_processor, "prepare_external_train_data", lambda data: "packed")
+    with backend.prepare(_payload(loss="sft"), job_id="job", scenario_step=0, prior_marker=None) as job:
+        result = job.train()
+    assert result.training["train/loss"] == 1.25
+    assert result.training["train/grad_norm"] == 2.0
+    assert result.training["perf/update_weights_time"] == 1.5
 
 
 @pytest.mark.parametrize("phase", ["train", "save"])

@@ -61,8 +61,6 @@ inference:
       max_new_tokens: 8192
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
-  config:
-    checkpoint-every-n-versions: 1
 pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
   record2record:

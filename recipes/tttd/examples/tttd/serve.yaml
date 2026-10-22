@@ -24,8 +24,6 @@ inference:
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
-  config:
-    checkpoint-every-n-versions: 2
 # TTTD's stages. The record stage owns the step grid; the later stages read it from there.
 # harness/harbor_agent.py reads this grid, so the harness and the stack cannot disagree about the step.
 pipeline:

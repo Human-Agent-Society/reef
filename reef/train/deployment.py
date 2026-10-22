@@ -183,6 +183,8 @@ class TrainingDeployment(ABC):
 
     requires_local_model: bool = True
     supports_teacher_engine: bool = False
+    #: Whether its model driver can run the engines on a remote component (an ``inference.remote`` section).
+    supports_remote_inference: bool = False
 
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

@@ -16,8 +16,8 @@ from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 from reef.artifact import LiveWeightArtifactRef
 from reef.evaluation.harness import FailureObservation
 from reef.harness.adapters import get_adapter
-from reef.storage.commit_log import CommitLog
 from reef.storage.commits import CommitRecord
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
 from reef.train.cordis_backend.manifest import MANIFEST_KIND, advance, fingerprint, normalize_cause
 
@@ -225,25 +225,26 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
     assert settled.fixed[0].count == 2
 
 
-def test_manifest_recovers_through_the_commit_log(tmp_path: Path) -> None:
+def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
     received: list[FailureManifest | None] = []
     first = failing_step(str(tmp_path / "no-such-binary"), received, {"steps": 0, "entries": []})
 
-    log = CommitLog(tmp_path / "commit.jsonl")
-    log.append(
-        CommitRecord(
-            scenario="demo",
-            step=1,
-            artifact_ref=LiveWeightArtifactRef(
-                content_id="live:1", release_id="live:demo:w1:1", parent_release_id="base", runtime_load_id="w1"
-            ),
-            checkpoint=False,
-            algorithm_state=dict(first.state),
-            high_water_sequence=1,
-            high_water_offset=1,
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
+        log = records.commit_history()
+        log.append(
+            CommitRecord(
+                scenario="demo",
+                step=1,
+                artifact_ref=LiveWeightArtifactRef(
+                    content_id="live:1", release_id="live:demo:w1:1", parent_release_id="base", runtime_load_id="w1"
+                ),
+                checkpoint=False,
+                algorithm_state=dict(first.state),
+                high_water_sequence=1,
+                high_water_offset=1,
+            )
         )
-    )
-    recovered = log.records()[-1].algorithm_state
+        recovered = log.records()[-1].algorithm_state
     assert recovered is not None
     assert recovered["failure_manifest"] == first.state["failure_manifest"]
 

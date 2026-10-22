@@ -6,7 +6,12 @@ import logging
 import math
 from typing import Any
 
-from reef.runtime.deployment import DeploymentResources, TrainingService, WeightTransferSession
+from reef.runtime.deployment import (
+    DeploymentResources,
+    NativeWeightTransferSession,
+    TrainingService,
+    WeightTransferSession,
+)
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import TrainingBackend
 from reef.train.slime_backend.reef_adapters.bridge import (
@@ -60,8 +65,8 @@ class SlimeTrainingService(TrainingService):
         self._closed = False
 
     @property
-    def weight_transfer_protocol(self) -> str:
-        return self._weight_transfer_protocol
+    def weight_transfer_protocols(self) -> tuple[str, ...]:
+        return (self._weight_transfer_protocol,)
 
     def start(self, resources: DeploymentResources) -> None:
         if self._started or self._closed:
@@ -83,7 +88,7 @@ class SlimeTrainingService(TrainingService):
         """Attach the existing native sender protocol after workers are initialized."""
         if self._actor_group is None or self._closed:
             raise RuntimeError("start training workers before attaching their weight transport")
-        if session.protocol != self.weight_transfer_protocol:
+        if not isinstance(session, NativeWeightTransferSession) or session.protocol != self._weight_transfer_protocol:
             raise ValueError("Slime training received an incompatible weight transfer protocol")
         if self._session_id is not None:
             if self._session_id == session.session_id:

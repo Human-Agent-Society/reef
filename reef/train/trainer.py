@@ -667,7 +667,7 @@ class Trainer:
             self._pending = None
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Notify the backend after ``state`` enters the durable commit log."""
+        """Notify the backend after ``state`` enters the durable commit history."""
         backend = self._candidate_backend
         if backend is not None:
             backend.commit_applied(state)
@@ -695,7 +695,7 @@ class Trainer:
         pipeline starts empty: without this replay, a report arriving after
         recovery waits forever on a reference that can never be pushed
         again. ``consumed_ids`` names the rows committed batches consumed —
-        the commit log records them per step because retention may keep a
+        the commit history records them per step because retention may keep a
         consumed row stored (audit-only retention is contract-legal), and a
         row a committed batch consumed must never train twice. Skipping them
         while replaying the retained prefix reconstructs the live state the

@@ -20,7 +20,6 @@ from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -37,16 +36,6 @@ class ContractInferenceHandler(InferenceHandler):
         return await self._handler(artifact, path, payload)
 
 
-def dispatcher_with_checkpoint_strategy(strategy, *, backend_factory, local_artifact_dir):
-    recipe = Recipe(checkpoint_strategy=strategy)
-    return Dispatcher(
-        recipe,
-        backend_factory,
-        local_artifact_dir=local_artifact_dir,
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-
-
 class WeightRecipe(Recipe):
     """A recipe whose scenarios commit live weights, so serving-version
     verification applies (the core ``recipe`` implementation serves a plain
@@ -58,7 +47,7 @@ class WeightRecipe(Recipe):
 
 def weight_dispatcher(tmp_path, initial):
     return Dispatcher(
-        WeightRecipe(checkpoint_strategy=EveryNVersions(3)),
+        WeightRecipe(),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
@@ -700,61 +689,6 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-
-    class CountingBackend(InMemoryRepositoryBackend):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            self.publish_count = 0
-            self.expected_parents = []
-
-        def publish(self, candidate, *, expected_parent, advance_head=True):
-            self.publish_count += 1
-            self.expected_parents.append(expected_parent)
-            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
-
-    backend = CountingBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-    original_checkpoint = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-
-    for version in (1, 2, 3):
-        candidate = tmp_path / f"candidate-{version}"
-        candidate.mkdir()
-        (candidate / "model.txt").write_text(f"v{version}")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
-
-        runtime = dispatcher.get_or_create_scenario("chat")
-        selected = dispatcher.current_artifact("chat")
-        assert selected.local_path is None
-        materialized = selected.materialize()
-        assert materialized.local_path.joinpath("model.txt").read_text() == f"v{version}"
-        assert runtime.scenario_step == version
-        if version < 3:
-            assert runtime.repository.current_artifact.release_id.startswith("local:")
-            assert runtime.repository.checkpoint_artifact == original_checkpoint
-            assert backend("chat").publish_count == 0
-
-    runtime = dispatcher.get_or_create_scenario("chat")
-    assert not runtime.repository.current_artifact.release_id.startswith("local:")
-    assert runtime.repository.checkpoint_artifact == runtime.repository.current_artifact
-    assert backend("chat").publish_count == 1
-    assert backend("chat").expected_parents == [original_checkpoint]
-    assert backend("chat").current() == runtime.repository.current_artifact
-    recovered = build_default_dispatcher(
-        backend_factory=backend, scenario_storage=SQLiteScenarioStorage()
-    ).get_or_create_scenario("chat")
-    assert recovered.scenario_step == 3
-
-
-@pytest.mark.unit
 def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
     async def run() -> None:
         async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
@@ -989,22 +923,20 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
     initial.mkdir()
     (initial / "model.txt").write_text("base")
     backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first_dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
+    first_dispatcher = Dispatcher(
+        WeightRecipe(),
+        backend,
         local_artifact_dir=tmp_path / "first-local",
         scenario_storage=SQLiteScenarioStorage(),
     )
     checkpoint = first_dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    (candidate / "model.txt").write_text("v1")
-    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+    # Live weights have no checkpoint bytes, so a new dispatcher cannot serve them.
+    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
     assert first_dispatcher.get_or_create_scenario("chat").repository.current_artifact != checkpoint
 
-    second_dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
+    second_dispatcher = Dispatcher(
+        WeightRecipe(),
+        backend,
         local_artifact_dir=tmp_path / "second-local",
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -1038,17 +970,11 @@ def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> 
 def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    decisions = []
-
-    class RecordingStrategy:
-        def should_checkpoint(self, scenario, version, result):
-            decisions.append((scenario, version, result.state))
-            return False
-
-    dispatcher = dispatcher_with_checkpoint_strategy(
-        RecordingStrategy(),
-        backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+    dispatcher = Dispatcher(
+        Recipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     dispatcher.get_or_create_scenario("math")
@@ -1056,11 +982,9 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
     dispatcher.registry.get("math").commit(TrainStepResult(state="no artifact"))
     # A no-artifact commit advances the step (the trainer consumed records and
-    # state) but does not move the serving head or consult the checkpoint
-    # strategy: there is no candidate to checkpoint.
+    # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
     assert dispatcher.get_or_create_scenario("math").repository.require_current_artifact() == math_head
-    assert decisions == []
 
     for scenario in ("math", "code", "math", "code"):
         version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
@@ -1070,44 +994,29 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
     assert dispatcher.get_or_create_scenario("code").scenario_step == 2
-    assert decisions == [
-        ("math", 2, 2),
-        ("code", 1, 1),
-        ("math", 3, 3),
-        ("code", 2, 2),
-    ]
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_source", ["strategy", "repository"])
-def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path, failure_source) -> None:
+def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
 
     class FailingBackend(InMemoryRepositoryBackend):
         def publish(self, candidate, *, expected_parent, advance_head=True):
-            if failure_source == "repository":
-                raise ArtifactPublicationError("repository failed")
-            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
+            raise ArtifactPublicationError("repository failed")
 
-    class FailingStrategy:
-        def should_checkpoint(self, scenario, version, result):
-            if failure_source == "strategy":
-                raise RuntimeError("strategy failed")
-            return True
-
-    dispatcher = dispatcher_with_checkpoint_strategy(
-        FailingStrategy(),
-        backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
+    dispatcher = Dispatcher(
+        Recipe(),
+        FailingBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     runtime = dispatcher.get_or_create_scenario("chat")
     previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.scenario_step)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
 
-    error = RuntimeError if failure_source == "strategy" else ArtifactPublicationError
-    with pytest.raises(error, match=f"{failure_source} failed"):
+    with pytest.raises(ArtifactPublicationError, match="repository failed"):
         dispatcher.registry.get("chat").commit(TrainStepResult(state="new", artifact=Artifact.local(candidate)))
 
     assert (
@@ -1258,9 +1167,7 @@ class HarnessRecipe(Recipe):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "recipe", [HarnessRecipe(), WeightRecipe(checkpoint_strategy=EveryNVersions(3))], ids=["harness", "weights"]
-)
+@pytest.mark.parametrize("recipe", [HarnessRecipe(), WeightRecipe()], ids=["harness", "weights"])
 def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_it(tmp_path, recipe) -> None:
     """A session still on an older release records against it, from its x-reef-tag-release; a tag the catalog does not
     have, and every call on a scenario that serves weights, records against the served release."""

@@ -25,7 +25,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
@@ -154,7 +153,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     recipe = SAORecipe(**runtime_bindings(_StubTrainingRuntime()))
 
     # Objective defaults live with the Slime implementation. The Reef recipe
-    # owns only its stages and checkpoint cadence.
+    # owns only its stages.
     stages = recipe.stages()
     assert (stages.record2record.plugin_class, stages.record2task.plugin_class, stages.task2batch.plugin_class) == (
         ExclusiveReportRecord2Record,
@@ -162,7 +161,6 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
         SAOBatches,
     )
     assert recipe.build_pipeline(PipelineContext("math")).batch_size == 128
-    assert recipe.checkpoint_strategy == EveryNVersions(1)
 
 
 @pytest.mark.unit
@@ -171,13 +169,11 @@ def test_sao_recipe_reads_reef_side_config() -> None:
         {},
         config={
             "pipeline": {"task2batch": {"config": {"batch_size": 2}}},
-            "artifact": {"checkpoint_every_n_versions": 4},
         },
         **runtime_bindings(_StubTrainingRuntime()),
     )
 
     assert recipe.build_pipeline(PipelineContext("math")).batch_size == 2
-    assert recipe.checkpoint_strategy == EveryNVersions(4)
 
 
 @pytest.mark.unit
@@ -487,12 +483,17 @@ class _StubTrainingRuntime(StubTrainingRuntime):
             raise StaleCandidate
         self.jobs.append(dict(payload))
         job_id = f"job-{scenario_step}"
-        checkpoint = self.checkpoint_root / job_id
-        checkpoint.mkdir(parents=True)
+        if self.checkpoint_root is None:
+            # A job that saves no checkpoint publishes live weights.
+            checkpoint_path = None
+        else:
+            checkpoint = self.checkpoint_root / job_id
+            checkpoint.mkdir(parents=True)
+            checkpoint_path = str(checkpoint)
         result = ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
-            checkpoint_path=str(checkpoint),
+            checkpoint_path=checkpoint_path,
             current_runtime_load_id=self._served_version,
             # A real SAO backend reports its schedule cadence and async
             # rollout metrics here; the shapes are asserted in test_sao_bridge.
@@ -604,19 +605,15 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
 @pytest.mark.integration
 def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     # The paper's async claim: after a step, the version an inference would
-    # freeze IS the freshly-synced one, not the pre-train head. Force a live
-    # step (checkpoint_every_n high) so the head stays a LiveWeightArtifactRef
-    # whose runtime_load_id is observable.
+    # freeze IS the freshly-synced one, not the pre-train head. The runtime
+    # saves no checkpoint, so the head stays a LiveWeightArtifactRef whose
+    # runtime_load_id is observable.
     initial = tmp_path / "initial"
     initial.mkdir()
-    runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
+    runtime = _StubTrainingRuntime()
 
     dispatcher = Dispatcher(
-        SAORecipe(
-            **runtime_bindings(runtime),
-            pipeline_stages=single_rollout_steps(),
-            checkpoint_strategy=EveryNVersions(99),
-        ),
+        SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -644,7 +641,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
 @pytest.mark.integration
 def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
     # Kill/restart recovery at the pipeline level: drop the in-memory dispatcher
-    # and rebuild the scenario from durable state ALONE (commit log + snapshot),
+    # and rebuild the scenario from durable state ALONE (commit history + snapshot),
     # then prove the step counter and algorithm state were reconstructed, not
     # remembered, and that training resumes at the next rollout.
     initial = tmp_path / "initial"
@@ -670,14 +667,14 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
         first.close()
 
     # Simulated restart: discard the dispatcher, rebuild over the SAME durable
-    # commit log + repository backend. Nothing carries the step in memory.
+    # commit history + repository backend. Nothing carries the step in memory.
     del first
     second = _make_dispatcher()
     try:
         recovered = second.get_or_create_scenario("math")
 
         assert recovered.scenario_step == 1  # step rebuilt from durable state
-        assert recovered.trainer.state == {"steps": 1}  # algorithm_state from the commit log
+        assert recovered.trainer.state == {"steps": 1}  # algorithm_state from the commit history
         assert recovered.store.durable
         record = recovered.store.history()[-1]
         assert record.step == 1  # the journal drove recovery

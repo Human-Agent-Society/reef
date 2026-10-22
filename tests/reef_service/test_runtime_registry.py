@@ -30,11 +30,26 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "executor_training",
         "inference_proxy",
         "ray_training",
+        "remote",
         "sglang",
         "slime_training",
         "tinker",
         "vllm",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("option", ["inference_url", "type", "control"])
+def test_coordinator_runtime_refuses_inference_options_it_sets_itself(option) -> None:
+    with pytest.raises(RuntimeConfigError, match=f"inference_runtime_options cannot set {option}"):
+        RuntimeRegistry().build(
+            {
+                "type": "coordinator_training",
+                "inference_runtime": "remote",
+                "inference_runtime_options": {option: "x", "engine": "sglang"},
+            },
+            model_path="Qwen/Qwen3-8B",
+        )
 
 
 @pytest.mark.unit

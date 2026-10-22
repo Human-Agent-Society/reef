@@ -153,7 +153,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
             self.placement_groups["rollout"] = (None, [], [])
 
     class CpuTraining:
-        weight_transfer_protocol = INFERENCE_PROTOCOL
+        weight_transfer_protocols = (INFERENCE_PROTOCOL,)
         actor = None
         engine = None
         inference_survived = False
