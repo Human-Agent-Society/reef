@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRAIN_RPC_TIMEOUT_S = 14_400
 
 
+def merge_rank_metrics(per_rank: list[dict[str, Any]]) -> dict[str, Any]:
+    """One metrics mapping from every rank's, in rank order; the lowest rank wins a shared key."""
+    merged: dict[str, Any] = {}
+    for metrics in reversed(per_rank):
+        merged.update(metrics or {})
+    return merged
+
+
 class SlimeTrainGroup:
     """Training operations shared by actor and critic worker groups.
 
@@ -206,8 +214,13 @@ class SlimeTrainGroup:
             "set_runtime_load_id_for_update", args=(runtime_load_id,), timeout=self.train_rpc_timeout_s
         )
 
-    def async_pop_rank0_metrics(self):
-        return self.executor.rpc(0, "pop_metrics", non_block=True)
+    def async_pop_metrics(self):
+        """Drain every rank's metrics, in rank order.
+
+        Slime logs a train step (loss, grad norm, learning rate) on the last
+        pipeline stage, which is not rank 0 under pipeline parallelism.
+        """
+        return self.executor.collective_rpc("pop_metrics", non_block=True)
 
     def activate_scenario(self, scenario: str) -> bool:
         """Put one scenario's adapter into every actor's LoRA slot."""
@@ -486,4 +499,4 @@ def create_train_groups(
         raise
 
 
-__all__ = ["SlimeTrainGroup", "create_train_groups", "prepare_critic_args"]
+__all__ = ["SlimeTrainGroup", "create_train_groups", "merge_rank_metrics", "prepare_critic_args"]
