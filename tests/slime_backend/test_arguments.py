@@ -19,6 +19,7 @@ def slime_args(**overrides):
     values = {
         "critic_steps_per_actor": 2,
         "critic_save_interval": 1,
+        "save": "/tmp/megatron",
         "use_critic": False,
         "offload_train": False,
         "disable_grad_buffers_cpu_backup": False,
@@ -53,7 +54,6 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.verify_lora_base_weights is True
     assert args.reef_executor_backend == "auto"
     assert args.reef_rollout_executor_backend == "auto"
-    assert args.reef_checkpoint_interval == 1
 
 
 @pytest.mark.unit
@@ -139,6 +139,7 @@ def test_keeping_the_lora_base_resident_needs_lora_and_colocation() -> None:
             "offload_rollout": True,
             "megatron_lora_rank": 32,
             "keep_lora_base_resident": True,
+            "save_interval": 1,
         }
         values.update(overrides)
         return SlimeArguments(**values)
@@ -170,6 +171,7 @@ def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
             offload_rollout=True,
             megatron_lora_rank=rank,
             keep_lora_base_resident=True,
+            save_interval=1,
         )
 
     for rank in (0, 32):
@@ -189,17 +191,11 @@ def test_finalize_arguments_rejects_nonpositive_critic_save_interval(interval: i
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("arguments", [["--save-interval", "100"], ["--save-interval=100"]])
-def test_finalize_arguments_refuses_slime_save_interval(arguments: list[str]) -> None:
-    with pytest.raises(ValueError, match="reef-checkpoint-interval"):
-        finalize_reef_slime_args(slime_args(), arguments)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("interval", [0, -1])
-def test_finalize_arguments_rejects_nonpositive_checkpoint_interval(interval: int) -> None:
-    with pytest.raises(ValueError, match="reef-checkpoint-interval"):
-        finalize_reef_slime_args(slime_args(reef_checkpoint_interval=interval), [])
+@pytest.mark.parametrize("save", [None, " "])
+def test_finalize_arguments_requires_save(save: str | None) -> None:
+    # Megatron checks --save-interval only with --save, and the bridge reads --save-interval.
+    with pytest.raises(ValueError, match="requires --save"):
+        finalize_reef_slime_args(slime_args(save=save), [])
 
 
 @pytest.mark.unit
@@ -228,7 +224,7 @@ def test_a_checkpoint_interval_needs_full_weight_training_that_keeps_its_workers
         "offload_rollout": True,
         "megatron_lora_rank": 0,
         "keep_lora_base_resident": False,
-        "reef_checkpoint_interval": 4,
+        "save_interval": 4,
         **overrides,
     }
     if refusal is None:

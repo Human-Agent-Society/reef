@@ -302,15 +302,6 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
     _assert_isolated_import("import reef; from reef.scenario.factory import ScenarioFactory")
 
 
-def test_checkpoint_strategy_is_a_leaf_module() -> None:
-    module = importlib.import_module("reef.recipe.checkpoint_strategy")
-    tree = ast.parse(inspect.getsource(module))
-    reef_imports = [
-        node for node in tree.body if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("reef")
-    ]
-    assert reef_imports == []
-
-
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "

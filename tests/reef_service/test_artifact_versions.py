@@ -23,13 +23,11 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.types import TrainStepResult
 
 
 class BlockingBackend(InferenceHandler):
@@ -171,7 +169,6 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     restarted = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(RollbackRuntime(tmp_path / "restarted-export")),
-            checkpoint_strategy=EveryNVersions(1),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
@@ -200,7 +197,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(restarted_runtime), checkpoint_strategy=EveryNVersions(1)),
+        TestPolicyRecipe(**runtime_bindings(restarted_runtime)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -216,7 +213,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_live_version_is_listed_but_cannot_be_a_rollback_target(tmp_path) -> None:
-    value, _, _ = dispatcher(tmp_path, checkpoint_every=2)
+    value, _, _ = dispatcher(tmp_path, save_interval=2)
     train(value, 1)
     train(value, 2)
 
@@ -499,30 +496,15 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
         value.close()
 
 
-class CountingCheckpoints(CheckpointStrategy):
-    """Record each policy decision while selecting the configured cadence."""
-
-    def __init__(self, every: int) -> None:
-        self.every = every
-        self.versions: list[int] = []
-
-    def should_checkpoint(self, scenario: str, version: int, result: TrainStepResult) -> bool:
-        self.versions.append(version)
-        return version % self.every == 0
-
-
 @pytest.mark.unit
-@pytest.mark.parametrize("checkpoint_every", [1, 2])
-def test_exported_weights_use_one_checkpoint_decision_per_step(tmp_path, monkeypatch, checkpoint_every: int) -> None:
-    value, runtime, _ = dispatcher(tmp_path, checkpoint_every=checkpoint_every)
+@pytest.mark.parametrize("save_interval", [1, 2])
+def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, save_interval: int) -> None:
+    value, runtime, _ = dispatcher(tmp_path, save_interval=save_interval)
     try:
         scenario = value.get_or_create_scenario("math")
-        strategy = CountingCheckpoints(checkpoint_every)
-        monkeypatch.setattr(scenario._committer, "_checkpoint_strategy", strategy)
         train(value, 1)
         train(value, 2)
-        assert strategy.versions == [1, 2]
-        assert [record.checkpoint for record in scenario.store.history()] == [checkpoint_every == 1, True]
+        assert [record.checkpoint for record in scenario.store.history()] == [save_interval == 1, True]
         assert scenario.trainer.state["steps"] == 2
         assert runtime.trained == 2
     finally:

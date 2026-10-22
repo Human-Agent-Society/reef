@@ -161,10 +161,7 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
     monkeypatch.setenv("TINKER_API_KEY", api_key)
     raw = {
         "reef": {"run-dir": str(tmp_path / "stack")},
-        "recipe": {
-            "implementation": "recipes.tttd.recipe:TTTDRecipe",
-            "config": {"checkpoint-every-n-versions": 1},
-        },
+        "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
         "inference": {
             "model-path": MODEL if REAL else str(model_dir),

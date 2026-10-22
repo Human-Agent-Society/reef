@@ -41,7 +41,6 @@ from reef.core.reports import ReportBase, ReportValidationError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
@@ -51,8 +50,6 @@ from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
 
-#: The checkpoint cadence key a composite refuses: every one of its steps checkpoints.
-CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
 #: The sections a component keeps under its own ``config``; a file keeps them at its top level.
@@ -156,8 +153,6 @@ class CompositeRecipe(Recipe):
         if len(weight_components) > 1:
             raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
         object.__setattr__(self, "components", dict(self.components))
-        # A composed release names every component, so every step checkpoints.
-        object.__setattr__(self, "checkpoint_strategy", EveryNVersions(1))
 
     @classmethod
     def from_resolved_config(
@@ -172,9 +167,6 @@ class CompositeRecipe(Recipe):
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
-        # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
-        # A component's config refuses the key as an unknown field.
-        cls.refuse_checkpoint_cadence(config, "recipe")
         for component in raw:
             if component in RESERVED_COMPONENT_NAMES:
                 raise RecipeConfigError(
@@ -235,25 +227,6 @@ class CompositeRecipe(Recipe):
                 f"components {[name for name, _ in selected]} all train weights; a release loads one component"
             )
         return selected[0][1] if selected else None
-
-    @staticmethod
-    def refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
-        """Refuse the cadence key in every spelling it is written in: flat, under artifact, hyphenated."""
-        artifact = config.get("artifact", {})
-        candidates = [
-            (section, key)
-            for key in config
-            if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
-        ]
-        if isinstance(artifact, Mapping):
-            candidates.extend(
-                (f"{section}.artifact", key)
-                for key in artifact
-                if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
-            )
-        if candidates:
-            where, key = candidates[0]
-            raise RecipeConfigError(f"{where}.{key} has no effect: every step of a composite recipe checkpoints")
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
         # Each component's evaluation runs a candidate of that component alone: the endpoint names it.

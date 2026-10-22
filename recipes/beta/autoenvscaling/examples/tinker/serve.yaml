@@ -32,8 +32,6 @@ generator:
             enable_thinking: false
 recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
-  config:
-    checkpoint-every-n-versions: 1
 # The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
   # The training plays of each task form one group; the next round is due after batches_per_round batches trained.

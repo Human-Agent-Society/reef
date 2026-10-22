@@ -134,9 +134,6 @@ this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
 
-Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
-``checkpoint_every_n_versions`` is the shorter spelling in deployment YAML.
-
 Run the recipe you chose
 ------------------------
 

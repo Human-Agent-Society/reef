@@ -18,8 +18,6 @@ inference:
   timeout-s: 7200
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
-  config:
-    checkpoint-every-n-versions: 1
 # TTTD's stages. The record stage owns the step grid; the later stages read it from there.
 # harness/harbor_agent.py reads this grid, so the harness and the stack cannot disagree about the step.
 pipeline:
