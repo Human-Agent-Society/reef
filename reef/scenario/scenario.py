@@ -15,7 +15,6 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
@@ -37,7 +36,6 @@ class Scenario:
         name: str,
         binding: ScenarioBinding,
         repository: Repository,
-        checkpoint_strategy: CheckpointStrategy,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
         model_config: ModelConfig | None = None,
@@ -75,7 +73,6 @@ class Scenario:
             name=name,
             binding=binding,
             artifacts=self._artifact_chain,
-            checkpoint_strategy=checkpoint_strategy,
             trainers=self.trainers,
             scenario_step=scenario_step,
             store=store,

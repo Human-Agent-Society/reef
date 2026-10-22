@@ -49,7 +49,6 @@ recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
   config:
     max-staleness: 0                   # on-policy: the stage waits for each step's release before sampling again
-    checkpoint-every-n-versions: 1000  # the bridge's per-step HF export seeds the next stage; no durable artifact within a stage
 # The sdft recipe's stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
   # The teacher's tokenizer and window.

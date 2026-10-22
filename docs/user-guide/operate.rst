@@ -103,9 +103,9 @@ Rollback republishes the target as a new commit and makes it current; history is
 Set the checkpoint cadence
 --------------------------
 
-``checkpoint_every_n_versions`` (default ``1``) decides how many accepted updates go by between durable checkpoints. Between checkpoints, new weights live only in the engine's memory: their versions are recorded, but their bytes are not. A restart restores the last checkpoint, and the step counter, algorithm state, and record progress continue from the log. Raise the cadence only when checkpoint writes are the bottleneck and losing live versions on a restart is acceptable.
+Each version whose checkpoint the training backend saves becomes a durable artifact. A Tinker deployment saves each version. A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts.
 
-A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts. Set ``1`` to save after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, thus their versions are live weights. Set ``checkpoint_every_n_versions`` to a multiple of ``N``. The driver does not start with a different value. Use a value above 1 only for full-weight training. The driver does not start with ``--release-train`` or with LoRA when the value is above 1.
+Set ``1`` to save and publish after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, thus their versions are live weights: their versions are recorded, but their bytes are not. Use a value above 1 only for full-weight training. The driver does not start with ``--release-train`` or with LoRA when the value is above 1. A scenario that serves several components cannot publish live weights, so it needs ``1``.
 
 A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again.
 
@@ -401,9 +401,6 @@ A scenario is idle when all of these conditions are true:
   ``max-loaded-scenarios``, Reef does not wait for the idle time.
 - No request or local training cycle runs on it.
 - No trainer has records that it would still train on.
-- No release exists only in memory. With ``checkpoint_every_n_versions``
-  above 1 (see `Set the checkpoint cadence`_), Reef keeps a release between
-  two checkpoints only in memory. Thus the scenario stays loaded.
 - The storage backend is durable.
 
 Reef never unloads a weight-training scenario, because only a delete releases

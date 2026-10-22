@@ -187,9 +187,6 @@ Common members
 | ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
-|                                                   |                             | ``EveryNVersions(1)``          |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
 | ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
 |                                                   |                             | ``Trainer.build``              |

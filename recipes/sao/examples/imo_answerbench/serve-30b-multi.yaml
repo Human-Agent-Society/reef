@@ -38,9 +38,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 4
-    # Artifacts are full model copies. Publishing one paused generation long enough for the
-    # SGLang scheduler watchdog (300 s) to kill the engines; keep the HF exports instead.
-    checkpoint-every-n-versions: 100000
 pipeline:
   task2batch:
     config:
@@ -57,7 +54,9 @@ training:
     megatron-to-hf-mode: "bridge"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
-    save-interval: "1"
+    # Each save is also an artifact: a full model copy. Publishing one paused generation long enough
+    # for the SGLang scheduler watchdog (300 s) to kill the engines, so this run does not save.
+    save-interval: "100000"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"

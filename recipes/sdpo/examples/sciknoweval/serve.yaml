@@ -46,7 +46,6 @@ recipe:
   implementation: recipes.sdpo.recipe:SDPORecipe
   config:
     max-staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
-    checkpoint-every-n-versions: 1000    # the bridge's per-step HF export is what the engines load
 # The sdpo recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
   # The sampling grid: one step is groups_per_step questions by rollouts_per_group attempts.

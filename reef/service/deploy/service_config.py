@@ -29,7 +29,7 @@ from reef.storage.tasks import TaskFileStore
 class ServiceConfig:
     """The HTTP service's settings, translated from a deployment config.
 
-    Recipe-specific config fields (batch sizes, group counts, checkpoint cadence)
+    Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.

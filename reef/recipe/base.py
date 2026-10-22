@@ -23,8 +23,6 @@ from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2task import Record2Task
@@ -103,7 +101,6 @@ class Recipe:
     runtime: InferenceRuntime | None = None
     training_runtime: TrainingRuntime | None = None
 
-    checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
@@ -181,11 +178,9 @@ class Recipe:
         ``field_values`` comes from ``resolve_config_field_values``. Domain
         validation still runs in the constructor; no environment is re-read.
         """
-        artifact = config.get("artifact", {})
         try:
             return cls(
                 **cls._recipe_kwargs(config, environ),
-                checkpoint_strategy=EveryNVersions(config_positive_int(artifact, "checkpoint_every_n_versions", 1)),
                 runtime=cls._resolve_runtime(environ, runtime),
                 training_runtime=training_runtime,
                 **field_values,
@@ -519,18 +514,15 @@ class WeightTrainingRecipe(Recipe):
         field_names = {argument.name for argument in config_arguments(cls)}
         data: dict[str, Any] = {}
         unknown: list[str] = []
-        checkpoint_every: Any = None
         for key, value in settings.items():
-            if key == "checkpoint_every_n_versions":
-                checkpoint_every = value
-            elif key in field_names:
+            if key in field_names:
                 # A YAML key left empty (None) is unset, not a value to parse.
                 if value is not None:
                     data[key] = value
             else:
                 unknown.append(key)
         if unknown:
-            known = ", ".join(f"reef.{name}" for name in [*sorted(field_names), "checkpoint_every_n_versions"])
+            known = ", ".join(f"reef.{name}" for name in sorted(field_names))
             raise RecipeConfigError(
                 f"{cls.__name__} does not consume {', '.join(f'reef.{key}' for key in sorted(unknown))}; "
                 f"the recipe would silently run with its defaults instead. "
@@ -538,10 +530,7 @@ class WeightTrainingRecipe(Recipe):
                 f"A new setting is declared with config_field() on the recipe dataclass "
                 f"(see reef.recipe.config_fields)."
             )
-        config: dict[str, Any] = {"data": data, "model": {"path": model_path}}
-        if checkpoint_every is not None:
-            config["artifact"] = {"checkpoint_every_n_versions": checkpoint_every}
-        return config
+        return {"data": data, "model": {"path": model_path}}
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:

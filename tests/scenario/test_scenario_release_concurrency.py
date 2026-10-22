@@ -284,8 +284,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     assert version.ref == previous_ref
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scenario, monkeypatch, checkpoint):
+def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scenario, monkeypatch):
     scenario, _ = local_scenario
     backend = scenario.repository.backend
     first = _prepare(scenario)
@@ -304,7 +303,6 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         second = _prepare(scenario)
-        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
 
         def unexpected_publish(*args, **kwargs):
             pytest.fail("a new release must not publish while its committed parent is unsynchronized")

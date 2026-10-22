@@ -15,7 +15,6 @@ from tests.support.runtime_stubs import StubTrainingRuntime
 
 
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.deploy.service_config import ServiceConfig
@@ -74,10 +73,7 @@ def stub_runtimes(**kwargs):
 
 
 def _settings(**overrides) -> ServiceConfig:
-    recipe_settings = {
-        "checkpoint_every_n_versions": 3,
-        **overrides.pop("recipe_settings", {}),
-    }
+    recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
         "host": "0.0.0.0",
         "port": 8900,
@@ -394,7 +390,6 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            recipe_settings={"checkpoint_every_n_versions": 5},
             pipeline_settings={"task2batch": {"config": {"batch_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
@@ -403,9 +398,8 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     )
     recipe = dispatcher.recipe
     captured["batch_size"] = recipe.stages().task2batch.config["batch_size"]
-    captured["checkpoint_strategy"] = recipe.checkpoint_strategy
 
-    assert captured == {"batch_size": 4, "checkpoint_strategy": EveryNVersions(5)}
+    assert captured == {"batch_size": 4}
 
 
 @pytest.mark.unit
@@ -544,7 +538,6 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
         )
     # The error lists what the recipe would consume.
     assert "reef.max_staleness" in str(excinfo.value)
-    assert "reef.checkpoint_every_n_versions" in str(excinfo.value)
 
 
 @pytest.mark.unit

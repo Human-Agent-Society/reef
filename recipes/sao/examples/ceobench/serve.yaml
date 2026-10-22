@@ -70,7 +70,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 64
-    checkpoint-every-n-versions: 20
 pipeline:
   task2batch:
     config:

@@ -12,8 +12,6 @@ inference:
   timeout-s: 300
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
-  config:
-    checkpoint-every-n-versions: 1
 # TTTD's step grid: one group of four rollouts.
 pipeline:
   record2record:

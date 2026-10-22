@@ -181,7 +181,7 @@ and ``core/evaluation.py``. ``core/training_request.py`` validates training-requ
 payloads and holds the queued instruction carried by a training batch. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
-with surface contracts, while checkpoint cadence is recipe policy.
+with surface contracts.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.

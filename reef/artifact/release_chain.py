@@ -17,9 +17,9 @@ class ReleaseNotRestorable(ReefError):
 class ArtifactReleaseChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
-    This layer knows nothing about scenarios, trainers, commit logs, or
-    checkpoint cadence. Its caller decides transaction ordering and records
-    the outcome after each artifact operation.
+    This layer knows nothing about scenarios, trainers, or commit logs. Its
+    caller decides transaction ordering and records the outcome after each
+    artifact operation.
     """
 
     def __init__(self, repository: Repository, *, process_id: str | None = None) -> None:

@@ -19,7 +19,6 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ReefError
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
@@ -32,7 +31,6 @@ from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.mutations import admit_mutations
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.sandbox.process import LocalExecutor
@@ -837,22 +835,17 @@ def _report_once(scenario, name: str, suffix: str) -> None:
     )
 
 
-@pytest.mark.parametrize("checkpoint_every", [1, 2])
-def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(
-    tmp_path: Path,
-    checkpoint_every: int,
-) -> None:
+def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(tmp_path: Path) -> None:
     """Cordis owns its temporary render, while the repository owns its copy."""
 
     def propose(nodes, samples, model):
         del nodes, samples, model
         return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 
-    built = dataclasses.replace(recipe(tmp_path, propose), checkpoint_strategy=EveryNVersions(checkpoint_every))
     initial = tmp_path / "initial"
     initial.mkdir()
     dispatcher = Dispatcher(
-        built,
+        recipe(tmp_path, propose),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -2513,40 +2506,6 @@ def test_pending_requires_durable_bytes() -> None:
         TrainStepResult({}, {}, pending=True)
     with pytest.raises(ValueError, match="pending must be a boolean"):
         TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
-
-
-def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) -> None:
-    """Checkpoint policy runs after the result is built, so a durable-weights
-    step can still land on the live path; holding it back there is not
-    expressible and must fail loudly rather than serve the tree anyway."""
-    built = CordisRecipe(
-        resolve_proposer(lambda nodes, samples, model: None),
-        resolve_episode_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=(SEED_MODELS, SEED_SETTINGS),
-        runtime=runtime(),
-        checkpoint_strategy=EveryNVersions(1000),
-    )
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("live-pending")
-        assert scenario is not None
-        held = TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path=str(tmp_path / "ckpt"), pending=True)
-        with pytest.raises(ReefError, match="pending release requires a durable checkpoint"):
-            scenario.commit(held)
-    finally:
-        dispatcher.close()
-
-
-# -- the tree travels as a file, and the adapter's kinds are an admission rule ----------
 
 
 def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:

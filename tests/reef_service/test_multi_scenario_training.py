@@ -12,7 +12,6 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord
 from reef.core.errors import ReefError
 from reef.core.records_types import RequestType
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService
 from reef.surface import adapter_name
 
@@ -134,7 +133,6 @@ def test_a_checkpointed_release_still_routes_requests_to_its_adapter(tmp_path) -
         runtime,
         tmp_path,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        checkpoint_strategy=EveryNVersions(1),
     )
     try:
         _feed(dispatcher, "math", 1)

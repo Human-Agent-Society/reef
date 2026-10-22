@@ -37,7 +37,6 @@ recipe:
   implementation: recipes.opd.recipe:OPDRecipe
   config:
     max-staleness: 0
-    checkpoint-every-n-versions: 1000
 pipeline:
   record2task:
     config:

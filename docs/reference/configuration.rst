@@ -664,7 +664,6 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
    inference.url | the address the training backend reports | the local engine; set only to front the engines with something else
-   recipe.config.checkpoint-every-n-versions | 1 | how often a version becomes durable, for a weight-training recipe
 
 Storage paths default under ``.reef/``, which the basic and sao stacks keep;
 the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere

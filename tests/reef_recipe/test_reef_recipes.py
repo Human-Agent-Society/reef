@@ -19,7 +19,6 @@ from reef.core.reports import ScoredRolloutReport
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.storage.sqlite import SQLiteRecordStore
@@ -82,7 +81,7 @@ def test_dotted_reference_resolves_an_external_recipe_class() -> None:
     [
         ("nowhere.to.be:Found", "cannot import recipe reference"),
         ("reef.recipe.base:missing", "cannot import recipe reference"),
-        ("reef.recipe.base:config_positive_int", "is not a Recipe class"),
+        ("reef.recipe.base:config_field", "is not a Recipe class"),
         (":Recipe", "must be 'package.module:ClassName'"),
     ],
 )
@@ -307,14 +306,12 @@ def test_recipe_config_routes_sections_to_their_consumers() -> None:
         {
             "implementation": "recipes.openclawrl.recipe:OpenClawRLRecipe",
             "pipeline": {"task2batch": {"config": {"batch_size": 4}}},
-            "artifact": {"checkpoint_every_n_versions": 3},
             "model": {"path": "/models/qwen"},
         }
     )
     recipe = build_recipe(settings["implementation"], {}, config=settings, **runtime_bindings(StubTrainingRuntime()))
 
     assert recipe.stages().task2batch.config == {"batch_size": 4}
-    assert recipe.checkpoint_strategy == EveryNVersions(3)
 
 
 def test_recipe_config_requires_implementation(tmp_path) -> None:
@@ -460,7 +457,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
     assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}
 
 
-def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
+def test_opd_recipe_uses_configured_runtime() -> None:
     from recipes.opd import OPDRecipe
 
     runtime = StubTrainingRuntime()
@@ -469,11 +466,9 @@ def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
         {},
         config={
             "pipeline": {"task2batch": {"config": {"batch_size": 4}}},
-            "artifact": {"checkpoint_every_n_versions": 20},
         },
         **runtime_bindings(runtime),
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.training_runtime is runtime
-    assert recipe.checkpoint_strategy == EveryNVersions(20)
     assert recipe.build_pipeline(PipelineContext("math")).task2batch.batch_size == 4
