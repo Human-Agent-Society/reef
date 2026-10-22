@@ -7,12 +7,15 @@ from types import SimpleNamespace
 import pytest
 
 from reef.runtime.deployment import (
+    ADAPTER_FILES_PROTOCOL,
     CoordinatorConfig,
     DeploymentResources,
     InferenceConnection,
     InferenceService,
     ModelDeploymentPlan,
+    NativeWeightTransferSession,
     TrainingService,
+    WeightTransferSession,
 )
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.runtime.interfaces import InferenceBackend, TrainingBackend
@@ -100,21 +103,12 @@ class Inference(InferenceService, InferenceBackend):
     def recover(self):
         raise AssertionError("unexpected recover in this fixture")
 
-    def offload(self, tags):
-        raise AssertionError("unexpected offload in this fixture")
-
-    def onload_weights(self):
-        raise AssertionError("unexpected onload_weights in this fixture")
-
-    def onload_kv(self):
-        raise AssertionError("unexpected onload_kv in this fixture")
-
     def unload_adapter(self, name):
         raise AssertionError("unexpected unload_adapter in this fixture")
 
 
 class Training(TrainingService):
-    weight_transfer_protocol = "test-weights-v1"
+    weight_transfer_protocols = ("test-weights-v1",)
 
     def __init__(self, resources):
         self.resources = resources
@@ -226,15 +220,48 @@ def test_startup_error_survives_cleanup_error():
 
 def test_incompatible_control_protocol_fails_before_allocation():
     plan, events = plan_for()
-    plan.training.weight_transfer_protocol = "another-protocol"
+    plan.training.weight_transfer_protocols = ("another-protocol",)
     with pytest.raises(ValueError, match="incompatible inference control protocol"):
         ModelDeployment(plan).start()
     assert events == []
 
 
+class FileInference(Inference):
+    supported_transfer_protocols = ("test-weights-v1", ADAPTER_FILES_PROTOCOL)
+
+
+class FileTraining(Training):
+    weight_transfer_protocols = (ADAPTER_FILES_PROTOCOL, "test-weights-v1")
+
+    def attach_weight_transport(self, session):
+        self.inference = session
+        self.resources.event("training-attach")
+
+
+@pytest.mark.parametrize(
+    ("sent", "session_type"),
+    [
+        (("test-weights-v1", ADAPTER_FILES_PROTOCOL), NativeWeightTransferSession),
+        ((ADAPTER_FILES_PROTOCOL, "test-weights-v1"), WeightTransferSession),
+        (("another-protocol", ADAPTER_FILES_PROTOCOL), WeightTransferSession),
+    ],
+)
+def test_deployment_selects_the_first_protocol_the_receiver_accepts(sent, session_type):
+    resources = Resources([], ())
+    training = FileTraining(resources)
+    training.weight_transfer_protocols = sent
+    deployment = ModelDeployment(ModelDeploymentPlan(resources, FileInference(resources), training))
+    deployment.start()
+    session = deployment.weight_transfer_session
+    deployment.close()
+    assert type(session) is session_type
+    assert session.protocol == next(protocol for protocol in sent if protocol != "another-protocol")
+    assert training.inference is session
+
+
 def test_combined_compatibility_is_explicit_not_a_startup_fallback():
     plan, events = plan_for()
-    plan.training.weight_transfer_protocol = None
+    plan.training.weight_transfer_protocols = ()
     owner = ModelDeployment(ModelDeploymentPlan(plan.resources, None, plan.training))
     owner.start()
     owner.close()
@@ -464,7 +491,7 @@ def test_reef_assembles_independently_selected_backend_definitions(monkeypatch):
 
 def test_assembler_rejects_incompatible_backend_pair_before_allocation(monkeypatch):
     existing, events = plan_for()
-    existing.training.weight_transfer_protocol = "unsupported-transport"
+    existing.training.weight_transfer_protocols = ("unsupported-transport",)
     monkeypatch.setattr(training_driver, "inference_service_for", lambda name, config: existing.inference)
     with pytest.raises(ValueError, match="incompatible inference control protocol"):
         training_driver.assemble_model_plan({}, TrainingDeploymentPlan(existing.resources, existing.training))

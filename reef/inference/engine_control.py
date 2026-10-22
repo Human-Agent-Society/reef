@@ -21,7 +21,7 @@ from reef.runtime.executor.config import ExecutorSettings, select_executor
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend
+from reef.runtime.interfaces import ColocatedInferenceBackend
 
 #: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -40,7 +40,7 @@ class EngineConfig:
 ConfigT = TypeVar("ConfigT", bound=EngineConfig)
 
 
-class EngineInferenceBackend(InferenceBackend):
+class EngineInferenceBackend(ColocatedInferenceBackend):
     """Borrow a control connection without owning publication or engine lifetime.
 
     The coordinator decides operation order and whether a loaded revision may

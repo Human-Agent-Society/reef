@@ -27,6 +27,7 @@ from typing import Any, Literal
 from reef.core.errors import ReefError
 from reef.runtime.interfaces import (
     AdapterEngine,
+    ColocatedInferenceBackend,
     InferenceBackend,
     RuntimeLoadId,
     ScenarioHistoryStore,
@@ -715,6 +716,14 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.inference = inference
         self.context = training.context
         self.config = training.config
+        # The same receiver, typed for the GPU-memory handoff; set exactly when training is colocated.
+        self.colocated_inference: ColocatedInferenceBackend | None
+        if not self.config.colocate:
+            self.colocated_inference = None
+        elif isinstance(inference, ColocatedInferenceBackend):
+            self.colocated_inference = inference
+        else:
+            raise TypeError(f"colocated training cannot share GPUs with {type(inference).__name__}")
         self.state = state
         self.history = self.context.history
         self.residency = AdapterResidencyManager(self.config.adapter_capacity) if self.config.lora else None
@@ -791,19 +800,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Colocated memory handoff
 
     def prepare_training(self) -> None:
-        if self.config.colocate:
+        if self.colocated_inference is not None:
             self.pause_generation()
-            self.inference.offload(self.release_tags)
+            self.colocated_inference.offload(self.release_tags)
 
     def restore_incumbent(self) -> None:
-        if not self.config.colocate:
+        if self.colocated_inference is None:
             return
         # Pairs with the training step's offload: resuming a region that was
         # never released fails, because the receiver resumes by removing the tag
         # from the set release added it to.
         if self.release_tags is None:
-            self.inference.onload_weights()
-        self.inference.onload_kv()
+            self.colocated_inference.onload_weights()
+        self.colocated_inference.onload_kv()
         self.resume()
 
     # -- Version identity
@@ -878,18 +887,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
                 self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
                 self._verify_engines_serve(target, "after update")
                 return target
-        if self.config.colocate:
+        colocated = self.colocated_inference
+        if colocated is not None:
             # Repeatable release also covers retry after a partial receive:
             # a released sender may need to reconstruct GPU workers.
-            self.inference.offload(self.release_tags)
+            colocated.offload(self.release_tags)
         self.training.prepare_weights(target, force_full=force_full)
-        if self.config.colocate and self.release_tags is None:
-            self.inference.onload_weights()
+        if colocated is not None and self.release_tags is None:
+            colocated.onload_weights()
         version = self.training.send_weights(target, force_full=force_full)
         if version != target:
             raise RuntimeError(f"weight sender returned runtime load ID {version!r}; expected {target!r}")
-        if self.config.colocate:
-            self.inference.onload_kv()
+        if colocated is not None:
+            colocated.onload_kv()
         self._verify_engines_serve(version, "after update")
         return version
 
@@ -938,8 +948,8 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if not pending and active is None:
             return
         self.pause_generation()
-        if self.config.colocate:
-            self.inference.onload_weights()
+        if self.colocated_inference is not None:
+            self.colocated_inference.onload_weights()
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(scenario, version, self)

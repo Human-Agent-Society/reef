@@ -6,11 +6,13 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from reef.runtime.deployment import WeightTransferSession
+from reef.runtime.deployment import NativeWeightTransferSession, WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.train.slime_backend import training
 from reef.train.slime_backend.resources import SlimeDeploymentResources
+
+PROTOCOL = training.WEIGHT_TRANSFER_PROTOCOLS["sglang"]
 
 
 class Group:
@@ -68,7 +70,7 @@ def test_training_initializes_without_receiver_then_attaches_sender(monkeypatch,
     assert not hasattr(service, "_bridge")
     receiver = object()
     control = RayExecutor.from_workers([receiver])
-    session = WeightTransferSession(service.weight_transfer_protocol, control, "session-1")
+    session = NativeWeightTransferSession(PROTOCOL, "session-1", control)
     service.attach_weight_transport(session)
     service.attach_weight_transport(session)
     expected = [("allocate",), ("attach", "actor", receiver)]
@@ -92,7 +94,7 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     with pytest.raises(RuntimeError, match="attached weight transport"):
         service.backend()
     control = RayExecutor.from_workers([object()])
-    service.attach_weight_transport(WeightTransferSession(service.weight_transfer_protocol, control, "session-1"))
+    service.attach_weight_transport(NativeWeightTransferSession(PROTOCOL, "session-1", control))
     captured = []
 
     def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s):
@@ -119,15 +121,17 @@ def test_training_rejects_invalid_worker_timeout_before_start(timeout):
 def test_native_transport_rejects_reuse_across_receiver_incarnations(monkeypatch):
     service, resources, events = service_and_resources(monkeypatch)
     receiver = RayExecutor.from_workers([object()])
-    session = WeightTransferSession(service.weight_transfer_protocol, receiver, "first")
+    session = NativeWeightTransferSession(PROTOCOL, "first", receiver)
     with pytest.raises(RuntimeError, match="start training workers"):
         service.attach_weight_transport(session)
     service.start(resources)
     with pytest.raises(ValueError, match="incompatible weight transfer"):
-        service.attach_weight_transport(WeightTransferSession("different", receiver, "first"))
+        service.attach_weight_transport(NativeWeightTransferSession("different", "first", receiver))
+    with pytest.raises(ValueError, match="incompatible weight transfer"):
+        service.attach_weight_transport(WeightTransferSession(PROTOCOL, "first"))
     service.attach_weight_transport(session)
     with pytest.raises(RuntimeError, match="different deployment"):
-        service.attach_weight_transport(WeightTransferSession(session.protocol, receiver, "second"))
+        service.attach_weight_transport(NativeWeightTransferSession(session.protocol, "second", receiver))
     assert len([event for event in events if event[0] == "attach"]) == 1
     service.close()
 
@@ -147,7 +151,7 @@ def test_training_cleanup_failure_preserves_borrowed_receiver_and_reservations(m
     service, resources, events = service_and_resources(monkeypatch, critic=True, release_error=True)
     service.start(resources)
     control = RayExecutor.from_workers([object()])
-    service.attach_weight_transport(WeightTransferSession(service.weight_transfer_protocol, control, "first"))
+    service.attach_weight_transport(NativeWeightTransferSession(PROTOCOL, "first", control))
     with pytest.raises(RuntimeError, match="release failed"):
         service.close()
     service.close()

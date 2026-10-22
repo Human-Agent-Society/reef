@@ -104,15 +104,6 @@ class Engines(InferenceBackend):
     def abort(self):
         self.events.append("abort")
 
-    def offload(self, tags):
-        raise AssertionError("a hosted trainer never offloads the engines")
-
-    def onload_weights(self):
-        raise AssertionError("a hosted trainer never onloads")
-
-    def onload_kv(self):
-        raise AssertionError("a hosted trainer never onloads")
-
     def unload_adapter(self, name):
         self.events.append(("unload", name))
 
@@ -339,20 +330,20 @@ def test_training_plan_pairs_a_gpu_less_trainer_with_lora_serving_engines(tmp_pa
 
 
 def test_training_service_hands_the_coordinator_a_backend_only_after_engines_attach(tmp_path):
-    from reef.runtime.deployment import WeightTransferSession
+    from reef.runtime.deployment import NativeWeightTransferSession, WeightTransferSession
 
     client = RemoteClient()
     control = UniProcExecutor.from_workers([Engines()])
     service = TinkerTrainingService("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path)), "key", client=client)
-    assert service.weight_transfer_protocol == ADAPTER_FILES_PROTOCOL
+    assert service.weight_transfer_protocols == (ADAPTER_FILES_PROTOCOL,)
     with pytest.raises(RuntimeError, match="before attaching"):
-        service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
+        service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, "s"))
     service.start(None)
     with pytest.raises(ValueError, match="delivers adapter files"):
-        service.attach_weight_transport(WeightTransferSession("slime-sglang-control-v2", control, "s"))
+        service.attach_weight_transport(NativeWeightTransferSession("slime-sglang-control-v2", "s", control))
     with pytest.raises(RuntimeError, match="attached engines"):
         service.backend()
-    service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
+    service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, "s"))
     assert isinstance(service.backend(), TinkerTrainingBackend)
     service.close()
     assert not client.closed  # the coordinator owns the backend, and closes the client with it

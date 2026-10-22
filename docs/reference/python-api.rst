@@ -76,7 +76,8 @@ The engine supervision hooks an inference integration also implements
 ``reef/runtime/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
-SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+SGLang's ``SGLangInferenceBackend`` inherits ``ColocatedInferenceBackend``, the
+``InferenceBackend`` that can also release GPU memory for a colocated trainer. Reef's
 coordinator owns publication and recovery ordering across them. Component
 allocation and service shutdown belong to ``TrainingService`` and
 ``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces

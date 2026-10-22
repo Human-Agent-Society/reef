@@ -63,7 +63,7 @@ class TinkerDeploymentResources(InferenceResources):
 class TinkerTrainingService(TrainingService):
     """Own the SDK client; the trainer delivers adapter files, so it needs no engine handle."""
 
-    weight_transfer_protocol = ADAPTER_FILES_PROTOCOL
+    weight_transfer_protocols = (ADAPTER_FILES_PROTOCOL,)
 
     def __init__(
         self,
@@ -94,7 +94,7 @@ class TinkerTrainingService(TrainingService):
     def attach_weight_transport(self, session: WeightTransferSession) -> None:
         if not self._started or self._closed:
             raise RuntimeError("start the training service before attaching its weight transport")
-        if session.protocol != self.weight_transfer_protocol:
+        if session.protocol not in self.weight_transfer_protocols:
             raise ValueError(
                 "Tinker delivers adapter files; the deployment must pair it with a receiver that loads them"
             )

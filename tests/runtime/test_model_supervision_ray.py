@@ -189,7 +189,7 @@ class Inference(InferenceService):
 
 
 class Training(TrainingService):
-    weight_transfer_protocol = "cpu-test-v1"
+    weight_transfer_protocols = ("cpu-test-v1",)
 
     def __init__(self, directory, namespace):
         self.directory, self.namespace = directory, namespace
@@ -548,15 +548,6 @@ class ScheduledInferenceBackend(InferenceBackend):
     def recover(self):
         raise AssertionError("unexpected recover in this fixture")
 
-    def offload(self, tags):
-        raise AssertionError("unexpected offload in this fixture")
-
-    def onload_weights(self):
-        raise AssertionError("unexpected onload_weights in this fixture")
-
-    def onload_kv(self):
-        raise AssertionError("unexpected onload_kv in this fixture")
-
     def unload_adapter(self, name):
         raise AssertionError("unexpected unload_adapter in this fixture")
 
@@ -594,7 +585,7 @@ class ScheduledInferenceService(InferenceService):
 
 
 class ScheduledTrainingService(TrainingService):
-    weight_transfer_protocol = "scheduled-cpu-v1"
+    weight_transfer_protocols = ("scheduled-cpu-v1",)
 
     def __init__(self, directory):
         self.directory = directory
