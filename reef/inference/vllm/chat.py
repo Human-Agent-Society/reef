@@ -261,6 +261,7 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
         capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
         client: NativeGenerateClient | None = None,
     ) -> None:
         super().__init__(
@@ -273,6 +274,7 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
             capture_topk=capture_topk,
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
 

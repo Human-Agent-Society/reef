@@ -134,7 +134,27 @@ config.
    pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the request and the target with the engine's chat template.
    pipeline.record2task.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
    pipeline.record2task.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
+   pipeline.record2task.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
    pipeline.task2batch.config.batch_size | 1 | the number of samples in one batch. ``--global-batch-size`` is the number of samples in one optimizer step. Thus a batch of 256 trains four steps of 64. A last step with fewer samples also trains.
+
+A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
+mode unless ``enable_thinking`` is false: Qwen3.8 opens the system prompt with
+a reasoning-effort instruction, and the generation prompt opens a think block.
+Targets without reasoning belong in non-thinking mode. Set the same
+``chat_template_kwargs`` in both places. A ``${...}`` reference resolves to a
+string, so write the mapping in each:
+
+.. code:: yaml
+
+   inference:
+     handler-config:
+       chat_template_kwargs:
+         enable_thinking: false
+   pipeline:
+     record2task:
+       config:
+         chat_template_kwargs:
+           enable_thinking: false
 
 Configure the optimizer, its learning rate, and its schedule in
 ``training.options``. The recipe refuses an ``optimization`` section.

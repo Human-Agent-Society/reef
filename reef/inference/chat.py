@@ -521,6 +521,17 @@ def stream_ids() -> tuple[str, str, int]:
     return f"chatcmpl-{uuid.uuid4().hex}", f"msg_{uuid.uuid4().hex}", int(time.time())
 
 
+def template_kwargs_of(value: Any, label: str) -> dict[str, Any]:
+    """Validate chat template arguments: an object without ``tools``, which the top-level tools field owns."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    if "tools" in value:
+        raise ValueError(f"{label}.tools is reserved; use the top-level tools field")
+    return dict(value)
+
+
 class TokenNativeChatHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat with engine-native policy tensors.
 
@@ -559,6 +570,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(upstream_url, timeout_s=timeout_s, error_label=client.error_label)
         if tokenizer is None and not model_path:
@@ -579,6 +591,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         self._sampling_defaults = dict(sampling_defaults or {})
         # None = read the end of each rendered prompt.
         self.force_reasoning = force_reasoning
+        # Chat template arguments for a request that omits them, for example
+        # {"enable_thinking": false}. A request's own chat_template_kwargs win key by key.
+        self._chat_template_kwargs = template_kwargs_of(chat_template_kwargs, "chat_template_kwargs")
 
     @property
     def client(self) -> NativeGenerateClient:
@@ -1125,14 +1140,10 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             for message in messages
         ):
             raise ValueError("exact chat capture currently requires text-only message content")
-        template_kwargs = payload.get("chat_template_kwargs", {})
-        if not isinstance(template_kwargs, Mapping):
-            raise ValueError("chat_template_kwargs must be an object")
-        if "tools" in template_kwargs:
-            raise ValueError("chat_template_kwargs.tools is reserved; use the top-level tools field")
+        template_kwargs = template_kwargs_of(payload.get("chat_template_kwargs"), "chat_template_kwargs")
         template_messages = self._template_messages(messages)
         tools = self._request_tools(payload)
-        render_kwargs = dict(template_kwargs)
+        render_kwargs = {**self._chat_template_kwargs, **template_kwargs}
         if tools is not None and payload.get("tool_choice") != "none":
             render_kwargs["tools"] = tools
         tokenizer = self._require_tokenizer()

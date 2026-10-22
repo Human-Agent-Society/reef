@@ -48,6 +48,7 @@ class TurnTokenizer:
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[Mapping[str, Any]], Sequence[Any] | None, bool]] = []
+        self.template_kwargs: list[dict[str, Any]] = []
 
     def from_pretrained(self, path: str, **options: Any) -> TurnTokenizer:
         return self
@@ -60,8 +61,10 @@ class TurnTokenizer:
         tokenize: bool = True,
         add_generation_prompt: bool = False,
         return_dict: bool = True,
+        **template_kwargs: Any,
     ) -> list[int] | dict[str, list[int]]:
         self.calls.append((list(conversation), tools, add_generation_prompt))
+        self.template_kwargs.append(template_kwargs)
         ids: list[int] = []
         for message in conversation:
             if message["role"] == "assistant":
@@ -153,6 +156,17 @@ def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenize
 
 
 @pytest.mark.unit
+def test_chat_template_kwargs_reach_every_render(tokenizer: TurnTokenizer) -> None:
+    pipeline = _pipeline(chat_template_kwargs={"enable_thinking": False})
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
+
+    assert len(pipeline.build_batch().items) == 1
+    # The prompt and the sequence render alike, as the inference handler renders the served prompt.
+    assert tokenizer.template_kwargs == [{"enable_thinking": False}, {"enable_thinking": False}]
+
+
+@pytest.mark.unit
 def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline(target="response")
     tool_call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": '{"q": "water"}'}}
@@ -227,6 +241,8 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
         ({"tokenizer_path": ""}, "tokenizer_path"),
         ({"tokenizer_path": TOKENIZER_PATH, "target": "teacher"}, "target"),
         ({"tokenizer_path": TOKENIZER_PATH, "max_tokens": -1}, "max_tokens"),
+        ({"tokenizer_path": TOKENIZER_PATH, "chat_template_kwargs": ["enable_thinking"]}, "chat_template_kwargs"),
+        ({"tokenizer_path": TOKENIZER_PATH, "chat_template_kwargs": {"tools": []}}, "tools"),
     ],
 )
 def test_settings_reject_invalid_values(config: dict[str, Any], message: str) -> None:
