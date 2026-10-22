@@ -774,11 +774,11 @@ class TrainingRecovery:
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
             publisher.inference.recover()
-        if publisher.colocated_inference is not None and publisher.config.lora:
+        if publisher.memory_handoff is not None and publisher.config.lora:
             # Cold startup releases everything before training initializes.
             # Restore the frozen base before registering scenario adapters,
             # including runs that only release KV/graphs on later steps.
-            publisher.colocated_inference.onload_weights()
+            publisher.memory_handoff.onload_weights()
         if marker is not None and status == "REJECTING":
             self.publication.reject(str(marker["job_id"]))
             marker["status"] = status = "REJECTED"
@@ -823,9 +823,9 @@ class TrainingRecovery:
             # version token (they boot with a backend default), and colocated
             # engines boot released: give them their weights and KV back
             # before the first request.
-            if publisher.colocated_inference is not None:
-                publisher.colocated_inference.onload_weights()
-                publisher.colocated_inference.onload_kv()
+            if publisher.memory_handoff is not None:
+                publisher.memory_handoff.onload_weights()
+                publisher.memory_handoff.onload_kv()
             publisher.initialize_version()
         elif marker is not None and status == "REJECTED":
             publisher.runtime_load_id = str(marker.get("parent_runtime_load_id") or versions[0])

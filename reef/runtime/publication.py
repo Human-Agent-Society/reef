@@ -716,13 +716,13 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.inference = inference
         self.context = training.context
         self.config = training.config
-        # The same receiver, typed for the GPU-memory handoff; set exactly when training is colocated,
-        # so a receiver without the handoff serves every other deployment.
-        self.colocated_inference: InferenceMemoryHandoffBackend | None
+        # The receiver's GPU-memory handoff, used only by colocated training: set exactly when
+        # training is colocated, so a receiver without the handoff serves every other deployment.
+        self.memory_handoff: InferenceMemoryHandoffBackend | None
         if not self.config.colocate:
-            self.colocated_inference = None
+            self.memory_handoff = None
         elif isinstance(inference, InferenceMemoryHandoffBackend):
-            self.colocated_inference = inference
+            self.memory_handoff = inference
         else:
             raise TypeError(f"colocated training cannot share GPUs with {type(inference).__name__}")
         self.state = state
@@ -801,19 +801,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Colocated memory handoff
 
     def prepare_training(self) -> None:
-        if self.colocated_inference is not None:
+        if self.memory_handoff is not None:
             self.pause_generation()
-            self.colocated_inference.offload(self.release_tags)
+            self.memory_handoff.offload(self.release_tags)
 
     def restore_incumbent(self) -> None:
-        if self.colocated_inference is None:
+        if self.memory_handoff is None:
             return
         # Pairs with the training step's offload: resuming a region that was
         # never released fails, because the receiver resumes by removing the tag
         # from the set release added it to.
         if self.release_tags is None:
-            self.colocated_inference.onload_weights()
-        self.colocated_inference.onload_kv()
+            self.memory_handoff.onload_weights()
+        self.memory_handoff.onload_kv()
         self.resume()
 
     # -- Version identity
@@ -888,19 +888,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
                 self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
                 self._verify_engines_serve(target, "after update")
                 return target
-        colocated = self.colocated_inference
-        if colocated is not None:
+        handoff = self.memory_handoff
+        if handoff is not None:
             # Repeatable release also covers retry after a partial receive:
             # a released sender may need to reconstruct GPU workers.
-            colocated.offload(self.release_tags)
+            handoff.offload(self.release_tags)
         self.training.prepare_weights(target, force_full=force_full)
-        if colocated is not None and self.release_tags is None:
-            colocated.onload_weights()
+        if handoff is not None and self.release_tags is None:
+            handoff.onload_weights()
         version = self.training.send_weights(target, force_full=force_full)
         if version != target:
             raise RuntimeError(f"weight sender returned runtime load ID {version!r}; expected {target!r}")
-        if colocated is not None:
-            colocated.onload_kv()
+        if handoff is not None:
+            handoff.onload_kv()
         self._verify_engines_serve(version, "after update")
         return version
 
@@ -949,8 +949,8 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if not pending and active is None:
             return
         self.pause_generation()
-        if self.colocated_inference is not None:
-            self.colocated_inference.onload_weights()
+        if self.memory_handoff is not None:
+            self.memory_handoff.onload_weights()
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(scenario, version, self)
