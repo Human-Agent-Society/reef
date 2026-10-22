@@ -180,7 +180,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     result = first.run_once()
     prepared = first.prepare_commit(result)
     first.commit(prepared)
-    # Simulate a crash after the commit log landed but before compaction.
+    # Simulate a crash after the commit history landed but before compaction.
     records.append(instruction("pending"))
     first.close()
     records.close()

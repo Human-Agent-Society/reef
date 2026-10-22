@@ -169,7 +169,7 @@ class RunService:
         self._runner: web.AppRunner | None = None
 
     def start(self) -> None:
-        # Scenario creation (or durable recovery from the commit log) happens
+        # Scenario creation (or durable recovery from the commit history) happens
         # before any request lands.
         self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()
@@ -608,7 +608,7 @@ def main() -> None:
         event_log.write({"event": "sc_campaign_done", "run": RUN})
     finally:
         # Never close the store under a night that is still committing. The
-        # snapshot is best effort: the commit log is the recovery authority.
+        # snapshot is best effort: the commit history is the recovery authority.
         _settle(service)
         with contextlib.suppress(Exception):
             _persist_pool(service, run_dir)

@@ -1,4 +1,4 @@
-"""Scenario store contracts and the commit log adapter's recovery boundaries."""
+"""Scenario store contracts and the commit history adapter's recovery boundaries."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioStoreConflict

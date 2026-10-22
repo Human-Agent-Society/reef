@@ -20,7 +20,7 @@ from tests.recipes.meta_harness.test_meta_harness import (
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 

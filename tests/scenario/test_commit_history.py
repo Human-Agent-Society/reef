@@ -1,4 +1,4 @@
-"""Durability protocol tests for the per-scenario commit log (issue #78, phase 3).
+"""Durability protocol tests for the per-scenario commit history (issue #78, phase 3).
 
 One append-only log per scenario is the single commit point: record-store
 compaction, the checkpoint head, and the trainer's algorithm
@@ -35,7 +35,7 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
-from reef.storage.commit_log import RECORD_KIND, CommitHistoryScenarioStore, CommitLogError
+from reef.storage.commit_history import RECORD_KIND, CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
@@ -183,7 +183,7 @@ def test_commit_history_retry_is_idempotent_but_conflicting_step_is_rejected(ope
     log.append(retry)
 
     assert log.records() == (original, second)
-    with pytest.raises(CommitLogError, match="conflicts"):
+    with pytest.raises(CommitHistoryError, match="conflicts"):
         log.append(sample_record(step=1, runtime_load_id="different"))
 
 
@@ -196,7 +196,7 @@ def test_commit_history_reads_the_appends_of_another_writer(open_history) -> Non
 
     second.append(sample_record(step=2, runtime_load_id="w2"))
     # The first writer's cache stops at step 1, but the append still sees step 2.
-    with pytest.raises(CommitLogError, match="conflicts"):
+    with pytest.raises(CommitHistoryError, match="conflicts"):
         first.append(sample_record(step=2, runtime_load_id="other"))
     first.append(sample_record(step=3, runtime_load_id="w3"))
 
@@ -238,13 +238,13 @@ def test_commit_record_holds_json_values() -> None:
     assert record.algorithm_state == {"path": ["a"]}
     assert record.metrics == {"1": {"set": []}}
     assert CommitRecord.from_dict(record.to_dict()) == record
-    with pytest.raises(CommitLogError, match="JSON values"):
+    with pytest.raises(CommitHistoryError, match="JSON values"):
         replace(sample_record(), metrics={"ids": {"a"}})
 
 
 @pytest.mark.unit
 def test_commit_record_validates_its_schema() -> None:
-    with pytest.raises(CommitLogError, match="step"):
+    with pytest.raises(CommitHistoryError, match="step"):
         CommitRecord(
             scenario="math",
             step=0,
@@ -254,7 +254,7 @@ def test_commit_record_validates_its_schema() -> None:
             high_water_sequence=0,
             high_water_offset=0,
         )
-    with pytest.raises(CommitLogError, match="high_water_sequence"):
+    with pytest.raises(CommitHistoryError, match="high_water_sequence"):
         CommitRecord(
             scenario="math",
             step=1,
@@ -264,9 +264,9 @@ def test_commit_record_validates_its_schema() -> None:
             high_water_sequence=-1,
             high_water_offset=0,
         )
-    with pytest.raises(CommitLogError, match="record kind"):
+    with pytest.raises(CommitHistoryError, match="record kind"):
         CommitRecord.from_dict({"record": "something-else"})
-    with pytest.raises(CommitLogError, match="compacted_ids"):
+    with pytest.raises(CommitHistoryError, match="compacted_ids"):
         CommitRecord.from_dict(
             {
                 "record": RECORD_KIND,
@@ -553,13 +553,13 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     assert committed_head.runtime_load_id == "w2"
 
     # A fresh dispatcher over the same dirs is a process restart: nothing is
-    # durable except the release chain, the record store, and the commit log.
+    # durable except the release chain, the record store, and the commit history.
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 2
-    # The live head survives the restart: it is the log's head record, even
+    # The live head survives the restart: it is the head record of the commit history, even
     # though the release chain only knows the bootstrap checkpoint.
     assert recovered.repository.require_current_artifact() == committed_head
     assert recovered.trainer.state == {"steps": 2}
@@ -603,7 +603,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
     The protect-all pipeline keeps every row physically present, so recovery
-    without the log's high-water mark would page from sequence 0, push again
+    without the history's high-water mark would page from sequence 0, push again
     the consumed pair, and train it again.
     """
     initial = tmp_path / "initial"
@@ -728,8 +728,8 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
 def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     """Crash window: checkpoint published to the release chain, record never appended.
 
-    The checkpoint head is then ahead of the log. Its metadata metadata carries
-    the same record fields, so recovery adopts it and heals the log.
+    The checkpoint head is then ahead of the commit history. Its metadata carries
+    the same record fields, so recovery adopts it and heals the history.
     """
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -872,7 +872,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     assert not list(tmp_path.rglob("*.sqlite3"))
 
     # Recovery still works from the release chain: the live head is forgotten, as
-    # before the log existed, and the step reverts to the checkpointed 0.
+    # before the commit history existed, and the step reverts to the checkpointed 0.
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
@@ -917,7 +917,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
 class _HarnessEvolveTestRecipe(Recipe):
     """Private harness-evolution stand-in for these mechanics tests.
 
-    These tests exercise commit-log/version-chain mechanics, not
+    These tests exercise commit-history/version-chain mechanics, not
     harness-evolution semantics specifically; they just need a concrete,
     artifact-producing Recipe. Constructs CordisBackend and
     the reported trace pipeline directly, the same shape
@@ -1119,9 +1119,9 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_log"])
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_history"])
 def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, monkeypatch, failure_point) -> None:
-    agent_record_dir = tmp_path / "records" if failure_point == "commit_log" else None
+    agent_record_dir = tmp_path / "records" if failure_point == "commit_history" else None
     dispatcher, backend = _build_saved_artifact_dispatcher(
         tmp_path,
         agent_record_dir=agent_record_dir,
@@ -1135,7 +1135,7 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
     assert pending is not None
     committer = scenario._committer
 
-    if failure_point == "commit_log":
+    if failure_point == "commit_history":
         assert isinstance(scenario.store, CommitHistoryScenarioStore)
         target = scenario.store.commit_history
         method_name = "append"
@@ -1388,11 +1388,11 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
 @pytest.mark.unit
 def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> None:
-    """A step that publishes no artifact must still enter the WAL.
+    """A step that publishes no artifact must still enter the commit history.
 
     Harness evolution frequently proposes nothing (or a losing candidate);
     the trainer still consumed records and advanced its algorithm state.
-    Recording that progress keeps the WAL the single durable commit point: a
+    Recording that progress keeps the commit history the single durable commit point: a
     crash loses neither the batch nor the record watermark, and recovery
     resumes without re-training compacted rows.
     """

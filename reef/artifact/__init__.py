@@ -6,7 +6,7 @@ level up. Boundaries this package holds:
 
 - Repository backends are scenario-agnostic. A backend stores one
   repository; the factory owns the scenario-name-to-backend mapping. Nothing
-  here knows what a scenario, trainer, or commit log is;
+  here knows what a scenario, trainer, or commit history is;
   ``ArtifactReleaseChain``'s caller decides transaction ordering.
 - Releases are immutable and heads move only by compare-and-swap
   (``advance_current`` takes ``expected``; ``publish`` takes
@@ -22,16 +22,16 @@ inherits ``ConfigurableRepositoryBackendFactory`` in ``storage.artifact_backend`
 Git LFS is the built-in one. ``tests/artifact/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
-Backends used with a scenario commit log must subclass
+Backends used with a scenario commit history must subclass
 ``StagedReleaseRepositoryBackend``. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
-After the scenario commit log is durable, ``commit_release(ref, expected_parent=...)``
+After the scenario commit history is durable, ``commit_release(ref, expected_parent=...)``
 advances that pointer. It must be idempotent when ``ref`` is already current and
-reject an unrelated head. A failed pointer update is repaired from the commit log
+reject an unrelated head. A failed pointer update is repaired from the commit history
 on restart; the pointer never overrides committed scenario state. The memory
 and Git LFS backends implement this contract. Backends without this capability
-are rejected before scenario creation or recovery when a commit log is configured.
-They remain usable without a commit log.
+are rejected before scenario creation or recovery when a commit history is configured.
+They remain usable without a commit history.
 """
 
 from reef.artifact.artifact import (

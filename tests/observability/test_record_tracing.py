@@ -6,7 +6,7 @@ import json
 
 import pytest
 from tests.reef_service.test_skill_delivery import FakeStream
-from tests.scenario.test_commit_log import RecordingRuntime, TestPolicyRecipe, wait_for_step
+from tests.scenario.test_commit_history import RecordingRuntime, TestPolicyRecipe, wait_for_step
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend

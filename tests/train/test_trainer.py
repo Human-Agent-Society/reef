@@ -1000,7 +1000,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
 def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
     from reef.core.components import RECORDS_COMPONENT
     from reef.scenario.factory import recovered_trainer_states
-    from reef.storage.commit_log import CommitHistoryScenarioStore
+    from reef.storage.commit_history import CommitHistoryScenarioStore
     from reef.storage.tasks import LocalTaskFileStore
     from reef.surface.base import Surface
 

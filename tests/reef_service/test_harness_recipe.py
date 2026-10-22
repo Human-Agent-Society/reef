@@ -582,7 +582,7 @@ def test_commit_applied_aligns_the_tree_to_the_committed_entries(tmp_path: Path)
 
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # An unlaunchable episode loses its pairing but must not put -inf into
-    # the metrics: the commit log serializes them as JSON, which has no
+    # the metrics: the commit history serializes them as JSON, which has no
     # -Infinity, and a non-JSON reader would decode a wrong finite number.
     import json
 

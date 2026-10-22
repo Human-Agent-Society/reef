@@ -22,14 +22,14 @@ from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.sql_commits import CommitTable, SQLCommitHistory, commit_table
-from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, TrajectoryTable, trajectory_table
+from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
@@ -89,8 +89,8 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-TRAJECTORY_TABLE = TrajectoryTable(trajectory_table(_METADATA))
-COMMIT_TABLE = CommitTable(commit_table(_METADATA))
+TRAJECTORY_TABLE = ScopedTable(trajectory_table(_METADATA))
+COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
 
 _TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)

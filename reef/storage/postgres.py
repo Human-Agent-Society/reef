@@ -44,14 +44,14 @@ from sqlalchemy.schema import CreateSchema
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.sql_commits import CommitTable, SQLCommitHistory, commit_table
-from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, TrajectoryTable, trajectory_table
+from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 logger = logging.getLogger(__name__)
@@ -370,14 +370,14 @@ class PostgresRecordStore(SQLRecordStore):
     def trajectory_store(self) -> SQLTrajectoryStore:
         """Open the uploaded trajectories of this store generation."""
         return SQLTrajectoryStore(
-            self, TrajectoryTable(self._database.trajectory_table, scope={"storage_id": self.storage_id})
+            self, ScopedTable(self._database.trajectory_table, scope={"storage_id": self.storage_id})
         )
 
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history of this store generation."""
         return SQLCommitHistory(
             self,
-            CommitTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
+            ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )

@@ -286,11 +286,11 @@ class Scenario:
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
 
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
-        """The newest durable commit made by ``component``'s trainer, read from the log without waiting on a commit."""
+        """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
-        """Committed releases, newest first; the scenario step is read under the same lock as the log."""
+        """Committed releases, newest first; the scenario step is read under the same lock as the commit history."""
         with self.release_queries.publication_lock:
             return self.release_queries.releases(self._committer.step)
 

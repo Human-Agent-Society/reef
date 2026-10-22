@@ -16,7 +16,7 @@ from contextlib import AbstractContextManager, contextmanager
 from threading import RLock
 
 from reef.core.errors import ReefError
-from reef.storage.commits import RECORD_KIND, CommitLogError, CommitRecord
+from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
@@ -46,9 +46,9 @@ class CommitHistory(ABC):
     Operations, for a history whose records are ``H`` before the call:
 
     - ``append(r)``: if ``e`` in ``H`` has ``e.step == r.step``, the call does
-      nothing when ``same_commit(e, r)`` and raises ``CommitLogError``
+      nothing when ``same_commit(e, r)`` and raises ``CommitHistoryError``
       otherwise. If ``r.step`` is below the last step of ``H``, it raises
-      ``CommitLogError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
+      ``CommitHistoryError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
     - ``locked()``: no other session or process appends while the block runs.
     - ``training_run_position()`` is ``(s, n)``: ``s`` is the step of the last
       rollback in ``H``, or 0 when there is none, and ``n`` is the number of
@@ -268,8 +268,8 @@ class CommitHistoryScenarioStore(ScenarioStore):
 __all__ = [
     "RECORD_KIND",
     "CommitHistory",
+    "CommitHistoryError",
     "CommitHistoryScenarioStore",
-    "CommitLogError",
     "CommitRecord",
     "same_commit",
 ]

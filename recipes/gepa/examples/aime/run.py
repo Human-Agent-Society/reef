@@ -17,7 +17,7 @@ through per-example checkpoints and ``summary.json`` puts those numbers beside
 the retained official record.
 
 The work directory resumes: the archive, the checkpoints, the round counter,
-and the scenario's own commit log all survive a restart. ``--dry-run`` boots
+and the scenario's own commit history all survive a restart. ``--dry-run`` boots
 the recipe and prints the plan without a model call.
 """
 
@@ -217,7 +217,7 @@ class RunService:
         self._runner: web.AppRunner | None = None
 
     def start(self) -> None:
-        # Scenario creation (or durable recovery from the commit log) happens
+        # Scenario creation (or durable recovery from the commit history) happens
         # before any request lands.
         self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()

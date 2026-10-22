@@ -29,7 +29,7 @@ from reef.observability import TrainingExperimentContext, TrainingExperimentEven
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 

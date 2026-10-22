@@ -528,7 +528,7 @@ class ScenarioCommitter:
                 component_trainer = self.component_trainer(component)
                 trainer, component = component_trainer.trainer, component_trainer.component
                 next_step = self._step + 1
-                # A step that is in the log already is a retry after a lost acknowledgment.
+                # A step that is in the commit history already is a retry after a lost acknowledgment.
                 records = self._store.history()
                 retrying = bool(records) and records[-1].step == next_step
             # The operation lock keeps the step and source stable while tracker

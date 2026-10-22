@@ -8,43 +8,16 @@ one transaction of the record store. The adapters build the table with
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from threading import RLock
 
-from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, and_, select, true
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, MetaData, String, Table, Text, select
 from sqlalchemy.engine import Connection
-from sqlalchemy.sql.elements import ColumnElement
 
-from reef.storage.commit_log import CommitHistory, same_commit
-from reef.storage.commits import CommitLogError, CommitRecord
-from reef.storage.sql_records import SQLRecordStore
-
-
-@dataclass(frozen=True)
-class CommitTable:
-    """The commit table of one database, and the namespace of one store in it.
-
-    Values: ``table`` is a table that ``commit_table`` defines. ``scope`` maps
-    column names of ``table`` to values. It is empty for a table without a
-    namespace, and it names ``storage_id`` for a table that has that column.
-
-    Purpose: a SQL adapter makes it. ``SQLCommitHistory`` restricts each
-    operation to the rows that match ``scope``.
-    """
-
-    table: Table
-    scope: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        unknown = set(self.scope) - set(self.table.c.keys())
-        if unknown:
-            raise ValueError(f"the scope names columns that {self.table.name} does not have: {sorted(unknown)!r}")
-
-    def condition(self) -> ColumnElement[bool]:
-        """Restrict an operation to the namespace of the adapter, if any."""
-        return and_(true(), *(self.table.c[key] == value for key, value in self.scope.items()))
+from reef.storage.commit_history import CommitHistory, same_commit
+from reef.storage.commits import CommitHistoryError, CommitRecord
+from reef.storage.sql_records import ScopedTable, SQLRecordStore
 
 
 def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -53,7 +26,7 @@ def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     ``commit_json`` holds the canonical JSON object of ``CommitRecord.to_dict``.
     If ``foreign_key`` names a column, the table also has the column
     ``storage_id``, which refers to it. The adapter then gives ``storage_id``
-    in ``CommitTable.scope``. Steps are unique in each namespace.
+    in ``ScopedTable.scope``. Steps are unique in each namespace.
     """
     if foreign_key is None:
         return Table(
@@ -96,7 +69,7 @@ class SQLCommitHistory(CommitHistory):
     session do.
     """
 
-    def __init__(self, record_store: SQLRecordStore, table: CommitTable, *, label: str, durable: bool) -> None:
+    def __init__(self, record_store: SQLRecordStore, table: ScopedTable, *, label: str, durable: bool) -> None:
         self.record_store = record_store
         self.table = table
         self._label = label
@@ -140,9 +113,9 @@ class SQLCommitHistory(CommitHistory):
             if existing is not None:
                 if same_commit(existing, record):
                     return
-                raise CommitLogError(f"commit step {record.step} conflicts with its existing record")
+                raise CommitHistoryError(f"commit step {record.step} conflicts with its existing record")
             if records and record.step < records[-1].step:
-                raise CommitLogError(f"commit step {record.step} precedes existing step {records[-1].step}")
+                raise CommitHistoryError(f"commit step {record.step} precedes existing step {records[-1].step}")
             connection.execute(
                 self.table.table.insert().values(**self.table.scope, step=record.step, commit_json=encoded)
             )

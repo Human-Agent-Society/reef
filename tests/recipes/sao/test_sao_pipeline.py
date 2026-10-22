@@ -641,7 +641,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
 @pytest.mark.integration
 def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
     # Kill/restart recovery at the pipeline level: drop the in-memory dispatcher
-    # and rebuild the scenario from durable state ALONE (commit log + snapshot),
+    # and rebuild the scenario from durable state ALONE (commit history + snapshot),
     # then prove the step counter and algorithm state were reconstructed, not
     # remembered, and that training resumes at the next rollout.
     initial = tmp_path / "initial"
@@ -667,14 +667,14 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
         first.close()
 
     # Simulated restart: discard the dispatcher, rebuild over the SAME durable
-    # commit log + repository backend. Nothing carries the step in memory.
+    # commit history + repository backend. Nothing carries the step in memory.
     del first
     second = _make_dispatcher()
     try:
         recovered = second.get_or_create_scenario("math")
 
         assert recovered.scenario_step == 1  # step rebuilt from durable state
-        assert recovered.trainer.state == {"steps": 1}  # algorithm_state from the commit log
+        assert recovered.trainer.state == {"steps": 1}  # algorithm_state from the commit history
         assert recovered.store.durable
         record = recovered.store.history()[-1]
         assert record.step == 1  # the journal drove recovery

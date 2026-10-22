@@ -453,7 +453,7 @@ removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostic
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
 Concrete storage classes live under ``reef.storage``:
-``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
+``commit_history.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
 ``TaskStorage`` (``tasks=``), and a ``CommitHistory``. The bundled record
 stores give their ``TaskStorage`` from ``task_storage()`` and their
 ``sql_commits.SQLCommitHistory`` from ``commit_history()``; the commits are a
@@ -848,7 +848,7 @@ and keeps consumption metadata out of record reads.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
-the read API does not guess which. Use the commit log's per-step
+the read API does not guess which. Use the commit history's per-step
 ``consumed_ids`` to determine consumption, including intentional skips; it is
 not proof that every named record produced a model update.
 

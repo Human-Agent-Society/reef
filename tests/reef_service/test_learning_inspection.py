@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention
 from reef.storage.sqlite import SQLiteScenarioStorage
