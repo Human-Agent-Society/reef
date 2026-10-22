@@ -32,7 +32,13 @@ from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitRecord,
+    RecordProgress,
+    scenario_metadata_for,
+    to_json_value,
+)
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import (
@@ -522,7 +528,7 @@ class ScenarioCommitter:
                 component_trainer = self.component_trainer(component)
                 trainer, component = component_trainer.trainer, component_trainer.component
                 next_step = self._step + 1
-                # A step that is in the log already is a retry after a lost acknowledgment.
+                # A step that is in the commit history already is a retry after a lost acknowledgment.
                 records = self._store.history()
                 retrying = bool(records) and records[-1].step == next_step
             # The operation lock keeps the step and source stable while tracker
@@ -867,12 +873,13 @@ class ScenarioCommitter:
 
     @staticmethod
     def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
+        # A record holds JSON values, where the prepared commit can hold tuples.
         return (
-            record.algorithm_state == prepared.algorithm_state
+            record.algorithm_state == to_json_value(prepared.algorithm_state)
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
             and record.consumed_ids == prepared.consumed_ids
-            and record.metrics == prepared.metrics
+            and record.metrics == to_json_value(prepared.metrics)
             and record.training_job_id == prepared.training_job_id
         )
 

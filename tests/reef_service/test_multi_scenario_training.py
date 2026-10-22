@@ -6,7 +6,7 @@ import asyncio
 import time
 
 import pytest
-from tests.scenario.test_commit_log import RecordingRuntime, build_training_dispatcher, wait_for_step
+from tests.scenario.test_commit_history import RecordingRuntime, build_training_dispatcher, wait_for_step
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord

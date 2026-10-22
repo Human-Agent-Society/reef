@@ -57,7 +57,7 @@ from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
-    CommitLogError,
+    CommitHistoryError,
     CommitRecord,
     parse_scenario_metadata,
     scenario_metadata_for,
@@ -1706,7 +1706,7 @@ def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path, dispa
 def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A checkpoint read back from the artifact head names its component, so a lost commit log resets no trainer."""
+    """A checkpoint read back from the artifact head names its component, so a lost commit history resets no trainer."""
     backend_factory = _seeded_repository(tmp_path)
     dispatcher, _ = dispatchers.open(records_dir=tmp_path / "records-1", backend_factory=backend_factory)
     scenario = _scenario(dispatcher, 1)
@@ -1795,7 +1795,7 @@ def test_commit_record_carries_its_component() -> None:
     assert encoded["component"] == HARNESS
     assert CommitRecord.from_dict(encoded) == record
     assert "component" not in CommitRecord.from_dict({**encoded, "component": None}).to_dict()
-    with pytest.raises(CommitLogError, match="only training commits may carry component"):
+    with pytest.raises(CommitHistoryError, match="only training commits may carry component"):
         CommitRecord(
             scenario="agent",
             step=4,

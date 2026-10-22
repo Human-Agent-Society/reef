@@ -288,7 +288,7 @@ The current ask command uses `POST /reef/train`, which `deployment.yaml` takes i
 
 ### Known limitations
 
-- `run.py` waits for the verdict of every step its reports triggered, then reads the head once: a step still pending at the deadline is reported as pending and its verdict lands in the commit log, not in the run's output.
+- `run.py` waits for the verdict of every step its reports triggered, then reads the head once: a step still pending at the deadline is reported as pending and its verdict lands in the commit history, not in the run's output.
 - A rejected proposal's content is not persisted, so a rejected row can name the mutation's id and op only.
 - vllm serves Qwen3-8B for pi only with `--enable-auto-tool-choice --tool-call-parser hermes`; without them it answers pi's `tool_choice: "auto"` requests with a 400, every episode fails, and every gate ties.
 - The B200 rows and the Mac rows differ in host and model server, so wall clocks compare within a setup, not across.

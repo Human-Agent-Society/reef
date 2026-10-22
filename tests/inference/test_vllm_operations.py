@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
 from reef.runtime.deployment import InferenceConnection
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.runtime.interfaces import WeightFiles
 
 
 class Receiver:
@@ -168,6 +170,46 @@ def test_worker_loads_an_adapter_directory_into_every_engine_then_stamps_the_ver
     worker.group = SimpleNamespace(engines=[])
     with pytest.raises(RuntimeError, match="no vLLM engines"):
         worker.load_adapter_from_disk("x", "/p", "inc:2")
+
+
+def test_worker_reloads_full_weights_into_every_engine_with_the_version(monkeypatch):
+    from reef.inference.vllm import worker as worker_module
+
+    calls = []
+
+    class Remote:
+        def remote(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
+    worker = worker_module.VLLMWorker.__new__(worker_module.VLLMWorker)
+    worker.group = SimpleNamespace(engines=[SimpleNamespace(update_weights_from_disk=Remote())] * 2)
+    worker.load_weights_from_disk("/ckpt/hf", "inc:3")
+    assert calls == [(("/ckpt/hf",), {"runtime_load_id": "inc:3"})] * 2
+    worker.group = SimpleNamespace(engines=[])
+    with pytest.raises(RuntimeError, match="no vLLM engines"):
+        worker.load_weights_from_disk("/ckpt/hf", "inc:3")
+
+
+@pytest.mark.parametrize(
+    ("files", "adapter_name", "call"),
+    [
+        (WeightFiles(Path("/ckpt/hf"), "full"), None, ("load_weights_from_disk", ("/ckpt/hf", "inc:4"))),
+        (
+            WeightFiles(Path("/ckpt/adapter"), "adapter"),
+            "math@inc:4",
+            ("load_adapter_from_disk", ("math@inc:4", "/ckpt/adapter", "inc:4")),
+        ),
+    ],
+)
+def test_receiver_loads_each_weight_file_layout_through_its_control_call(files, adapter_name, call):
+    backend = VLLMInferenceBackend(UniProcExecutor.from_workers([object()]))
+    calls = []
+    backend._call = lambda method, *args, **kwargs: calls.append((method, args))
+    backend.load_weight_files(files, adapter_name=adapter_name, runtime_load_id="inc:4")
+    assert calls == [call]
+    with pytest.raises(ValueError, match="adapter name is given exactly for adapter weight files"):
+        backend.load_weight_files(files, adapter_name=None if adapter_name else "x", runtime_load_id="inc:4")
 
 
 def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(monkeypatch):

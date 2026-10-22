@@ -21,9 +21,10 @@ from typing import Any
 
 from reef.core.config import config_value
 from reef.inference.deployment import inference_service_for
+from reef.inference.remote import service as remote_inference
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.deployment import ComponentHealth
+from reef.runtime.deployment import ComponentHealth, InferenceService
 from reef.runtime.deployment import ModelDeployment as ModelDeployment
 from reef.runtime.deployment import ModelDeploymentPlan, ModelPlanSource
 from reef.service.deploy.config_utils import load_config
@@ -77,7 +78,12 @@ class ConfiguredModelPlanSource(ModelPlanSource):
 
 def assemble_model_plan(config: Mapping[str, Any], training: TrainingDeploymentPlan) -> ModelDeploymentPlan:
     """Select inference independently and validate the pair before allocation."""
-    inference = inference_service_for(config.get("reef", {}).get("inference_backend"), training.inference_config)
+    reef = config.get("reef", {})
+    if reef.get("inference_remote"):
+        # The engines that inference.backend names run on a remote component.
+        inference: InferenceService = remote_inference.create_inference(training.inference_config)
+    else:
+        inference = inference_service_for(reef.get("inference_backend"), training.inference_config)
     plan = ModelDeploymentPlan(
         resources=training.resources,
         training=training.training,

@@ -79,9 +79,11 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
     def service(**kwargs):
         return SlimeTrainingService(SimpleNamespace(), preparation=preparation, loss_family_config=None, **kwargs)
 
-    assert service().weight_transfer_protocol == WEIGHT_TRANSFER_PROTOCOLS["sglang"] == "slime-sglang-control-v2"
+    assert (
+        service().weight_transfer_protocols == (WEIGHT_TRANSFER_PROTOCOLS["sglang"],) == ("slime-sglang-control-v2",)
+    )
     vllm_trainer = service(inference_backend="vllm")
-    assert vllm_trainer.weight_transfer_protocol == VLLM_PROTOCOL
+    assert vllm_trainer.weight_transfer_protocols == (VLLM_PROTOCOL,)
     with pytest.raises(ValueError, match="no receiver protocol"):
         service(inference_backend="tinker")
     plan = ModelDeploymentPlan(

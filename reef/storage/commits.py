@@ -1,12 +1,13 @@
 """Scenario registration metadata, commit records, and their persisted formats.
 
-Checkpoint recovery uses CommitRecord, the same value stored in the commit log.
+Checkpoint recovery uses CommitRecord, the same value stored in the commit history.
 Initial registration has no commit. Encoding and validation depend only on core
 value types; training and storage operations remain with their callers.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -41,7 +42,7 @@ def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
-    """Validate one record_progress mapping; shared by checkpoint metadata and commit-log parsing.
+    """Validate one record_progress mapping; shared by checkpoint metadata and commit-history parsing.
 
     ``context`` prefixes every error message (e.g. ``"scenario metadata"`` or
     ``"commit record"``). Raises ``ValueError``; callers with their own error
@@ -63,8 +64,19 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
 RECORD_KIND = "reef-commit/5"
 
 
-class CommitLogError(ReefError):
-    """The commit log is corrupt or a record does not match the schema."""
+class CommitHistoryError(ReefError):
+    """The commit history is corrupt or a record does not match the schema."""
+
+
+def to_json_value(value: Any) -> Any:
+    """Return ``value`` as a JSON round trip gives it back: tuples become lists, and mapping keys become strings.
+
+    Raises ``CommitHistoryError`` when ``value`` holds something JSON cannot encode.
+    """
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise CommitHistoryError(f"commit record values must be JSON values: {exc}") from exc
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -74,7 +86,10 @@ class CommitRecord:
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
     consumed and the IDs processed by the step. Recovery rebuilds processor
-    memory without changing stored records.
+    memory without changing stored records. ``algorithm_state`` and
+    ``metrics`` hold JSON values: the constructor converts them as a JSON round
+    trip does, so a record equals itself after storage, and it raises
+    ``CommitHistoryError`` for a value that JSON cannot encode.
     """
 
     scenario: str
@@ -101,9 +116,9 @@ class CommitRecord:
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
-            raise CommitLogError("commit record step must be a positive integer")
+            raise CommitHistoryError("commit record step must be a positive integer")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
-            raise CommitLogError("commit record component must be a non-empty string or null")
+            raise CommitHistoryError("commit record component must be a non-empty string or null")
         if self.components is not None and (
             not isinstance(self.components, Mapping)
             or not all(
@@ -111,41 +126,43 @@ class CommitRecord:
                 for name, content_id in self.components.items()
             )
         ):
-            raise CommitLogError("commit record components must map component names to content ids")
+            raise CommitHistoryError("commit record components must map component names to content ids")
         if self.operation != "training" and self.component is not None:
-            raise CommitLogError("only training commits may carry component")
+            raise CommitHistoryError("only training commits may carry component")
         for name, value in (
             ("high_water_sequence", self.high_water_sequence),
             ("high_water_offset", self.high_water_offset),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise CommitLogError(f"commit record {name} must be a non-negative integer")
+                raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
         if self.operation not in ("training", "rollback", "promote"):
-            raise CommitLogError("commit record operation must be 'training', 'rollback', or 'promote'")
+            raise CommitHistoryError("commit record operation must be 'training', 'rollback', or 'promote'")
         if not isinstance(self.operation_verified, bool):
-            raise CommitLogError("commit record operation_verified must be a boolean")
+            raise CommitHistoryError("commit record operation_verified must be a boolean")
         if self.operation in ("rollback", "promote"):
             if not isinstance(self.rollback_target_release_id, str) or not self.rollback_target_release_id:
-                raise CommitLogError(f"{self.operation} commit requires rollback_target_release_id")
+                raise CommitHistoryError(f"{self.operation} commit requires rollback_target_release_id")
         elif self.rollback_target_release_id is not None:
-            raise CommitLogError("training commit must not carry rollback_target_release_id")
+            raise CommitHistoryError("training commit must not carry rollback_target_release_id")
         if not isinstance(self.pending, bool) or (self.pending and self.operation != "training"):
-            raise CommitLogError("only a training commit may be pending")
+            raise CommitHistoryError("only a training commit may be pending")
         if self.metrics is not None and not isinstance(self.metrics, Mapping):
-            raise CommitLogError("commit record metrics must be an object or null")
+            raise CommitHistoryError("commit record metrics must be an object or null")
         if self.training_job_id is not None and (
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
-            raise CommitLogError("commit record training_job_id must be a non-empty string or null")
+            raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
         if self.operation != "training" and self.training_job_id is not None:
-            raise CommitLogError("only training commits may carry training_job_id")
-        # Own every mutable value the record was handed: the log is the durable
-        # commit point, so a caller mutating its state or metrics afterwards
-        # must not change what was recorded.
+            raise CommitHistoryError("only training commits may carry training_job_id")
+        # Hold state and metrics as a stored record reads them back, so a record
+        # equals itself after storage, and a caller mutating its values
+        # afterwards does not change what was recorded.
         object.__setattr__(
-            self, "algorithm_state", None if self.algorithm_state is None else dict(self.algorithm_state)
+            self,
+            "algorithm_state",
+            None if self.algorithm_state is None else to_json_value(dict(self.algorithm_state)),
         )
-        object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
+        object.__setattr__(self, "metrics", None if self.metrics is None else to_json_value(dict(self.metrics)))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
         object.__setattr__(self, "components", None if self.components is None else dict(self.components))
 
@@ -185,36 +202,36 @@ class CommitRecord:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CommitRecord:
         if value.get("record") != RECORD_KIND:
-            raise CommitLogError(f"unknown commit record kind: {value.get('record')!r}")
+            raise CommitHistoryError(f"unknown commit record kind: {value.get('record')!r}")
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
-            raise CommitLogError("commit record requires scenario")
+            raise CommitHistoryError("commit record requires scenario")
         step = value.get("step")
         if not isinstance(step, int):
-            raise CommitLogError("commit record step must be an integer")
+            raise CommitHistoryError("commit record step must be an integer")
         raw_ref = value.get("artifact_ref")
         if not isinstance(raw_ref, Mapping):
-            raise CommitLogError("commit record requires artifact_ref")
+            raise CommitHistoryError("commit record requires artifact_ref")
         checkpoint = value.get("checkpoint")
         if not isinstance(checkpoint, bool):
-            raise CommitLogError("commit record checkpoint must be a boolean")
+            raise CommitHistoryError("commit record checkpoint must be a boolean")
         algorithm_state = value.get("algorithm_state")
         if algorithm_state is not None and not isinstance(algorithm_state, Mapping):
-            raise CommitLogError("commit record algorithm_state must be an object or null")
+            raise CommitHistoryError("commit record algorithm_state must be an object or null")
         raw_progress = value.get("record_progress")
         if not isinstance(raw_progress, Mapping):
-            raise CommitLogError("commit record requires record_progress")
+            raise CommitHistoryError("commit record requires record_progress")
         try:
             artifact_ref = decode_artifact_ref(raw_ref)
         except ValueError as exc:
-            raise CommitLogError(f"commit record {exc}") from exc
+            raise CommitHistoryError(f"commit record {exc}") from exc
         try:
             record_progress = parse_record_progress(raw_progress, context="commit record")
         except ValueError as exc:
-            raise CommitLogError(str(exc)) from exc
+            raise CommitHistoryError(str(exc)) from exc
         recorded_at = value.get("recorded_at")
         if not isinstance(recorded_at, int | float) or isinstance(recorded_at, bool):
-            raise CommitLogError("commit record recorded_at must be a number")
+            raise CommitHistoryError("commit record recorded_at must be a number")
         operation = value.get("operation", "training")
         operation_verified = value.get("operation_verified", True)
         rollback_target_release_id = value.get("rollback_target_release_id")
@@ -285,7 +302,7 @@ def scenario_metadata_for(
     elif rollback_target_release_id is not None:
         raise ValueError("training scenario metadata must not carry rollback_target_release_id")
     # The trainer that made the checkpoint: a checkpoint adopted from the artifact head
-    # after the commit log is lost must still be attributed to its component's trainer.
+    # after the commit history is lost must still be attributed to its component's trainer.
     if component is not None:
         if not isinstance(component, str) or not component:
             raise ValueError("scenario metadata component must be a non-empty string or None")
@@ -386,7 +403,7 @@ __all__ = [
     "RECORD_KIND",
     "SCENARIO_METADATA_KEY",
     "SCENARIO_METADATA_KIND",
-    "CommitLogError",
+    "CommitHistoryError",
     "CommitRecord",
     "RecordProgress",
     "parse_record_progress",

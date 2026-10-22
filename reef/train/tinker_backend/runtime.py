@@ -44,7 +44,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
 
     Each attempt branches from the incumbent's weights AND optimizer.
     Repeating a failed attempt can consume API resources, but cannot apply its
-    gradient twice to the incumbent. Reef's commit log remains authoritative.
+    gradient twice to the incumbent. Reef's commit history remains authoritative.
     """
 
     def __init__(self, base_model: str, config: TinkerConfig, client: TinkerClient) -> None:

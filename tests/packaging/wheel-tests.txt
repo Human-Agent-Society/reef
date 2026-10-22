@@ -174,7 +174,7 @@ tests/runtime/test_training_coordinator.py
 tests/runtime/test_training_execution.py
 tests/runtime/test_training_publication.py
 tests/runtime/test_training_restart.py
-tests/scenario/test_commit_log.py
+tests/scenario/test_commit_history.py
 tests/scenario/test_component_trainers.py
 tests/scenario/test_composite_replay_parity.py
 tests/scenario/test_composite_restart_replay.py

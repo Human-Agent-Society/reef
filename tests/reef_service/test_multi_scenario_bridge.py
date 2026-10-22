@@ -64,8 +64,8 @@ class _SlottedGroup:
         self.train_calls.append((rollout_id, self.active))
         return [{"values": [0.25]}]
 
-    def async_pop_rank0_metrics(self):
-        return self._actor_handlers[0].pop_metrics.remote()
+    def async_pop_metrics(self):
+        return [rank.pop_metrics.remote() for rank in self._actor_handlers]
 
     def async_get_rank0_runtime_load_id(self):
         return self._actor_handlers[0].get_runtime_load_id.remote()

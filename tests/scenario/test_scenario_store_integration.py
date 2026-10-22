@@ -25,7 +25,7 @@ from reef.train.types import TrainStepResult
 
 
 class OpaqueStore(ScenarioStore):
-    """Delegate storage while exposing no SQLite paths or commit-log attribute."""
+    """Delegate storage while exposing no SQLite paths or commit-history attribute."""
 
     def __init__(self, scenario: str, inner: ScenarioStore, events: list[tuple[str, str]], *, fail_recovery: bool):
         self.scenario = scenario

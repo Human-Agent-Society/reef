@@ -11,9 +11,15 @@ from tests.runtime.test_executor_runtime import Coordinator
 
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.runtime.deployment import ADAPTER_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
+from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend, LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.runtime.interfaces import (
+    InferenceBackend,
+    LearningRateSchedule,
+    LearningRateScheduleState,
+    TrainingMethod,
+    WeightFiles,
+)
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -81,8 +87,9 @@ class Engines(InferenceBackend):
         self.versions = ["engine:0"]
         self.events = []
 
-    def load_adapter_files(self, name, path, runtime_load_id):
-        self.loads.append((name, str(path), runtime_load_id))
+    def load_weight_files(self, files, *, adapter_name, runtime_load_id):
+        assert files.layout == "adapter"
+        self.loads.append((adapter_name, str(files.path), runtime_load_id))
         if runtime_load_id is not None:
             self.versions = [runtime_load_id]
 
@@ -106,15 +113,6 @@ class Engines(InferenceBackend):
 
     def abort(self):
         self.events.append("abort")
-
-    def offload(self, tags):
-        raise AssertionError("a hosted trainer never offloads the engines")
-
-    def onload_weights(self):
-        raise AssertionError("a hosted trainer never onloads")
-
-    def onload_kv(self):
-        raise AssertionError("a hosted trainer never onloads")
 
     def unload_adapter(self, name):
         self.events.append(("unload", name))
@@ -245,12 +243,14 @@ def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_pa
 def test_the_trainer_delivers_files_and_never_sends(tmp_path, objective):
     stack = Stack(tmp_path)
     with pytest.raises(RuntimeError, match="no Tinker checkpoint"):
-        stack.backend.adapter_files("math", "other:1")
+        stack.backend.weight_files("math", "other:1")
+    with pytest.raises(RuntimeError, match="no shared model weights"):
+        stack.backend.weight_files(None, "other:1")
     first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     published = stack.coordinator.update_serving_weights(first.training_job_id)
     adapter = Path(first.checkpoint_path) / ADAPTER_DIR
     # Reef's residency re-activation asks for the published revision by version, not for a send.
-    assert stack.backend.adapter_files("math", published.runtime_load_id) == adapter
+    assert stack.backend.weight_files("math", published.runtime_load_id) == WeightFiles(adapter, "adapter")
     for send in (
         lambda: stack.backend.send_weights("x:1", force_full=False),
         lambda: stack.backend.prepare_weights("x:1", force_full=False),
@@ -354,21 +354,96 @@ def test_training_plan_pairs_a_gpu_less_trainer_with_lora_serving_engines(tmp_pa
         TinkerDeployment().create_training_plan(config, loss_family="tttd")
 
 
+def _remote_engine_config(tmp_path):
+    raw = _local_engine_config(tmp_path)
+    raw["inference"] = {
+        "model-path": "Qwen/Qwen3-8B",
+        "backend": "sglang",
+        "num-gpus": 2,
+        "remote": {"url": "https://gpu-host.example/", "inference-token-env": "GPU_HOST_TOKEN"},
+    }
+    return raw
+
+
+def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_component(tmp_path, monkeypatch):
+    from reef.inference.remote.service import RemoteInferenceService
+    from reef.service.training_driver import assemble_model_plan
+    from reef.train.tinker_backend.training import RaySessionResources
+
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    config, _ = resolve_deployment_config(_remote_engine_config(tmp_path), None, tmp_path / "serve.yaml")
+    assert [service["name"] for service in config["services"]] == ["tinker-driver", "reef"]
+    reef = config["reef"]
+    assert (reef["inference_backend"], reef["inference_num_gpus"], reef["model_path"]) == (
+        "sglang",
+        2,
+        "Qwen/Qwen3-8B",
+    )
+    assert not local_model_required(config)
+    settings = service_config_from_mapping(config)
+    runtime = training_deployment_for("tinker").runtime_config(
+        {**settings.__dict__, "ray_address": "ray://head:10001"}
+    )
+    assert runtime["inference_runtime"] == "remote"
+    assert runtime["inference_runtime_options"] == {"engine": "sglang", "inference_token_env": "GPU_HOST_TOKEN"}
+    # Resolution stores the validated section: underscore keys, defaults filled in, the URL normalized.
+    assert reef["inference_remote"] == {
+        "url": "https://gpu-host.example",
+        "control_token_env": "REEF_REMOTE_CONTROL_TOKEN",
+        "inference_token_env": "GPU_HOST_TOKEN",
+        "startup_timeout_s": 3600.0,
+    }
+
+    monkeypatch.setenv("RAY_ADDRESS", "ray://head:10001")
+    monkeypatch.setenv("REEF_REMOTE_CONTROL_TOKEN", "control-secret")
+    training = TinkerDeployment().create_training_plan(config, loss_family="tttd")
+    assert isinstance(training.resources, RaySessionResources)
+    with pytest.raises(ValueError, match="cluster address and a namespace"):
+        RaySessionResources(ray_address="", namespace="reef")
+    assert training.inference_config["remote"] == reef["inference_remote"]
+    assert (training.inference_config["engine"], training.inference_config["num_gpus"]) == ("sglang", 2)
+    assert training.inference_config["engine_config"]["options"]["max_lora_rank"] == 16
+    plan = assemble_model_plan(config, training)
+    assert isinstance(plan.inference, RemoteInferenceService)
+    assert plan.weight_transfer_protocol(plan.inference) == WEIGHT_FILES_PROTOCOL
+
+
+def test_remote_engine_topology_refuses_an_incomplete_section(tmp_path, monkeypatch):
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    for change, match in (
+        ({"backend": "vllm"}, "only with inference.backend: sglang"),
+        ({"remote": {"control-token-env": "GPU_HOST_CONTROL"}}, "inference.remote requires a url"),
+        ({"remote": {"url": "https://gpu-host.example?key=1"}}, "without credentials, query"),
+        (
+            {"remote": {"url": "https://gpu-host.example", "engine": "sglang"}},
+            "unknown inference.remote fields: engine",
+        ),
+    ):
+        raw = _remote_engine_config(tmp_path)
+        raw["inference"] = {**raw["inference"], **change}
+        with pytest.raises(DeployConfigError, match=match):
+            resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    raw = _remote_engine_config(tmp_path)
+    raw["training"] = {"backend": "slime"}
+    with pytest.raises(DeployConfigError, match="does not support remote engines"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
 def test_training_service_hands_the_coordinator_a_backend_only_after_engines_attach(tmp_path):
-    from reef.runtime.deployment import WeightTransferSession
+    from reef.runtime.deployment import NativeWeightTransferSession, WeightTransferSession
 
     client = RemoteClient()
     control = UniProcExecutor.from_workers([Engines()])
     service = TinkerTrainingService("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path)), "key", client=client)
-    assert service.weight_transfer_protocol == ADAPTER_FILES_PROTOCOL
+    assert service.weight_transfer_protocols == (WEIGHT_FILES_PROTOCOL,)
     with pytest.raises(RuntimeError, match="before attaching"):
-        service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
+        service.attach_weight_transport(WeightTransferSession(WEIGHT_FILES_PROTOCOL, "s"))
     service.start(None)
     with pytest.raises(ValueError, match="delivers adapter files"):
-        service.attach_weight_transport(WeightTransferSession("slime-sglang-control-v2", control, "s"))
+        service.attach_weight_transport(NativeWeightTransferSession("slime-sglang-control-v2", "s", control))
     with pytest.raises(RuntimeError, match="attached engines"):
         service.backend()
-    service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, control, "s"))
+    service.attach_weight_transport(WeightTransferSession(WEIGHT_FILES_PROTOCOL, "s"))
     assert isinstance(service.backend(), TinkerTrainingBackend)
     service.close()
     assert not client.closed  # the coordinator owns the backend, and closes the client with it

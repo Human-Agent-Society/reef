@@ -376,8 +376,13 @@ rollout log probabilities and the weight version that produced each token.
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
 Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
-``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
-through ``sglang_sampling_params`` or ``vllm_sampling_params``. A positive
+``sampling_defaults``, ``force_reasoning`` and ``chat_template_kwargs``; per-request sampling extras pass
+through ``sglang_sampling_params`` or ``vllm_sampling_params``.
+``chat_template_kwargs`` renders a request that omits them, for example
+``{enable_thinking: false}`` for a hybrid-thinking model served without
+reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
+that renders its own samples, such as SFT's
+``pipeline.record2task.config.chat_template_kwargs``, must use the same value. A positive
 ``capture_topk`` also records the sampler's top-K ids and log-probs for every
 response token. Score centering (``training.options.score-centering``) needs
 at least ``score-centering-top-k`` of them (see the loss families guide). A vLLM engine
@@ -675,7 +680,7 @@ persistent.
    storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
-   storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commit logs and settings
+   storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commits and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
    storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
    storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store
@@ -712,7 +717,7 @@ passes must tolerate missing records once capacity eviction occurs.
 
 This is a body budget, not a hard filesystem quota or an emergency disk-full
 handler. Concurrent writes can exceed it between sweeps. Indexes, retry hashes,
-commit logs and WAL require additional disk headroom. SQLite reuses freed pages
+commit histories and WAL require additional disk headroom. SQLite reuses freed pages
 without automatically shrinking its file. Cleanup failures are logged and
 retried on the next sweep. Standalone stores need an explicit maintenance call;
 see `Python API <python-api.rst>`__.
@@ -1011,7 +1016,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
 against. The step record holds the proposer's raw traffic and every evaluation
-episode's session log, so treat its directory like the commit log.
+episode's session log, so treat its directory like the commit history.
 
 The ``inference`` section
 -------------------------
@@ -1026,6 +1031,21 @@ when it is omitted, it follows ``inference.timeout-s``.
    inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
    inference.retry-initial-s | 0.05 | delay before the first retry
    inference.retry-max-s | 1.0 | maximum delay between retries
+
+An ``inference.remote`` section runs the engines that ``inference.backend``
+names on a remote inference component instead of this host. The component's
+``--engine`` must name the same backend. `Serve from a remote GPU host
+<../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
+``reef serve`` refuses the section unless the training backend supports remote
+engines; Tinker does, Slime does not yet. The section tells Reef how to reach
+the component:
+
+.. config::
+
+   inference.remote.url | the component's HTTP(S) base URL, without credentials, query or fragment
+   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the model driver reads it
+   inference.remote.inference-token-env | REEF_REMOTE_INFERENCE_TOKEN | variable with the component's inference token; the HTTP service reads it
+   inference.remote.startup-timeout-s | 3600 | deadline for one engine start on the component, including the model download
 
 The ``training`` section
 ------------------------
@@ -1324,7 +1344,7 @@ binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
 finishes the current run, marks its summary with the source and target, and
 resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit log. A scenario with several
+attached for joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
 prefix (``harness/train/loss``) on the same ``train/step`` axis with
 ``reef/component`` on the row, its optimizer step rows land under

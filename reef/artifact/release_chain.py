@@ -17,7 +17,7 @@ class ReleaseNotRestorable(ReefError):
 class ArtifactReleaseChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
-    This layer knows nothing about scenarios, trainers, or commit logs. Its
+    This layer knows nothing about scenarios, trainers, or commit histories. Its
     caller decides transaction ordering and records the outcome after each
     artifact operation.
     """
