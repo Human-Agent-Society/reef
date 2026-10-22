@@ -262,8 +262,9 @@ class RemoteInferenceServer:
         archive = directory.with_suffix(".tar")
         try:
             with archive.open("wb") as stream:
+                # Write in a thread: a multi-gigabyte upload must not stall the requests this component forwards.
                 async for chunk in request.content.iter_chunked(UPLOAD_CHUNK_BYTES):
-                    stream.write(chunk)
+                    await asyncio.to_thread(stream.write, chunk)
             await asyncio.to_thread(unpack_archive, archive, directory)
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)

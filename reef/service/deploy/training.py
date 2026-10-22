@@ -85,7 +85,9 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
     if settings.inference_backend == REMOTE_INFERENCE_BACKEND:
-        RemoteInferenceSettings.from_mapping(settings.inference_remote)
+        # Every later reader gets the validated section, with underscore keys and defaults filled in.
+        config["reef"]["inference_remote"] = asdict(RemoteInferenceSettings.from_mapping(settings.inference_remote))
+        settings = service_config_from_mapping(config)
     elif settings.inference_remote:
         raise DeployConfigError("inference.remote requires inference.backend: remote")
     config["reef"]["training_backend"] = settings.training_backend or "slime"

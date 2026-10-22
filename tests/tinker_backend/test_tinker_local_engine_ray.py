@@ -119,10 +119,10 @@ FAKE_COOKBOOK = textwrap.dedent(
 
 def _write_fake_sdk(root: Path, model: str) -> Path:
     site = root / "fake_sdk"
-    (site / "tinker").mkdir(parents=True)
+    (site / "tinker").mkdir(parents=True, exist_ok=True)
     (site / "tinker" / "__init__.py").write_text(FAKE_SDK)
     (site / "tinker" / "settings.json").write_text(json.dumps({"root": str(root), "model": model}))
-    (site / "tinker_cookbook").mkdir()
+    (site / "tinker_cookbook").mkdir(exist_ok=True)
     (site / "tinker_cookbook" / "__init__.py").write_text("")
     (site / "tinker_cookbook" / "weights.py").write_text(FAKE_COOKBOOK)
     return site
@@ -192,6 +192,7 @@ def model_driver(tmp_path, monkeypatch, inference, runtime, *, ray_gpus, driver_
     try:
         address = ray.get_runtime_context().gcs_address
         ready = tmp_path / "ready"
+        ready.unlink(missing_ok=True)  # a restarted driver writes it again
         # Ray 2.59 starts a local cluster with token auth and records the mode in RAY_AUTH_MODE;
         # a driver that loses it cannot join the cluster.
         env = {
@@ -337,7 +338,7 @@ def assert_tinker_trained_once(tmp_path, scenario_name: str, published: str) -> 
 
 
 @pytest.mark.integration
-def test_tinker_trains_behind_themodel_driver_with_a_local_engine(tmp_path, monkeypatch):
+def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, monkeypatch):
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     inference = {
@@ -365,7 +366,7 @@ def test_tinker_trains_behind_themodel_driver_with_a_local_engine(tmp_path, monk
 
 
 @pytest.mark.integration
-def test_tinker_trains_behind_themodel_driver_with_a_remote_engine(tmp_path, monkeypatch):
+def test_tinker_trains_behind_the_model_driver_with_a_remote_engine(tmp_path, monkeypatch):
     """The stub engines run in a separate component process with its own Ray session; adapters travel over HTTP."""
     from reef.inference.remote.service import RemoteControl
     from reef.inference.sglang.chat import SGLangInferenceHandler
@@ -446,5 +447,12 @@ def test_tinker_trains_behind_themodel_driver_with_a_remote_engine(tmp_path, mon
         # Closing the deployment stops the remote engines; the component keeps serving.
         with pytest.raises(RuntimeError, match="409"):
             control.call("GET", "runtime-load-ids")
+        assert [path for path in work_dir.iterdir() if path.is_dir()] == []
+        # A restarted driver starts the engines again and reloads the committed adapter before it serves.
+        with model_driver(tmp_path, monkeypatch, inference, runtime, ray_gpus=0, driver_env=tokens) as stack:
+            assert stack.inference.serving_runtime_load_id() == published
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+            (adapter,) = [path for path in work_dir.iterdir() if path.is_dir()]
+            assert (adapter / "adapter_config.json").is_file()
     finally:
         stop_process(component)

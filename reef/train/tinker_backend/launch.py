@@ -36,7 +36,6 @@ from reef.train.deployment import (
     driver_service,
     inference_handler_factory_for,
     prepare_inference_config,
-    remote_inference_section,
     require_ray_roles,
 )
 from reef.train.tinker_backend.config import TinkerConfig
@@ -74,9 +73,10 @@ class TinkerDeployment(InProcessTrainingDeployment):
             raise DeployConfigError(
                 "Tinker serves through inference.backend: sglang, or remote engines running sglang"
             )
-        remote_engine = str(remote_inference_section(settings).get("engine", "sglang"))
-        if backend == REMOTE_INFERENCE_BACKEND and remote_engine != "sglang" and ":" not in remote_engine:
-            raise DeployConfigError("Tinker's remote engines must run inference.remote.engine: sglang")
+        if backend == REMOTE_INFERENCE_BACKEND:
+            remote_engine = settings["inference_remote"]["engine"]
+            if remote_engine != "sglang" and ":" not in remote_engine:
+                raise DeployConfigError("Tinker's remote engines must run inference.remote.engine: sglang")
         if settings["inference_url"] or config.get("reef", {}).get("runtime"):
             raise DeployConfigError("a managed local engine discovers its inference connection from the driver")
         if settings["colocate"]:
@@ -130,7 +130,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
             # The engines run on the remote component; this host keeps only the coordinator's Ray session.
             resources = RaySessionResources(ray_address=ray_address, namespace=namespace)
             inference_config = {
-                "remote": remote_inference_section(reef),
+                "remote": dict(reef["inference_remote"]),
                 "num_gpus": int(reef["inference_num_gpus"]),
                 "engine_config": engine_config,
             }
@@ -174,9 +174,10 @@ class TinkerDeployment(InProcessTrainingDeployment):
             "train_timeout_s": settings["train_timeout_s"],
         }
         if settings["inference_backend"] == REMOTE_INFERENCE_BACKEND:
-            remote = remote_inference_section(settings)
+            remote = settings["inference_remote"]
             runtime_config["inference_runtime_options"] = {
-                name: remote[name] for name in ("engine", "inference_token_env") if name in remote
+                "engine": remote["engine"],
+                "inference_token_env": remote["inference_token_env"],
             }
         handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if handler_factory is not None:

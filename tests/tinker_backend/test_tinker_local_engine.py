@@ -344,7 +344,7 @@ def _remote_engine_config(tmp_path):
         "model-path": "Qwen/Qwen3-8B",
         "backend": "remote",
         "num-gpus": 2,
-        "remote": {"url": "https://gpu-host.example", "inference-token-env": "GPU_HOST_TOKEN"},
+        "remote": {"url": "https://gpu-host.example/", "inference-token-env": "GPU_HOST_TOKEN"},
     }
     return raw
 
@@ -369,7 +369,15 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
         {**settings.__dict__, "ray_address": "ray://head:10001"}
     )
     assert runtime["inference_runtime"] == "remote"
-    assert runtime["inference_runtime_options"] == {"inference_token_env": "GPU_HOST_TOKEN"}
+    assert runtime["inference_runtime_options"] == {"engine": "sglang", "inference_token_env": "GPU_HOST_TOKEN"}
+    # Resolution stores the validated section: underscore keys, defaults filled in, the URL normalized.
+    assert reef["inference_remote"] == {
+        "url": "https://gpu-host.example",
+        "engine": "sglang",
+        "control_token_env": "REEF_REMOTE_CONTROL_TOKEN",
+        "inference_token_env": "GPU_HOST_TOKEN",
+        "startup_timeout_s": 3600.0,
+    }
 
     monkeypatch.setenv("RAY_ADDRESS", "ray://head:10001")
     monkeypatch.setenv("REEF_REMOTE_CONTROL_TOKEN", "control-secret")
@@ -377,10 +385,7 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
     assert isinstance(training.resources, RaySessionResources)
     with pytest.raises(ValueError, match="cluster address and a namespace"):
         RaySessionResources(ray_address="", namespace="reef")
-    assert training.inference_config["remote"] == {
-        "url": "https://gpu-host.example",
-        "inference_token_env": "GPU_HOST_TOKEN",
-    }
+    assert training.inference_config["remote"] == reef["inference_remote"]
     assert training.inference_config["num_gpus"] == 2
     assert training.inference_config["engine_config"]["options"]["max_lora_rank"] == 16
     plan = assemble_model_plan(config, training)

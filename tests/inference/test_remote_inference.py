@@ -44,7 +44,7 @@ def serving(app: web.Application):
     loop.run_until_complete(runner.setup())
     site = web.TCPSite(runner, "127.0.0.1", 0)
     loop.run_until_complete(site.start())
-    port = site._server.sockets[0].getsockname()[1]
+    port = runner.addresses[0][1]
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     try:

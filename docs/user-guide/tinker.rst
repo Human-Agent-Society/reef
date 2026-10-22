@@ -231,24 +231,30 @@ settings from ``training.options``. The GPU host downloads ``model-path``. The
 Reef host keeps it as a remote identifier and loads only the tokenizer.
 
 The HTTP service sends inference requests to the component, and the component
-forwards them to its engines. Token capture, version stamps, publication and
-restart recovery work as with a local engine. When the driver stops, the
-component stops its engines and keeps running. The next driver start replaces
-them and reloads each scenario's committed adapter.
+forwards each request and its answer unchanged. Token capture and version stamps
+therefore come from the engines, as with a local engine. Publication uses the
+same coordinator steps as a local engine; only the adapter files travel over
+HTTP. When the driver stops, the component stops its engines and keeps running.
+The next driver start replaces them and reloads each scenario's committed
+adapter before it serves.
 
 The control token gives its holder control of the GPU host. Its holder
 chooses the model, the engine options and the served weights, and the engines
 run a model's own code (``trust_remote_code``). Protect it like a login to
 that host: serve the component over HTTPS, keep the token out of logs and
-deployment files, and keep it separate from the inference token. Each publication uploads one adapter directory, so its time grows with
-the adapter size and the network path. The component serves one control plane
-at a time: a second start replaces the first one's engines.
+deployment files, and keep it separate from the inference token.
+
+Each publication uploads one adapter directory, so its time grows with the
+adapter size and the network path. The component serves one control plane at
+a time: a second start replaces the first one's engines.
 `The inference section <../reference/configuration.rst#the-inference-section>`__
 lists the ``inference.remote`` settings.
 
 ``tests/tinker_backend/test_tinker_local_engine_ray.py`` also runs this
 topology on a CPU: the component runs stub engines in a separate process with
-its own Ray session, and the adapter reaches them over HTTP.
+its own Ray session, and the adapter reaches them over HTTP. The test also
+restarts the driver and checks that the component serves the committed adapter
+again.
 
 Verification scope
 -------------------
@@ -257,6 +263,7 @@ CPU tests exercise data alignment and loss math, SDK call ordering, rejected and
 uncertain candidates, commit admission, request capture and SSE, deployment,
 scenario commit/restart/rollback, and the coordinator path with a local engine
 (publication, rejection, restart recovery, adapter reload) against engine and
-SDK doubles. A live Tinker run is additionally needed
+SDK doubles. The remote topology is tested with stub engines only; real SGLang
+engines on a remote GPU host have not been run. A live Tinker run is additionally needed
 to verify account model availability, remote persistence, and training quality.
 No live training or performance result is claimed by this implementation.
