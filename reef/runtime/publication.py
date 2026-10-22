@@ -767,9 +767,11 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def load_adapter(self, name: str, payload: Any) -> None:
         scenario, version = parse_adapter_name(name)
-        files = self.training.adapter_files(scenario, version)
+        files = self.training.weight_files(scenario, version)
         if files is not None:
-            self.inference.load_adapter_files(name, files, None)
+            if files.layout != "adapter":
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=None)
             return
         self.training.send_adapter(scenario, name)
 
@@ -881,13 +883,15 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def _transfer(self, target: str, *, force_full: bool, scenario: str | None = None) -> str:
         """Send the trainer's weights as ``target`` and verify every engine received them."""
-        if scenario is not None:
-            files = self.training.adapter_files(scenario, target)
-            if files is not None:
-                # A trainer that delivers files never sends: Reef's receiver loads the adapter.
-                self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
-                self._verify_engines_serve(target, "after update")
-                return target
+        files = self.training.weight_files(scenario, target)
+        if files is not None:
+            # A trainer that delivers files never sends: Reef's receiver loads them.
+            if files.layout != ("full" if scenario is None else "adapter"):
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            name = None if scenario is None else adapter_name(scenario, target)
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=target)
+            self._verify_engines_serve(target, "after update")
+            return target
         handoff = self.memory_handoff
         if handoff is not None:
             # Repeatable release also covers retry after a partial receive:

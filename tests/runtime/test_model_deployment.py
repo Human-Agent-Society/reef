@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.runtime.deployment import (
-    ADAPTER_FILES_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
     CoordinatorConfig,
     DeploymentResources,
     InferenceConnection,
@@ -227,11 +227,11 @@ def test_incompatible_control_protocol_fails_before_allocation():
 
 
 class FileInference(Inference):
-    supported_transfer_protocols = ("test-weights-v1", ADAPTER_FILES_PROTOCOL)
+    supported_transfer_protocols = ("test-weights-v1", WEIGHT_FILES_PROTOCOL)
 
 
 class FileTraining(Training):
-    weight_transfer_protocols = (ADAPTER_FILES_PROTOCOL, "test-weights-v1")
+    weight_transfer_protocols = (WEIGHT_FILES_PROTOCOL, "test-weights-v1")
 
     def attach_weight_transport(self, session):
         self.inference = session
@@ -241,9 +241,9 @@ class FileTraining(Training):
 @pytest.mark.parametrize(
     ("sent", "session_type"),
     [
-        (("test-weights-v1", ADAPTER_FILES_PROTOCOL), NativeWeightTransferSession),
-        ((ADAPTER_FILES_PROTOCOL, "test-weights-v1"), WeightTransferSession),
-        (("another-protocol", ADAPTER_FILES_PROTOCOL), WeightTransferSession),
+        (("test-weights-v1", WEIGHT_FILES_PROTOCOL), NativeWeightTransferSession),
+        ((WEIGHT_FILES_PROTOCOL, "test-weights-v1"), WeightTransferSession),
+        (("another-protocol", WEIGHT_FILES_PROTOCOL), WeightTransferSession),
     ],
 )
 def test_deployment_selects_the_first_protocol_the_receiver_accepts(sent, session_type):

@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from reef.inference.process import RayHealthProbe
@@ -21,7 +20,7 @@ from reef.runtime.executor.config import ExecutorSettings, select_executor
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceMemoryHandoffBackend
+from reef.runtime.interfaces import InferenceMemoryHandoffBackend, WeightFiles
 
 #: Bound on one control RPC or engine launch; a weight update legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -99,8 +98,13 @@ class EngineInferenceBackend(InferenceMemoryHandoffBackend):
     def onload_kv(self) -> None:
         self._call("onload_kv")
 
-    def load_adapter_files(self, name: str, path: Path, runtime_load_id: str | None) -> None:
-        self._call("load_adapter_from_disk", name, str(path), runtime_load_id)
+    def load_weight_files(self, files: WeightFiles, *, adapter_name: str | None, runtime_load_id: str | None) -> None:
+        if (adapter_name is None) != (files.layout == "full"):
+            raise ValueError("an adapter name is given exactly for adapter weight files")
+        if adapter_name is None:
+            self._call("load_weights_from_disk", str(files.path), runtime_load_id)
+        else:
+            self._call("load_adapter_from_disk", adapter_name, str(files.path), runtime_load_id)
 
     def unload_adapter(self, name: str) -> None:
         results = self._engines().collective_rpc(
@@ -232,6 +236,9 @@ class EngineControl(Generic[ConfigT]):
 
     def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> Any:
         return self._call("load_adapter_from_disk", lora_name, lora_path, runtime_load_id)
+
+    def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> Any:
+        return self._call("load_weights_from_disk", model_path, runtime_load_id)
 
     def pause_generation_for_update(self) -> Any:
         return self._call("pause_generation_for_update")

@@ -1598,10 +1598,12 @@ publishes through ``activate_checkpoint``. With a local inference engine the
 same deployment instead returns a model-driver plan: ``TinkerTrainingService``
 supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
 that delivers each published adapter as a PEFT directory through
-``adapter_files``; Reef's publisher then calls the receiver's
-``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
-transfer any engine that loads adapter directories can declare), so the
-trainer never holds an engine handle. The HTTP service connects through the
+``weight_files``, which returns a ``WeightFiles`` value with the ``"adapter"``
+layout. Reef's publisher then calls the receiver's
+``InferenceBackend.load_weight_files``, so the trainer never holds an engine
+handle. This is the ``reef-weight-files-v1`` transfer. A receiver that declares
+it loads both layouts: ``"adapter"`` under the adapter name Reef chooses, and
+``"full"`` (a Hugging Face checkpoint) in place of the served weights. The HTTP service connects through the
 ``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.

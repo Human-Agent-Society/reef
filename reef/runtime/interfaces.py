@@ -923,6 +923,27 @@ class TrainingContext:
     history: ScenarioHistoryStore | None = None
 
 
+@dataclass(frozen=True)
+class WeightFiles:
+    """Weights that a trainer wrote as files, for Reef to deliver to the receiver.
+
+    ``path`` is a directory on the coordinator's node. ``layout`` names what it
+    holds: ``"full"`` is a Hugging Face checkpoint of every model weight, and
+    ``"adapter"`` is a PEFT adapter directory. ``TrainingBackend.weight_files``
+    makes the values; ``BackendWeightPublisher`` passes them to
+    ``InferenceBackend.load_weight_files``.
+    """
+
+    path: Path
+    layout: Literal["full", "adapter"]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise TypeError("weight files path must be a Path")
+        if self.layout not in ("full", "adapter"):
+            raise ValueError(f"weight files layout must be full or adapter, got {self.layout!r}")
+
+
 class TrainingBackend(ABC):
     """Training-only preparation, checkpoint I/O and native weight sending.
 
@@ -993,12 +1014,13 @@ class TrainingBackend(ABC):
     @abstractmethod
     def send_adapter(self, scenario: str, name: str) -> None: ...
 
-    def adapter_files(self, scenario: str, runtime_load_id: str) -> Path | None:
-        """The adapter directory to serve as ``runtime_load_id`` when this trainer delivers files.
+    def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
+        """The weights to serve as ``runtime_load_id`` when this trainer delivers files.
 
-        A trainer that produces adapters as PEFT directories instead of
-        sending tensors returns the directory; Reef then asks the receiver to
-        load it and never calls the sender methods. The default, None,
+        ``scenario`` names a per-scenario adapter, whose files have the
+        ``"adapter"`` layout; ``None`` names the shared model, whose files have
+        the ``"full"`` layout. Reef then asks the receiver to load the files and
+        never calls the sender methods for that transfer. The default, None,
         selects the native sender path.
         """
         return None
@@ -1010,13 +1032,16 @@ class TrainingBackend(ABC):
 class InferenceBackend(ABC):
     """Receiver operations with acknowledged completion and no commit policy."""
 
-    def load_adapter_files(self, name: str, path: Path, runtime_load_id: str | None) -> None:
-        """Load a PEFT adapter directory under ``name``, serving it as ``runtime_load_id`` when given.
+    def load_weight_files(self, files: WeightFiles, *, adapter_name: str | None, runtime_load_id: str | None) -> None:
+        """Load ``files`` into every engine and return once they serve them.
 
-        Reef calls this for trainers that deliver adapter files; a receiver
-        that can only accept native tensor transfers keeps the default.
+        An ``"adapter"`` layout is loaded under ``adapter_name``, which is then
+        given; a ``"full"`` layout replaces the served weights, and
+        ``adapter_name`` is None. When ``runtime_load_id`` is given, every
+        engine reports it afterwards. Reef calls this for trainers that deliver
+        files; a receiver that only accepts native transfers keeps the default.
         """
-        raise ReefError(f"{type(self).__name__} does not load adapter files")
+        raise ReefError(f"{type(self).__name__} does not load weight files")
 
     @abstractmethod
     def initialize_version(self, runtime_load_id: str) -> None: ...

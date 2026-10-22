@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.runtime.deployment import (
-    ADAPTER_FILES_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
     DeploymentResources,
     InferenceResources,
     TrainingService,
@@ -63,7 +63,7 @@ class TinkerDeploymentResources(InferenceResources):
 class TinkerTrainingService(TrainingService):
     """Own the SDK client; the trainer delivers adapter files, so it needs no engine handle."""
 
-    weight_transfer_protocols = (ADAPTER_FILES_PROTOCOL,)
+    weight_transfer_protocols = (WEIGHT_FILES_PROTOCOL,)
 
     def __init__(
         self,

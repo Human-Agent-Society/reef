@@ -8,9 +8,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.runtime.deployment import ADAPTER_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
+from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend, LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.runtime.interfaces import (
+    InferenceBackend,
+    LearningRateSchedule,
+    LearningRateScheduleState,
+    TrainingMethod,
+    WeightFiles,
+)
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -78,8 +84,9 @@ class Engines(InferenceBackend):
         self.versions = ["engine:0"]
         self.events = []
 
-    def load_adapter_files(self, name, path, runtime_load_id):
-        self.loads.append((name, str(path), runtime_load_id))
+    def load_weight_files(self, files, *, adapter_name, runtime_load_id):
+        assert files.layout == "adapter"
+        self.loads.append((adapter_name, str(files.path), runtime_load_id))
         if runtime_load_id is not None:
             self.versions = [runtime_load_id]
 
@@ -233,12 +240,14 @@ def test_restart_republishes_the_incumbent_from_disk_and_branches_from_it(tmp_pa
 def test_the_trainer_delivers_files_and_never_sends(tmp_path, objective):
     stack = Stack(tmp_path)
     with pytest.raises(RuntimeError, match="no Tinker checkpoint"):
-        stack.backend.adapter_files("math", "other:1")
+        stack.backend.weight_files("math", "other:1")
+    with pytest.raises(RuntimeError, match="no shared model weights"):
+        stack.backend.weight_files(None, "other:1")
     first = stack.coordinator.execute_training_job(stack.payload(objective, step=0))
     published = stack.coordinator.update_serving_weights(first.training_job_id)
     adapter = Path(first.checkpoint_path) / ADAPTER_DIR
     # Reef's residency re-activation asks for the published revision by version, not for a send.
-    assert stack.backend.adapter_files("math", published.runtime_load_id) == adapter
+    assert stack.backend.weight_files("math", published.runtime_load_id) == WeightFiles(adapter, "adapter")
     for send in (
         lambda: stack.backend.send_weights("x:1", force_full=False),
         lambda: stack.backend.prepare_weights("x:1", force_full=False),
@@ -335,15 +344,15 @@ def test_training_service_hands_the_coordinator_a_backend_only_after_engines_att
     client = RemoteClient()
     control = UniProcExecutor.from_workers([Engines()])
     service = TinkerTrainingService("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path)), "key", client=client)
-    assert service.weight_transfer_protocols == (ADAPTER_FILES_PROTOCOL,)
+    assert service.weight_transfer_protocols == (WEIGHT_FILES_PROTOCOL,)
     with pytest.raises(RuntimeError, match="before attaching"):
-        service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, "s"))
+        service.attach_weight_transport(WeightTransferSession(WEIGHT_FILES_PROTOCOL, "s"))
     service.start(None)
     with pytest.raises(ValueError, match="delivers adapter files"):
         service.attach_weight_transport(NativeWeightTransferSession("slime-sglang-control-v2", "s", control))
     with pytest.raises(RuntimeError, match="attached engines"):
         service.backend()
-    service.attach_weight_transport(WeightTransferSession(ADAPTER_FILES_PROTOCOL, "s"))
+    service.attach_weight_transport(WeightTransferSession(WEIGHT_FILES_PROTOCOL, "s"))
     assert isinstance(service.backend(), TinkerTrainingBackend)
     service.close()
     assert not client.closed  # the coordinator owns the backend, and closes the client with it

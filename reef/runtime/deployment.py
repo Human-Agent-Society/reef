@@ -140,8 +140,8 @@ class NativeWeightTransferSession(WeightTransferSession):
     receiver: Executor
 
 
-#: The transfer a trainer declares when it delivers adapters as PEFT directories Reef loads itself.
-ADAPTER_FILES_PROTOCOL = "reef-adapter-files-v1"
+#: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
+WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
 
 
 class InferenceService(DeploymentHealth):
