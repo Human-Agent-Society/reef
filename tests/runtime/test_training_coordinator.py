@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from reef.runtime.interfaces import (
-    ColocatedInferenceBackend,
     InferenceBackend,
+    InferenceMemoryHandoffBackend,
     PreparedTrainingJob,
     TrainingBackend,
     TrainingCheckpoint,
@@ -56,7 +56,7 @@ class Receiver(InferenceBackend):
         self.events.append(("inference.unload", name))
 
 
-class ColocatedReceiver(Receiver, ColocatedInferenceBackend):
+class MemoryHandoffReceiver(Receiver, InferenceMemoryHandoffBackend):
     def offload(self, tags):
         self.events.append(("inference.offload", tags))
 
@@ -164,7 +164,7 @@ class Job(PreparedTrainingJob):
 
 def build(tmp_path, *, colocate=False, owns_training=True):
     events = []
-    inference = ColocatedReceiver(events) if colocate else Receiver(events)
+    inference = MemoryHandoffReceiver(events) if colocate else Receiver(events)
     training = Trainer(tmp_path, inference, events, colocate=colocate)
     coordinator = TrainingCoordinator(training, inference, owns_training=owns_training)
     events.clear()

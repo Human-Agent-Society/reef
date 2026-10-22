@@ -460,9 +460,10 @@ The startup sequence is:
 ``TrainingBackend`` implements training preparation, checkpoint storage,
 optimizer execution and native sending. ``InferenceBackend`` implements
 receiver pause/resume, recovery and version observation.
-``ColocatedInferenceBackend`` adds the memory operations that colocated
-training needs; the coordinator refuses a colocated trainer with any other
-receiver.
+``InferenceMemoryHandoffBackend`` adds the operations that release GPU memory to
+a trainer and take it back. SGLang and vLLM implement it for every deployment;
+the coordinator calls it only for colocated training, and refuses a colocated
+trainer whose receiver does not implement it.
 The generic coordinator owns their ordering, publication journal, scenario
 adapter residency and commit barrier. The Slime adapter has no inference
 lifecycle object and does not own the publication state machine.

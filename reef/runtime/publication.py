@@ -27,8 +27,8 @@ from typing import Any, Literal
 from reef.core.errors import ReefError
 from reef.runtime.interfaces import (
     AdapterEngine,
-    ColocatedInferenceBackend,
     InferenceBackend,
+    InferenceMemoryHandoffBackend,
     RuntimeLoadId,
     ScenarioHistoryStore,
     TrainingBackend,
@@ -716,11 +716,12 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.inference = inference
         self.context = training.context
         self.config = training.config
-        # The same receiver, typed for the GPU-memory handoff; set exactly when training is colocated.
-        self.colocated_inference: ColocatedInferenceBackend | None
+        # The same receiver, typed for the GPU-memory handoff; set exactly when training is colocated,
+        # so a receiver without the handoff serves every other deployment.
+        self.colocated_inference: InferenceMemoryHandoffBackend | None
         if not self.config.colocate:
             self.colocated_inference = None
-        elif isinstance(inference, ColocatedInferenceBackend):
+        elif isinstance(inference, InferenceMemoryHandoffBackend):
             self.colocated_inference = inference
         else:
             raise TypeError(f"colocated training cannot share GPUs with {type(inference).__name__}")

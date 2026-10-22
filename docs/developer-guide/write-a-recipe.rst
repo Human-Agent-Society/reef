@@ -350,7 +350,7 @@ the runtime scheduler.
 
 Alongside ``TrainingBackend``, ``InferenceBackend`` exposes pause,
 resume, recovery, version verification and adapter unload.
-``ColocatedInferenceBackend`` adds the memory operations for colocated training.
+``InferenceMemoryHandoffBackend`` adds the memory operations that colocated training uses.
 ``TrainingCoordinator`` owns LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
 weight tensors never pass through the HTTP service or the scheduler.
