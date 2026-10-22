@@ -52,7 +52,7 @@ The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
 the trainer can both use it.
 """
 
-from reef.record2record.base import InferenceRecord2Record, NoRecordSets, Record2Record, TaskStatus
+from reef.record2record.base import InferenceRecord2Record, NoRecordSets, Record2Record, TaskStatus, UnitDropReason
 from reef.record2record.judging import JudgedSet, JudgingRecord2Record, RecordJudging
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.reports import (
@@ -90,4 +90,5 @@ __all__ = [
     "SingleRecordSet",
     "SingleSetUnit",
     "TaskStatus",
+    "UnitDropReason",
 ]

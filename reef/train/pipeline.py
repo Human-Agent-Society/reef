@@ -45,7 +45,7 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, TaskStatus
+from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, TaskStatus, UnitDropReason
 from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2task import NoTasks, Record2Task
 from reef.storage.trajectories import consumed_trajectory_id
@@ -343,7 +343,7 @@ class TrainingPipeline:
             if held <= buffer_size:
                 break
             held -= self.count_unit_samples(unit)
-            self.record2record.drop_held_unit(unit)
+            self.record2record.drop_held_unit(unit, reason=UnitDropReason.BUFFER_LIMIT)
             if not self.buffer_release_warned:
                 logger.warning(
                     "scenario %r released a held record set beyond the buffer size %d (further releases are not logged)",
@@ -405,15 +405,25 @@ class TrainingPipeline:
     # the same batch out until it is acknowledged, then end the units and
     # trajectories it consumed.
 
-    def ready(self, sample_count: int) -> bool:
-        """Whether a batch can be built now; in ``auto`` it needs ``sample_count`` held samples."""
+    def advance(self) -> None:
+        """Advance background work and settle its results without reserving a training batch.
+
+        Apply buffer limits and, without a pending batch, staleness checks.
+        This operation needs no backend sample count. Call it on the same
+        serialized path as other pipeline operations; it starts no new thread.
+        """
         # Background work, such as judgments or finished rounds, forms sets without a new record.
         self.record2record.advance(time.monotonic())
         self.move_record_sets()
+        if self.pending is None:
+            self.record2record.drop_stale_units(self.context.max_staleness)
+            self.forget_ended_sets()
+
+    def ready(self, sample_count: int) -> bool:
+        """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples."""
+        self.advance()
         if self.pending is not None:
             return True
-        self.record2record.drop_stale_units(self.context.max_staleness)
-        self.forget_ended_sets()
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:

@@ -128,10 +128,13 @@ The trainer calls it on its own thread, under its lock; no call may block:
   that are ready, and gives each result back to the record stage
   (``settle``). A set without a result waits, and its records stay held (see
   `Slow record-to-task work <#slow-record-to-task-work>`__).
-- ``ready(sample_count)``: is a batch available. It first advances the record stage
-  (``advance``), for example to take in finished judgments or to start a
-  task-generation round that is due. Then it moves the record sets as
-  ``push`` does.
+- ``advance()``: advance the record stage's background work, move and settle
+  record sets, and apply buffer and staleness limits. It needs no sample
+  count and reserves no batch. A pending batch keeps its reservation while
+  new results enter the buffer. Call it on the same serialized path as
+  other pipeline operations; it does not make the pipeline thread-safe.
+- ``ready(sample_count)``: call ``advance()`` and check whether a batch is
+  available for the backend's sample target.
 - ``build_batch(sample_count)``: reserve whole batch units from the record
   stage, in its selection order, until the batch holds at least
   ``sample_count`` samples,
@@ -259,8 +262,13 @@ scenario on a shared engine does not age the data. These rules also apply:
 * While the serving version is unknown, for example before the first
   publication, no data is stale.
 
-A stage that holds groups overrides ``drop_held_unit`` to end a whole group.
-``ReportRecord2Record`` does this for a ready group.
+A stage that holds groups overrides ``drop_held_unit(unit, *, reason)`` to
+end a whole group. ``ReportRecord2Record`` does this for a ready group.
+The caller supplies ``UnitDropReason.BUFFER_LIMIT`` for buffer eviction or
+``UnitDropReason.STALE`` for the serving-version check. Overrides must accept
+the reason; it lets a stage distinguish the two outcomes without inspecting
+already-released records. Neither outcome confirms training. Backend rejection
+of a reserved batch still uses ``consume(units, trained=False)``.
 
 .. list-table::
    :header-rows: 1

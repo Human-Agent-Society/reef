@@ -16,9 +16,11 @@ from reef.record2record import (
     InferenceRecord2Record,
     NoRecordSets,
     RecordSet,
+    RecordSetUnit,
     ReportContext,
     ReportGrouping,
     ReportRecord2Record,
+    UnitDropReason,
 )
 from reef.record2task import ImmediateRecord2Task, Record2Task, ReportTasks, SkippedReport, TaskResult
 from reef.storage.sqlite import SQLiteRecordStore
@@ -435,6 +437,67 @@ def test_a_pipeline_refuses_a_trajectory_that_its_batch_stage_does_not_accept() 
 
 def ready_tasks(*names: str) -> TaskResult:
     return TaskResult.ready(tuple(TaskItem(Path(name)) for name in names))
+
+
+class DropRecordingRecords(InferenceRecord2Record):
+    """Inference sets with an ordered history of units dropped without training.
+
+    ``dropped`` contains unit IDs and their supplied reasons, appended before
+    normal cleanup. Pipeline tests read it to check discard notifications.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dropped: list[tuple[Hashable, UnitDropReason]] = []
+
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
+        self.dropped.append((unit.unit_id, reason))
+        super().drop_held_unit(unit, reason=reason)
+
+
+@pytest.mark.unit
+def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch() -> None:
+    processor = WaitingPipeline(PipelineContext("s"))
+    processor.push(inference("i1"))
+    processor.later_tasks.finish("i1", ready_tasks("a", "b"))
+    processor.advance()
+    assert processor.status()["ready_samples"] == 2
+    assert processor.record2record.pool.reserved is None
+    assert not processor.ready(3)
+    batch = processor.build_batch(2)
+
+    processor.push(inference("i2"))
+    processor.later_tasks.finish("i2", ready_tasks("c"))
+    processor.advance()
+    assert processor.build_batch(2) is batch
+    assert processor.acknowledge(batch.batch_id) == {"i1"}
+    assert processor.status()["ready_samples"] == 1
+    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["c"]
+
+
+@pytest.mark.unit
+def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -> None:
+    context = PipelineContext("s", max_staleness=0)
+    records = DropRecordingRecords()
+    later_tasks = LaterTasks()
+    processor = TrainingPipeline(
+        context,
+        record2record=records,
+        record2task=later_tasks,
+        task2batch=UploadBatches(context, 1),
+    )
+    processor.push(inference("i1"))
+    processor.push(inference("i2"))
+    later_tasks.finish("i1", TaskResult.ready((TRAJECTORY,)))
+    later_tasks.finish("i2", TaskResult.ready((TRAJECTORY,)))
+    processor.advance()
+    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT)]
+    # Trajectories without a producing version become stale once the serving version is known.
+    processor.observe_serving_runtime_load_id("e:1")
+    processor.advance()
+    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT), ("i2", UnitDropReason.STALE)]
+    assert processor.status()["ready_samples"] == 0
+    assert processor.releasable_record_ids() == {"i1", "i2"}
 
 
 @pytest.mark.unit

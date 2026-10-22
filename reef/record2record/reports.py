@@ -23,7 +23,7 @@ from reef.core.plugins import NoSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.pipeline_context import PipelineContext
-from reef.record2record.base import Record2Record
+from reef.record2record.base import Record2Record, UnitDropReason
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
 from reef.record2record.sets import RecordSet, RecordSetUnit
 
@@ -386,7 +386,7 @@ class ReportRecord2Record(Record2Record):
 
     # ------------------------------------------------------- held unit limit
 
-    def drop_held_unit(self, unit: RecordSetUnit) -> None:
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
         self.release_set(report_units((unit,))[0])
 
     def release_set(self, report_set: ReportSet) -> None:
