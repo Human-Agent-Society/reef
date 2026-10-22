@@ -338,6 +338,68 @@ def test_training_plan_pairs_a_gpu_less_trainer_with_lora_serving_engines(tmp_pa
         TinkerDeployment().create_training_plan(config, loss_family="tttd")
 
 
+def _remote_engine_config(tmp_path):
+    raw = _local_engine_config(tmp_path)
+    raw["inference"] = {
+        "model-path": "Qwen/Qwen3-8B",
+        "backend": "remote",
+        "num-gpus": 2,
+        "remote": {"url": "https://gpu-host.example", "inference-token-env": "GPU_HOST_TOKEN"},
+    }
+    return raw
+
+
+def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_component(tmp_path, monkeypatch):
+    from reef.inference.remote.service import RemoteInferenceService
+    from reef.service.training_driver import assemble_model_plan
+    from reef.train.tinker_backend.training import RaySessionResources
+
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    config, _ = resolve_deployment_config(_remote_engine_config(tmp_path), None, tmp_path / "serve.yaml")
+    assert [service["name"] for service in config["services"]] == ["tinker-driver", "reef"]
+    reef = config["reef"]
+    assert (reef["inference_backend"], reef["inference_num_gpus"], reef["model_path"]) == (
+        "remote",
+        2,
+        "Qwen/Qwen3-8B",
+    )
+    assert not local_model_required(config)
+    settings = service_config_from_mapping(config)
+    runtime = training_deployment_for("tinker").runtime_config(
+        {**settings.__dict__, "ray_address": "ray://head:10001"}
+    )
+    assert runtime["inference_runtime"] == "remote"
+    assert runtime["inference_runtime_options"] == {"inference_token_env": "GPU_HOST_TOKEN"}
+
+    monkeypatch.setenv("RAY_ADDRESS", "ray://head:10001")
+    monkeypatch.setenv("REEF_REMOTE_CONTROL_TOKEN", "control-secret")
+    training = TinkerDeployment().create_training_plan(config, loss_family="tttd")
+    assert isinstance(training.resources, RaySessionResources)
+    assert training.inference_config["remote"] == {
+        "url": "https://gpu-host.example",
+        "inference_token_env": "GPU_HOST_TOKEN",
+    }
+    assert training.inference_config["num_gpus"] == 2
+    assert training.inference_config["engine_config"]["options"]["max_lora_rank"] == 16
+    plan = assemble_model_plan(config, training)
+    assert isinstance(plan.inference, RemoteInferenceService)
+    assert plan.weight_transfer_protocol(plan.inference) == WEIGHT_FILES_PROTOCOL
+
+
+def test_remote_engine_topology_refuses_an_incomplete_section(tmp_path, monkeypatch):
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    for change, match in (
+        ({"remote": {"url": "https://gpu-host.example", "engine": "vllm"}}, "remote.engine: sglang"),
+        ({"remote": {}}, "requires inference.remote.url"),
+        ({"remote": {"url": "https://gpu-host.example?key=1"}}, "without credentials, query"),
+        ({"backend": "sglang", "model-path": str(tmp_path / "model")}, "requires inference.backend: remote"),
+    ):
+        raw = _remote_engine_config(tmp_path)
+        raw["inference"] = {**raw["inference"], **change}
+        with pytest.raises(DeployConfigError, match=match):
+            resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
 def test_training_service_hands_the_coordinator_a_backend_only_after_engines_attach(tmp_path):
     from reef.runtime.deployment import NativeWeightTransferSession, WeightTransferSession
 

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.config import config_option
+from reef.core.config import config_metadata, config_option
 
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.runtime import ExecutorInferenceRuntime
@@ -199,6 +199,9 @@ class CoordinatorRuntimeConfig(RayRuntimeConfig):
     inference_runtime: str = config_option(
         "", help="Independently selected inference runtime kind or factory reference."
     )
+    inference_runtime_options: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Options of the selected inference runtime.")
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -251,6 +254,7 @@ class CoordinatorRuntimeFactory(RuntimeFactory):
         try:
             inference = registry.build(
                 {
+                    **dict(config.get("inference_runtime_options") or {}),
                     **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
                     "type": config["inference_runtime"],
                     "control": training.train_group_handle,

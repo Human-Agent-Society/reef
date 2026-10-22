@@ -26,7 +26,7 @@ from reef.inference.chat import (
     sse_json_events,
     stream_ids,
 )
-from reef.inference.http import HttpInferenceHandler
+from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.runtime.interfaces import InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
@@ -301,6 +301,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         client: NativeGenerateClient | None = None,
+        request_headers: RequestHeadersFactory | None = None,
     ) -> None:
         super().__init__(
             upstream_url,
@@ -313,6 +314,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
+            request_headers=request_headers,
         )
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:

@@ -73,6 +73,15 @@ INFERENCE_RESERVED_OPTIONS = frozenset(
 )
 
 
+#: The inference backend whose engines run on a remote component (``reef.inference.remote``).
+REMOTE_INFERENCE_BACKEND = "remote"
+
+
+def remote_inference_section(settings: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``inference.remote`` section with underscore keys; ``reef.inference.remote`` validates its values."""
+    return {str(key).replace("-", "_"): value for key, value in dict(settings.get("inference_remote") or {}).items()}
+
+
 def prepare_inference_config(
     config: dict[str, Any], settings: Mapping[str, Any], training_options: Mapping[str, Any]
 ) -> None:

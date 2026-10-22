@@ -7,10 +7,11 @@ from dataclasses import asdict
 from importlib.metadata import entry_points
 from typing import Any
 
+from reef.inference.remote.config import RemoteInferenceSettings
 from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.train.deployment import TrainingDeployment
+from reef.train.deployment import REMOTE_INFERENCE_BACKEND, TrainingDeployment
 
 
 # Built-ins are references, so discovery does not import execution dependencies.
@@ -45,12 +46,14 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
 def local_model_required(config: dict[str, Any]) -> bool:
     """Whether the selected training backend executes the model on this host.
 
-    Provider deployments and local backends need the resolved snapshot on disk;
-    a hosted backend keeps the remote model identifier as written.
+    Provider deployments and local engines need the resolved snapshot on disk.
+    A hosted backend without local engines, including one whose engines run on
+    a remote component, keeps the model identifier as written.
     """
     reef = config.get("reef", {})
     backend = reef.get("training_backend")
-    if not backend or reef.get("inference_backend"):
+    inference_backend = reef.get("inference_backend")
+    if not backend or (inference_backend and inference_backend != REMOTE_INFERENCE_BACKEND):
         return True
     return training_deployment_for(backend).requires_local_model
 
@@ -81,6 +84,10 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         )
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
+    if settings.inference_backend == REMOTE_INFERENCE_BACKEND:
+        RemoteInferenceSettings.from_mapping(settings.inference_remote)
+    elif settings.inference_remote:
+        raise DeployConfigError("inference.remote requires inference.backend: remote")
     config["reef"]["training_backend"] = settings.training_backend or "slime"
     dependencies = backend.prepare(config, asdict(settings))
     http = http_service(config, service_config_from_mapping(config))

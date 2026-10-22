@@ -30,6 +30,7 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "executor_training",
         "inference_proxy",
         "ray_training",
+        "remote",
         "sglang",
         "slime_training",
         "tinker",

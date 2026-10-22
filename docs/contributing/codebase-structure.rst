@@ -229,7 +229,10 @@ share: the coordinator backend, the inference service, the control actor and its
 default serving executor. ``inference/sglang/`` owns SGLang engine launch,
 capture and control independently of training; ``inference/vllm/`` owns vLLM capture,
 the KV connector that stamps tokens with their weight version, and engine launch and
-control over vLLM's HTTP control routes. ``train/slime_backend/inference.py`` only
+control over vLLM's HTTP control routes. ``inference/remote/`` runs those engines
+on another host: its component (``python -m reef.inference.remote``) serves their
+control operations and requests over HTTP, and ``RemoteInferenceService`` is the
+control plane's receiver for it. ``train/slime_backend/inference.py`` only
 translates Slime options into plain launch data; the selected inference factory
 constructs its own configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions.

@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.inference.http import HttpInferenceHandler
+from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.runtime.interfaces import InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -571,8 +571,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
+        request_headers: RequestHeadersFactory | None = None,
     ) -> None:
-        super().__init__(upstream_url, timeout_s=timeout_s, error_label=client.error_label)
+        super().__init__(
+            upstream_url, request_headers=request_headers, timeout_s=timeout_s, error_label=client.error_label
+        )
         if tokenizer is None and not model_path:
             raise ValueError("chat training inference requires model_path")
         self._client = client

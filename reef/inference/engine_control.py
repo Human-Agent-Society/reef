@@ -167,7 +167,7 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
         return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._inference.workers))
 
     def _control(self, connection: InferenceConnection) -> Executor:
-        if connection.protocol != self.connection_protocol:
+        if connection.protocol != self.connection_protocol or connection.control is None:
             raise ValueError(f"incompatible {self.engine_name} inference connection: {connection.protocol!r}")
         return connection.control
 

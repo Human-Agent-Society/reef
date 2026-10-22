@@ -1035,6 +1035,20 @@ when it is omitted, it follows ``inference.timeout-s``.
    inference.retry-initial-s | 0.05 | delay before the first retry
    inference.retry-max-s | 1.0 | maximum delay between retries
 
+``inference.backend: remote`` runs the engines on a remote inference component
+instead of this host. `Serve from a remote GPU host
+<../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup. The
+``inference.remote`` section tells Reef how to reach the component, and
+``reef serve`` refuses it with any other backend:
+
+.. config::
+
+   inference.remote.url | the component's HTTP(S) base URL, without credentials, query or fragment
+   inference.remote.engine | sglang | engine backend that the component starts; Tinker requires ``sglang``
+   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the model driver reads it
+   inference.remote.inference-token-env | REEF_REMOTE_INFERENCE_TOKEN | variable with the component's inference token; the HTTP service reads it
+   inference.remote.startup-timeout-s | 3600 | deadline for one engine start on the component, including the model download
+
 The ``training`` section
 ------------------------
 
