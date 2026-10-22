@@ -368,6 +368,7 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
 @pytest.mark.integration
 def test_tinker_trains_behind_the_model_driver_with_a_remote_engine(tmp_path, monkeypatch):
     """The stub engines run in a separate component process with its own Ray session; adapters travel over HTTP."""
+    pytest.importorskip("ray")  # the component process starts its own Ray session
     from reef.inference.remote.service import RemoteControl
     from reef.inference.sglang.chat import SGLangInferenceHandler
 
