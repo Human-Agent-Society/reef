@@ -70,7 +70,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 64
-    checkpoint-every-n-versions: 20
 pipeline:
   task2batch:
     config:
@@ -107,6 +106,7 @@ training:
     critic-save-interval: "8"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "1"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"

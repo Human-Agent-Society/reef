@@ -193,7 +193,7 @@ def _dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        # The commit log is what puts gate metrics on the release catalog.
+        # The commit history is what puts gate metrics on the release catalog.
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         allow_implicit_creation=allow_implicit_creation,
     )
@@ -3000,7 +3000,7 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
                 "pi-agent/models.json",
                 "pi-agent/settings.json",
             ]
-            # The entries live in the commit log, where the proposals route and the step's proposer read them.
+            # The entries live in the commit history, where the proposals route and the step's proposer read them.
             scenario = dispatcher.get_or_create_scenario("delivery")
             assert scenario is not None
             entries = scenario.release_queries.entries_for_version(manifest["release_id"])

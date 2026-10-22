@@ -18,7 +18,6 @@ from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -80,7 +79,6 @@ def make_dispatcher(
     tmp_path: Path,
     *,
     backend: CandidateBackend | None = None,
-    checkpoint_every: int = 1,
     admission: ScenarioAdmission | None = None,
     idle_unload_seconds: float | None = None,
     storage: SQLiteScenarioStorage | None = None,
@@ -89,7 +87,7 @@ def make_dispatcher(
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
-        StepRecipe(backend=backend, checkpoint_strategy=EveryNVersions(checkpoint_every)),
+        StepRecipe(backend=backend),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
@@ -199,18 +197,6 @@ def test_scenario_with_a_running_cycle_stays_loaded(tmp_path) -> None:
         assert not dispatcher.unload_if_idle("math")
     finally:
         backend.resume.set()
-        dispatcher.close()
-
-
-@pytest.mark.unit
-def test_scenario_with_a_release_only_in_memory_stays_loaded(tmp_path) -> None:
-    dispatcher = make_dispatcher(tmp_path, backend=StepBackend(tmp_path / "candidates"), checkpoint_every=2)
-    try:
-        current = trained(dispatcher, "math", 1)
-        assert current.repository.holds_local_releases
-
-        assert not dispatcher.unload_if_idle("math")
-    finally:
         dispatcher.close()
 
 

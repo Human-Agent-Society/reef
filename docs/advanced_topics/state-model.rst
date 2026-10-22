@@ -54,8 +54,10 @@ way.
        class C0,C1 durable
        class V1,V2 volatile
 
-Checkpoint cadence controls when live weights become durable, not how often they
-change; any number of live steps may occur between checkpoints. A live release's
+The training backend decides when live weights become durable: each version
+whose checkpoint the backend saves is published as an artifact. A Slime
+deployment saves each ``save-interval``-th version, so any number of live steps
+may occur between checkpoints. A live release's
 ``runtime_load_id`` is an opaque ``<incarnation>:<sequence>`` token, where the
 incarnation keeps tokens unique across training-group restarts. The release
 record is durable; the bytes are not, so a restart restores the last checkpoint.

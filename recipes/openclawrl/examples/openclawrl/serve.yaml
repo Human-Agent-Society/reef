@@ -61,8 +61,6 @@ inference:
       max_new_tokens: 8192
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
-  config:
-    checkpoint-every-n-versions: 1
 pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
   record2record:
@@ -113,6 +111,7 @@ training:
     hf-checkpoint: "${inference.model-path}"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "1"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"

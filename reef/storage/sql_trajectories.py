@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 
 from sqlalchemy import (
     BigInteger,
@@ -24,42 +22,14 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
-    and_,
     func,
     select,
-    true,
 )
 from sqlalchemy.engine import RowMapping
-from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.batches import TrajectoryItem
-from reef.storage.sql_records import SQLRecordStore
+from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.trajectories import StoredTrajectory, TrajectoryConflict, TrajectoryStore
-
-
-@dataclass(frozen=True)
-class TrajectoryTable:
-    """The uploaded trajectory table of one database, and the namespace of one store in it.
-
-    Values: ``table`` is a table that ``trajectory_table`` defines. ``scope``
-    maps column names of ``table`` to values. It is empty for a table without a
-    namespace, and it names ``storage_id`` for a table that has that column.
-
-    Purpose: a SQL adapter makes it. ``SQLTrajectoryStore`` restricts each
-    operation to the rows that match ``scope``.
-    """
-
-    table: Table
-    scope: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        unknown = set(self.scope) - set(self.table.c.keys())
-        if unknown:
-            raise ValueError(f"the scope names columns that {self.table.name} does not have: {sorted(unknown)!r}")
-
-    def condition(self) -> ColumnElement[bool]:
-        """Restrict an operation to the namespace of the adapter, if any."""
-        return and_(true(), *(self.table.c[key] == value for key, value in self.scope.items()))
 
 
 def trajectory_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -67,7 +37,7 @@ def trajectory_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
 
     If ``foreign_key`` names a column, the table also has the column
     ``storage_id``, which refers to it. The adapter then gives ``storage_id``
-    in ``TrajectoryTable.scope``. Trajectory IDs are unique in each namespace.
+    in ``ScopedTable.scope``. Trajectory IDs are unique in each namespace.
     """
     columns = (
         Column("trajectory_id", Text, nullable=False),
@@ -97,7 +67,7 @@ def trajectory_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
 class SQLTrajectoryStore(TrajectoryStore):
     """The uploaded trajectories of one scenario in its record database."""
 
-    def __init__(self, records: SQLRecordStore, table: TrajectoryTable) -> None:
+    def __init__(self, records: SQLRecordStore, table: ScopedTable) -> None:
         self.records = records
         self.table = table
 

@@ -303,8 +303,10 @@ factory discovery does not make arbitrary backend pairs compatible.
 2. Verify the receiver and prepare weight transfer. Colocated inference releases
    its initial device allocations before training workers initialize.
 3. Call ``TrainingService.start(resources)`` without an inference connection.
-4. Attach a ``WeightTransferSession`` to the trainer's native sender. Its protocol,
-   borrowed receiver executor and fresh session identity describe one attachment.
+4. Select the first transfer in the trainer's ``weight_transfer_protocols`` that
+   the receiver accepts, and attach a ``WeightTransferSession`` with a fresh
+   identity. Only the receiver's native protocol gives the sender the borrowed
+   receiver executor (``NativeWeightTransferSession``).
 5. Start Reef's ``TrainingCoordinator`` with separate ``TrainingBackend`` and
    ``InferenceBackend``, then verify readiness after durable recovery.
 
@@ -347,7 +349,8 @@ no model trainer. ``RuntimeCandidateBackend`` connects that recipe interface to
 the runtime scheduler.
 
 Alongside ``TrainingBackend``, ``InferenceBackend`` exposes pause,
-resume, recovery, version verification, adapter unload and memory operations.
+resume, recovery, version verification and adapter unload.
+``InferenceMemoryHandoffBackend`` adds the memory operations that colocated training uses.
 ``TrainingCoordinator`` owns LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
 weight tensors never pass through the HTTP service or the scheduler.

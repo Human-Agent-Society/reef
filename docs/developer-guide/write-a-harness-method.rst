@@ -127,7 +127,7 @@ current release does not run under ``floor``, so ``current_scores`` is empty.
    Do not put credentials in tree entries. Reef rejects literal credential
    fields (including ``apiKey``, ``token``, and their plural or list forms)
    when loading a seed, applying a proposal, or recovering stored state.
-   Tree state is stored in the commit log, snapshot metadata, and published
+   Tree state is stored in the commit history, snapshot metadata, and published
    artifact. If older stored state contains a credential, recovery fails and
    names the field. Rotate the key and remove it from the stored entry.
 

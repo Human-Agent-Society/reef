@@ -9,8 +9,10 @@ import importlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import types
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -1319,6 +1321,18 @@ def _session_events(session: str, release: str, stages, tool: str | None = None)
     return events
 
 
+def write_commits(directory: Path, *commits: dict) -> None:
+    """Replace the commits of one scenario database with the given JSON objects, at steps 1, 2, ..."""
+    database = directory / "x.sqlite3"
+    SQLiteRecordStore(database).close()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DELETE FROM scenario_commit")
+        connection.executemany(
+            "INSERT INTO scenario_commit (step, commit_json) VALUES (?, ?)",
+            [(step, json.dumps(commit)) for step, commit in enumerate(commits, start=1)],
+        )
+
+
 def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Path, monkeypatch) -> None:
     replay = _method(monkeypatch, "replay")
     work = tmp_path / "work"
@@ -1357,7 +1371,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "selection": {"reason": "candidate won 2 task pairings and lost 0"},
         },
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n")
+    write_commits(work / "agent-record", commit)
     for name, release, tool in (("s1", "r1", "harness_propose"), ("s2", "r2", None)):
         events = _session_events(name, release, ["think"], tool)
         (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
@@ -1440,7 +1454,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "mutations": [{"op": "update", "id": "main", "options": {"name": "native_graph", "config": graph}}],
         },
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(updated) + "\n")
+    write_commits(work / "agent-record", updated)
     first_update = replay.collect(work)
     assert first_update["releases"][1]["diff"] == {
         "added": [],
@@ -1458,7 +1472,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "metrics": None,
         "algorithm_state": None,
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n" + json.dumps(rollback) + "\n")
+    write_commits(work / "agent-record", commit, rollback)
     with_rollback = replay.collect(work)
     assert [(r["kind"], r["step"], r["release_id"]) for r in with_rollback["releases"]] == [
         ("seed", 0, "r1"),

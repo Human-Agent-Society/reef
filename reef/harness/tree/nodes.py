@@ -3,7 +3,7 @@
 A harness composition is a flat compose Entry tree whose entries name one of
 the node kinds below. Each kind's plugin body is its admission gate: it
 validates the entry config at load, so a proposal carrying an invalid node
-lands as a FAILED fiber and never reaches the commit log. Five kinds cover what
+lands as a FAILED fiber and never reaches the commit history. Five kinds cover what
 both surveyed harnesses compose from files alone - one JSON config tree,
 markdown resource directories, and code-valued extension files - and the
 native harness adds kinds only it renders:

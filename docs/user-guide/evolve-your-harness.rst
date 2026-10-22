@@ -473,10 +473,10 @@ trajectory back, and deletes the root.
 Bookkeeping of the steps
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Commit log
-^^^^^^^^^^
+Commit history
+^^^^^^^^^^^^^^
 
-Every result is recorded in the scenario's commit log, whether the candidate
+Every result is recorded in the scenario's commit history, whether the candidate
 was published or rejected. A commit carries:
 
 - its mutation: op, id and the full options, so a rejected rewrite is
@@ -494,7 +494,7 @@ was published or rejected. A commit carries:
 Step record
 ^^^^^^^^^^^
 
-The commit log holds the result; the step record holds what decided it.
+The commit history holds the result; the step record holds what decided it.
 Recording of step records is off by default and exists for debugging and audit:
 set ``evolution.step_record_dir`` to a directory, made absolute at build, and
 each scenario's steps write their raw material under it.
@@ -546,7 +546,7 @@ directory.
 Together with the commit record, which names the step's directory as
 ``step_record``, those files let a reader rebuild why the tree changed or
 did not. They are the proposer's raw traffic and the episodes' full logs, so
-keep the directory where the commit log lives; a copy that fails (a full
+keep the directory where the commit history lives; a copy that fails (a full
 disk) aborts the step rather than scoring it.
 
 Edge cases

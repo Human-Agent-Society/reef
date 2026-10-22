@@ -7,7 +7,7 @@ from slime.ray import actor_group
 
 from reef.runtime.executor import ExecutorFuture, resolve
 from reef.train.slime_backend.reef_adapters.executors.ray import SlimeRayExecutor
-from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup, merge_rank_metrics
 
 
 class _RemoteMethod:
@@ -66,12 +66,11 @@ def test_bridge_facing_train_group_methods_fan_out(ray_group) -> None:
     assert group.set_runtime_load_id_for_update("incarnation:5") == ["prepare-0", "prepare-1"]
     assert workers[0].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
     assert workers[1].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
-    metrics = group.async_pop_rank0_metrics()
+    metrics = group.async_pop_metrics()
     version = group.async_get_rank0_runtime_load_id()
     assert isinstance(metrics, ExecutorFuture)
-    assert resolve(metrics) == {"rank": 0}
+    assert resolve(metrics) == [{"rank": 0}, {"rank": 1}]  # every rank drains: the last pipeline stage logs a step
     assert resolve(version) == "incarnation:4"
-    assert workers[1].pop_metrics.calls == []
     assert workers[1].get_runtime_load_id.calls == []
 
 
@@ -103,3 +102,16 @@ def test_ray_launcher_preserves_placement_and_releases_only_owned_workers(ray_gr
     assert all(target is not placement[0] for target, _ in killed)
     with pytest.raises(RuntimeError, match="not running"):
         _ = group.executor
+
+
+@pytest.mark.unit
+def test_rank_metrics_merge_keeps_the_last_stage_step_and_rank0_on_a_shared_key() -> None:
+    first_stage = {"train/step": 3, "perf/update_weights_time": 1.5}
+    last_stage = {"train/step": 3, "train/loss": 1.25, "train/grad_norm": 2.0, "perf/update_weights_time": 9.0}
+
+    assert merge_rank_metrics([first_stage, {}, last_stage]) == {
+        "train/step": 3,
+        "train/loss": 1.25,
+        "train/grad_norm": 2.0,
+        "perf/update_weights_time": 1.5,
+    }

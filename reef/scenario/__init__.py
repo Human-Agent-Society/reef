@@ -17,7 +17,6 @@ The modules follow these responsibilities:
   It returns a complete ``Scenario`` and closes owned resources on failure.
 - ``committer`` orders commit, rollback, retries, and artifact publication
   around store settlement. Trainer state is exposed only after settlement.
-  ``recipe.checkpoint_strategy`` selects steps that publish durable checkpoints.
 - ``releases`` queries releases, artifact content, and committed training metadata.
   It shares the committer's publication lock. Writers take the operation lock
   before the publication lock; readers never take the operation lock, so long
