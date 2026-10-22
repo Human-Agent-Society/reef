@@ -234,11 +234,16 @@ class RoutingPublisher(ABC):
 
     @abstractmethod
     def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
-        """Load and publish a compatible manifest whose digest is ``snapshot_version``, selected by the router
-        runtime ``router_config_hash``.
+        """Load the manifest at ``manifest_path`` and publish it with the router runtime ``router_config_hash``.
+
+        Only a manifest whose digest is ``snapshot_version`` is published. If this raises, the current
+        adapter is unchanged.
 
         Raises:
-            ValueError: The manifest is not that version or changes the target catalog.
+            OSError: The manifest file cannot be read.
+            ValueError: Routing is disabled, the manifest or runtime hash is invalid, or the digest differs
+                from ``snapshot_version``. Also raised when the candidate changes the target catalog,
+                automatic selector, or set of Scenario names.
         """
 
     @abstractmethod
