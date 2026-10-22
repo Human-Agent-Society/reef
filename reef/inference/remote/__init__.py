@@ -2,8 +2,9 @@
 
 ``python -m reef.inference.remote`` runs on the GPU host. It starts the engines
 that the control plane asks for, then serves their control operations and their
-inference requests over HTTP. On the control plane, ``inference.backend:
-remote`` selects :class:`~reef.inference.remote.service.RemoteInferenceService`.
+inference requests over HTTP. On the control plane, an ``inference.remote``
+section runs the engines that ``inference.backend`` names on the component,
+through :class:`~reef.inference.remote.service.RemoteInferenceService`.
 The trainer delivers weights as files (``reef-weight-files-v1``), and the
 coordinator uploads them to the component. No tensor transport crosses the
 network boundary.

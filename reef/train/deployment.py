@@ -73,11 +73,6 @@ INFERENCE_RESERVED_OPTIONS = frozenset(
 )
 
 
-#: The inference backend whose engines run on a remote component (``reef.inference.remote``).
-#: Deployment resolution validates its ``inference_remote`` section and stores every field of it.
-REMOTE_INFERENCE_BACKEND = "remote"
-
-
 def prepare_inference_config(
     config: dict[str, Any], settings: Mapping[str, Any], training_options: Mapping[str, Any]
 ) -> None:
@@ -188,6 +183,8 @@ class TrainingDeployment(ABC):
 
     requires_local_model: bool = True
     supports_teacher_engine: bool = False
+    #: Whether its model driver can run the engines on a remote component (an ``inference.remote`` section).
+    supports_remote_inference: bool = False
 
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

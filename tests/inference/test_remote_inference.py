@@ -178,6 +178,7 @@ def component(tmp_path, monkeypatch):
 def started_service(url: str) -> RemoteInferenceService:
     service = RemoteInferenceService(
         RemoteInferenceSettings(url=url, startup_timeout_s=30),
+        engine="sglang",
         engine_config={"model_path": "Qwen/Qwen3-8B"},
         num_gpus=2,
         control_token=CONTROL_TOKEN,
@@ -332,13 +333,13 @@ def test_component_refuses_an_archive_that_leaves_its_directory(component, tmp_p
 @pytest.mark.parametrize(
     ("section", "match"),
     [
-        ({}, "requires inference.remote.url"),
+        ({}, "inference.remote requires a url"),
         ({"url": "ftp://host"}, "HTTP"),
         ({"url": "https://user:pw@host"}, "without credentials"),
         ({"url": "https://host?x=1"}, "without credentials, query"),
         ({"url": "https://host", "control-token-env": "SAME", "inference-token-env": "SAME"}, "different"),
         ({"url": "https://host", "startup-timeout-s": 0}, "positive"),
-        ({"url": "https://host", "engine": ""}, "engine must be"),
+        ({"url": "https://host", "control-token-env": ""}, "control-token-env must be"),
         ({"url": "https://host", "region": "us"}, "unknown inference.remote fields: region"),
     ],
 )
@@ -349,11 +350,10 @@ def test_settings_refuse_invalid_sections(section, match):
 
 def test_settings_read_dashed_keys_and_normalize_the_url():
     settings = RemoteInferenceSettings.from_mapping(
-        {"url": "https://host.example/", "engine": "vllm", "control-token-env": "A", "inference-token-env": "B"}
+        {"url": "https://host.example/", "control-token-env": "A", "inference-token-env": "B"}
     )
-    assert (settings.url, settings.engine, settings.control_token_env, settings.inference_token_env) == (
+    assert (settings.url, settings.control_token_env, settings.inference_token_env) == (
         "https://host.example",
-        "vllm",
         "A",
         "B",
     )

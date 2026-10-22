@@ -422,9 +422,9 @@ def test_tinker_trains_behind_the_model_driver_with_a_remote_engine(tmp_path, mo
         model_dir.mkdir()
         inference = {
             "model-path": MODEL if REAL else str(model_dir),
-            "backend": "remote",
+            "backend": engine,
             "num-gpus": 2,
-            "remote": {"url": url, "engine": engine},
+            "remote": {"url": url},
         }
         runtime = {
             "inference_runtime": "remote",

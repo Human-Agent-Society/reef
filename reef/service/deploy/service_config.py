@@ -88,9 +88,9 @@ class ServiceConfig:
     inference_remote: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Remote inference component (inference.backend: remote): url, engine, control-token-env, "
-            "inference-token-env and startup-timeout-s. Resolution replaces it with the fields of the "
-            "validated RemoteInferenceSettings.",
+            "Run the engines that inference.backend names on a remote inference component: url, "
+            "control-token-env, inference-token-env and startup-timeout-s. Resolution replaces it with the "
+            "fields of the validated RemoteInferenceSettings.",
             public_path=("inference", "remote"),
         ),
     )

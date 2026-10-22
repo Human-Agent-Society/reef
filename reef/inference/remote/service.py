@@ -133,7 +133,7 @@ class RemoteInferenceService(InferenceService):
     """Start engines on a remote component and connect Reef's coordinator to them.
 
     ``start`` asks the component to start ``engine_config`` with the backend
-    that ``settings.engine`` names on ``num_gpus`` GPUs, replacing any engines
+    that ``engine`` names (``inference.backend``) on ``num_gpus`` GPUs, replacing any engines
     it runs, and returns a connection without a control executor. The trainer
     must send ``reef-weight-files-v1``; the coordinator uploads its files
     through :class:`RemoteInferenceBackend`. ``close`` stops the engines.
@@ -143,11 +143,20 @@ class RemoteInferenceService(InferenceService):
     supported_transfer_protocols = (WEIGHT_FILES_PROTOCOL,)
 
     def __init__(
-        self, settings: RemoteInferenceSettings, *, engine_config: Mapping[str, Any], num_gpus: int, control_token: str
+        self,
+        settings: RemoteInferenceSettings,
+        *,
+        engine: str,
+        engine_config: Mapping[str, Any],
+        num_gpus: int,
+        control_token: str,
     ) -> None:
+        if not engine:
+            raise ValueError("remote inference needs the engine backend that the component starts")
         if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
             raise ValueError("remote inference needs a positive num_gpus")
         self.settings = settings
+        self.engine = engine
         self.engine_config = dict(engine_config)
         self.num_gpus = num_gpus
         self.control = RemoteControl(settings.url, control_token)
@@ -161,7 +170,7 @@ class RemoteInferenceService(InferenceService):
         self.control.call(
             "PUT",
             "engines",
-            payload={"backend": self.settings.engine, "config": self.engine_config, "num_gpus": self.num_gpus},
+            payload={"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus},
             timeout_s=self.settings.startup_timeout_s,
         )
         return InferenceConnection(self.connection_protocol, None)
@@ -197,13 +206,15 @@ class RemoteInferenceService(InferenceService):
 def create_inference(config: Mapping[str, Any]) -> RemoteInferenceService:
     """Build the service from a training deployment's inference input.
 
-    ``config`` has ``remote`` (the ``inference.remote`` section),
-    ``engine_config`` (the engine backend's own input) and ``num_gpus``.
-    The control token is read from this process's environment.
+    ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
+    (the ``inference.backend`` name), ``engine_config`` (that backend's own
+    input) and ``num_gpus``. The control token is read from this process's
+    environment.
     """
     settings = RemoteInferenceSettings.from_mapping(config["remote"])
     return RemoteInferenceService(
         settings,
+        engine=config["engine"],
         engine_config=config["engine_config"],
         num_gpus=config["num_gpus"],
         control_token=settings.token(settings.control_token_env, os.environ),

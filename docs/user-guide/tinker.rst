@@ -207,14 +207,14 @@ other backend that a control plane asks for.
 ``python -m reef.inference.remote --help`` lists the bind address, the upload
 directory and the Ray options.
 
-On the Reef host, set the same two variables and select
-``inference.backend: remote``:
+On the Reef host, set the same two variables. Keep ``inference.backend:
+sglang`` and add an ``inference.remote`` section with the component's URL:
 
 .. code:: yaml
 
    inference:
      model-path: Qwen/Qwen3-8B
-     backend: remote
+     backend: sglang
      num-gpus: 2
      remote:
        url: https://gpu-host.example.com

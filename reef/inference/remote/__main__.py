@@ -20,13 +20,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="python -m reef.inference.remote",
         description=(
             "Serve this host's inference engines to a Reef control plane. The control plane starts the engines "
-            "with inference.backend: remote and publishes trained weights to them."
+            "named in its inference.remote section and publishes trained weights to them."
         ),
     )
     parser.add_argument(
         "--engine",
         default="sglang",
-        help="the only inference backend the control plane may start: sglang, vllm or module:factory (default: sglang)",
+        help="the only engine backend the control plane may start; its inference.backend must match (default: sglang)",
     )
     parser.add_argument("--host", default="0.0.0.0", help="bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="bind port (default: 8000)")

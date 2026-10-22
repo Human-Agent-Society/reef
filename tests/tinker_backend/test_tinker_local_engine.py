@@ -342,7 +342,7 @@ def _remote_engine_config(tmp_path):
     raw = _local_engine_config(tmp_path)
     raw["inference"] = {
         "model-path": "Qwen/Qwen3-8B",
-        "backend": "remote",
+        "backend": "sglang",
         "num-gpus": 2,
         "remote": {"url": "https://gpu-host.example/", "inference-token-env": "GPU_HOST_TOKEN"},
     }
@@ -359,7 +359,7 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
     assert [service["name"] for service in config["services"]] == ["tinker-driver", "reef"]
     reef = config["reef"]
     assert (reef["inference_backend"], reef["inference_num_gpus"], reef["model_path"]) == (
-        "remote",
+        "sglang",
         2,
         "Qwen/Qwen3-8B",
     )
@@ -373,7 +373,6 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
     # Resolution stores the validated section: underscore keys, defaults filled in, the URL normalized.
     assert reef["inference_remote"] == {
         "url": "https://gpu-host.example",
-        "engine": "sglang",
         "control_token_env": "REEF_REMOTE_CONTROL_TOKEN",
         "inference_token_env": "GPU_HOST_TOKEN",
         "startup_timeout_s": 3600.0,
@@ -386,7 +385,7 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
     with pytest.raises(ValueError, match="cluster address and a namespace"):
         RaySessionResources(ray_address="", namespace="reef")
     assert training.inference_config["remote"] == reef["inference_remote"]
-    assert training.inference_config["num_gpus"] == 2
+    assert (training.inference_config["engine"], training.inference_config["num_gpus"]) == ("sglang", 2)
     assert training.inference_config["engine_config"]["options"]["max_lora_rank"] == 16
     plan = assemble_model_plan(config, training)
     assert isinstance(plan.inference, RemoteInferenceService)
@@ -396,15 +395,22 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
 def test_remote_engine_topology_refuses_an_incomplete_section(tmp_path, monkeypatch):
     monkeypatch.setenv("TINKER_API_KEY", "test-key")
     for change, match in (
-        ({"remote": {"url": "https://gpu-host.example", "engine": "vllm"}}, "remote.engine: sglang"),
-        ({"remote": {}}, "requires inference.remote.url"),
+        ({"backend": "vllm"}, "only with inference.backend: sglang"),
+        ({"remote": {"control-token-env": "GPU_HOST_CONTROL"}}, "inference.remote requires a url"),
         ({"remote": {"url": "https://gpu-host.example?key=1"}}, "without credentials, query"),
-        ({"backend": "sglang", "model-path": str(tmp_path / "model")}, "requires inference.backend: remote"),
+        (
+            {"remote": {"url": "https://gpu-host.example", "engine": "sglang"}},
+            "unknown inference.remote fields: engine",
+        ),
     ):
         raw = _remote_engine_config(tmp_path)
         raw["inference"] = {**raw["inference"], **change}
         with pytest.raises(DeployConfigError, match=match):
             resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    raw = _remote_engine_config(tmp_path)
+    raw["training"] = {"backend": "slime"}
+    with pytest.raises(DeployConfigError, match="does not support remote engines"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 def test_training_service_hands_the_coordinator_a_backend_only_after_engines_attach(tmp_path):

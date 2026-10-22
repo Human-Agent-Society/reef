@@ -21,21 +21,18 @@ class RemoteInferenceSettings:
     """How the control plane reaches one remote inference component.
 
     - ``url`` is the component's HTTP(S) base URL, without credentials, query or fragment.
-    - ``engine`` is the inference backend that the component starts: ``sglang``,
-      ``vllm``, or a ``module:factory`` reference. It also selects the request
-      dialect that the HTTP service speaks.
     - ``control_token_env`` and ``inference_token_env`` name two different
       environment variables. They hold the bearer tokens for control routes
       and for inference requests.
     - ``startup_timeout_s`` is positive and bounds one engine start, including
       the model download on the component.
 
-    The values come from the ``inference.remote`` section. Service deployment
-    validates them; the remote inference service and runtime read them.
+    The values come from the ``inference.remote`` section, whose presence runs
+    the engines that ``inference.backend`` names on the component. Service
+    deployment validates them; the remote inference service reads them.
     """
 
     url: str
-    engine: str = "sglang"
     control_token_env: str = DEFAULT_CONTROL_TOKEN_ENV
     inference_token_env: str = DEFAULT_INFERENCE_TOKEN_ENV
     startup_timeout_s: float = 3600.0
@@ -55,7 +52,6 @@ class RemoteInferenceSettings:
             raise ValueError("inference.remote.url must be an HTTP(S) URL without credentials, query or fragment")
         object.__setattr__(self, "url", self.url.rstrip("/"))
         for name, value in (
-            ("engine", self.engine),
             ("control-token-env", self.control_token_env),
             ("inference-token-env", self.inference_token_env),
         ):
@@ -81,7 +77,7 @@ class RemoteInferenceSettings:
         if unknown:
             raise ValueError(f"unknown inference.remote fields: {', '.join(unknown)}")
         if "url" not in values:
-            raise ValueError("inference.backend: remote requires inference.remote.url")
+            raise ValueError("inference.remote requires a url")
         return cls(**values)
 
     def token(self, variable: str, environ: Mapping[str, str]) -> str:

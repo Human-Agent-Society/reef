@@ -5,8 +5,8 @@ service runs Tinker's training and sampling in process. With
 ``inference.backend: sglang``, Reef's model driver runs the local engines and
 its coordinator, and Tinker trains behind that coordinator as a hosted
 sender whose "weight transfer" is loading adapter files into the engines.
-With ``inference.backend: remote``, the same driver asks a remote component to
-run the SGLang engines and uploads the adapter files to it.
+With an ``inference.remote`` section as well, the same driver asks a remote
+component to run the SGLang engines and uploads the adapter files to it.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ from reef.runtime.executor.placement import ModelGpuLayout
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.train.algos.registry import loss_family_refs
 from reef.train.deployment import (
-    REMOTE_INFERENCE_BACKEND,
     InProcessTrainingDeployment,
     TrainingDeploymentPlan,
     driver_service,
@@ -46,7 +45,8 @@ BUILTIN_TINKER_LOSSES = frozenset({"importance_sampling"})
 
 
 def _local_engine_selected(settings: Mapping[str, Any]) -> bool:
-    return any(
+    """Whether the deployment names engines for the model driver, on this host or on a remote component."""
+    return bool(settings.get("inference_remote")) or any(
         settings.get(name) is not None for name in ("inference_backend", "inference_num_gpus", "tensor_parallel_size")
     )
 
@@ -63,20 +63,17 @@ def tinker_settings(options: Mapping[str, Any]) -> TinkerConfig:
 class TinkerDeployment(InProcessTrainingDeployment):
     runtime_type = "reef.train.tinker_backend.launch:runtime_factory"
     requires_local_model = False
+    supports_remote_inference = True
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         if not _local_engine_selected(settings):
             return super().prepare(config, settings)
         backend = settings["inference_backend"]
-        if backend not in (None, "sglang", REMOTE_INFERENCE_BACKEND) and ":" not in str(backend):
+        if backend not in (None, "sglang") and ":" not in str(backend):
             # A dotted factory receives the same SGLang-shaped inference input and interprets it itself.
             raise DeployConfigError(
-                "Tinker serves through inference.backend: sglang, or remote engines running sglang"
+                "Tinker serves through local or remote engines only with inference.backend: sglang"
             )
-        if backend == REMOTE_INFERENCE_BACKEND:
-            remote_engine = settings["inference_remote"]["engine"]
-            if remote_engine != "sglang" and ":" not in remote_engine:
-                raise DeployConfigError("Tinker's remote engines must run inference.remote.engine: sglang")
         if settings["inference_url"] or config.get("reef", {}).get("runtime"):
             raise DeployConfigError("a managed local engine discovers its inference connection from the driver")
         if settings["colocate"]:
@@ -126,11 +123,12 @@ class TinkerDeployment(InProcessTrainingDeployment):
             raise RuntimeError(f"recipe loss family {loss_family!r} has no Tinker implementation registered")
         engine_config = sglang_inference_config({**reef, "model_path": model}, tinker)
         resources: DeploymentResources
-        if reef.get("inference_backend") == REMOTE_INFERENCE_BACKEND:
+        if reef.get("inference_remote"):
             # The engines run on the remote component; this host keeps only the coordinator's Ray session.
             resources = RaySessionResources(ray_address=ray_address, namespace=namespace)
             inference_config = {
                 "remote": dict(reef["inference_remote"]),
+                "engine": reef["inference_backend"],
                 "num_gpus": int(reef["inference_num_gpus"]),
                 "engine_config": engine_config,
             }
@@ -173,11 +171,11 @@ class TinkerDeployment(InProcessTrainingDeployment):
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
         }
-        if settings["inference_backend"] == REMOTE_INFERENCE_BACKEND:
-            remote = settings["inference_remote"]
+        if settings["inference_remote"]:
+            runtime_config["inference_runtime"] = "remote"
             runtime_config["inference_runtime_options"] = {
-                "engine": remote["engine"],
-                "inference_token_env": remote["inference_token_env"],
+                "engine": settings["inference_backend"] or "sglang",
+                "inference_token_env": settings["inference_remote"]["inference_token_env"],
             }
         handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if handler_factory is not None:
