@@ -35,9 +35,10 @@ from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
 from reef.service.app import InferenceRetryPolicy, create_app
-from reef.service.request_service import PendingInference
+from reef.service.request_service import PendingInference, RequestService
 from reef.service.routing import RoutingDecision
 from reef.service.routing_preview import PreviewSettings
+from reef.service.wire import parse_request_headers
 from reef.storage.records import AppendResult
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
@@ -610,3 +611,24 @@ def test_a_pending_stream_is_routed_exactly_when_it_has_a_decision_for_its_own_s
     ):
         with pytest.raises(ValueError):
             make()
+
+
+@pytest.mark.unit
+def test_a_pending_stream_has_both_or_neither_of_its_deferred_check_inputs(tmp_path: Path) -> None:
+    dispatcher = routing_dispatcher(tmp_path)
+    try:
+        prepared = RequestService(dispatcher)._prepare_inference(
+            parse_request_headers({"x-reef-scenario": "coding"}, RequestType.INFERENCE),
+            HttpInferenceHandler("http://127.0.0.1:1"),
+            None,
+        )
+        item = AgentRecord.create(scenario="coding", request_type=RequestType.INFERENCE, payload={"messages": []})
+        assert PendingInference(item, None).deferred_prepared is None
+        both = PendingInference(item, None, deferred_prepared=prepared, path="/v1/chat/completions")
+        assert (both.deferred_prepared, both.path) == (prepared, "/v1/chat/completions")
+        # Either one alone is refused now, not after the stream when record_stream checks the final response.
+        for fields in ({"deferred_prepared": prepared}, {"path": "/v1/chat/completions"}):
+            with pytest.raises(ValueError, match="prepared inference and its path"):
+                PendingInference(item, None, **fields)
+    finally:
+        dispatcher.close()

@@ -148,10 +148,10 @@ class PendingInference:
     """State retained to finalize one provider stream, including after its connection has closed.
 
     ``item`` is the record to finalize. ``record_stream`` releases the optional ``admission`` and ``lease``
-    handles in its finalization path, whether storage succeeds or fails. ``deferred_prepared`` and ``path``
-    are set together when the handler validates its response only at the end. ``routing_decision`` is None
-    or a ``RoutingDecision`` and ``routing_request_id`` a string. For a routed stream, ``routing_decision`` is its
-    decision, ``record`` is true, ``routing_request_id`` is non-empty and
+    handles in its finalization path, whether storage succeeds or fails. ``deferred_prepared`` is None if and
+    only if ``path`` is None; both are set when the handler validates its response only at the end.
+    ``routing_decision`` is None or a ``RoutingDecision`` and ``routing_request_id`` a string. For a routed
+    stream, ``routing_decision`` is its decision, ``record`` is true, ``routing_request_id`` is non-empty and
     ``routing_decision.scenario == item.scenario``; otherwise ``routing_decision`` is None and
     ``routing_request_id`` is empty. ``routing_started`` is a finite int or float, normally the
     ``time.monotonic`` reading taken at the provider call, or zero by default. A routed record's elapsed
@@ -172,6 +172,8 @@ class PendingInference:
     routing_started: float = 0.0
 
     def __post_init__(self) -> None:
+        if (self.deferred_prepared is None) != (self.path is None):
+            raise ValueError("a stream's deferred response check needs both its prepared inference and its path")
         if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
             raise ValueError("a stream's routing decision must be None or a routing decision")
         if not isinstance(self.routing_request_id, str):
