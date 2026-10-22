@@ -201,7 +201,9 @@ different tokens and start the remote inference component:
    python -m reef.inference.remote --port 8000
 
 The component starts its own Ray session and no engines. Its control routes
-answer ``409`` until a model driver starts the engines.
+answer ``409`` until a model driver starts the engines. It starts only the
+engine backend that ``--engine`` names (default ``sglang``) and refuses any
+other backend that a control plane asks for.
 ``python -m reef.inference.remote --help`` lists the bind address, the upload
 directory and the Ray options.
 
@@ -234,9 +236,11 @@ restart recovery work as with a local engine. When the driver stops, the
 component stops its engines and keeps running. The next driver start replaces
 them and reloads each scenario's committed adapter.
 
-The control token lets its holder replace the served weights. Serve the
-component over HTTPS, and keep the control token separate from the inference
-token. Each publication uploads one adapter directory, so its time grows with
+The control token gives its holder control of the GPU host. Its holder
+chooses the model, the engine options and the served weights, and the engines
+run a model's own code (``trust_remote_code``). Protect it like a login to
+that host: serve the component over HTTPS, keep the token out of logs and
+deployment files, and keep it separate from the inference token. Each publication uploads one adapter directory, so its time grows with
 the adapter size and the network path. The component serves one control plane
 at a time: a second start replaces the first one's engines.
 `The inference section <../reference/configuration.rst#the-inference-section>`__

@@ -83,6 +83,8 @@ class FakeEngines(InferenceBackend):
         self.engine_url = engine_url
         self.events = events
         self.versions = ["base:0"]
+        self.release_load = threading.Event()
+        self.release_load.set()
 
     def initialize_version(self, runtime_load_id):
         self.versions = [runtime_load_id]
@@ -109,6 +111,7 @@ class FakeEngines(InferenceBackend):
         self.events.append(("unload", name))
 
     def load_weight_files(self, files, *, adapter_name, runtime_load_id):
+        assert self.release_load.wait(timeout=30)
         contents = {path.name: path.read_text() for path in files.path.iterdir()}
         self.events.append(("load", files.layout, adapter_name, runtime_load_id, contents, files.path))
         if runtime_load_id is not None:
@@ -137,7 +140,7 @@ class FakeService(InferenceService):
         self.events.append("health")
 
     def poll(self):
-        self.check_health()
+        self.events.append("poll")
 
     def close(self):
         self.events.append("close")
@@ -157,17 +160,19 @@ def component(tmp_path, monkeypatch):
     """A running component whose engines are fakes, and the events they record."""
     events: list = []
     with serving(engine_app()) as engine_url:
-        monkeypatch.setattr(
-            server_module,
-            "inference_service_for",
-            lambda name, config: FakeService({"backend": name, **config}, events, engine_url),
-        )
+        services = []
+
+        def create_service(name, config):
+            services.append(FakeService({"backend": name, **config}, events, engine_url))
+            return services[-1]
+
+        monkeypatch.setattr(server_module, "inference_service_for", create_service)
         monkeypatch.setattr(server_module, "reserve_model_gpus", lambda layout: FakeReservation(layout, events))
         server = RemoteInferenceServer(
-            control_token=CONTROL_TOKEN, inference_token=INFERENCE_TOKEN, work_dir=tmp_path / "work"
+            engine="sglang", control_token=CONTROL_TOKEN, inference_token=INFERENCE_TOKEN, work_dir=tmp_path / "work"
         )
         with serving(server.application()) as url:
-            yield url, events, tmp_path / "work"
+            yield url, events, tmp_path / "work", services
 
 
 def started_service(url: str) -> RemoteInferenceService:
@@ -183,7 +188,7 @@ def started_service(url: str) -> RemoteInferenceService:
 
 
 def test_service_starts_engines_and_publishes_weight_files_through_the_component(component, tmp_path):
-    url, events, work_dir = component
+    url, events, work_dir, _ = component
     service = started_service(url)
     assert service.supported_transfer_protocols == (WEIGHT_FILES_PROTOCOL,)
     assert events == [
@@ -228,6 +233,7 @@ def test_service_starts_engines_and_publishes_weight_files_through_the_component
         backend.load_weight_files(WeightFiles(weights, "full"), adapter_name="x", runtime_load_id="inc:4")
 
     service.check_health()
+    assert events[-1] == "poll"
     service.close()
     service.close()
     assert events[-2:] == ["close", "release"]
@@ -236,7 +242,7 @@ def test_service_starts_engines_and_publishes_weight_files_through_the_component
 
 
 def test_component_requires_its_tokens_and_running_engines(component):
-    url, events, _ = component
+    url, events, _, _ = component
     with pytest.raises(RuntimeError, match="401"):
         RemoteControl(url, "wrong").call("GET", "health")
     with pytest.raises(RuntimeError, match="409: no engines are running"):
@@ -253,8 +259,41 @@ def test_component_requires_its_tokens_and_running_engines(component):
     assert "pause" not in events
 
 
+def test_component_starts_only_the_engine_its_operator_chose(component):
+    url, events, _, services = component
+    with pytest.raises(RuntimeError, match="400: this component starts only 'sglang' engines, not 'subprocess:run'"):
+        RemoteControl(url, CONTROL_TOKEN).call(
+            "PUT", "engines", payload={"backend": "subprocess:run", "config": {"echo": 1}, "num_gpus": 1}
+        )
+    assert services == [] and events == []
+
+
+def test_health_reports_busy_engines_as_healthy_while_they_load_weights(component, tmp_path):
+    url, events, _, services = component
+    service = started_service(url)
+    backend = service.backend(InferenceConnection(CONTROL_PROTOCOL, None))
+    engines = services[0].engines
+    engines.release_load.clear()
+    weights = tmp_path / "hf"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    loading = threading.Thread(
+        target=backend.load_weight_files,
+        args=(WeightFiles(weights, "full"),),
+        kwargs={"adapter_name": None, "runtime_load_id": "inc:5"},
+    )
+    loading.start()
+    try:
+        service.check_health()  # answers while the load holds the control lock
+        assert events[-1] == "poll" and not [event for event in events if event[0] == "load"]
+    finally:
+        engines.release_load.set()
+        loading.join(timeout=30)
+    assert events[-1][:4] == ("load", "full", None, "inc:5")
+
+
 def test_component_forwards_requests_to_the_engines_without_its_token(component):
-    url, _, _ = component
+    url, _, _, _ = component
     started_service(url)
     request = urllib.request.Request(
         f"{url}/generate",
@@ -271,7 +310,7 @@ def test_component_forwards_requests_to_the_engines_without_its_token(component)
 
 
 def test_component_refuses_an_archive_that_leaves_its_directory(component, tmp_path):
-    url, events, work_dir = component
+    url, events, work_dir, _ = component
     started_service(url)
     archive = io.BytesIO()
     with tarfile.open(fileobj=archive, mode="w") as tar:
@@ -363,6 +402,7 @@ def test_runtime_sends_requests_to_the_component_with_the_inference_token(tmp_pa
     [
         ({"engine": "my.engines:create"}, {"TOKEN": "x"}, "explicit inference handler factory"),
         ({}, {}, "environment variable TOKEN"),
+        ({"engine": " "}, {"TOKEN": "x"}, "runtime.engine must be a non-empty string"),
     ],
 )
 def test_runtime_refuses_an_unknown_dialect_or_a_missing_token(config, environ, match):

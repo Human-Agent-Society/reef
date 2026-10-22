@@ -61,9 +61,18 @@ class TinkerDeploymentResources(InferenceResources):
 
 
 class RaySessionResources(DeploymentResources):
-    """One Ray session for Reef's coordinator; the engines run on a remote component and reserve nothing here."""
+    """One Ray session for Reef's coordinator, when the engines run on a remote component.
+
+    Values: ``ray_address`` and ``namespace`` are non-empty strings; ``started``
+    and ``closed`` record the lifecycle, which runs at most once from new to
+    started to closed. ``start`` joins the cluster at ``ray_address`` in
+    ``namespace`` and reserves no GPU; ``close`` leaves the session, and is
+    allowed before ``start`` and more than once.
+    """
 
     def __init__(self, *, ray_address: str, namespace: str) -> None:
+        if not ray_address or not namespace:
+            raise ValueError("a Ray session needs the cluster address and a namespace")
         self.ray_address = ray_address
         self.namespace = namespace
         self.started = False

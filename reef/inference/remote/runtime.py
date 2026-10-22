@@ -29,12 +29,26 @@ ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {
 
 @dataclass(frozen=True)
 class RemoteRuntimeConfig(RuntimeConnectionConfig):
-    """Request options for a remote component; ``engine`` selects the dialect, the variable holds the token."""
+    """Request options of the HTTP service for engines on a remote component.
+
+    Values: the ``RuntimeConnectionConfig`` values, where also ``engine`` is a
+    non-empty backend name that the component runs (``sglang``, ``vllm`` or a
+    ``module:factory`` reference), and ``inference_token_env`` is a non-empty
+    environment variable name. ``RemoteRuntimeFactory`` reads them: ``engine``
+    selects the request dialect, unless ``inference_handler_factory`` names one,
+    and the variable holds the bearer token that every request carries.
+    """
 
     engine: str = config_option("sglang", help="Engine backend that the remote component runs.")
     inference_token_env: str = config_option(
         DEFAULT_INFERENCE_TOKEN_ENV, help="Environment variable with the component's inference token."
     )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for name, value in (("engine", self.engine), ("inference_token_env", self.inference_token_env)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"runtime.{name} must be a non-empty string")
 
 
 class RemoteRuntimeFactory(EngineRuntimeFactory):

@@ -375,6 +375,8 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
     monkeypatch.setenv("REEF_REMOTE_CONTROL_TOKEN", "control-secret")
     training = TinkerDeployment().create_training_plan(config, loss_family="tttd")
     assert isinstance(training.resources, RaySessionResources)
+    with pytest.raises(ValueError, match="cluster address and a namespace"):
+        RaySessionResources(ray_address="", namespace="reef")
     assert training.inference_config["remote"] == {
         "url": "https://gpu-host.example",
         "inference_token_env": "GPU_HOST_TOKEN",

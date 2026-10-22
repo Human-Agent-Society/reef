@@ -60,18 +60,31 @@ class LocalEngineResources(InferenceResources):
 class RemoteInferenceServer:
     """Serve this host's engines to one Reef control plane over HTTP.
 
+    Values: ``control_token`` and ``inference_token`` are different non-empty
+    strings; ``engine`` is the non-empty name of the one inference backend this
+    component may start, fixed when the component starts; ``work_dir`` holds
+    the uploaded weight files. ``resources``, ``service``, ``backend`` and
+    ``inference_url`` are all None (no engines run) or all set (one started
+    engine stack). Each ``adapters`` entry maps the name of an adapter that the
+    running engines loaded to the directory under ``work_dir`` it was loaded
+    from; the map is empty when no engines run.
+
     Routes under ``CONTROL_PATH`` need ``Authorization: Bearer <control_token>``;
     every other path is forwarded to the engines and needs the inference token.
-    ``PUT engines`` starts the engines that the control plane names, replacing
-    running ones, and the other control routes call their ``InferenceBackend``.
-    Control operations run one at a time. Weight files arrive as a tar stream and
-    are unpacked under ``work_dir``: full weights are removed after the load, and
+    ``PUT engines`` starts ``engine`` with the input that the control plane
+    sends, replacing running engines, and refuses any other backend name. The
+    other control routes call the engines' ``InferenceBackend``, one at a time.
+    ``GET health`` never waits behind such a call: it observes failures through
+    ``InferenceService.poll``. Full weight files are removed after the load, and
     an adapter's files when it is unloaded or replaced.
     """
 
-    def __init__(self, *, control_token: str, inference_token: str, work_dir: Path) -> None:
+    def __init__(self, *, engine: str, control_token: str, inference_token: str, work_dir: Path) -> None:
+        if not engine:
+            raise ValueError("the remote inference component needs the engine backend it may start")
         if not control_token or not inference_token or control_token == inference_token:
             raise ValueError("the remote inference component needs two different non-empty tokens")
+        self.engine = engine
         self.control_token = control_token
         self.inference_token = inference_token
         self.work_dir = work_dir
@@ -181,6 +194,9 @@ class RemoteInferenceServer:
         backend_name, config, num_gpus = body.get("backend"), body.get("config"), body.get("num_gpus")
         if not isinstance(backend_name, str) or not backend_name or not isinstance(config, Mapping):
             raise web.HTTPBadRequest(text="the engine request needs a backend name and its config object")
+        if backend_name != self.engine:
+            # The control plane chooses engine input, never which code this host imports.
+            raise web.HTTPBadRequest(text=f"this component starts only {self.engine!r} engines, not {backend_name!r}")
         if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
             raise web.HTTPBadRequest(text="the engine request needs a positive num_gpus")
         async with self.lock:
@@ -194,11 +210,12 @@ class RemoteInferenceServer:
         return web.json_response({"ok": True})
 
     async def health(self, request: web.Request) -> web.StreamResponse:
+        """Report failed engines; busy engines, such as ones loading weights, are healthy."""
         self.authorize(request, self.control_token)
         self.running_backend()
         service = self.service
         if service is not None:
-            await asyncio.to_thread(service.check_health)
+            await asyncio.to_thread(service.poll)
         return web.json_response({"ok": True})
 
     async def runtime_load_ids(self, request: web.Request) -> web.StreamResponse:

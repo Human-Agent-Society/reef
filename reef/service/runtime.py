@@ -42,6 +42,8 @@ CONNECTION_CONFIG_KEYS = (
     "inference_handler_factory",
     "inference_handler_config",
 )
+#: Inference runtime options the coordinator runtime sets itself; ``inference_runtime_options`` cannot name them.
+RESERVED_INFERENCE_OPTIONS = frozenset({*CONNECTION_CONFIG_KEYS, "type", "control"})
 #: Keys the config path forwards verbatim to :func:`connect_ray_runtime`.
 RAY_CONFIG_KEYS = ("actor_name", "namespace", "ray_address", "train_timeout_s", *CONNECTION_CONFIG_KEYS[1:])
 
@@ -194,7 +196,16 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
 
 @dataclass(frozen=True)
 class CoordinatorRuntimeConfig(RayRuntimeConfig):
-    """Connect to a Reef coordinator in Ray and pair it with a separately selected inference runtime."""
+    """Connect to a Reef coordinator in Ray and pair it with a separately selected inference runtime.
+
+    Values: the ``RayRuntimeConfig`` values, where also ``inference_runtime`` is
+    a non-empty runtime kind or factory reference, and
+    ``inference_runtime_options`` maps option names of that runtime to their
+    values. No option name is one that the coordinator sets itself
+    (``RESERVED_INFERENCE_OPTIONS``). ``CoordinatorRuntimeFactory`` passes the
+    options, the connection settings and the coordinator client to the
+    selected runtime's factory, which validates the options.
+    """
 
     inference_runtime: str = config_option(
         "", help="Independently selected inference runtime kind or factory reference."
@@ -207,6 +218,9 @@ class CoordinatorRuntimeConfig(RayRuntimeConfig):
         super().__post_init__()
         if not self.inference_runtime:
             raise ValueError("runtime.inference_runtime must name the selected inference implementation")
+        reserved = sorted(set(self.inference_runtime_options) & RESERVED_INFERENCE_OPTIONS)
+        if reserved:
+            raise ValueError(f"runtime.inference_runtime_options cannot set {', '.join(reserved)}")
 
 
 class CoordinatorRuntimeFactory(RuntimeFactory):

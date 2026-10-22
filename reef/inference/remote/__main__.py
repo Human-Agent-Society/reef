@@ -23,6 +23,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "with inference.backend: remote and publishes trained weights to them."
         ),
     )
+    parser.add_argument(
+        "--engine",
+        default="sglang",
+        help="the only inference backend the control plane may start: sglang, vllm or module:factory (default: sglang)",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="bind port (default: 8000)")
     parser.add_argument(
@@ -66,7 +71,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     try:
         server = RemoteInferenceServer(
-            control_token=tokens[0], inference_token=tokens[1], work_dir=arguments.work_dir.resolve()
+            engine=arguments.engine,
+            control_token=tokens[0],
+            inference_token=tokens[1],
+            work_dir=arguments.work_dir.resolve(),
         )
         web.run_app(server.application(), host=arguments.host, port=arguments.port, print=None)
     finally:

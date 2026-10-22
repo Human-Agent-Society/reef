@@ -379,12 +379,15 @@ def test_tinker_trains_behind_themodel_driver_with_a_remote_engine(tmp_path, mon
     component_log = tmp_path / "component.log"
     component_env = {key: value for key, value in os.environ.items() if not key.startswith(("REEF_", "RAY_"))}
     component_env.update(tokens, PYTHONPATH=os.pathsep.join([str(REPO_ROOT), component_env.get("PYTHONPATH", "")]))
+    engine = "tests.support._stub_engine:create_inference"
     with component_log.open("w") as log:
         component = subprocess.Popen(
             [
                 sys.executable,
                 "-m",
                 "reef.inference.remote",
+                "--engine",
+                engine,
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -415,7 +418,6 @@ def test_tinker_trains_behind_themodel_driver_with_a_remote_engine(tmp_path, mon
 
         model_dir = tmp_path / "model"
         model_dir.mkdir()
-        engine = "tests.support._stub_engine:create_inference"
         inference = {
             "model-path": MODEL if REAL else str(model_dir),
             "backend": "remote",
