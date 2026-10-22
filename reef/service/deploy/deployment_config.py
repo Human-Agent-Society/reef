@@ -103,9 +103,11 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "evaluation",
         "pipeline",
         "generator",
+        "task_import",
         "observability",
     }
-    extra = set(pending) - known_sections
+    # A section name, like a field name, can use a hyphen for an underscore.
+    extra = {section.replace("-", "_") for section in pending} - known_sections
     if extra:
         raise DeployConfigError(f"unknown config sections: {', '.join(sorted(extra))}; {LAYOUT_HINT}")
     resolved: dict[str, Any] = {"reef": {"recipe": "recipe", "host": "127.0.0.1"}, "run_dir": ".reef/run"}
@@ -256,20 +258,6 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             replace(argument, public_path=("recipe", "config", argument.name))
             for argument in config_arguments(recipe_type, prefix=prefix)
         )
-        if issubclass(recipe_type, WeightTrainingRecipe):
-            # The legacy service contract projects this control into artifact
-            # settings rather than the recipe's data fields; keep its default there.
-            arguments.append(
-                ConfigArgument(
-                    "checkpoint_every_n_versions",
-                    (*prefix, "checkpoint_every_n_versions"),
-                    "int",
-                    True,
-                    None,
-                    "Artifact checkpoint interval in published versions.",
-                    public_path=("recipe", "config", "checkpoint_every_n_versions"),
-                )
-            )
         arguments.extend(
             ConfigArgument(
                 section,

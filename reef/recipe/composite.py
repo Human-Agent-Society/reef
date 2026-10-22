@@ -42,18 +42,15 @@ from reef.core.reports import ReportBase, ReportValidationError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.storage.tasks import SplitSettings, TaskStorage, TaskStore
+from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
 
-#: The checkpoint cadence key a composite refuses: every one of its steps checkpoints.
-CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
 #: The sections a component keeps under its own ``config``; a file keeps them at its top level.
@@ -108,14 +105,20 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 
 
 class ComponentTaskStorage(TaskStorage):
-    """Opens the task stores of one component under ``<component>/<name>``, so components never share a store."""
+    """Opens the task stores of one component under ``<component>/<name>``, so components never share a store.
+
+    The one exception is the scenario's ``imported-tasks`` store, which every component reads by its own name.
+    """
 
     def __init__(self, storage: TaskStorage, component: str) -> None:
         self.storage = storage
         self.component = component
 
-    def open(self, name: str, *, split: SplitSettings) -> TaskStore:
-        return self.storage.open(f"{self.component}/{name}", split=split)
+    def open(self, name: str) -> TaskStore:
+        # The scenario's imported tasks are the one store that the components share; only the service writes it.
+        if name == IMPORTED_TASK_STORE:
+            return self.storage.open(name)
+        return self.storage.open(f"{self.component}/{name}")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -127,8 +130,7 @@ class CompositeRecipe(Recipe):
     ``RESERVED_COMPONENT_NAMES``. Each component is a ``Recipe`` and not a
     ``CompositeRecipe``, and has the composite's ``training_mode``. At most
     one component is a ``WeightTrainingRecipe``. ``__post_init__`` checks
-    these conditions, stores ``components`` as a read-only mapping, and sets
-    ``checkpoint_strategy`` to ``EveryNVersions(1)``.
+    these conditions and stores ``components`` as a read-only mapping.
     Purpose: ``build_recipe`` makes it from a deployment config that lists
     the components under ``components``.
     ``ScenarioFactory`` builds one trainer per component and one release
@@ -167,8 +169,6 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
         # Read-only, so the checked conditions and the properties read from the components hold after construction.
         object.__setattr__(self, "components", MappingProxyType(dict(self.components)))
-        # A composed release names every component, so every step checkpoints.
-        object.__setattr__(self, "checkpoint_strategy", EveryNVersions(1))
 
     @classmethod
     def from_resolved_config(
@@ -183,9 +183,6 @@ class CompositeRecipe(Recipe):
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
-        # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
-        # A component's config refuses the key as an unknown field.
-        cls.refuse_checkpoint_cadence(config, "recipe")
         for component in raw:
             if component in RESERVED_COMPONENT_NAMES:
                 raise RecipeConfigError(
@@ -246,25 +243,6 @@ class CompositeRecipe(Recipe):
                 f"components {[name for name, _ in selected]} all train weights; a release loads one component"
             )
         return selected[0][1] if selected else None
-
-    @staticmethod
-    def refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
-        """Refuse the cadence key in every spelling it is written in: flat, under artifact, hyphenated."""
-        artifact = config.get("artifact", {})
-        candidates = [
-            (section, key)
-            for key in config
-            if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
-        ]
-        if isinstance(artifact, Mapping):
-            candidates.extend(
-                (f"{section}.artifact", key)
-                for key in artifact
-                if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
-            )
-        if candidates:
-            where, key = candidates[0]
-            raise RecipeConfigError(f"{where}.{key} has no effect: every step of a composite recipe checkpoints")
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
         # Each component's evaluation runs a candidate of that component alone: the endpoint names it.

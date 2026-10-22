@@ -146,10 +146,9 @@ publishes it to the engine, and records a new version.
 
 You are training when a new ``training`` entry appears, which happens once
 ``batch_size`` eligible records have arrived. Later requests use the current
-version without a restart. Keep ``checkpoint_every_n_versions`` at its default
-of ``1`` unless you want versions without durable checkpoints. Between
-checkpoints, weight bytes live only in engine memory and a restart falls back to
-the last checkpoint.
+version without a restart. Each saved checkpoint becomes a durable version.
+With a ``save-interval`` above 1, the versions between two saves live only in
+engine memory, and a restart falls back to the last checkpoint.
 
 A full-weight deployment handles one training scenario for its lifetime. To
 train another, run another stack on different ports.
@@ -195,8 +194,7 @@ What a published adapter contains
 Every accepted update publishes a directory holding the adapter alone, never a
 merged or full-model checkpoint. This is what makes saving every update
 affordable: a rank-32 adapter is a few megabytes where the base model is
-gigabytes. ``checkpoint_every_n_versions`` can therefore stay at 1, and the
-release chain keeps every revision instead of only some of them.
+gigabytes. Thus the release chain can keep every revision.
 
 .. code:: text
 

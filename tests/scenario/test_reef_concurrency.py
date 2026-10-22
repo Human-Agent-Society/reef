@@ -24,7 +24,6 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainStepResult
@@ -61,7 +60,7 @@ class CountingRuntime(StubTrainingRuntime):
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
-            checkpoint_path="/unused",
+            checkpoint_path=None,
             current_runtime_load_id=None,
             metadata={"runtime_load_id": version},
         )
@@ -162,7 +161,6 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
         TestPolicyRecipe(
             **runtime_bindings(runtime),
             batch_size=1,
-            checkpoint_strategy=EveryNVersions(1000),
             max_staleness=pairs_per_thread * thread_count,
         ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
@@ -203,9 +201,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000), max_staleness=4
-        ),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, max_staleness=4),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -237,7 +233,6 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
     initial.mkdir()
     dispatcher = build_default_dispatcher(
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        checkpoint_strategy=EveryNVersions(1),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -273,42 +268,3 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
             break
         node = backend.resolve_release(node.parent_release_id)
     assert nodes == total + 2
-
-
-@pytest.mark.unit
-def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypatch) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = build_default_dispatcher(
-        backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        checkpoint_strategy=EveryNVersions(1000),
-        local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-    scenario = dispatcher.get_or_create_scenario("chat")
-    repository = scenario.repository
-    original_stage = repository.stage
-
-    def stage_and_move_head(*args, **kwargs):
-        staged = original_stage(*args, **kwargs)
-        # A concurrent writer moving the serving head after this commit
-        # observed it: the fenced advance must fail instead of overwriting.
-        intruder = LiveWeightArtifactRef(
-            content_id="live:intruder",
-            release_id="live:other:w9:9",
-            parent_release_id=None,
-            runtime_load_id="w9",
-        )
-        Repository.advance_current(repository, intruder, expected=repository.require_current_artifact())
-        return staged
-
-    monkeypatch.setattr(repository, "stage", stage_and_move_head)
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-
-    with pytest.raises(ArtifactConflict, match="serving head advanced"):
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
-
-    assert scenario.scenario_step == 0
-    assert repository.current_artifact.release_id == "live:other:w9:9"
-    assert list((tmp_path / "staged").rglob("*")) == []

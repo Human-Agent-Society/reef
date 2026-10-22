@@ -59,6 +59,7 @@ from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sandbox.process import EpisodeExecutor, LocalExecutor
+from reef.storage.tasks import TaskStore
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.manifest import FailureManifest, advance
@@ -340,6 +341,11 @@ def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBinding
     )
 
 
+def eval_task_paths(store: TaskStore) -> tuple[str, ...]:
+    """Return the local directory of each task in the eval split of ``store``, in publication order."""
+    return tuple(str(store.path(task.files_digest)) for task in store.tasks(split="eval"))
+
+
 class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
     """Settle one proposal per step through episode pairs.
 
@@ -358,6 +364,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     state's ``entries``, carried by ``initial_state`` and loaded once at
     construction so an invalid seed refuses boot. A recovered state brings
     its own entries and therefore always wins over the seed.
+
+    With ``eval_task_store``, each step evaluates on the eval split of that
+    task store as the step reads it (:func:`eval_task_paths`), and ``tasks``
+    is the split when the backend was built. A step fixes its list, so both
+    sides of a comparison play the same tasks.
     """
 
     def __init__(
@@ -393,6 +404,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_executor: EpisodeExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
+        eval_task_store: TaskStore | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -407,6 +419,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._descriptor = descriptor
         self._propose = propose
         self._tasks = tasks
+        self._eval_task_store = eval_task_store
         self._models = models
         self._model_resolver = model_resolver
         if (
@@ -721,6 +734,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
         # Failing traces become permanent evaluation tasks; off by default. The method picks which, Reef screens them.
         # An instruction step consumes the failures it carries, so it promotes them too or they are lost.
+        tasks = self._tasks if self._eval_task_store is None else eval_task_paths(self._eval_task_store)
         if self._promote_failures:
             if self._promote_task is None:
                 candidates: Sequence[str] = _default_promote(samples)
@@ -730,7 +744,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             promoted = _admit_promoted(
                 promoted,
                 candidates,
-                frozenset(self._tasks),
+                frozenset(tasks),
                 self._max_promoted_tasks,
                 per_client=self._max_promoted_per_client,
                 clients=clients,
@@ -743,10 +757,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["screened_tasks"] = sum(
                 1 for prompt in candidates if isinstance(prompt, str) and _screened(prompt)
             )
-        evaluation_tasks = (*self._tasks, *(task for task in promoted if task not in frozenset(self._tasks)))
-        if self._promote_failures:
+        evaluation_tasks = (*tasks, *(task for task in promoted if task not in frozenset(tasks)))
+        if self._promote_failures or self._eval_task_store is not None:
             metrics["evaluation_task_count"] = len(evaluation_tasks)
-            metrics["promoted_tasks"] = len(evaluation_tasks) - len(self._tasks)
+        if self._promote_failures:
+            metrics["promoted_tasks"] = len(evaluation_tasks) - len(tasks)
         step_dir = self._claim_step_dir(steps)
         self._current_step_record = step_dir
         if step_dir is not None:

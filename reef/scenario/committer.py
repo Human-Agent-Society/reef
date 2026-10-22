@@ -3,8 +3,7 @@
 Artifact storage and head movement live in ``reef.artifact``; the durable
 record values and checkpoint metadata formats live in ``commits``. This
 module owns the scenario-specific ordering across trainer state, store
-settlement, checkpoint policy, surfaces, and artifact
-operations.
+settlement, surfaces, and artifact operations.
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, Releas
 from reef.core.errors import ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
@@ -65,7 +63,6 @@ class ScenarioCommitter:
         name: str,
         binding: ScenarioBinding,
         artifacts: ArtifactReleaseChain,
-        checkpoint_strategy: CheckpointStrategy,
         trainers: tuple[ComponentTrainer, ...],
         scenario_step: int = 0,
         store: ScenarioStore,
@@ -81,7 +78,6 @@ class ScenarioCommitter:
         self._name = name
         self._binding = binding
         self._artifacts = artifacts
-        self._checkpoint_strategy = checkpoint_strategy
         self.trainers = trainers
         # The first trainer answers commits made on the scenario's behalf, such as rollback.
         self._trainer = trainers[0].trainer
@@ -505,9 +501,7 @@ class ScenarioCommitter:
             prepared = replace(
                 trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
-            self.commit_saved_artifact(
-                result, publication, prepared, trainer, component, checkpointed=self._should_checkpoint(result)
-            )
+            self.commit_saved_artifact(result, publication, prepared, trainer, component)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
 
@@ -549,31 +543,21 @@ class ScenarioCommitter:
                     self.commit_without_artifact(prepared, trainer, component)
                     return result.state
 
-                # Resolve checkpoint policy once; held artifacts always retain their bytes.
-                checkpointed = (
-                    isinstance(publication, SavedArtifactPublication) and result.pending
-                ) or self._should_checkpoint(result)
                 surface = self._binding.surface
                 if isinstance(publication, DurableWeightsPublication):
-                    if checkpointed:
-                        publication = SavedArtifactPublication(
-                            Artifact.local(
-                                Path(publication.checkpoint_path),
-                                metadata={"runtime_load_id": publication.runtime_load_id},
-                            ),
-                            surface.loader_component,
-                        )
-                    else:
-                        publication = LiveWeightPublication(publication.runtime_load_id)
+                    # Saved weights always become an artifact version; only a job that saved nothing is live.
+                    publication = SavedArtifactPublication(
+                        Artifact.local(
+                            Path(publication.checkpoint_path),
+                            metadata={"runtime_load_id": publication.runtime_load_id},
+                        ),
+                        surface.loader_component,
+                    )
                 if isinstance(publication, LiveWeightPublication):
                     if not surface.single:
                         raise ReefError(
                             f"scenario {self._name!r} serves components {list(surface.names)}: "
                             "live weights cannot be published without a checkpoint"
-                        )
-                    if checkpointed:
-                        raise ReefError(
-                            "checkpoint-selected training results must include the artifact returned by execute_training_job"
                         )
                     if result.pending:
                         raise ReefError(
@@ -581,9 +565,7 @@ class ScenarioCommitter:
                         )
                     self.commit_live_weights(publication, prepared, trainer)
                 else:
-                    self.commit_saved_artifact(
-                        result, publication, prepared, trainer, component, checkpointed=checkpointed
-                    )
+                    self.commit_saved_artifact(result, publication, prepared, trainer, component)
                 return result.state
 
     def prepare_experiment(
@@ -621,9 +603,6 @@ class ScenarioCommitter:
             except RuntimeError:
                 logger.exception("experiment correlation could not annotate the pending result")
         return result
-
-    def _should_checkpoint(self, result: TrainStepResult) -> bool:
-        return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)
 
     def commit_live_weights(
         self,
@@ -665,8 +644,6 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         trainer: Trainer,
         component: str | None,
-        *,
-        checkpointed: bool,
     ) -> None:
         artifacts = self._artifacts
         next_step = self._step + 1
@@ -684,25 +661,18 @@ class ScenarioCommitter:
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
-            if checkpointed:
-                published_ref = artifacts.publish(
-                    local_artifact,
-                    expected_parent=checkpoint,
-                    metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
-                    advance_heads=not pending and not durable,
-                )
-                if not pending:
-                    self._activate(artifacts.resolve(published_ref), source=local_artifact)
-            else:
-                published_ref = local_artifact.ref
-                if not durable:
-                    # Without a durable commit point, reject a changed serving
-                    # head before recording the prepared step.
-                    artifacts.advance(published_ref, expected=head)
+            published_ref = artifacts.publish(
+                local_artifact,
+                expected_parent=checkpoint,
+                metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
+                advance_heads=not pending and not durable,
+            )
+            if not pending:
+                self._activate(artifacts.resolve(published_ref), source=local_artifact)
             record = self._append_commit_record(
                 step=next_step,
                 artifact_ref=published_ref,
-                checkpoint=checkpointed,
+                checkpoint=True,
                 prepared=prepared,
                 pending=pending,
                 component=component,

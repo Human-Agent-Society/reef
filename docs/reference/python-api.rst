@@ -187,9 +187,6 @@ Common members
 | ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
-|                                                   |                             | ``EveryNVersions(1)``          |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
 | ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
 |                                                   |                             | ``Trainer.build``              |
@@ -446,8 +443,8 @@ directory preserves SQLite schemas, JSONL format, and scenario filenames.
 The storage service keeps all per-scenario state. This includes the
 ``ScenarioSettings`` of each scenario: the model configuration and the
 selected training mode. The scenario registry uses ``read_settings`` and
-``write_settings``. The per-scenario state also includes the tasks that
-record-to-task stages generate (see `Generated task stores`_). ``archive``
+``write_settings``. The per-scenario state also includes the published
+Harbor tasks of its task stores (see `Task stores`_). ``archive``
 retires the settings and tasks with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
@@ -526,8 +523,8 @@ The session contract is:
      - Whether committed history survives session/process restart. A durable
        store requires a repository backend supporting staged releases.
    * - ``tasks``
-     - The ``TaskStorage`` that opens the generated task stores of the
-       scenario (see `Generated task stores`_). The stores close with the
+     - The ``TaskStorage`` that opens the task stores of the
+       scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order, including rollback and
@@ -581,28 +578,31 @@ closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
 
-Generated task stores
-~~~~~~~~~~~~~~~~~~~~~
+Task stores
+~~~~~~~~~~~
 
-A record-to-task stage that generates tasks saves them in a ``TaskStore``
-before any rollout. Thus generation and rollout can recover independently
-after a restart. The contract and its values are in ``reef.storage.tasks``.
+A ``TaskStore`` holds published Harbor tasks, each in the ``train`` or
+``eval`` split. A record-to-task stage that generates tasks saves them in a
+task store before any rollout. Thus generation and rollout can recover
+independently after a restart. A caller can also add a task directory with
+``add_task``. The contract and its values are in ``reef.storage.tasks``.
 
-To open a store, call
-``task_storage.open(name, split=SplitSettings(eval_fraction=..., seed=...))``.
-Each record-to-task stage uses its own ``name``. The first open saves the
-split settings. A later open with different settings raises
-``TaskStoreError``.
+To open a store, call ``task_storage.open(name)``. Each record-to-task stage
+uses its own ``name``.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
 The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
 which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
 give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
-components never share a store.
+components never share a store, except ``imported-tasks``
+(``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
+which every component opens by that name and only the service writes.
 
 A store holds generations. A generation holds its source record ids and its
-candidates. Each ``TaskCandidate`` holds a ``GeneratedTask`` and its outcome:
+candidates. ``save_candidates`` saves a copy of each candidate task directory
+in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
+``files_digest`` of its directory, and its outcome:
 
 - A published candidate has a ``split``, ``train`` or ``eval``. The stage
   chooses the split, and the store keeps it.
@@ -610,11 +610,12 @@ candidates. Each ``TaskCandidate`` holds a ``GeneratedTask`` and its outcome:
 - A pending candidate has neither. After a restart, the stage validates the
   candidates in ``GenerationState.pending_indices``.
 
-A published task is a Harbor task directory. ``publish_task`` saves the
-directory in the task file store first, and then it records the publication
-in the database. The database keeps the digest of the files
-(``StoredTask.files_digest``). The task file store accepts text and binary
-files. A ``GeneratedTask`` holds text files only.
+A task is a Harbor task directory. The database keeps the state of the store
+and the digest of each task directory. The task file store keeps the files,
+text or binary, under that digest. ``publish_task`` records the publication of
+a saved candidate. ``add_task`` saves a task directory, such as one with
+images, and then records its publication. A ``StoredTask`` holds the task
+``name``, its ``split`` and its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -625,12 +626,17 @@ files. A ``GeneratedTask`` holds text files only.
    * - ``begin_generation(generation=..., source_record_ids=...)``
      - Create the checkpoint of a generation. A retry with the same source
        record ids returns the checkpoint.
-   * - ``save_candidates(generation=..., candidates=...)``
-     - Save the candidates once, before validation or play.
+   * - ``save_candidates(generation=..., directories=...)``
+     - Save a copy of each candidate task directory once, before validation or
+       play. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
        same split. It then returns the published task.
+   * - ``add_task(directory=..., split=...)``
+     - Publish a Harbor task directory under its directory name, and return
+       its ``StoredTask``. The caller checks that the directory is a Harbor
+       task. A retry with the same files and split returns the published task.
    * - ``reject_task(generation=..., index=..., reason=...)``
      - Save the rejection of one candidate.
    * - ``complete_generation(generation=...)``
@@ -638,11 +644,12 @@ files. A ``GeneratedTask`` holds text files only.
    * - ``generation(generation)``, ``generations()``
      - Return one checkpoint or all checkpoints.
    * - ``tasks(split=None)``
-     - Return the published tasks in generation and candidate order. Give a
-       ``split`` to return only the tasks of that split.
-   * - ``path(task)``
-     - Return the local Harbor task directory of a published task, for
-       example for ``TaskPlayer.play``. Do not change it.
+     - Return the published tasks in publication order. Give a ``split`` to
+       return only the tasks of that split.
+   * - ``path(files_digest)``
+     - Return the local task directory of a candidate or a published task,
+       for example for ``read_harbor_task`` or ``TaskPlayer.play``. Do not
+       change it.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -1104,17 +1111,16 @@ Task generation
 
 .. code:: python
 
-   from reef.core.tasks import (
-       GeneratedTask, HarborTask, PlayArm, TaskGenerationRequest, TaskGenerator,
-       TaskPlayResult, TaskValidationResult,
-   )
+   from reef.core.tasks import HarborTask
+   from reef.recipe.generated_tasks import TaskGenerator, TaskPlayResult, TaskValidationResult
+   from reef.record2task.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
 ``pipeline.record2task.config.generator``. Subclasses implement:
 
 - the class method ``from_config(config, *, scenario, environ)``, which returns
   the generator of one scenario;
-- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``;
+- ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
 ``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
@@ -1137,14 +1143,8 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``GeneratedTask(task, measurement_arms=())`` holds one task and the
-measurement arms the generator wants played on it. ``PlayArm(name, count,
-extra_instruction_files=())`` names an arm, its number of plays, and the task
-files shown after the instruction. Arm names are unique for each task.
-
-``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="")``
-holds the rewards of the training plays and, by arm name, of each measurement
-arm. Each tuple holds only the episodes that ran. ``is_played`` is true when
+``TaskPlayResult(task, training_rewards=(), error="", split="train")`` holds
+the rewards of the training plays, only of the episodes that ran. ``is_played`` is true when
 ``error`` is empty. A task that was not played has no rewards.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
@@ -1154,9 +1154,9 @@ exceptions instead.
 Migration: ``reef.train.processors.TaskGenerationProcessor`` is removed. Move
 its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 
-- ``generate`` returns a tuple of ``GeneratedTask`` values instead of one task.
+- ``generate`` returns a tuple of ``HarborTask`` values instead of one task.
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
-- Import ``TaskValidationResult`` from ``reef.core.tasks``.
+- Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
 Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
 not needed.

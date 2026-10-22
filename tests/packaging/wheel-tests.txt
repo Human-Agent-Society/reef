@@ -80,7 +80,6 @@ tests/reef_recipe/test_composite_recipe.py
 tests/reef_recipe/test_generated_tasks.py
 tests/reef_recipe/test_recipe_config_fields.py
 tests/reef_recipe/test_recipe_runtime_model.py
-tests/reef_recipe/test_reef_checkpointing.py
 tests/reef_recipe/test_reef_interface_inheritance.py
 tests/reef_recipe/test_reef_recipes.py
 tests/reef_recipe/test_reefine_agent.py

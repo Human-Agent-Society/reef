@@ -648,7 +648,7 @@ def create_training_backend(
         critic_steps_per_actor=args.critic_steps_per_actor,
         critic_only_steps=args.num_critic_only_steps,
         critic_save_interval=args.critic_save_interval,
-        checkpoint_interval=args.reef_checkpoint_interval,
+        checkpoint_interval=args.save_interval,
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),

@@ -166,15 +166,11 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
         dispatcher.close()
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(
-    publication_case, monkeypatch, checkpoint
-):
+def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
     dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records))
     try:
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
-        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
         _report_once(scenario, "lost-journal-ack", "1")
         result = scenario.prepare_training_step()
         assert isinstance(scenario.store, CommitHistoryScenarioStore)

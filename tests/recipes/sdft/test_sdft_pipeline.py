@@ -24,7 +24,6 @@ from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
@@ -220,7 +219,6 @@ def test_sdft_recipe_resolves_by_dotted_reference(tokenizer: CountingTokenizer) 
     assert isinstance(recipe, SDFTRecipe)
     assert recipe.name == "sdft"
     assert recipe.report_type is TeacherContextReport
-    assert recipe.checkpoint_strategy == EveryNVersions(1)
     spec = SDFTRecipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("sdft", "sdft")
     assert spec.scheduling == StepScheduling(unit="sample")
@@ -247,11 +245,9 @@ def test_sdft_recipe_hands_each_stage_its_pipeline_config(tokenizer: CountingTok
                 },
                 "task2batch": {"config": {"batch_size": 4}},
             },
-            "artifact": {"checkpoint_every_n_versions": 4},
         }
     )
 
-    assert recipe.checkpoint_strategy == EveryNVersions(4)
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2task, SDFTTasks)
     assert pipeline.task2batch.batch_size == 4

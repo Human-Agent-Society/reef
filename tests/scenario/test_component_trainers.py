@@ -41,7 +41,6 @@ from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.record2record import (
     GroupDecision,
     JudgingRecord2Record,
@@ -797,17 +796,6 @@ def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(
         dispatcher.delete_scenario("again")
     marker["commit_acknowledged"] = True
     assert dispatcher.delete_scenario("again")["scenario"] == "again"
-
-
-@pytest.mark.unit
-def test_a_scenario_of_several_components_refuses_a_checkpoint_interval_above_one(
-    tmp_path: Path, dispatchers: _Dispatchers
-) -> None:
-    """A step that published no checkpoint would see its component dropped from the next release."""
-    recipe = _TwoTrainerRecipe(backends=_local_pair(tmp_path), checkpoint_strategy=EveryNVersions(2))
-    dispatcher, _ = dispatchers.open(recipe=recipe)
-    with pytest.raises(ReefError, match="checkpoint interval must be 1"):
-        dispatcher.get_or_create_scenario("agent")
 
 
 @dataclass(frozen=True)

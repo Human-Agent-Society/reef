@@ -32,7 +32,6 @@ from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.commit_log import RECORD_KIND, CommitHistoryScenarioStore, CommitLog, CommitLogError
@@ -370,16 +369,20 @@ class RecordingRuntime(StubTrainingRuntime):
     def train_candidate(self, payload):
         self.trained_batches.append(payload["sources"])
         runtime_load_id = f"w{len(self.trained_batches)}"
-        checkpoint = self._checkpoint_dir / str(payload["scenario_step"]) if self._checkpoint_dir else "/unused"
-        if self._checkpoint_dir:
+        if self._checkpoint_dir is None:
+            # Without a checkpoint directory, the runtime saves nothing and publishes live weights.
+            checkpoint_path = None
+        else:
+            checkpoint = self._checkpoint_dir / str(payload["scenario_step"])
             checkpoint.mkdir(parents=True)
             (checkpoint / "model.txt").write_text(runtime_load_id)
+            checkpoint_path = str(checkpoint)
         job_id = f"job-{payload['scenario_step']}"
         self._candidate_versions[job_id] = runtime_load_id
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
-            checkpoint_path=str(checkpoint),
+            checkpoint_path=checkpoint_path,
             current_runtime_load_id=self._served_version,
         )
 
@@ -423,15 +426,10 @@ def build_training_dispatcher(
     tmp_path,
     backend_factory,
     *,
-    checkpoint_strategy: CheckpointStrategy | None = None,
     agent_record_dir=None,
 ):
     return Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(runtime),
-            batch_size=1,
-            checkpoint_strategy=(checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1000)),
-        ),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
@@ -647,13 +645,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    recipe = lambda runtime: (  # noqa: E731
-        ProtectAllPolicyRecipe(
-            **runtime_bindings(runtime),
-            batch_size=1,
-            checkpoint_strategy=EveryNVersions(1000),
-        )
-    )
+    recipe = lambda runtime: (ProtectAllPolicyRecipe(**runtime_bindings(runtime), batch_size=1))  # noqa: E731
 
     def build(runtime):
         return Dispatcher(
@@ -784,7 +776,6 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
         runtime,
         tmp_path,
         backend_factory,
-        checkpoint_strategy=EveryNVersions(1),
         agent_record_dir=agent_record_dir,
     )
     first.accept_record(sft_inference("i1"))
@@ -835,7 +826,6 @@ def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
         runtime,
         tmp_path,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        checkpoint_strategy=EveryNVersions(1),
         agent_record_dir=tmp_path / "agent-record",
     )
     dispatcher.accept_record(sft_inference("i1"))
@@ -942,7 +932,6 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
         runtime,
         tmp_path,
         backend_factory,
-        checkpoint_strategy=EveryNVersions(1),
     )
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
@@ -953,7 +942,6 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
         RecordingRuntime(),
         tmp_path,
         backend_factory,
-        checkpoint_strategy=EveryNVersions(1),
     )
     recovered = second.get_or_create_scenario("math")
 

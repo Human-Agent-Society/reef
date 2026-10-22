@@ -25,7 +25,6 @@ from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.training_loop import DispatchedTrainingLoop, in_flight_job_marker
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
@@ -236,7 +235,6 @@ class Dispatcher(ScenarioLifecycle):
         - Its storage is durable.
         - No request runs on it.
         - No trainer has records that it would still train on.
-        - No release exists only in memory.
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
@@ -245,7 +243,7 @@ class Dispatcher(ScenarioLifecycle):
         """
         if current.training_runtime is not None or not current.store.durable:
             return False
-        if current.operations.active_count() > 0 or current.repository.holds_local_releases:
+        if current.operations.active_count() > 0:
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
@@ -571,7 +569,6 @@ class Dispatcher(ScenarioLifecycle):
 def build_default_dispatcher(
     *,
     backend_factory: RepositoryBackendFactory | None = None,
-    checkpoint_strategy: CheckpointStrategy | None = None,
     local_artifact_dir: Path | None = None,
     scenario_storage: ScenarioStorage,
 ) -> Dispatcher:
@@ -589,11 +586,8 @@ def build_default_dispatcher(
         initial = root / "initial"
         initial.mkdir()
         backend_factory = InMemoryRepositoryBackend.factory(initial, root=root / "repository")
-    recipe = Recipe(
-        checkpoint_strategy=checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1),
-    )
     return Dispatcher(
-        recipe,
+        Recipe(),
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         scenario_storage=scenario_storage,

@@ -1,13 +1,19 @@
-"""Storage contracts and values for the tasks that a record-to-task stage generates.
+"""Storage contracts and values for the published Harbor tasks of a scenario.
 
-A stage saves each generation job in a task store before any rollout. A
-generation holds its source record ids and its candidate tasks. Each candidate
-then gets one outcome: the stage publishes it to the train or eval split, or
-rejects it with a reason. The stage chooses the split. The store keeps it and
-refuses writes that conflict with it.
+A task store holds published tasks, each in the train or eval split. A task
+gets into a store in one of two ways:
 
-A published task is a Harbor task directory. Its files can be text or binary,
-so they are not in the database. The database keeps the state of the store and
+- A record-to-task stage generates it. The stage saves each generation job in
+  the store before any rollout. A generation holds its source record ids and
+  the directories of its candidate tasks. Each candidate then gets one
+  outcome: the stage publishes it to a split, or rejects it with a reason.
+- A caller adds a task directory to a split (``TaskStore.add_task``).
+
+The caller chooses the split. The store keeps it and refuses writes that
+conflict with it.
+
+A task is a Harbor task directory. Its files can be text or binary, so they
+are not in the database. The database keeps the state of the store and
 the digest of each task directory. A ``TaskFileStore`` keeps the files under
 that digest. The same files always give the same digest, so a repeated save
 changes nothing. A deployment selects the file store in
@@ -36,7 +42,10 @@ from typing import Any, Literal, Self
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
-from reef.core.tasks import GeneratedTask
+
+#: The task store of a scenario that holds the tasks a deployment imports. Only the service writes it, and
+#: every component of the scenario reads it.
+IMPORTED_TASK_STORE = "imported-tasks"
 
 SplitName = Literal["train", "eval"]
 SPLIT_NAMES: tuple[SplitName, ...] = ("train", "eval")
@@ -51,34 +60,29 @@ class TaskConflict(TaskStoreError):
 
 
 @dataclass(frozen=True)
-class SplitSettings:
-    """The split settings of a task store. They do not change for the life of the store."""
-
-    eval_fraction: float
-    seed: int
-
-    def __post_init__(self) -> None:
-        fraction = self.eval_fraction
-        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 <= fraction <= 1:
-            raise ValueError("eval_fraction must be a number between 0 and 1")
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise ValueError("seed must be an integer")
-        object.__setattr__(self, "eval_fraction", float(fraction))
-
-
-@dataclass(frozen=True)
 class TaskCandidate:
-    """One candidate of a generation and its outcome.
+    """One candidate task of a generation, and its outcome.
 
-    A published candidate has a ``split``. A rejected candidate has an
-    ``error``. A pending candidate has neither.
+    Values: ``(name, files_digest, split, error)`` is a candidate if and only if
+    ``name`` is a non-empty string, ``files_digest`` is the digest of the
+    candidate's task directory in the task file store, ``split`` is ``train``,
+    ``eval`` or ``None``, and ``split`` and ``error`` are not both set. A
+    published candidate has a ``split``. A rejected candidate has a non-empty
+    ``error``, the reason. A pending candidate has neither.
+
+    Purpose: ``TaskStore`` makes it in ``GenerationState.candidates``. The
+    record-to-task stage reads the task directory (``TaskStore.path``) and the
+    outcome, to validate, publish or play the candidate, also after a restart.
     """
 
-    generated: GeneratedTask
+    name: str
+    files_digest: str
     split: SplitName | None = None
     error: str = ""
 
     def __post_init__(self) -> None:
+        if not self.name or not self.files_digest:
+            raise ValueError("a candidate needs a name and a files digest")
         if self.split is not None and self.split not in SPLIT_NAMES:
             raise ValueError("split must be 'train', 'eval' or None")
         if self.split is not None and self.error:
@@ -125,19 +129,35 @@ class GenerationState:
 class StoredTask:
     """A published task and its split.
 
-    ``generation`` and ``index`` identify the candidate that published the task
-    first. ``files_digest`` identifies its directory in the task file store.
+    Values: ``(name, split, files_digest)`` is a stored task if and only if
+    ``name`` is a non-empty string, ``split`` is ``train`` or ``eval``, and
+    ``files_digest`` is the digest of the task directory in the task file
+    store. The directory has the name ``name``.
+
+    Purpose: ``TaskStore`` makes it. The caller reads ``split``, and gives
+    ``files_digest`` to ``TaskStore.path`` to get the task directory.
     """
 
-    generated: GeneratedTask
+    name: str
     split: SplitName
-    generation: int
-    index: int
     files_digest: str
+
+    def __post_init__(self) -> None:
+        if not self.name or self.split not in SPLIT_NAMES or not self.files_digest:
+            raise ValueError("a stored task needs a name, the split 'train' or 'eval', and a files digest")
 
 
 class TaskStore(ABC):
-    """The generations and published tasks of one record-to-task stage.
+    """The generations and published tasks of one named store of a scenario.
+
+    Values: the state of a store is a finite sequence of generations in
+    increasing ``generation``, and a finite sequence of published tasks in
+    publication order. No two published tasks have the
+    same name. A published task does not change.
+
+    Purpose: a record-to-task stage writes its generations and publishes their
+    candidates. A caller adds task directories (``add_task``). Readers take the
+    published tasks of a split (``tasks``) and their directories (``path``).
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
@@ -152,17 +172,19 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def save_candidates(self, *, generation: int, candidates: tuple[GeneratedTask, ...]) -> GenerationState:
-        """Save the candidates of a generation before validation or play.
+    def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
+        """Save a copy of each candidate task directory of a generation, in order, before validation or play.
 
-        Raises ``TaskStoreError`` if the generation does not exist or has other candidates.
+        The name of a candidate is the name of its directory. Raises
+        ``TaskStoreError`` if the generation does not exist or has other
+        candidates, or if a directory holds an entry that is not a file or a
+        directory.
         """
 
     @abstractmethod
     def publish_task(self, *, generation: int, index: int, split: SplitName) -> StoredTask:
         """Publish one candidate to ``split`` and return the published task.
 
-        The method saves the task files before it records the publication.
         Each task name is published once. A later candidate with the same
         files must give the same split. The method then returns the published
         task.
@@ -170,6 +192,20 @@ class TaskStore(ABC):
         Raises ``TaskConflict`` if the name is published with other files or
         in the other split. Raises ``TaskStoreError`` if the candidate does not
         exist or is rejected.
+        """
+
+    @abstractmethod
+    def add_task(self, *, directory: Path, split: SplitName) -> StoredTask:
+        """Publish the task directory ``directory`` to ``split`` under the name ``directory.name``.
+
+        The method saves the task files before it records the publication, and
+        returns the published task. If the name is published with the same
+        files and split, the method returns that task. The caller checks that
+        the directory is a Harbor task.
+
+        Raises ``TaskConflict`` if the name is published with other files or
+        in the other split. Raises ``TaskStoreError`` if the directory holds an
+        entry that is not a file or a directory.
         """
 
     @abstractmethod
@@ -193,23 +229,23 @@ class TaskStore(ABC):
 
     @abstractmethod
     def tasks(self, *, split: SplitName | None = None) -> tuple[StoredTask, ...]:
-        """Return the published tasks in generation and candidate order, optionally of one split."""
+        """Return the published tasks in publication order, optionally of one split."""
 
     @abstractmethod
-    def path(self, task: StoredTask) -> Path:
-        """Return the local Harbor task directory of a published task. The caller must not change it."""
+    def path(self, files_digest: str) -> Path:
+        """Return the local task directory of a candidate or a published task, by its ``files_digest``.
+
+        The caller must not change the directory. Raises ``TaskStoreError`` if
+        the scenario holds no files of ``files_digest``.
+        """
 
 
 class TaskStorage(ABC):
-    """Opens the task stores of one scenario. Each store has a name and its own split settings."""
+    """Opens the task stores of one scenario by name."""
 
     @abstractmethod
-    def open(self, name: str, *, split: SplitSettings) -> TaskStore:
-        """Open the task store ``name``.
-
-        The first open saves ``split``. Raises ``TaskStoreError`` if a later
-        open gives different split settings.
-        """
+    def open(self, name: str) -> TaskStore:
+        """Open the task store ``name``. A store that holds nothing yet is empty."""
 
 
 class TaskFileStore(Plugin, ABC):
@@ -365,10 +401,10 @@ def sync_directory(path: Path) -> None:
 
 
 __all__ = [
+    "IMPORTED_TASK_STORE",
     "GenerationState",
     "LocalTaskFileStore",
     "SplitName",
-    "SplitSettings",
     "StoredTask",
     "TaskCandidate",
     "TaskConflict",

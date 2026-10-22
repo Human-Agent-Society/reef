@@ -70,16 +70,13 @@ def validate_bridge_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> N
             raise ValueError(
                 "--keep-lora-base-resident applies to colocated training; without --colocate nothing is released"
             )
-    save = args.save
-    if not isinstance(save, str) or not save.strip():
-        raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
-    if args.reef_checkpoint_interval > 1:
+    if args.save_interval > 1:
         # --release-train loads the workers from --save before each job. Thus the workers lose the jobs without a checkpoint.
         if args.release_train:
-            raise ValueError("--reef-checkpoint-interval above 1 cannot run with --release-train")
+            raise ValueError("--save-interval above 1 cannot run with --release-train")
         # LoRA starts each scenario again from its last saved adapter. Thus LoRA needs a save after each job.
         if args.megatron_lora_rank > 0:
-            raise ValueError("--reef-checkpoint-interval above 1 requires full-weight training, not LoRA")
+            raise ValueError("--save-interval above 1 requires full-weight training, not LoRA")
 
 
 def configure_megatron_runtime(args: SlimeArguments) -> None:
@@ -226,7 +223,7 @@ def clear_unsaved_marker(
 ) -> dict[str, Any] | None:
     """Delete the marker if it names a job that saved no checkpoint. Return the marker that stays.
 
-    With ``--reef-checkpoint-interval`` above 1, a job between two saves
+    With ``--save-interval`` above 1, a job between two saves
     keeps no checkpoint. Its marker, or the copy of its marker in a
     ``RUNNING`` marker, has a null ``checkpoint_path``. The workers load the
     last saved rollout ``T``.

@@ -156,7 +156,6 @@ def test_service_config_rejects_settings_no_config_field_consumes() -> None:
         "reef.strict",
         "reef.label",
         "reef.max_staleness",
-        "reef.checkpoint_every_n_versions",
     ):
         assert known in message
 

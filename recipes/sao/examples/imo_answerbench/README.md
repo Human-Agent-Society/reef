@@ -435,7 +435,7 @@ We ran two SAO seeds and two GRPO(+DIS) runs of one seed on the mid-pass pool. T
 
 The GRPO(+DIS) collapse belongs to this setting; the proposed mechanism remains a hypothesis. The paper’s GRPO(+DIS) stays stable and finishes four IMO points behind SAO. Its vanilla GRPO collapses around step 160.
 
-Three of four runs ended in engine watchdog kills. Two followed publication pauses exceeding the SGLang scheduler’s 300-second watchdog; seed 1 failed after a weight update at step 61, with cause unresolved. Checkpoints use shared storage with a retention cap. The stack files now set `checkpoint-every-n-versions`, `save-interval`, and `critic-save-interval` very large, disabling periodic publication and Megatron/critic saves. The weight-update path in this configuration has not been hardened.
+Three of four runs ended in engine watchdog kills. Two followed publication pauses exceeding the SGLang scheduler’s 300-second watchdog; seed 1 failed after a weight update at step 61, with cause unresolved. Checkpoints use shared storage with a retention cap. `serve-30b-multi.yaml` now sets `save-interval` and `critic-save-interval` very large. This disables the actor and critic saves, and thus periodic publication. The weight-update path in this configuration has not been hardened.
 
 ### Attempts that produced no result
 

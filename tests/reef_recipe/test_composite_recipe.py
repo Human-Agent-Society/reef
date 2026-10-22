@@ -25,7 +25,6 @@ from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
@@ -163,7 +162,6 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
         "harness/AGENTS.md": "seed",
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
     }
-    assert recipe.checkpoint_strategy == EveryNVersions(1)
     assert recipe.report_type is None
     # No weight-training component: a bootstrap model snapshot would sit at the release root.
     assert recipe.bootstrap_artifact_component() is None
@@ -405,50 +403,6 @@ def test_composite_recipe_reads_components_from_the_file_layout() -> None:
     own_runtime = recipe_config_from_file_layout(file_layout({**harness, "runtime": {"type": "upstream"}}))
     with pytest.raises(RecipeConfigError, match=r"components\.harness\.runtime is not accepted"):
         build_recipe(own_runtime["implementation"], {}, config=own_runtime)
-
-
-@pytest.mark.unit
-def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
-    components = {
-        "harness": {"implementation": "tests.reef_recipe.test_composite_recipe:_TreeRecipe"},
-        "config": {"implementation": "tests.reef_recipe.test_composite_recipe:_ConfigRecipe"},
-    }
-    base = {"implementation": "reef.recipe.composite:CompositeRecipe", "model": {"path": "served-model"}}
-    with pytest.raises(RecipeConfigError, match=r"artifact\.checkpoint_every_n_versions has no effect"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={**base, "artifact": {"checkpoint_every_n_versions": 5}, "components": components},
-        )
-    with pytest.raises(RecipeConfigError, match=r"does not consume config key\(s\) 'checkpoint_every_n_versions'"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={
-                **base,
-                "components": {
-                    **components,
-                    "harness": {**components["harness"], "config": {"checkpoint-every-n-versions": 5}},
-                },
-            },
-        )
-    # The flat deployment spelling is refused too.
-    with pytest.raises(RecipeConfigError, match=r"recipe\.checkpoint_every_n_versions has no effect"):
-        build_recipe(
-            base["implementation"], {}, config={**base, "checkpoint_every_n_versions": 5, "components": components}
-        )
-    with pytest.raises(RecipeConfigError, match=r"does not consume config key\(s\) 'artifact'"):
-        build_recipe(
-            base["implementation"],
-            {},
-            config={
-                **base,
-                "components": {
-                    **components,
-                    "harness": {**components["harness"], "config": {"artifact": {"checkpoint_every_n_versions": 5}}},
-                },
-            },
-        )
 
 
 @pytest.mark.unit

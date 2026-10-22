@@ -393,13 +393,13 @@ the ``pipeline`` section, and names a ``TaskGenerator`` class in
 depend on the generator's method, so a team can replace the generator without
 a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
-``TaskGenerator`` is in ``reef.core.tasks``. Reef calls its class method
+``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
+``TaskGenerationRequest`` in ``reef.record2task.generator``. Reef calls its class method
 ``from_config(config, *, scenario, environ)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
-- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``
-  returns zero or more tasks. A ``GeneratedTask`` holds a ``HarborTask`` and
-  its ``measurement_arms``. Preserve the request's source record IDs in each
+- ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``
+  returns zero or more tasks. Preserve the request's source record IDs in each
   task's ``source_agent_record_ids``.
 - ``async validate(task: HarborTask) -> TaskValidationResult`` checks one
   task. Empty ``errors`` means the task passed. Return task defects as errors.
@@ -408,14 +408,9 @@ generator gets what it needs from its ``config`` and from these calls only:
 - ``async record_results(results: tuple[TaskPlayResult, ...])`` receives the
   results of the last ``generate`` call. The default keeps nothing.
 
-A ``PlayArm(name, count, extra_instruction_files)`` asks for ``count`` more
-plays of a task. Each play shows the agent the files that
-``extra_instruction_files`` names after the instruction, for example
-``solution/hint.txt``. The recipe never trains on a measurement arm.
-
-A ``TaskPlayResult`` holds the task, ``training_rewards``,
-``measurement_rewards`` (by arm name), a ``split`` (``train`` by default), and an ``error``. The rewards include
-only episodes that ran. An episode that ran
+A ``TaskPlayResult`` holds the task, ``training_rewards``, a ``split``
+(``train`` by default), and an ``error``. The rewards include only episodes
+that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task was not
 played: it failed validation, the generator service refused it, or the agent
 could not start on it.
@@ -442,13 +437,13 @@ at a time. In each round it:
    task with the generator.
 3. Publishes each valid task with its train/eval split.
 4. Writes each training task through the generator service and plays it
-   ``plays_per_task`` times on the training arm, then plays each measurement
-   arm. It does not play eval tasks.
+   ``plays_per_task`` times on the training arm. It does not play eval tasks.
 5. Sends the results to ``record_results``.
 
 The training plays carry the arm ``plain``, and only reports with that label
-train. A generated task whose measurement arm is
-named ``plain`` comes back unplayed with an error. The record stage groups
+train. A generator can play a task more times through the generator service
+on another arm, as SPADE does for its hint plays; those reports do not train.
+The record stage groups
 the training reports by ``metadata.task.name``. A group is complete at
 ``plays_per_task`` episodes, and a batch holds ``tasks_per_step`` complete
 groups. A training play that reports nothing, such as a failed trial, never
@@ -456,7 +451,7 @@ joins its group. When the task's plays end, its group is complete at the
 number of plays that reported; a group of one is discarded. The
 ``task_group`` objective centers and scales each reward within its
 task group, on Tinker's ``importance_sampling`` loss. The record stage
-releases the reports of measurement arms and reports without an arm, such as a
+releases the reports of other arms and reports without an arm, such as a
 generator's own reports, without assembling them.
 
 A round can also generate tasks from recorded sessions. Set the record
@@ -520,8 +515,8 @@ Each stage has its own package: ``reef/record2record/``, ``reef/record2task/``,
 and ``reef/task2batch/``. The pipeline lives in ``reef/train/pipeline.py``, and
 the context that the stages read in ``reef/pipeline_context.py``. A stage that
 saves generated tasks opens a store with
-``context.task_storage.open(name, split=...)`` (see `Generated task stores
-<../reference/python-api.rst#generated-task-stores>`__). In a composite recipe,
+``context.task_storage.open(name, split=...)`` (see `Task stores
+<../reference/python-api.rst#task-stores>`__). In a composite recipe,
 each component opens its store names under its component name.
 ``task_storage`` is ``None`` if the trainer has no scenario session. The stage
 packages also hold shared implementations: ``SampleAssembly``
