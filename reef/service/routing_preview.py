@@ -250,7 +250,11 @@ def router_rejection(status: int, data: bytes) -> RoutingRequestError:
 def checked_selection(
     routing: RoutingAdapter, scenario: RoutingScenario, reply: Mapping[str, object], returned_hashes: list[str]
 ) -> RoutingDecision:
-    """The decision a 200 reply makes, after checking every field Reef relies on against ``routing``."""
+    """The decision a 200 reply makes, after checking every field Reef relies on against ``routing``.
+
+    ``scenario`` must be a Scenario of ``routing.snapshot``. ``RoutingPreviewClient.select`` checks that
+    before it sends the preview; this function does not check it again.
+    """
 
     def unexpected(name: str) -> RoutingRequestError:
         return router_failure(f"the router's preview reply has an unexpected {name}", "routing_selection")

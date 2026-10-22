@@ -446,9 +446,10 @@ class RoutingDecision:
     For ``default`` and ``rule``, ``router_config_hash`` is a router runtime hash: that of the router that
     selected.
     Purpose: ``RoutingAdapter.explicit_decision`` makes pins and ``checked_selection`` makes the other two,
-    with the snapshot's automatic model as ``original_selector``. Each also checks that the target belongs
-    to the Scenario in that snapshot, which a decision alone cannot. The
-    request keeps one decision for its provider call and every retry; ``metadata`` is its stored record form.
+    with the snapshot's automatic model as ``original_selector``. ``explicit_decision`` and
+    ``RoutingPreviewClient.select`` first check that the Scenario is the snapshot's own. Both makers then
+    check that the target belongs to that Scenario. A decision alone can check neither. The request keeps
+    one decision for its provider call and every retry; ``metadata`` is its stored record form.
     """
 
     target: RoutingTarget
@@ -656,7 +657,13 @@ class RoutingAdapter:
         """The decision for a request naming one of ``scenario``'s targets, made without the router.
 
         Returns None for a request of the automatic model, which the router selects.
+
+        Raises:
+            ValueError: ``scenario`` is not equal to this snapshot's Scenario of the same name.
+            RoutingRequestError: The request names no model, or a target it cannot use.
         """
+        if self.snapshot.scenarios.get(scenario.name) != scenario:
+            raise ValueError("Scenario is not part of the routing snapshot")
         selector = payload.get("model")
         if not isinstance(selector, str) or not selector:
             raise RoutingRequestError("request body must name a model", code="missing_model")

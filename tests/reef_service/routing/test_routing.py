@@ -180,6 +180,33 @@ def test_a_pin_outside_the_scenario_disabled_or_unknown_is_refused(
     assert (captured.value.code, captured.value.status) == (code, status)
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"name": "other-opd"},
+        {"target_ids": ("code-student", "code-teacher", "math-teacher")},
+        {"default_target": "code-teacher"},
+        {"rules": ()},
+    ],
+)
+@pytest.mark.parametrize("model", ["code-teacher", "math-teacher", "auto"])
+def test_a_scenario_that_is_not_the_snapshots_own_is_refused_before_its_selector(
+    adapter: RoutingAdapter, change: dict[str, object], model: str
+) -> None:
+    foreign = replace(adapter.snapshot.scenarios["code-opd"], **change)
+    with pytest.raises(ValueError, match="not part of the routing snapshot"):
+        adapter.explicit_decision(foreign, {"model": model})
+
+
+def test_an_equal_copy_of_the_snapshots_scenario_is_accepted(adapter: RoutingAdapter) -> None:
+    scenario = adapter.snapshot.scenarios["code-opd"]
+    equal_copy = replace(scenario)
+    assert equal_copy is not scenario
+    pinned = adapter.explicit_decision(equal_copy, {"model": "code-teacher"})
+    assert pinned is not None and (pinned.scenario, pinned.target.target_id) == ("code-opd", "code-teacher")
+    assert adapter.explicit_decision(equal_copy, {"model": "auto"}) is None
+
+
 def test_request_headers_name_one_configured_scenario(adapter: RoutingAdapter) -> None:
     headers = client_headers("math-opd", ("x-reef-tag-session", "s1"), ("Accept", "a"), ("Accept", "b"))
     assert adapter.check_request(headers, CHAT) == adapter.snapshot.scenarios["math-opd"]
