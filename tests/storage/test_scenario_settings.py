@@ -54,6 +54,19 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
     assert open_storage().read_settings("math") == ScenarioSettings(training_mode="hybrid")
 
 
+def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_config, tmp_path):
+    url, schema = postgres_config
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
+        store = storage.open("math")
+        store.commit_step(expected_step=0, commit=committed())
+        storage.archive("math")
+        with pytest.raises(RuntimeError, match="archived"):
+            store.history()
+        with pytest.raises(RuntimeError, match="archived"):
+            store.records.count("math")
+        store.close()
+
+
 def test_archive_retires_settings_with_records_and_commits(open_storage):
     storage = open_storage()
     with closing(storage.open("math")) as store:

@@ -33,9 +33,26 @@ def same_commit(left: CommitRecord, right: CommitRecord) -> bool:
 class CommitHistory(ABC):
     """The ordered commits of one scenario generation.
 
-    ``append`` is the commit point. Appending a commit identical to the one at
-    its step (ignoring ``recorded_at``) is a no-op. A different commit at an
-    existing step, or a step before the last one, raises ``CommitLogError``.
+    Values: ``records()`` is a tuple of ``CommitRecord`` whose steps strictly
+    increase, so each step occurs at most once. Steps need not be consecutive;
+    ``CommitHistoryScenarioStore.recover`` rejects a gap after a checkpoint.
+    The history does not check which scenario a record names; the scenario
+    store does. ``label`` names where the history is kept, and ``durable`` is
+    true when the records survive a process restart.
+
+    Purpose: a storage adapter makes it, and ``CommitHistoryScenarioStore``
+    reads and appends through it. ``append`` is the commit point.
+
+    Operations, for a history whose records are ``H`` before the call:
+
+    - ``append(r)``: if ``e`` in ``H`` has ``e.step == r.step``, the call does
+      nothing when ``same_commit(e, r)`` and raises ``CommitLogError``
+      otherwise. If ``r.step`` is below the last step of ``H``, it raises
+      ``CommitLogError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
+    - ``locked()``: no other session or process appends while the block runs.
+    - ``training_run_position()`` is ``(s, n)``: ``s`` is the step of the last
+      rollback in ``H``, or 0 when there is none, and ``n`` is the number of
+      training records in ``H`` with a step above ``s``.
     """
 
     @property
@@ -74,12 +91,20 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """Own one records connection, its task stores and uploaded trajectories, and its commit history.
+    """One open session of a scenario: its records, task stores, uploaded trajectories and commits.
 
-    ``tasks`` opens the task stores, and ``trajectories`` keeps the uploaded
-    trajectories. Usually, both are in the same database as the records and the
-    commits. The store is durable when its commit history is durable.
-    ``initial_step`` supports existing scenarios constructed at a saved step.
+    Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
+    ``trajectories`` and ``commit_history`` hold that scenario's state; the
+    bundled storages keep all four in one database. Every record in the
+    history names ``scenario``; a read that finds another name raises
+    ``ReefError``. ``initial_step`` is a non-negative step for an existing
+    scenario constructed at a saved step. The current step is the last step in
+    the history, or ``initial_step`` when the history is empty. ``durable`` is
+    ``commit_history.durable``. After ``close``, every operation raises
+    ``RuntimeError``.
+
+    Purpose: a ``ScenarioStorage`` makes it in ``open``. The scenario and its
+    trainers read and commit through it, under the ``ScenarioStore`` contract.
     """
 
     def __init__(
@@ -137,11 +162,14 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._commit_history
 
     def history(self) -> tuple[CommitRecord, ...]:
-        with self._locked():
+        # Commits are append-only, so a read needs no lock against other writers.
+        with self._lock:
+            self._ensure_open()
             return self._history()
 
     def training_run_position(self) -> tuple[int, int]:
-        with self._locked():
+        with self._lock:
+            self._ensure_open()
             return self._commit_history.training_run_position()
 
     def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:

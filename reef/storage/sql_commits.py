@@ -72,18 +72,28 @@ def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
 
 
 class SQLCommitHistory(CommitHistory):
-    """The commits of one scenario generation in its record database.
+    """The commits of one scenario generation, as the rows of its namespace in the commit table.
 
-    Values: ``record_store`` supplies the transactions, ``table`` gives the
-    commit table and the namespace of this generation, and ``durable`` is true
-    when the database outlives the process. A SQL adapter makes it from its
-    record store; ``CommitHistoryScenarioStore`` reads and appends through it.
+    Values: ``record_store`` is the open record store whose transactions the
+    history uses. ``table`` is the commit table and the namespace of this
+    generation. ``label`` names the table for error messages, and ``durable``
+    is true when the database outlives the process. ``records()`` is the rows
+    of the namespace in step order, decoded. The cached records are always a
+    prefix of those rows, so a read fetches only the steps after them; a
+    locked block that rolls back clears the cache. A row deleted by anything
+    but this class is outside the contract.
 
-    ``locked`` holds one write transaction of the record store. The reads and
-    appends of the locking thread use that transaction, so an append is
-    durable when the locked block ends. Outside a locked block, each call uses
-    its own transaction. Commits are append-only, so a read gets only the
-    steps after the cached ones.
+    Purpose: a SQL record store makes it in ``commit_history()``.
+    ``CommitHistoryScenarioStore`` reads and appends through it.
+
+    ``locked`` holds one write transaction of the record store: ``BEGIN
+    IMMEDIATE`` in SQLite, the row lock on the store generation in PostgreSQL.
+    The reads and appends of the locking thread use that transaction, so an
+    append is durable when the locked block ends, and an exception in the
+    block stores nothing. Outside a locked block, each call uses its own
+    transaction. Once a PostgreSQL store generation is archived, every
+    operation raises ``RuntimeError``, as the record operations of the same
+    session do.
     """
 
     def __init__(self, record_store: SQLRecordStore, table: CommitTable, *, label: str, durable: bool) -> None:

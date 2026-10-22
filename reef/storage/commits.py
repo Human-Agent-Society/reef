@@ -7,6 +7,7 @@ value types; training and storage operations remain with their callers.
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
 from copy import deepcopy
@@ -67,6 +68,17 @@ class CommitLogError(ReefError):
     """The commit log is corrupt or a record does not match the schema."""
 
 
+def to_json_value(value: Any) -> Any:
+    """Return ``value`` as a JSON round trip gives it back: tuples become lists, and mapping keys become strings.
+
+    Raises ``CommitLogError`` when ``value`` holds something JSON cannot encode.
+    """
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise CommitLogError(f"commit record values must be JSON values: {exc}") from exc
+
+
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
     """One committed training step: the atomic release record.
@@ -74,7 +86,10 @@ class CommitRecord:
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
     consumed and the IDs processed by the step. Recovery rebuilds processor
-    memory without changing stored records.
+    memory without changing stored records. ``algorithm_state`` and
+    ``metrics`` hold JSON values: the constructor converts them as a JSON round
+    trip does, so a record equals itself after storage, and it raises
+    ``CommitLogError`` for a value that JSON cannot encode.
     """
 
     scenario: str
@@ -139,13 +154,15 @@ class CommitRecord:
             raise CommitLogError("commit record training_job_id must be a non-empty string or null")
         if self.operation != "training" and self.training_job_id is not None:
             raise CommitLogError("only training commits may carry training_job_id")
-        # Own every mutable value the record was handed: the log is the durable
-        # commit point, so a caller mutating its state or metrics afterwards
-        # must not change what was recorded.
+        # Hold state and metrics as a stored record reads them back, so a record
+        # equals itself after storage, and a caller mutating its values
+        # afterwards does not change what was recorded.
         object.__setattr__(
-            self, "algorithm_state", None if self.algorithm_state is None else dict(self.algorithm_state)
+            self,
+            "algorithm_state",
+            None if self.algorithm_state is None else to_json_value(dict(self.algorithm_state)),
         )
-        object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
+        object.__setattr__(self, "metrics", None if self.metrics is None else to_json_value(dict(self.metrics)))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
         object.__setattr__(self, "components", None if self.components is None else dict(self.components))
 

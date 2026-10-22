@@ -94,6 +94,16 @@ def test_retry_returns_original_timestamp_even_after_later_commits(store):
     assert store.training_run_position() == (0, 2)
 
 
+def test_retry_with_tuple_values_matches_the_stored_json(store):
+    # A stored record reads back lists where the caller's commit held tuples.
+    tuples = replace(commit(), algorithm_state={"path": ("a", "b")}, metrics={"paths": ({"stages": ()},)})
+
+    original = store.commit_step(expected_step=0, commit=tuples)
+
+    assert store.commit_step(expected_step=0, commit=tuples) == original
+    assert store.history()[0].metrics == {"paths": [{"stages": []}]}
+
+
 @pytest.mark.parametrize(
     "changed",
     [

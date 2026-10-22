@@ -8,7 +8,6 @@ settlement, surfaces, and artifact operations.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
 from contextlib import suppress
@@ -33,7 +32,13 @@ from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitRecord,
+    RecordProgress,
+    scenario_metadata_for,
+    to_json_value,
+)
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import (
@@ -868,13 +873,13 @@ class ScenarioCommitter:
 
     @staticmethod
     def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
-        # A stored record is read back from JSON, where tuples become lists.
+        # A record holds JSON values, where the prepared commit can hold tuples.
         return (
-            record.algorithm_state == json.loads(json.dumps(prepared.algorithm_state))
+            record.algorithm_state == to_json_value(prepared.algorithm_state)
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
             and record.consumed_ids == prepared.consumed_ids
-            and record.metrics == json.loads(json.dumps(prepared.metrics))
+            and record.metrics == to_json_value(prepared.metrics)
             and record.training_job_id == prepared.training_job_id
         )
 

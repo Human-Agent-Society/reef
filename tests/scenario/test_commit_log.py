@@ -233,6 +233,16 @@ def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
 
 
 @pytest.mark.unit
+def test_commit_record_holds_json_values() -> None:
+    record = replace(sample_record(), algorithm_state={"path": ("a",)}, metrics={1: {"set": ()}})
+    assert record.algorithm_state == {"path": ["a"]}
+    assert record.metrics == {"1": {"set": []}}
+    assert CommitRecord.from_dict(record.to_dict()) == record
+    with pytest.raises(CommitLogError, match="JSON values"):
+        replace(sample_record(), metrics={"ids": {"a"}})
+
+
+@pytest.mark.unit
 def test_commit_record_validates_its_schema() -> None:
     with pytest.raises(CommitLogError, match="step"):
         CommitRecord(
