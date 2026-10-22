@@ -94,13 +94,15 @@ Recover by hand only when all of these hold:
 2. ``.reef-retention/records/`` under the checkpoint root has a record for ``P``. The file name is ``P`` padded to 20 digits, then ``.json``. No record is newer. Its ``job_id`` is the job for rollout ``P``.
 3. That job was committed. A rejected job also leaves a checkpoint record and moves the tracker. Its rollout holds the declined candidate. Retention can also have deleted the committed rollout before it.
 
-   Each scenario has a commit log in ``agent_record_dir`` on the Reef service's host. The default is ``.reef/agent-record``. A committed training step records its job ID as ``training_job_id``. A rejected step does not. But a rejected step still has the ID in another field of its line. So search for the exact pair:
+   Each scenario has a SQLite database in ``agent_record_dir`` on the Reef service's host. The default is ``.reef/agent-record``. Its ``scenario_commit`` table has one row for each committed step. A committed training step records its job ID as ``training_job_id``. A rejected step does not. But a rejected step still has the ID in another field of its row. So search for the exact pair with the ``sqlite3`` command-line tool:
 
    .. code:: bash
 
-      grep -l '"training_job_id":"<job_id>"' <agent_record_dir>/*.commits.jsonl
+      for db in <agent_record_dir>/*.sqlite3; do
+        sqlite3 "$db" "SELECT '$db', step FROM scenario_commit WHERE instr(commit_json, '\"training_job_id\":\"<job_id>\"') > 0"
+      done
 
-   A printed file name means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
+   A printed row means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
 4. The ``RUNNING`` marker has a ``parent_runtime_load_id``: the runtime load ID that rollout ``P`` is served under.
 
 Before you replace the marker, back up the ``RUNNING`` marker to a directory outside the checkpoint root. The preflight refuses any extra file or directory in the HF, Megatron or critic checkpoint directory as ``unowned checkpoint assets``. It also refuses any extra ``*.json`` file in ``.reef-retention/records/``.

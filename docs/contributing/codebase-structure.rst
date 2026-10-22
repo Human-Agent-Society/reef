@@ -285,16 +285,17 @@ The extension points those packages expose are in `Python API
   split manifests. What a method asks the designer for, and what it does
   with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
-  shares SQL record and retention operations. ``sql_tasks.py`` shares the
-  task tables and task store operations in the same database.
-  ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts,
-  as ``commit_log.py`` holds the JSONL commit history. ``sqlite.py`` supplies SQLite
-  schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
-  PostgreSQL tables, the commit table, pooled transactions, and retention.
-  ``commit_log.py`` owns the ``CommitHistory`` base, the JSONL ``CommitLog``, and
+  shares SQL record and retention operations, and ``ScopedTable``, one table
+  with the namespace of one store. ``sql_tasks.py``,
+  ``sql_trajectories.py`` and ``sql_commits.py`` share the task, trajectory
+  and commit tables and their operations in the same database.
+  ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
+  ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
+  maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,
+  and retention. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
-  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time upgrades of older schemas
-  and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
+  upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes? Put it in

@@ -355,7 +355,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     Owns a compose Entry tree (``Loader``) of harness
     nodes. The tree is in-memory; its state is serialized through the
-    algorithm state (``"entries"`` key) so the commit log and snapshot
+    algorithm state (``"entries"`` key) so the commit history and snapshot
     metadata persist and recover it. A selected mutation renders to files and
     returns a ``TrainStepResult`` carrying the artifact; a rejected mutation
     restores the prior tree and returns a no-artifact ``TrainStepResult``.
@@ -688,7 +688,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                     if "inline credential" in error:
                         message += (
                             "; this state predates the credential admission check and the existing "
-                            "commit log and snapshot metadata already hold the credential: rotate "
+                            "commit history and snapshot metadata already hold the credential: rotate "
                             "the credential, then edit the entry before resuming"
                         )
                     raise ValueError(message)

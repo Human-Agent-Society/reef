@@ -680,7 +680,7 @@ persistent.
    storage.artifact-repository | .reef/artifacts.git | the Git LFS repository of the release chain; only for ``git_lfs``
    storage.artifact-work-dir | .reef/artifact-work | materialization scratch
    storage.artifact-cache-dir | .reef/artifact-cache | fetched artifact cache
-   storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commit logs and settings
+   storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commits and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
    storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
    storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store
@@ -717,7 +717,7 @@ passes must tolerate missing records once capacity eviction occurs.
 
 This is a body budget, not a hard filesystem quota or an emergency disk-full
 handler. Concurrent writes can exceed it between sweeps. Indexes, retry hashes,
-commit logs and WAL require additional disk headroom. SQLite reuses freed pages
+commit histories and WAL require additional disk headroom. SQLite reuses freed pages
 without automatically shrinking its file. Cleanup failures are logged and
 retried on the next sweep. Standalone stores need an explicit maintenance call;
 see `Python API <python-api.rst>`__.
@@ -1019,7 +1019,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
 against. The step record holds the proposer's raw traffic and every evaluation
-episode's session log, so treat its directory like the commit log.
+episode's session log, so treat its directory like the commit history.
 
 The ``inference`` section
 -------------------------
@@ -1335,7 +1335,7 @@ binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
 finishes the current run, marks its summary with the source and target, and
 resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit log. A scenario with several
+attached for joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
 prefix (``harness/train/loss``) on the same ``train/step`` axis with
 ``reef/component`` on the row, its optimizer step rows land under

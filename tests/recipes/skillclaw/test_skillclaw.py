@@ -635,9 +635,13 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
 
 
 def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
-    """pool-current survives via the double rename, and the commit log's last
-    version wins as the restart bootstrap when its tree is still on disk."""
-    import hashlib
+    """pool-current survives via the double rename, and the release of the last
+    commit wins as the restart bootstrap when its tree is still on disk."""
+    from contextlib import closing
+
+    from reef.artifact import ArtifactRef
+    from reef.storage.commits import CommitRecord
+    from reef.storage.sqlite import SQLiteScenarioStorage
 
     run_dir = tmp_path / "run"
     version_dir = run_dir / "artifacts" / "v-night-1" / "pi-agent" / "skills" / "alpha"
@@ -652,16 +656,24 @@ def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
     driver._persist_pool(FakeService(), run_dir)  # idempotent under the double rename
     assert (run_dir / "pool-current" / "pi-agent" / "skills" / "alpha" / "SKILL.md").read_text() == "body"
 
-    assert driver._committed_pool(run_dir, "dry") is None  # no commit log yet
-    key = hashlib.sha256(b"dry").hexdigest()
-    log = run_dir / "reef-data" / f"{key}.commits.jsonl"
-    log.parent.mkdir(parents=True)
-    log.write_text(
-        json.dumps({"artifact_ref": {"version": "v-gone"}})
-        + "\n"
-        + json.dumps({"artifact_ref": {"version": "v-night-1"}})
-        + "\n"
-    )
+    assert driver._committed_pool(run_dir, "dry") is None  # no commit yet
+    with (
+        closing(SQLiteScenarioStorage(run_dir / "reef-data")) as storage,
+        closing(storage.open("dry")) as store,
+    ):
+        for step, release_id in enumerate(("v-gone", "v-night-1"), start=1):
+            store.commit_step(
+                expected_step=step - 1,
+                commit=CommitRecord(
+                    scenario="dry",
+                    step=step,
+                    artifact_ref=ArtifactRef(f"content-{step}", release_id, None),
+                    checkpoint=False,
+                    algorithm_state=None,
+                    high_water_sequence=0,
+                    high_water_offset=0,
+                ),
+            )
     committed = driver._committed_pool(run_dir, "dry")
     assert committed == run_dir / "artifacts" / "v-night-1"
 

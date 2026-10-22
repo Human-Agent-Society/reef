@@ -453,10 +453,11 @@ removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostic
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
 Concrete storage classes live under ``reef.storage``:
-``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
-``TaskStorage`` (``tasks=``), and a ``CommitHistory``, either the JSONL
-``commit_log.CommitLog`` or the ``postgres.PostgresCommitTable``. The bundled
-record stores give their ``TaskStorage`` from ``task_storage()``. ``sqlite.SQLiteScenarioStorage`` and
+``commit_history.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
+``TaskStorage`` (``tasks=``), and a ``CommitHistory``. The bundled record
+stores give their ``TaskStorage`` from ``task_storage()`` and their
+``sql_commits.SQLCommitHistory`` from ``commit_history()``; the commits are a
+``scenario_commit`` table in the same database as the records. ``sqlite.SQLiteScenarioStorage`` and
 ``postgres.PostgresScenarioStorage`` assemble their respective backends. The
 scenario package depends only on storage contracts. The storage contract is:
 
@@ -533,10 +534,11 @@ expected step, or a retry with conflicting content, raises
 ``ScenarioStoreConflict`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
-``CommitLog`` uses a local POSIX file lock. Its fsynced JSONL line is the
-durable commit point. ``PostgresCommitTable`` holds an advisory lock in one
-transaction and inserts the commit row in that transaction. The commit is
-durable when the transaction ends. Direct writes through a ``CommitHistory``
+``SQLCommitHistory`` holds one write transaction of the record store, which
+SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
+store generation. It reads the history and inserts the commit row in that
+transaction. The commit is durable when the transaction ends; an exception
+before then stores no commit. Direct writes through a ``CommitHistory``
 bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
@@ -777,8 +779,8 @@ The URL constructor owns its pool. To share a pool across sessions, construct
 close sessions before closing the database. Both close operations are idempotent.
 ``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
 (the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
-the schema. It uses ``directory`` only to import the commit logs and model
-configuration files of earlier versions on start. Pass it through
+the schema. It uses ``directory`` only to import the model configuration
+files of earlier versions on start. Pass it through
 ``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
 selects this storage service with ``storage.record_backend: postgres``; see
@@ -846,7 +848,7 @@ and keeps consumption metadata out of record reads.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
-the read API does not guess which. Use the commit log's per-step
+the read API does not guess which. Use the commit history's per-step
 ``consumed_ids`` to determine consumption, including intentional skips; it is
 not proof that every named record produced a model update.
 

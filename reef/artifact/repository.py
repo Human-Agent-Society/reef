@@ -115,7 +115,7 @@ class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
     Optional capabilities are separate base classes. To find or list stored
     scenarios, also inherit ``RegistrationAwareRepositoryBackendFactory`` or
     ``EnumerableRepositoryBackendFactory``. ``CachedRepositoryBackendFactory``
-    gives both. To work with a scenario commit log, the backends must
+    gives both. To work with a scenario commit history, the backends must
     subclass ``StagedReleaseRepositoryBackend``.
     """
 

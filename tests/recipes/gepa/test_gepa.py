@@ -33,7 +33,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.sandbox.process import LocalExecutor
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -823,14 +823,14 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
         assert json.loads(archive_path.read_text()) == committed
 
         assert isinstance(scenario.store, CommitHistoryScenarioStore)
-        commit_log = scenario.store.commit_history
-        assert commit_log is not None
+        history = scenario.store.commit_history
+        assert history is not None
 
         def fail_append(record):
-            raise RuntimeError("commit log unavailable")
+            raise RuntimeError("commit history unavailable")
 
-        monkeypatch.setattr(commit_log, "append", fail_append)
-        with pytest.raises(RuntimeError, match="commit log unavailable"):
+        monkeypatch.setattr(history, "append", fail_append)
+        with pytest.raises(RuntimeError, match="commit history unavailable"):
             scenario.commit(second)
         assert json.loads(archive_path.read_text()) == committed
     finally:
