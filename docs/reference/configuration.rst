@@ -376,8 +376,13 @@ rollout log probabilities and the weight version that produced each token.
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
 Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
-``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
-through ``sglang_sampling_params`` or ``vllm_sampling_params``. A positive
+``sampling_defaults``, ``force_reasoning`` and ``chat_template_kwargs``; per-request sampling extras pass
+through ``sglang_sampling_params`` or ``vllm_sampling_params``.
+``chat_template_kwargs`` renders a request that omits them, for example
+``{enable_thinking: false}`` for a hybrid-thinking model served without
+reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
+that renders its own samples, such as SFT's
+``pipeline.record2task.config.chat_template_kwargs``, must use the same value. A positive
 ``capture_topk`` also records the sampler's top-K ids and log-probs for every
 response token. Score centering (``training.options.score-centering``) needs
 at least ``score-centering-top-k`` of them (see the loss families guide). A vLLM engine
