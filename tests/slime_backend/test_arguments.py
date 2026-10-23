@@ -204,10 +204,11 @@ def test_finalize_arguments_requires_save(save: str | None) -> None:
     [
         ({}, None),
         ({"release_train": True}, "--release-train"),
-        ({"megatron_lora_rank": 32}, "not LoRA"),
+        # Each LoRA scenario restarts from its own last save.
+        ({"megatron_lora_rank": 32}, None),
     ],
 )
-def test_a_checkpoint_interval_needs_full_weight_training_that_keeps_its_workers(overrides, refusal) -> None:
+def test_a_checkpoint_interval_needs_workers_that_keep_their_state(overrides, refusal) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
 
     values = {

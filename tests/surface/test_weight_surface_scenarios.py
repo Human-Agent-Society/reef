@@ -78,3 +78,22 @@ def test_recovery_checks_the_scenario_adapter_not_the_global_version() -> None:
     assert WeightLoader("code").recover(current, checkpoint_ref, runtime) == checkpoint_ref
     surface = create_weight_surface(scenario="math")
     assert isinstance(surface.loader, WeightLoader) and isinstance(surface.inference, WeightInferenceHooks)
+
+
+def test_recovery_serves_the_checkpoint_when_a_restart_restored_an_older_adapter(tmp_path: Path) -> None:
+    class Runtime(StubTrainingRuntime):
+        def serving_runtime_load_id(self):
+            return "inc:9"
+
+        def serving_adapter_runtime_load_id(self, scenario):
+            # The restart restored math's last saved adapter; its live head was never saved.
+            return {"math": "inc:2"}.get(scenario)
+
+    current = LiveWeightArtifactRef(
+        content_id="live:x", release_id="live:p:4", parent_release_id=None, runtime_load_id="inc:4"
+    )
+    saved = checkpoint(tmp_path, "inc:2")
+    assert WeightLoader("math").recover(current, saved.ref, Runtime().inference) == saved.ref
+    # Requests then name the adapter that the engine holds.
+    out = WeightInferenceHooks(scenario="math").prepare_request(saved, "/v1/chat/completions", {})
+    assert out["lora_path"] == adapter_name("math", "inc:2")

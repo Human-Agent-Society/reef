@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,12 @@ from tests.recipes.sao.test_sao_bridge import (
 )
 from tests.support.slime_coordinator import build_slime_coordinator
 
+from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
-from reef.runtime.recovery import ScenarioHistory, history_path
+from reef.runtime.recovery import ScenarioHistory, history_path, marker_path
 from reef.runtime.scheduler import InferenceMemory
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
+from reef.train.slime_backend.reef_adapters.training_job.storage import LEARNING_RATE_SCHEDULES_FILENAME
 
 INCARNATION = "inc"
 
@@ -225,6 +228,7 @@ def _actor(
     adapter_capacity: int | None = None,
     colocate: bool = False,
     keep_lora_base_resident: bool = False,
+    checkpoint_interval: int = 1,
 ):
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
     manager = _ColocatedManager(version) if colocate else _Manager(version)
@@ -239,6 +243,7 @@ def _actor(
         adapter_capacity=adapter_capacity,
         colocate=colocate,
         keep_lora_base_resident=keep_lora_base_resident,
+        checkpoint_interval=checkpoint_interval,
         critic_group=_RecordingGroup(template, critic=True),
         loss_family="sao",
     )
@@ -367,6 +372,58 @@ def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray
     # Training resumes with the next global checkpoint index and per-scenario steps.
     result = _run(restarted, _job("b", 1, "inc:2"))
     assert result.outcome == "complete" and group.train_calls == [(4, "b")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, True)])
+@pytest.mark.parametrize("unsaved_last", [False, True], ids=["saved-marker", "unsaved-marker-deleted"])
+def test_a_restart_serves_each_scenario_from_its_own_last_checkpoint(
+    tmp_path, _local_ray_get, colocate, keep_base, unsaved_last
+) -> None:
+    options = {"checkpoint_interval": 2, "colocate": colocate, "keep_lora_base_resident": keep_base}
+    actor, _, _, template = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))  # a: inc:1, no checkpoint
+    _run(actor, _job("a", 1, "inc:1"))  # a: inc:2, saved at rollout 1
+    _run(actor, _job("a", 2, "inc:2"))  # a: inc:3, no checkpoint
+    _run(actor, _job("b", 0, "inc:3"))  # b: inc:4, no checkpoint
+    _run(actor, _job("b", 1, "inc:4"))  # b: inc:5, saved at rollout 4
+    if unsaved_last:
+        _run(actor, _job("b", 2, "inc:5"))  # b: inc:6, no checkpoint
+        # The Slime preflight deletes the marker of a job without a checkpoint.
+        marker_path(template).unlink()
+    assert sorted(path.name for path in Path(template).parent.glob("checkpoint-*")) == ["checkpoint-1", "checkpoint-4"]
+    assert actor.health()["lora_adapters"]["a"]["runtime_load_id"] == "inc:3"
+
+    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(6 if unsaved_last else 5), start_rollout_id=5, **options)
+    # The slot snapshots hold each scenario's last saved job, so each adapter
+    # comes back under the name that job published, not under a newer one.
+    adapters = restarted.health()["lora_adapters"]
+    assert {scenario: adapters[scenario]["runtime_load_id"] for scenario in ("a", "b")} == {"a": "inc:2", "b": "inc:5"}
+    assert ("a", scenario_adapter_name("a", "inc:2")) in group2.published
+    if unsaved_last:
+        assert ("b", scenario_adapter_name("b", "inc:5")) in group2.published and group2.publications == []
+    else:
+        # The marker's job saved, so the startup republishes its scenario under the recorded version.
+        assert group2.publications == [("b", "inc:5")]
+    assert restarted.health()["phase"] == "serving"
+    history = ScenarioHistory(history_path(template))
+    assert history.adapter("a") == history.checkpoint_adapter("a") == scenario_adapter_name("a", "inc:2")
+
+
+@pytest.mark.unit
+def test_a_checkpoint_records_the_schedule_progress_of_its_own_scenario_only(tmp_path, _local_ray_get) -> None:
+    warmup = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
+    actor, _, _, template = _actor(tmp_path, _EngineVersion(0), checkpoint_interval=2)
+
+    def scheduled_job(scenario: str, step: int, producing: str) -> dict:
+        return {**_job(scenario, step, producing), "method": TrainingMethod("sao", warmup).to_dict()}
+
+    _run(actor, scheduled_job("a", 0, "inc:0"))  # no checkpoint
+    _run(actor, scheduled_job("b", 0, "inc:1"))  # no checkpoint
+    _run(actor, scheduled_job("b", 1, "inc:2"))  # b saved at rollout 2
+    record = json.loads((Path(template).parent / LEARNING_RATE_SCHEDULES_FILENAME).read_text(encoding="utf-8"))
+    # The checkpoint holds b's adapter only. A restart restores a without its step, so the file omits it.
+    assert record == {"schedules": {"b": {"rollout_id": 2, **LearningRateScheduleState(warmup, 2).to_dict()}}}
 
 
 @pytest.mark.unit

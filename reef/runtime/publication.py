@@ -910,7 +910,12 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         )
         if self.history is not None:
             scenario = str(marker["scenario"])
-            self.history.record_publication(scenario, published, adapter_name(scenario, published))
+            self.history.record_publication(
+                scenario,
+                published,
+                adapter_name(scenario, published),
+                checkpointed=marker["checkpoint_path"] is not None,
+            )
         return published
 
     # -- Recovery
@@ -924,14 +929,15 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
             self.restore_scenario_adapters(marker)
 
     def restore_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
-        """Re-register every scenario's committed adapter after a restart.
+        """Re-register every scenario's served adapter on engines that lost them.
 
-        The Megatron checkpoint restores only the slot's last occupant; the
-        other scenarios come back from their persisted slot snapshots. Each
-        is loaded under the name its last publication recorded, so Reef's
-        routing for that scenario keeps resolving. The marker's scenario is
-        activated last: the regular startup republication then publishes it
-        under the recovered runtime load ID.
+        Each scenario is loaded under the name the history says the engines
+        serve. In a running process, that is the scenario's last publication.
+        After a restart, startup recovery first sets it to the scenario's
+        checkpoint adapter: the trainer restores each scenario from its
+        persisted slot snapshot, which its last saved job wrote. The marker's
+        scenario is activated last: the regular startup republication then
+        publishes it under the recovered runtime load ID.
         """
         history = self.require_history()
         residency = self.require_residency()
