@@ -73,6 +73,22 @@ INFERENCE_RESERVED_OPTIONS = frozenset(
 )
 
 
+def remote_engine_config(engine_config: Mapping[str, Any], model_path: str) -> dict[str, Any]:
+    """``engine_config`` for engines on a remote component, which loads ``model_path``.
+
+    ``model_path`` is ``inference.remote.model_path``. It replaces the model
+    in the input and in its ``options``, which hold this host's path once
+    deployment resolution has downloaded the model here.
+    """
+    config = dict(engine_config)
+    config["model_path"] = model_path
+    options = dict(config.get("options") or {})
+    if "model_path" in options:
+        options["model_path"] = model_path
+    config["options"] = options
+    return config
+
+
 def prepare_inference_config(
     config: dict[str, Any], settings: Mapping[str, Any], training_options: Mapping[str, Any]
 ) -> None:

@@ -296,6 +296,17 @@ equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
 The Tinker backend still produces SGLang engine options and keeps
 ``inference.backend: sglang``.
 
+With an ``inference.remote`` section, Slime's engines run on a remote inference
+component, and Slime reserves only its training GPUs. Each publication exports
+the actor's current weights as a Hugging Face checkpoint under ``weight-files``,
+beside the HF and Megatron checkpoint directories. The coordinator uploads the
+export to the component, which reloads it in place of the served weights; the
+next publication replaces the export. Every training node writes its own
+shards, so multi-node training needs that directory on shared storage; a
+publication whose export lacks a shard on rank 0's node fails. A full-weight
+publication moves the whole model each time, for example about 16 GB for an 8B
+bf16 model. LoRA and ``training.colocate`` are refused with remote engines.
+
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
 Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
@@ -1037,8 +1048,9 @@ names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 ``reef serve`` refuses the section unless the training backend supports remote
-engines; Tinker does, Slime does not yet. The section tells Reef how to reach
-the component:
+engines. Tinker publishes its adapters; Slime publishes full weights and
+refuses LoRA and ``training.colocate`` with remote engines. The section tells
+Reef how to reach the component:
 
 .. config::
 
@@ -1046,6 +1058,7 @@ the component:
    inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the model driver reads it
    inference.remote.inference-token-env | REEF_REMOTE_INFERENCE_TOKEN | variable with the component's inference token; the HTTP service reads it
    inference.remote.startup-timeout-s | 3600 | deadline for one engine start on the component, including the model download
+   inference.remote.model-path | ``inference.model-path`` as written | the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot
 
 The ``training`` section
 ------------------------

@@ -26,6 +26,11 @@ class RemoteInferenceSettings:
       and for inference requests.
     - ``startup_timeout_s`` is positive and bounds one engine start, including
       the model download on the component.
+    - ``model_path`` is the model that the component loads: a Hugging Face
+      repository ID or a path on the component's host, or None before
+      deployment resolution. Resolution fills it with ``inference.model-path``
+      as the file names it, before this host downloads anything, because a
+      local snapshot path means nothing on the component's host.
 
     The values come from the ``inference.remote`` section, whose presence runs
     the engines that ``inference.backend`` names on the component. Service
@@ -36,6 +41,7 @@ class RemoteInferenceSettings:
     control_token_env: str = DEFAULT_CONTROL_TOKEN_ENV
     inference_token_env: str = DEFAULT_INFERENCE_TOKEN_ENV
     startup_timeout_s: float = 3600.0
+    model_path: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.url, str):
@@ -66,6 +72,8 @@ class RemoteInferenceSettings:
             or self.startup_timeout_s <= 0
         ):
             raise ValueError("inference.remote.startup-timeout-s must be a positive number")
+        if self.model_path is not None and (not isinstance(self.model_path, str) or not self.model_path.strip()):
+            raise ValueError("inference.remote.model-path must be a non-empty string")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> RemoteInferenceSettings:

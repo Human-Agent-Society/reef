@@ -499,3 +499,35 @@ def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags
     assert "--rollout-num-gpus=1" in argv
     assert "--rollout-num-gpus-per-engine=1" in argv
     assert not any(argument.startswith("--sglang-") for argument in argv)
+
+
+def test_slime_remote_engines_take_full_weights_without_colocation(tmp_path):
+    from reef.runtime.deployment import RuntimeConfigError
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.service.deploy.training import local_model_required, training_deployment_for
+    from reef.train.slime_backend.runtime import SlimeRuntimeFactory
+
+    raw = training_config()
+    raw["inference"]["remote"] = {"url": "https://gpu-host.example"}
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    # Megatron loads the model here; the component loads it as the file names it.
+    assert local_model_required(config)
+    assert config["reef"]["inference_remote"]["model_path"] == "/models/demo"
+    settings = service_config_from_mapping(config)
+    runtime = training_deployment_for("slime").runtime_config({**settings.__dict__, "ray_address": "ray://head:10001"})
+    assert runtime["inference_runtime"] == "remote"
+    assert runtime["inference_runtime_options"] == {
+        "engine": "sglang",
+        "inference_token_env": "REEF_REMOTE_INFERENCE_TOKEN",
+    }
+    with pytest.raises(RuntimeConfigError, match="inference_runtime_options cannot set inference_url"):
+        SlimeRuntimeFactory().parse_config({**runtime, "inference_runtime_options": {"inference_url": "x"}}, {})
+    for change, match in (
+        ({"colocate": True}, "training.colocate"),
+        ({"options": {**raw["training"]["options"], "megatron-lora-rank": 8}}, "only full weights"),
+    ):
+        refused = training_config()
+        refused["inference"]["remote"] = {"url": "https://gpu-host.example"}
+        refused["training"] = {**refused["training"], **change}
+        with pytest.raises(DeployConfigError, match=match):
+            resolve_deployment_config(refused, None, tmp_path / "serve.yaml")

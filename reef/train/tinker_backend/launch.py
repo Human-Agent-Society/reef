@@ -35,6 +35,7 @@ from reef.train.deployment import (
     driver_service,
     inference_handler_factory_for,
     prepare_inference_config,
+    remote_engine_config,
     require_ray_roles,
 )
 from reef.train.tinker_backend.config import TinkerConfig
@@ -130,7 +131,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
                 "remote": dict(reef["inference_remote"]),
                 "engine": reef["inference_backend"],
                 "num_gpus": int(reef["inference_num_gpus"]),
-                "engine_config": engine_config,
+                "engine_config": remote_engine_config(engine_config, reef["inference_remote"]["model_path"]),
             }
         else:
             resources = TinkerDeploymentResources(
