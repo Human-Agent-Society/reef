@@ -64,20 +64,10 @@ def test_native_training_options_reach_slime(tmp_path, monkeypatch, managed):
     ]
 
 
-@pytest.mark.parametrize(
-    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
-)
-@pytest.mark.parametrize(
-    "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
-)
-def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode, timeout_config):
+def plan_args(mode):
     from types import SimpleNamespace
 
-    from reef.service.training_driver import assemble_model_plan
-    from reef.train.slime_backend import driver
-    from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
-
-    args = SimpleNamespace(
+    return SimpleNamespace(
         hf_checkpoint="model",
         seed=1,
         offload_rollout=False,
@@ -93,8 +83,16 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         rollout_external=mode == "external",
         keep_lora_base_resident=mode == "lora-colocate-keep-base",
         disjoint_prefix_sharing=False,
-        reef_checkpoint_interval=1,
+        save_interval=1,
     )
+
+
+def patch_driver(monkeypatch, args, *, lora):
+    """Plan construction on these ``args``, with Slime's parsing and Ray connection replaced."""
+    from types import SimpleNamespace
+
+    from reef.train.slime_backend import driver
+    from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
 
     class Algorithm:
         def parse_driver_options(self, arguments):
@@ -118,12 +116,25 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     ):
         monkeypatch.setattr(driver, name, lambda *args: None)
     monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda *args: None)
-    monkeypatch.setattr(bridge, "prepare_bridge", lambda *args, **kwargs: SimpleNamespace(lora="lora" in mode))
+    monkeypatch.setattr(bridge, "prepare_bridge", lambda *args, **kwargs: SimpleNamespace(lora=lora))
 
     def unexpected(**kwargs):
         pytest.fail("plan construction must not connect or allocate resources")
 
     monkeypatch.setattr(ray, "init", unexpected)
+    return driver
+
+
+@pytest.mark.parametrize(
+    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
+)
+@pytest.mark.parametrize(
+    "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
+)
+def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode, timeout_config):
+    from reef.service.training_driver import assemble_model_plan
+
+    driver = patch_driver(monkeypatch, plan_args(mode), lora="lora" in mode)
     training = driver.create_training_plan({"reef": timeout_config}, loss_family="loss")
     configured_timeout = timeout_config.get("train_timeout_s")
     expected_timeout = 14400 if configured_timeout is None else configured_timeout
@@ -136,55 +147,43 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert plan.training.weight_transfer_protocol is not None
+    assert plan.training.weight_transfer_protocols
 
 
-@pytest.mark.parametrize(
-    ("artifact_interval", "checkpoint_interval", "refused"),
-    [(None, 1, False), (8, 4, False), (None, 4, True), (6, 4, True)],
-)
-def test_the_artifact_cadence_must_be_a_multiple_of_the_checkpoint_interval(
-    monkeypatch, artifact_interval, checkpoint_interval, refused
-):
-    from types import SimpleNamespace
+def test_plan_with_remote_engines_reserves_training_gpus_only_and_sends_the_files_model(monkeypatch):
+    from reef.inference.remote.service import RemoteInferenceService
+    from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL
+    from reef.runtime.executor.placement import ModelGpuLayout
+    from reef.service.training_driver import assemble_model_plan
+    from reef.train.slime_backend.resources import model_gpu_layout
 
-    from reef.train.slime_backend import driver
-    from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
+    args = plan_args("managed")
+    args.hf_checkpoint = "/cache/snapshot"
+    driver = patch_driver(monkeypatch, args, lora=False)
+    monkeypatch.setenv("REEF_REMOTE_CONTROL_TOKEN", "control-secret")
+    remote = {
+        "url": "https://gpu-host.example",
+        "control_token_env": "REEF_REMOTE_CONTROL_TOKEN",
+        "inference_token_env": "REEF_REMOTE_INFERENCE_TOKEN",
+        "startup_timeout_s": 3600.0,
+        "model_path": "Qwen/Qwen3-8B",
+    }
+    reef = {"inference_remote": remote, "inference_num_gpus": 4, "tensor_parallel_size": 2}
+    training = driver.create_training_plan({"reef": reef}, loss_family="loss")
+    assert training.resources.remote_inference
+    assert model_gpu_layout(args, remote_inference=True) == ModelGpuLayout(4, 4, external_inference=True)
+    assert model_gpu_layout(args, remote_inference=True).total == 4
+    assert (training.inference_config["engine"], training.inference_config["num_gpus"]) == ("sglang", 4)
+    assert training.inference_config["engine_config"]["model_path"] == "Qwen/Qwen3-8B"
+    plan = assemble_model_plan({"reef": reef}, training)
+    assert isinstance(plan.inference, RemoteInferenceService)
+    assert plan.weight_transfer_protocol(plan.inference) == WEIGHT_FILES_PROTOCOL
 
-    class Algorithm:
-        def parse_driver_options(self, arguments):
-            return None, arguments
-
-        def apply_driver_options(self, args, config):
-            pass
-
-        def validate_backend_args(self, args, recipe):
-            pass
-
-    class PreparedBridge(Exception):
-        pass
-
-    def prepare_bridge(*args, **kwargs):
-        raise PreparedBridge
-
-    monkeypatch.setenv("RAY_ADDRESS", "external")
-    monkeypatch.setattr(driver, "resolve_loss_family", lambda name: Algorithm())
-    monkeypatch.setattr(
-        driver, "_parse_slime_args", lambda arguments: SimpleNamespace(reef_checkpoint_interval=checkpoint_interval)
+    lora_driver = patch_driver(monkeypatch, plan_args("lora"), lora=True)
+    lora_plan = assemble_model_plan(
+        {"reef": reef}, lora_driver.create_training_plan({"reef": reef}, loss_family="loss")
     )
-    for name in (
-        "_configure_executors",
-        "_validate_tracking_args",
-        "_apply_bridge_resume_fallback",
-        "_apply_unsaved_optimizer_resume",
-        "_stamp_loss_family_reference",
-    ):
-        monkeypatch.setattr(driver, name, lambda *args: None)
-    monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda *args: None)
-    monkeypatch.setattr(bridge, "prepare_bridge", prepare_bridge)
-    reef = {} if artifact_interval is None else {"checkpoint_every_n_versions": artifact_interval}
-
-    with pytest.raises(RuntimeError if refused else PreparedBridge) as raised:
-        driver.create_training_plan({"reef": reef}, loss_family="loss")
-    if refused:
-        assert "must be a multiple of --reef-checkpoint-interval" in str(raised.value)
+    assert lora_plan.weight_transfer_protocol(lora_plan.inference) == WEIGHT_FILES_PROTOCOL
+    colocated_driver = patch_driver(monkeypatch, plan_args("colocate"), lora=False)
+    with pytest.raises(RuntimeError, match="colocated training"):
+        colocated_driver.create_training_plan({"reef": reef}, loss_family="loss")

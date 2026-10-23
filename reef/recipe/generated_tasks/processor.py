@@ -1187,9 +1187,12 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
         record2task: GeneratedTaskTasks,
         worker: BackgroundJobWorker | None = None,
     ) -> None:
-        super().__init__(context, settings.tasks_per_step)
+        super().__init__(context, None)
+        # A rollout batch bounds its own samples, at most tasks_per_step x plays_per_task, so no buffer releases them.
+        self.buffer_size = None
         self.record2record = record2record
         self.record2task = record2task
+        self.tasks_per_step = settings.tasks_per_step
         self.settle_timeout_seconds = settings.settle_timeout_seconds
         self.episode_capacity = settings.episode_capacity or settings.tasks_per_step * record2task.plays_per_task
         self.worker = worker or BackgroundJobWorker(self, thread_name="generated-task-rollouts", concurrency=1)

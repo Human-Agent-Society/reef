@@ -30,7 +30,7 @@ from reef.train.types import TrainingBatch, trajectories
 REWARD_OBJECTIVE = "tests.slime_backend.test_slime_training_methods:RewardObjective"
 WARMUP = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
 # One optimizer step per sample: two samples make a two-step job.
-ONE_SAMPLE_STEPS = StepScheduling(unit="sample", batch_size=1)
+ONE_SAMPLE_STEPS = StepScheduling(unit="sample")
 
 
 class RewardObjective(TrainingObjective):

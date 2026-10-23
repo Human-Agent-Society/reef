@@ -6,7 +6,13 @@ import logging
 import math
 from typing import Any
 
-from reef.runtime.deployment import DeploymentResources, TrainingService, WeightTransferSession
+from reef.runtime.deployment import (
+    WEIGHT_FILES_PROTOCOL,
+    DeploymentResources,
+    NativeWeightTransferSession,
+    TrainingService,
+    WeightTransferSession,
+)
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import TrainingBackend
 from reef.train.slime_backend.reef_adapters.bridge import (
@@ -56,12 +62,19 @@ class SlimeTrainingService(TrainingService):
         self._critic_group: Any = None
         self._backend: TrainingBackend | None = None
         self._session_id: str | None = None
+        #: Set by a file session: the coordinator delivers exported weight files and no native sender exists.
+        self.delivers_weight_files = False
         self._started = False
         self._closed = False
 
     @property
-    def weight_transfer_protocol(self) -> str:
-        return self._weight_transfer_protocol
+    def weight_transfer_protocols(self) -> tuple[str, ...]:
+        """The native transfer first, then weight files for a receiver that the workers cannot reach.
+
+        As files, full-weight training delivers Hugging Face checkpoints and
+        LoRA training delivers each scenario's PEFT adapter.
+        """
+        return (self._weight_transfer_protocol, WEIGHT_FILES_PROTOCOL)
 
     def start(self, resources: DeploymentResources) -> None:
         if self._started or self._closed:
@@ -80,24 +93,31 @@ class SlimeTrainingService(TrainingService):
         # release_train retirement as a deployment failure after serialization.
 
     def attach_weight_transport(self, session: WeightTransferSession) -> None:
-        """Attach the existing native sender protocol after workers are initialized."""
+        """Attach the native sender, or prepare the workers to export weight files, after they are initialized."""
         if self._actor_group is None or self._closed:
             raise RuntimeError("start training workers before attaching their weight transport")
-        if session.protocol != self.weight_transfer_protocol:
+        rollout_manager: Any
+        if isinstance(session, NativeWeightTransferSession) and session.protocol == self._weight_transfer_protocol:
+            receiver = session.receiver
+            if not isinstance(receiver, RayExecutor) or len(receiver.workers) != 1:
+                raise ValueError("Slime weight transport requires one native Ray receiver")
+            # The pinned native updaters consume one borrowed actor handle. Reef
+            # already fenced/offloaded the receiver; attachment only configures
+            # sender layout and transport, never its inference lifecycle.
+            rollout_manager = receiver.workers[0]
+        elif not isinstance(session, NativeWeightTransferSession) and session.protocol == WEIGHT_FILES_PROTOCOL:
+            # No receiver handle: the workers only report their parallel layout, and export files on request.
+            rollout_manager = None
+        else:
             raise ValueError("Slime training received an incompatible weight transfer protocol")
         if self._session_id is not None:
             if self._session_id == session.session_id:
                 return
             raise RuntimeError("training workers cannot reuse a different deployment's weight transfer session")
-        receiver = session.receiver
-        if not isinstance(receiver, RayExecutor) or len(receiver.workers) != 1:
-            raise ValueError("Slime weight transport requires one native Ray receiver")
-        # The pinned native updaters consume one borrowed actor handle. Reef
-        # already fenced/offloaded the receiver; attachment only configures
-        # sender layout and transport, never its inference lifecycle.
         for group in (self._actor_group, self._critic_group):
             if group is not None:
-                group.set_rollout_manager(receiver.workers[0])
+                group.set_rollout_manager(rollout_manager)
+        self.delivers_weight_files = rollout_manager is None
         self._session_id = session.session_id
 
     def backend(self) -> TrainingBackend:
@@ -111,6 +131,7 @@ class SlimeTrainingService(TrainingService):
                 preparation=self.preparation,
                 loss_family_config=self.loss_family_config,
                 train_rpc_timeout_s=self.train_rpc_timeout_s,
+                delivers_weight_files=self.delivers_weight_files,
             )
         return self._backend
 

@@ -5,7 +5,7 @@ ordered tuple of event objects; most harnesses keep plain files there, and
 opencode a SQLite database. A missing directory reads as an empty trajectory
 (a crashed episode still yields a result); corruption raises, except for one
 torn final JSONL line per file, which a mid-write crash legitimately leaves
-behind (the same tolerance the commit log applies).
+behind (the same tolerance the commit history applies).
 
 Subclass :class:`TrajectoryReader`, set the class attribute ``format``, implement
 :meth:`TrajectoryReader.__call__`, and decorate with ``@register_trajectory_reader``::

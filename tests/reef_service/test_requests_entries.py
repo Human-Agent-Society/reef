@@ -3,7 +3,7 @@
 ``evolution.requests: true`` appends the adapter's ``code_extension`` and
 ``skill`` entries to the seed; the same load and render paths as every
 other node carry them, a pi release carries the rendered files alone (the
-entries live in the commit log the service proposer reads), and adapters
+entries live in the commit history the service proposer reads), and adapters
 without a shipped extension refuse boot naming them. The
 assets are read through ``_ASSETS``, so these tests write placeholders and
 point the module at them; the shipped files are checked when present.

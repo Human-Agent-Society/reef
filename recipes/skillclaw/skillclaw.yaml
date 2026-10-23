@@ -16,6 +16,8 @@ recipe:
   config:
     evolution:
       adapter: pi
+      # The night trigger: the batch closes at the frozen day's task count, passing reports included.
+      batch_size: 60
       # The method module in the harness/ package: propose is the sealed night
       # flow (one decision per skill group plus the no-skill bucket) mapped to
       # one composite mutation sequence; evaluate grades the probe episodes.
@@ -58,11 +60,6 @@ recipe:
       # hands the recipe its model binding, which reef renders into each probe
       # episode and passes to propose. The served pool never names an endpoint.
       seed: []
-# The night trigger: the batch closes at the frozen day's task count, passing reports included.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 60
 inference:
   upstream-model: ${REEF_MODEL}
 

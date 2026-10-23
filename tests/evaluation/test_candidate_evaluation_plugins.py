@@ -43,7 +43,6 @@ def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
 def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
     runtime = StubTrainingRuntime()
     config = SAORecipe.service_config({}, model_path="/models/student")
-    config["pipeline"] = {"task2batch": {"config": {"batch_size": 1}}}
     config["evaluation"] = evaluation_config()
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},

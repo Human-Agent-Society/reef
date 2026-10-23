@@ -142,7 +142,7 @@ def _training_recipe(
 
 
 #: The keys a recipe that trains weights through a component reads at the top of its config.
-COMPOSED_RECIPE_KEYS = frozenset({"components", "model", "artifact", "data", "execution", "executors"})
+COMPOSED_RECIPE_KEYS = frozenset({"components", "model", "data", "execution", "executors"})
 
 
 def composed_training_recipe(

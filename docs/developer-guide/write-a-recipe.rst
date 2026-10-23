@@ -72,7 +72,7 @@ A weight recipe is four pieces plus the class that binds them.
 .. config::
 
    training objective | a ``TrainingObjective`` declaring a loss family and implementing ``prepare(batch, state)`` to return advantages, metrics, and proposed state in a ``StepSignal``. No torch, Ray, or Slime import.
-   step schedule | a ``StepScheduling`` the recipe binds beside its objective: rollout unit, optimizer step size, epochs, shuffle, and remainder handling. The objective declares only whether its loss tolerates more than one pass.
+   step schedule | a ``StepScheduling`` the recipe binds beside its objective: rollout unit, epochs, shuffle, and remainder handling. The backend's batch size sets the optimizer step size. The objective declares only whether its loss tolerates more than one pass.
    pipeline stages | the record stage, the record-to-task stage, and the task-to-batch stage that turn valid reports and referenced records into samples and typed batches; ``pipeline_spec()`` names them
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
@@ -100,15 +100,15 @@ Copy a weight-training config as described in `Evolve your model
 
    recipe:
      implementation: "my_pkg.my_method:MyMethodRecipe"
-   pipeline:
-     task2batch:
-       config:
-         batch_size: 4
+   training:
+     config:
+       global_batch_size: 4
 
 This fragment shows only the new keys; keep the inference, storage and training
-settings from the config you copied. Reef assembles the driver and HTTP process. Set
-``training.config.global_batch_size`` to the same value, and add the driver flags your
-loss family requires (`the mapping
+settings from the config you copied. Reef assembles the driver and HTTP process.
+``training.config.global_batch_size`` is the batch size: Reef makes a batch when
+it holds this many samples, and Slime trains it in optimizer steps of this
+size. Add the driver flags your loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
 The driver reads the same ``recipe.implementation`` value from the deployment config and
 gets the loss family from the class's ``training_spec()``. Do not repeat either
@@ -128,7 +128,7 @@ Declare each method setting once with ``config_field``:
 
    @dataclass(frozen=True)
    class MyMethodRecipe(WeightTrainingRecipe):
-       batch_size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
+       clip_ratio: float = config_field(0.2, env="MY_CLIP_RATIO", help="Bound on the policy ratio.")
        temperature: float = config_field(0.5, allow_nonfinite=False)
        tags: tuple[str, ...] = config_field(())
 
@@ -303,8 +303,10 @@ factory discovery does not make arbitrary backend pairs compatible.
 2. Verify the receiver and prepare weight transfer. Colocated inference releases
    its initial device allocations before training workers initialize.
 3. Call ``TrainingService.start(resources)`` without an inference connection.
-4. Attach a ``WeightTransferSession`` to the trainer's native sender. Its protocol,
-   borrowed receiver executor and fresh session identity describe one attachment.
+4. Select the first transfer in the trainer's ``weight_transfer_protocols`` that
+   the receiver accepts, and attach a ``WeightTransferSession`` with a fresh
+   identity. Only the receiver's native protocol gives the sender the borrowed
+   receiver executor (``NativeWeightTransferSession``).
 5. Start Reef's ``TrainingCoordinator`` with separate ``TrainingBackend`` and
    ``InferenceBackend``, then verify readiness after durable recovery.
 
@@ -347,7 +349,8 @@ no model trainer. ``RuntimeCandidateBackend`` connects that recipe interface to
 the runtime scheduler.
 
 Alongside ``TrainingBackend``, ``InferenceBackend`` exposes pause,
-resume, recovery, version verification, adapter unload and memory operations.
+resume, recovery, version verification and adapter unload.
+``InferenceMemoryHandoffBackend`` adds the memory operations that colocated training uses.
 ``TrainingCoordinator`` owns LoRA residency and colocated
 handoffs. The native sender transfers weights directly to receiver workers;
 weight tensors never pass through the HTTP service or the scheduler.

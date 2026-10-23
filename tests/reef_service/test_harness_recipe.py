@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -19,8 +20,7 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ReefError
-from reef.core.plugins import PluginReference
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -32,7 +32,6 @@ from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.mutations import admit_mutations
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.sandbox.process import LocalExecutor
@@ -583,7 +582,7 @@ def test_commit_applied_aligns_the_tree_to_the_committed_entries(tmp_path: Path)
 
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # An unlaunchable episode loses its pairing but must not put -inf into
-    # the metrics: the commit log serializes them as JSON, which has no
+    # the metrics: the commit history serializes them as JSON, which has no
     # -Infinity, and a non-JSON reader would decode a wrong finite number.
     import json
 
@@ -837,22 +836,17 @@ def _report_once(scenario, name: str, suffix: str) -> None:
     )
 
 
-@pytest.mark.parametrize("checkpoint_every", [1, 2])
-def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(
-    tmp_path: Path,
-    checkpoint_every: int,
-) -> None:
+def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(tmp_path: Path) -> None:
     """Cordis owns its temporary render, while the repository owns its copy."""
 
     def propose(nodes, samples, model):
         del nodes, samples, model
         return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 
-    built = dataclasses.replace(recipe(tmp_path, propose), checkpoint_strategy=EveryNVersions(checkpoint_every))
     initial = tmp_path / "initial"
     initial.mkdir()
     dispatcher = Dispatcher(
-        built,
+        recipe(tmp_path, propose),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -909,9 +903,8 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     finally:
         dispatcher.close()
 
-    raw = (agent_record_dir / f"{hashlib.sha256(b'leak-476').hexdigest()}.commits.jsonl").read_bytes()
-    assert key.encode() not in raw
-    record = json.loads(raw.splitlines()[0])
+    assert_no_key_in_database(agent_record_dir, "leak-476", key)
+    record = first_commit(agent_record_dir, "leak-476")
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
@@ -931,6 +924,23 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         recovered.commit(follow_up)
     finally:
         restarted.close()
+
+
+def scenario_database(agent_record_dir: Path, scenario: str) -> Path:
+    return agent_record_dir / f"{hashlib.sha256(scenario.encode()).hexdigest()}.sqlite3"
+
+
+def assert_no_key_in_database(agent_record_dir: Path, scenario: str, key: str) -> None:
+    """Check every file of the scenario database, including the SQLite WAL files."""
+    paths = list(agent_record_dir.glob(f"{scenario_database(agent_record_dir, scenario).name}*"))
+    assert paths
+    for path in paths:
+        assert key.encode() not in path.read_bytes(), path
+
+
+def first_commit(agent_record_dir: Path, scenario: str) -> dict:
+    with SQLiteRecordStore(scenario_database(agent_record_dir, scenario)) as records:
+        return records.commit_history().records()[0].to_dict()
 
 
 def test_disabled_seed_with_an_inline_key_refuses_boot(tmp_path: Path) -> None:
@@ -988,9 +998,8 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     finally:
         dispatcher.close()
 
-    raw = (agent_record_dir / f"{hashlib.sha256(b'leak-476-disabled').hexdigest()}.commits.jsonl").read_bytes()
-    assert key.encode() not in raw
-    record = json.loads(raw.splitlines()[0])
+    assert_no_key_in_database(agent_record_dir, "leak-476-disabled", key)
+    record = first_commit(agent_record_dir, "leak-476-disabled")
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
@@ -1023,11 +1032,18 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         dispatcher.close()
 
     # Rewrite the committed record as a pre-gate workdir holds it: the seed
-    # entry names the key inline. This file is the only one with key bytes.
-    log_path = agent_record_dir / f"{hashlib.sha256(b'pregate-476').hexdigest()}.commits.jsonl"
-    record = json.loads(log_path.read_bytes().splitlines()[-1])
-    record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"] = {"apiKey": key}
-    log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
+    # entry names the key inline. This row is the only stored value with key bytes.
+    database = scenario_database(agent_record_dir, "pregate-476")
+    with closing(sqlite3.connect(database)) as connection, connection:
+        step, commit_json = connection.execute(
+            "SELECT step, commit_json FROM scenario_commit ORDER BY step DESC LIMIT 1"
+        ).fetchone()
+        record = json.loads(commit_json)
+        record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"] = {"apiKey": key}
+        connection.execute(
+            "UPDATE scenario_commit SET commit_json = ? WHERE step = ?",
+            (json.dumps(record, separators=(",", ":"), sort_keys=True), step),
+        )
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     restarted = Dispatcher(
@@ -1045,8 +1061,17 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         restarted.close()
 
     for path in tmp_path.rglob("*"):
-        if path.is_file() and before.get(path) != path.read_bytes():
+        if path.is_file() and not path.name.startswith(database.name) and before.get(path) != path.read_bytes():
             assert key.encode() not in path.read_bytes(), path
+    with closing(sqlite3.connect(database)) as connection:
+        tables = [name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        holders = [
+            (table, row[0])
+            for table in tables
+            for row in connection.execute(f'SELECT * FROM "{table}"')
+            if key in repr(row)
+        ]
+    assert holders == [("scenario_commit", step)]
 
 
 def test_yaml_seed_must_be_a_list_of_mappings(tmp_path: Path, monkeypatch) -> None:
@@ -1424,7 +1449,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     monkeypatch.syspath_prepend(str(tmp_path))
     proxy = InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
 
-    def config(data: dict | None = None, pipeline: dict | None = None) -> dict:
+    def config(data: dict | None = None, pipeline: dict | None = None, **evolution: object) -> dict:
         settings = {
             "data": data or {},
             "evolution": {
@@ -1432,6 +1457,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
                 "evaluate": "demo_pipeline_stages:Evaluate",
                 "tasks": ["task one"],
                 "binary": str(make_binary(tmp_path)),
+                **evolution,
             },
         }
         if pipeline is not None:
@@ -1444,8 +1470,9 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
             pipeline={
                 "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
                 "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
-                "task2batch": {"config": {"batch_size": 2}},
-            }
+                "task2batch": {"config": {"buffer_size": 6}},
+            },
+            batch_size=2,
         ),
         runtime=proxy,
     )
@@ -1453,23 +1480,37 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     assert type(trainer.pipeline.record2record).__name__ == "InferenceRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "InferenceTasks"
     assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    assert trainer.pipeline.task2batch.batch_size == 2
+    # evolution.batch_size is the trainer's batch size, which it batches by.
+    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (2, 6)
 
     reported = CordisRecipe.from_environment({}, config=config(), runtime=proxy)
     trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "ReportRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "TraceTasks"
     assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    assert trainer.pipeline.task2batch.batch_size == 1
+    # The default buffer holds four batches.
+    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (1, 4)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         CordisRecipe.from_environment({}, config=config({"batch_size": 2}))
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment({}, config=config({"batch_policy": "records"}))
+    for batch_size in (0, -1, True, "2"):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.batch_size must be an integer of at least 1"):
+            CordisRecipe.from_environment({}, config=config(batch_size=batch_size), runtime=proxy)
     # A bad stage config fails when the scenario's pipeline builds.
-    with pytest.raises(RecipeConfigError, match="batch_size must be positive"):
+    for stage_config, message in (
+        ({"batch_size": 2}, "unknown config fields: batch_size"),
+        ({"buffer_size": 0}, "buffer_size must be positive"),
+    ):
+        with pytest.raises(RecipeConfigError, match=message):
+            CordisRecipe.from_environment(
+                {}, config=config(pipeline={"task2batch": {"config": stage_config}}, batch_size=2), runtime=proxy
+            ).build("demo", SQLiteRecordStore())
+    # The trainer refuses a buffer that cannot hold one batch.
+    with pytest.raises(PluginConfigError, match="buffer_size 1 is smaller than the batch size 2"):
         CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2batch": {"config": {"batch_size": 0}}}), runtime=proxy
+            {}, config=config(pipeline={"task2batch": {"config": {"buffer_size": 1}}}, batch_size=2), runtime=proxy
         ).build("demo", SQLiteRecordStore())
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment(
@@ -2515,40 +2556,6 @@ def test_pending_requires_durable_bytes() -> None:
         TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
 
 
-def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) -> None:
-    """Checkpoint policy runs after the result is built, so a durable-weights
-    step can still land on the live path; holding it back there is not
-    expressible and must fail loudly rather than serve the tree anyway."""
-    built = CordisRecipe(
-        resolve_proposer(lambda nodes, samples, model: None),
-        resolve_episode_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=(SEED_MODELS, SEED_SETTINGS),
-        runtime=runtime(),
-        checkpoint_strategy=EveryNVersions(1000),
-    )
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("live-pending")
-        assert scenario is not None
-        held = TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path=str(tmp_path / "ckpt"), pending=True)
-        with pytest.raises(ReefError, match="pending release requires a durable checkpoint"):
-            scenario.commit(held)
-    finally:
-        dispatcher.close()
-
-
-# -- the tree travels as a file, and the adapter's kinds are an admission rule ----------
-
-
 def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:
     tool = {
         "id": "shout",
@@ -2634,9 +2641,9 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
     with pytest.raises(ValueError, match="proposals_dir must be a non-empty path"):
         dataclasses.replace(default, proposals_dir=" ")
     # The backend gets the scenario's own directory; nothing is created until a proposal arrives.
-    trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
-        "demo", SQLiteRecordStore()
-    )
+    trainer = dataclasses.replace(
+        built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime(), binary=str(make_binary(tmp_path))
+    ).build("demo", SQLiteRecordStore())
     inbox = trainer.candidate_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()

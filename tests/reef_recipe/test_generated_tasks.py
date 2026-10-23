@@ -109,6 +109,10 @@ def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, Rou
     )
 
 
+#: The trainer's batch size of episodes. A rollout batch trains on its settled groups, whatever this is.
+BATCH_SIZE = 4
+
+
 def processor(**config: object) -> TrainingPipeline:
     context = PipelineContext("tasks")
     group_settings, round_settings, batch_settings = stage_settings(
@@ -193,8 +197,8 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
         )
     )
     played(p, "harbor-00000-000", 1, 0.0)
-    assert p.ready()
-    assert [sample.training.get("turn_count", 1) for sample in p.build_batch().items] == [2, 1]
+    assert p.ready(BATCH_SIZE)
+    assert [sample.training.get("turn_count", 1) for sample in p.build_batch(BATCH_SIZE).items] == [2, 1]
 
 
 def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
@@ -206,7 +210,7 @@ def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> No
         played(p, "harbor-00000-001", index, score)
     objective = resolve_objective("task_group")
     assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
-    signal = objective.prepare(p.build_batch(), {})
+    signal = objective.prepare(p.build_batch(BATCH_SIZE), {})
     assert signal.action == "train"
     assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
     assert signal.metrics["constant_groups"] == 1
@@ -218,7 +222,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
     for task in ("harbor-00000-000", "harbor-00000-001"):
         for index in range(2):
             played(p, task, index, 1.0)
-    signal = resolve_objective("task_group").prepare(p.build_batch(), {"steps": 3})
+    signal = resolve_objective("task_group").prepare(p.build_batch(BATCH_SIZE), {"steps": 3})
     assert signal.action == "skip" and signal.advantages is None
     assert signal.next_algorithm_state == {"steps": 3}
     assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
@@ -414,9 +418,9 @@ def rounds(
 
 def looked(p: TrainingPipeline) -> bool:
     """Look for a batch three times: a generation's outcome, then its rollout's, land on the look after each submit."""
-    p.ready()
-    p.ready()
-    return p.ready()
+    p.ready(BATCH_SIZE)
+    p.ready(BATCH_SIZE)
+    return p.ready(BATCH_SIZE)
 
 
 def train_rollout(p: TrainingPipeline, *, trained: bool = True) -> None:
@@ -426,7 +430,7 @@ def train_rollout(p: TrainingPipeline, *, trained: bool = True) -> None:
         task = task_use.rsplit("/", 1)[1]
         played(p, task, 0, 1.0)
         played(p, task, 1, 0.0)
-    p.acknowledge(p.build_batch().batch_id, trained=trained)
+    p.acknowledge(p.build_batch(BATCH_SIZE).batch_id, trained=trained)
     # The trainer releases the consumed records once the step's commit is durable.
     p.release_records(p.releasable_record_ids())
 
@@ -616,9 +620,9 @@ class PartlyReported(StandInGenerator):
 def test_a_round_that_played_no_task_does_not_block_the_next_one(tmp_path: Path) -> None:
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, ScriptedGenerator([]), worker=worker)
-    assert not p.ready() and generation_numbers(worker) == [0]
+    assert not p.ready(BATCH_SIZE) and generation_numbers(worker) == [0]
     worker.finish()
-    assert not p.ready(), "round 0 lands without a task and round 1 starts on the same look"
+    assert not p.ready(BATCH_SIZE), "round 0 lands without a task and round 1 starts on the same look"
     assert generation_numbers(worker) == [0, 1], "no batch can come; none was acknowledged"
 
 
@@ -640,7 +644,7 @@ def test_results_that_the_generator_did_not_take_are_sent_again_by_a_later_job(t
     p, player = rounds(tmp_path, task_generator)
     assert not looked(p)
     assert player.writes == ["harbor-00000-000", "harbor-00000-001"]
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert p.status()["task_generation"]["last_error"] == "the generator lost its state directory"
     assert not p.record2task.task_store.is_delivered(0)
     task_generator.failing_results = False
@@ -696,13 +700,13 @@ def test_a_task_that_an_earlier_generation_published_is_rejected_as_a_duplicate(
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, task_generator, worker=worker, rounds=2, batches_per_round=1)
     for _ in range(3):
-        p.ready()
+        p.ready(BATCH_SIZE)
         worker.finish()
     train_rollout(p)
     for _ in range(4):
-        p.ready()
+        p.ready(BATCH_SIZE)
         worker.finish()
-    p.ready()
+    p.ready(BATCH_SIZE)
     store = p.record2task.task_store
     state = store.generation(1)
     assert state is not None and train_task_names(state) == ("harbor-00001-005",)
@@ -719,7 +723,7 @@ def test_a_restart_sends_results_that_the_generator_did_not_receive(tmp_path: Pa
     restarted, _ = rounds(tmp_path, task_generator, worker=worker, rounds=1)
     assert [job.receipt for job in worker.submitted] == ["delivery"], "no round or play is due, yet the results go out"
     worker.finish()
-    restarted.ready()
+    restarted.ready(BATCH_SIZE)
     assert task_generator.result_generations == [0]
     assert restarted.record2task.task_store.is_delivered(0)
 
@@ -738,9 +742,9 @@ def test_a_task_whose_play_a_stop_interrupted_is_staged_again_and_plays(tmp_path
     worker = DeferredWorker()
     player = StandInGenerator(tmp_path / "tasks")
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), player, worker=worker, rounds=1)
-    first.ready()
+    first.ready(BATCH_SIZE)
     worker.finish()
-    first.ready()
+    first.ready(BATCH_SIZE)
     # The play wrote the task through the generator service, then the process stopped before its result was saved.
     store = first.record2task.task_store
     asyncio.run(player.write_task(read_harbor_task(store.path(store.tasks()[0].files_digest))))
@@ -764,7 +768,7 @@ def test_a_generator_that_always_fails_stops_at_the_round_limit(tmp_path: Path) 
     task_generator = FailingGenerator()
     p, _ = rounds(tmp_path, task_generator, rounds=3, generation_attempts=2)
     for _ in range(20):
-        p.ready()
+        p.ready(BATCH_SIZE)
     assert len(task_generator.requests) == 6, "three rounds, two attempts each"
     assert p.record2record.rounds_stopped
 
@@ -817,7 +821,8 @@ def rolled_out(p: TrainingPipeline, task: str, task_use: str, batch: str, index:
 def test_saved_tasks_roll_out_as_one_batch_and_train_on_its_labelled_episodes(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, player, rollout_worker = rollout_rounds(tmp_path, task_generator)
-    assert not p.ready() and not p.ready(), "the generation saves two tasks, and the rollout of both starts"
+    assert not p.ready(BATCH_SIZE), "the generation saves two tasks"
+    assert not p.ready(BATCH_SIZE), "the rollout of both starts"
     (job,) = rollout_worker.submitted
     assert isinstance(job, RolloutJob)
     batch = job.receipt
@@ -827,8 +832,8 @@ def test_saved_tasks_roll_out_as_one_batch_and_train_on_its_labelled_episodes(tm
         name = task.metadata["task"]["name"]
         rolled_out(p, name, task_use, batch, 0, 1.0)
         rolled_out(p, name, task_use, batch, 1, 0.0)
-    assert p.ready(), "both groups settled at the episodes that the plays reported"
-    built = p.build_batch()
+    assert p.ready(BATCH_SIZE), "both groups settled at the episodes that the plays reported"
+    built = p.build_batch(BATCH_SIZE)
     assert len(built.items) == 4 and not p.status()["rollout"]["is_playing"]
     p.acknowledge(built.batch_id)
     p.release_records(p.releasable_record_ids())
@@ -899,11 +904,11 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     assert {"rec-untagged", "rep-untagged"} <= p.releasable_record_ids(), "an untagged session is released"
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids()
     assert p.operational_metrics()["waiting_source_sessions"] == 1
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert [record.agent_record_id for record in worker.submitted[0].source_records] == ["rec-a", "rep-a"]
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the round runs"
     worker.finish()
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
 
 
@@ -930,9 +935,9 @@ def test_a_restart_does_not_generate_again_from_replayed_sessions_of_a_complete_
     worker = DeferredWorker()
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, **SOURCES)
     sessions(first, "a")
-    first.ready()
+    first.ready(BATCH_SIZE)
     worker.finish()
-    first.ready()
+    first.ready(BATCH_SIZE)
     first.close()
     task_generator = ScriptedGenerator()
     restarted, _ = rounds(tmp_path, task_generator, **SOURCES)
@@ -946,15 +951,15 @@ def test_replayed_sessions_of_a_complete_generation_do_not_use_up_a_round(tmp_pa
     worker = DeferredWorker()
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, **config)
     sessions(first, "a")
-    first.ready()
+    first.ready(BATCH_SIZE)
     worker.finish()
-    first.ready()
+    first.ready(BATCH_SIZE)
     first.close()
     task_generator = ScriptedGenerator()
     restarted, _ = rounds(tmp_path, task_generator, **config)
     sessions(restarted, "a", "b")
     for _ in range(6):
-        restarted.ready()
+        restarted.ready(BATCH_SIZE)
     assert [source_ids(request) for request in task_generator.requests] == [["rec-b", "rep-b"]]
 
 
@@ -1002,12 +1007,13 @@ def test_the_recipe_binds_the_objective_its_schedule_and_its_stages() -> None:
     spec = GeneratedTaskRecipe.training_spec()
     assert GeneratedTaskRecipe.pipeline_spec().task2batch is GeneratedTaskBatches and spec.objective == "task_group"
     assert spec.loss_family == "importance_sampling"
-    assert spec.scheduling.unit == "sample" and spec.scheduling.batch_size == "actual"
+    assert spec.scheduling.unit == "sample"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     built = training_recipe().build_pipeline(PipelineContext("one"))
     assert isinstance(built.record2record, GeneratedTaskRecord2Record)
     assert isinstance(built.record2task, GeneratedTaskTasks) and built.record2task.worker is None, "no round runs"
-    assert isinstance(built.task2batch, GeneratedTaskBatches) and built.batch_size == 4
+    assert isinstance(built.task2batch, GeneratedTaskBatches) and built.task2batch.tasks_per_step == 4
+    assert built.buffer_size is None, "a rollout batch bounds its own samples"
     built.close()
 
 
@@ -1054,7 +1060,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
     assert built.record2task.plays_per_task == 3, "the plays come from the record stage's groups"
     assert built.record2task.task_store is not None
-    assert built.batch_size == 2
+    assert isinstance(built.task2batch, GeneratedTaskBatches) and built.task2batch.tasks_per_step == 2
     built.close()
 
 
@@ -1103,7 +1109,7 @@ def test_a_rollout_that_trains_nothing_lets_the_next_round_start(tmp_path: Path)
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3)])
     p, _, _ = rollout_rounds(tmp_path, task_generator, BrokenPlayer(tmp_path / "tasks"), rounds=2, batches_per_round=1)
     for _ in range(10):
-        assert not p.ready()
+        assert not p.ready(BATCH_SIZE)
     assert p.status()["task_generation"]["completed"] == 2, "the failed rollout ends without a batch to wait for"
 
 
@@ -1131,10 +1137,10 @@ def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3)])
     p, _, _ = rollout_rounds(tmp_path, task_generator, rounds=2, batches_per_round=2)
     for _ in range(3):
-        p.ready()
+        p.ready(BATCH_SIZE)
     train_rollout(p)
     for _ in range(3):
-        p.ready()
+        p.ready(BATCH_SIZE)
     assert p.status()["task_generation"]["completed"] == 2, "no batch can come, so the next round starts"
     assert p.rollout is not None and all("harbor-00001" in task_use for task_use in p.rollout.task_uses)
 
@@ -1160,14 +1166,14 @@ def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedb
 def test_a_skipped_generation_is_finished_by_the_next_round(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)], failing="harbor-00000-001")
     p, _ = rounds(tmp_path, task_generator, rounds=3, generation_attempts=1)
-    p.ready()
-    p.ready()
+    p.ready(BATCH_SIZE)
+    p.ready(BATCH_SIZE)
     store = p.record2task.task_store
     assert not store.generation(0).is_complete
     assert p.status()["task_store"]["train"] == 1 and p.status()["task_store"]["available"] == 0
     task_generator.failing = None
     for _ in range(3):
-        p.ready()
+        p.ready(BATCH_SIZE)
     assert store.generation(0).is_complete and len(task_generator.requests) == 1
     assert p.status()["task_store"]["available"] == 2, "the same generation finished from its saved candidates"
 
@@ -1198,9 +1204,9 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_a_lost_result_afte
 def test_tasks_of_a_batch_that_did_not_train_roll_out_again(tmp_path: Path) -> None:
     p, _, _ = rollout_rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
     for _ in range(3):
-        p.ready()
+        p.ready(BATCH_SIZE)
     train_rollout(p, trained=False)
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert p.rollout is not None and len(p.rollout.task_uses) == 2, "both tasks roll out again"
     assert p.status()["task_store"]["trained"] == 0
 
@@ -1214,7 +1220,7 @@ def test_a_rollout_job_that_fails_gives_its_tasks_lost_results_so_the_feedback_g
 
     p.task2batch.run = failing_run
     for _ in range(4):
-        p.ready()
+        p.ready(BATCH_SIZE)
     results = p.record2task.task_store.results(0)
     assert [result.infrastructure_failure for result in results] == [True, True]
     assert task_generator.result_generations == [0]
@@ -1243,8 +1249,8 @@ def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 5)], failing="harbor-00000-001")
     p, _ = rounds(tmp_path, task_generator, rounds=3, generation_attempts=1, **SOURCES)
     sessions(p, "a", "b", "c", "d")
-    p.ready()
-    p.ready()
+    p.ready(BATCH_SIZE)
+    p.ready(BATCH_SIZE)
     task_generator.failing = None
     for _ in range(3):
         looked(p)
@@ -1273,7 +1279,7 @@ def test_a_task_whose_step_did_not_commit_rolls_out_again_after_a_restart(tmp_pa
         task = task_use.rsplit("/", 1)[1]
         played(first, task, 0, 1.0)
         played(first, task, 1, 0.0)
-    first.acknowledge(first.build_batch().batch_id)
+    first.acknowledge(first.build_batch(BATCH_SIZE).batch_id)
     # The process stops before the step's commit is durable, so no record is released.
     assert first.record2task.task_store.trained_task_names() == frozenset()
     first.close()

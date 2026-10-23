@@ -52,7 +52,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
         return Mutation("create", "requested-rules", {"name": "rules", "config": {"text": "marker rules"}})
 
     # A large auto batch must not keep an explicit manual request waiting.
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), pipeline_stages=harness_stages(100)))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), batch_size=100))
     scenario = dispatcher.get_or_create_scenario("ask-scenario")
 
     async def run():
@@ -529,7 +529,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
         trainer = Trainer.build(
             "agents",
             records,
-            pipeline_factory=harness_stages(1, inference=True).build,
+            pipeline_factory=harness_stages(inference=True).build,
             candidate_backend=_RequiresBackend(written),
             training_mode="manual",
         )
@@ -700,7 +700,9 @@ def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tm
             assert [item["name"] for item in head["requires"]] == names and len(names) == 9
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
             assert response.status == 200, await response.text()
-            assert f"REQUIRES='{json.dumps(head['requires'])}'" in await response.text()
+            # The script lists each item as parse_requires orders its keys; compare the values.
+            [line] = [line for line in (await response.text()).splitlines() if line.startswith("REQUIRES=")]
+            assert json.loads(line.removeprefix("REQUIRES=").strip("'")) == head["requires"]
         finally:
             await client.close()
 

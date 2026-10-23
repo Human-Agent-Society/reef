@@ -21,7 +21,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     ``GeneratedTaskTasks``, and ``GeneratedTaskBatches``; the deployment's
     ``pipeline`` section gives their config: the rounds, the task
     generator, and the generator service in ``record2task``, the task groups
-    and the source sessions in ``record2record``, and the batch size in
+    and the source sessions in ``record2record``, and the rollout batches in
     ``task2batch``. Without that section, no round runs, no task rolls out,
     and nothing trains.
 
@@ -38,9 +38,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective=TaskGroupObjective.name, scheduling=StepScheduling(unit="sample", batch_size="actual")
-        )
+        return WeightTrainingSpec(objective=TaskGroupObjective.name, scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

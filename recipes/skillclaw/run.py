@@ -20,8 +20,8 @@ still counts every task. Rounds checkpoint as round-<n>/summary.json and a
 rerun resumes after the last one: a completed task's stored verdict is never
 re-bought, a replayed report that the store already holds is skipped on its
 409, a night whose trigger report landed before a crash is poked by hand,
-and the served pool survives restarts as pool-current with the commit log as
-the authority (_committed_pool).
+and the served pool survives restarts as pool-current with the commit history
+as the authority (_committed_pool).
 
 ``python3 run.py report`` prints the gain table over both runs' sealed
 rounds (``stats.py``, the preregistered criterion).
@@ -80,7 +80,7 @@ from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
-from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
 class EventLog:
@@ -169,7 +169,7 @@ class RunService:
         self._runner: web.AppRunner | None = None
 
     def start(self) -> None:
-        # Scenario creation (or durable recovery from the commit log) happens
+        # Scenario creation (or durable recovery from the commit history) happens
         # before any request lands.
         self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()
@@ -504,28 +504,21 @@ def _persist_pool(service: RunService, run_dir: Path) -> None:
 def _committed_pool(run_dir: Path, scenario: str) -> Path | None:
     """The pool tree of the scenario's last durable commit, if still on disk.
 
-    The commit log is the authority on which night landed; pool-current is
+    The commit history is the authority on which night landed; pool-current is
     written after the commit, so a crash between them would otherwise revert
-    the served pool while the summaries claim the night happened. Version
-    trees under run_dir/artifacts survive restarts even though the in-memory
+    the served pool while the summaries claim the night happened. Release trees
+    under run_dir/artifacts survive restarts even though the in-memory
     repository forgets them.
     """
     key = hashlib.sha256(scenario.encode("utf-8")).hexdigest()
-    log = run_dir / "reef-data" / f"{key}.commits.jsonl"
-    if not log.exists():
+    database = run_dir / "reef-data" / f"{key}.sqlite3"
+    if not database.exists():
         return None
-    version = None
-    for line in log.read_text(encoding="utf-8").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        ref = record.get("artifact_ref")
-        if isinstance(ref, dict) and ref.get("version"):
-            version = str(ref["version"])
-    if version is None:
+    with SQLiteRecordStore(database) as records:
+        history = records.commit_history().records()
+    if not history:
         return None
-    candidate = run_dir / "artifacts" / version
+    candidate = run_dir / "artifacts" / history[-1].artifact_ref.release_id
     return candidate if (candidate / "pi-agent" / "skills").is_dir() else None
 
 
@@ -615,7 +608,7 @@ def main() -> None:
         event_log.write({"event": "sc_campaign_done", "run": RUN})
     finally:
         # Never close the store under a night that is still committing. The
-        # snapshot is best effort: the commit log is the recovery authority.
+        # snapshot is best effort: the commit history is the recovery authority.
         _settle(service)
         with contextlib.suppress(Exception):
             _persist_pool(service, run_dir)

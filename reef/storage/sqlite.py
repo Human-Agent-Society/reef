@@ -1,4 +1,4 @@
-"""SQLite records, scenario storage, and retained-file maintenance."""
+"""SQLite records, commits, scenario storage, and retained-file maintenance."""
 
 from __future__ import annotations
 
@@ -22,13 +22,14 @@ from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings
-from reef.storage.commit_log import CommitHistoryScenarioStore, CommitLog
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, TrajectoryTable, trajectory_table
+from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
@@ -88,7 +89,8 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-TRAJECTORY_TABLE = TrajectoryTable(trajectory_table(_METADATA))
+TRAJECTORY_TABLE = ScopedTable(trajectory_table(_METADATA))
+COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
 
 _TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
@@ -209,6 +211,12 @@ class SQLiteRecordStore(SQLRecordStore):
         """Open the uploaded trajectories in this database."""
         return SQLTrajectoryStore(self, TRAJECTORY_TABLE)
 
+    def commit_history(self) -> SQLCommitHistory:
+        """Open the commit history in this database; it is durable unless the database is in memory."""
+        return SQLCommitHistory(
+            self, COMMIT_TABLE, label=f"{self._database}#scenario_commit", durable=self._database != ":memory:"
+        )
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -323,12 +331,12 @@ class SQLiteRecordRetention:
 
 
 class SQLiteScenarioStorage(ScenarioStorage):
-    """Open existing hashed SQLite and JSONL paths and manage their lifecycle.
+    """Open hashed SQLite database paths and manage their lifecycle.
 
-    Each scenario has one database file for its records, settings, generated
-    tasks and uploaded trajectories, and one JSONL commit log. Without a directory, all state is in memory.
-    Records, commits and task states then last for one session, and settings
-    last for the storage. ``task_files`` keeps the files of published tasks.
+    Each scenario has one database file for its records, commits, settings,
+    generated tasks and uploaded trajectories. Without a directory, all state is in memory. Records, commits and task
+    states then last for one session, and settings last for the storage.
+    ``task_files`` keeps the files of published tasks.
     The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If
     the storage has no directory, the default store uses a temporary directory.
     """
@@ -380,13 +388,12 @@ class SQLiteScenarioStorage(ScenarioStorage):
             self._ensure_open()
             key = self._scenario_key(scenario)
             database = None if self._directory is None else self._directory / f"{key}.sqlite3"
-            commit_log = None if self._directory is None else CommitLog(self._directory / f"{key}.commits.jsonl")
             records = SQLiteRecordStore(database)
             try:
                 return CommitHistoryScenarioStore(
                     scenario,
                     records,
-                    commit_log,
+                    records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
                     trajectories=records.trajectory_store(),
                 )
@@ -420,15 +427,14 @@ class SQLiteScenarioStorage(ScenarioStorage):
             return 0 if self._directory is None else SQLiteRecordRetention(retention).prune(self._directory)
 
     def state_paths(self, scenario: str) -> tuple[Path, ...]:
-        """Existing local state paths; the stable process lock is never moved."""
+        """The local state paths of a scenario: its database and the WAL files of SQLite."""
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
             if self._directory is None:
                 return ()
             return tuple(
-                self._directory / name
-                for name in (f"{key}.sqlite3", f"{key}.sqlite3-wal", f"{key}.sqlite3-shm", f"{key}.commits.jsonl")
+                self._directory / name for name in (f"{key}.sqlite3", f"{key}.sqlite3-wal", f"{key}.sqlite3-shm")
             )
 
     def close(self) -> None:

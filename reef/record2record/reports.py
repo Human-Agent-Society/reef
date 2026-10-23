@@ -23,7 +23,7 @@ from reef.core.plugins import NoSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.pipeline_context import PipelineContext
-from reef.record2record.base import Record2Record
+from reef.record2record.base import Record2Record, UnitDropReason
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
 from reef.record2record.sets import RecordSet, RecordSetUnit
 
@@ -230,7 +230,6 @@ class ReportRecord2Record(Record2Record):
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
-        self.held_unit_limit = context.held_unit_limit
         self.grouping = grouping
         self.exclusive_sources = exclusive_sources
         self.candidate_count = 0
@@ -243,7 +242,6 @@ class ReportRecord2Record(Record2Record):
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()
         self.groups: dict[Hashable, ReportGroup] = {}
-        self.limit_warned = False
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
@@ -253,8 +251,6 @@ class ReportRecord2Record(Record2Record):
 
     def context_changed(self, context: PipelineContext) -> None:
         self.admitted_report_type = context.admitted_report_type
-        self.held_unit_limit = context.held_unit_limit
-        self.apply_limit()
 
     # ------------------------------------------------------------- formation
 
@@ -341,7 +337,6 @@ class ReportRecord2Record(Record2Record):
         else:
             group.entries[slot] = entry
             self.refresh_group(key)
-        self.apply_limit()
 
     def reject(self, record_set: RecordSet) -> None:
         self.end_report(report_candidate(record_set).context.report)
@@ -391,28 +386,7 @@ class ReportRecord2Record(Record2Record):
 
     # ------------------------------------------------------- held unit limit
 
-    def apply_limit(self) -> None:
-        """Release the oldest unreserved units beyond the limit. The reserved batch stays."""
-        limit = self.held_unit_limit
-        if limit is None or len(self.pool) <= limit:
-            return
-        reserved = self.reserved_report_ids()
-        for report_set in report_units(self.pool.ordered_units()):
-            if len(self.pool) <= limit:
-                return
-            if report_set.entries[0].report_id in reserved:
-                continue
-            self.release_set(report_set)
-            if not self.limit_warned:
-                logger.warning(
-                    "scenario %r released report %s beyond the manual limit %d (further releases are not logged)",
-                    self.scenario,
-                    report_set.entries[0].report_id,
-                    limit,
-                )
-                self.limit_warned = True
-
-    def drop_held_unit(self, unit: RecordSetUnit) -> None:
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
         self.release_set(report_units((unit,))[0])
 
     def release_set(self, report_set: ReportSet) -> None:

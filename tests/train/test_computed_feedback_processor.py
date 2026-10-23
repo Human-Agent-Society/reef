@@ -101,12 +101,12 @@ class ToyBatches(Task2Batch):
 class _ToyProcessor(TrainingPipeline):
     """Trains the judged records of ``_ToyJudging``. Samples are one-token stubs."""
 
-    def __init__(self, context: PipelineContext, *, worker: Any, batch_size: int = 1) -> None:
+    def __init__(self, context: PipelineContext, *, worker: Any) -> None:
         super().__init__(
             context,
             record2record=JudgingRecord2Record(_ToyJudging(), worker),
             record2task=_ToyTasks(),
-            task2batch=ToyBatches(context, batch_size),
+            task2batch=ToyBatches(context, None),
         )
 
 
@@ -116,9 +116,9 @@ def _record(agent_record_id: str, **payload) -> AgentRecord:
     )
 
 
-def _engine(batch_size: int = 1, worker=None) -> tuple[_ToyProcessor, _FakeWorker]:
+def _engine(worker=None) -> tuple[_ToyProcessor, _FakeWorker]:
     worker = worker if worker is not None else _FakeWorker()
-    processor = _ToyProcessor(PipelineContext("s"), worker=worker, batch_size=batch_size)
+    processor = _ToyProcessor(PipelineContext("s"), worker=worker)
     return processor, worker
 
 
@@ -131,8 +131,8 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     assert processor.background_jobs_running()
 
     worker.push(_Judgment("r1"))
-    assert processor.ready()
-    batch = processor.build_batch()
+    assert processor.ready(1)
+    batch = processor.build_batch(1)
     assert source_record_id(batch.items[0]) == "r1"
     processor.acknowledge(batch.batch_id)
     decision = processor.releasable_record_ids()
@@ -155,7 +155,7 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     processor.push(_record("done2", completes="b"))
     worker.push(Failed("a"))
     worker.push(_Judgment("b", good=False))
-    assert not processor.ready()
+    assert not processor.ready(1)
     releasable = processor.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
 
@@ -172,7 +172,7 @@ def test_refused_submission_retires_immediately() -> None:
 
 
 def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
-    processor, worker = _engine(batch_size=2)
+    processor, worker = _engine()
     processor.observe_serving_runtime_load_id("v1")
     processor.push(_record("old", track=True, version="v1"))
     processor.push(_record("done1", completes="old"))
@@ -181,20 +181,20 @@ def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
-    assert not processor.ready()  # the stale candidate was dropped
+    assert not processor.ready(2)  # the stale candidate was dropped
     assert "old" in processor.releasable_record_ids()
     assert "new" not in processor.releasable_record_ids()
 
 
 def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
     worker = _FakeWorker()
-    processor = _ToyProcessor(PipelineContext("s", max_staleness=1), worker=worker, batch_size=3)
+    processor = _ToyProcessor(PipelineContext("s", max_staleness=1), worker=worker)
     for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
         processor.observe_serving_runtime_load_id(version)
         processor.push(_record(name, track=True, version=version))
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
-    assert not processor.ready()  # e:3 is two versions behind e:5
+    assert not processor.ready(3)  # e:3 is two versions behind e:5
     assert "v3" in processor.releasable_record_ids()
     assert {"v4", "v5"}.isdisjoint(processor.releasable_record_ids())
 

@@ -334,9 +334,10 @@ The response is ``{"scenario": "my-agent", "trajectory_ids":
 after training. The same ID with a different trajectory returns 409. An
 invalid upload returns 400 and saves nothing.
 
-Each uploaded trajectory counts as one batch unit toward the recipe's
-``batch_size``. A batch takes uploaded trajectories first, in upload order,
-and then the units of recorded traffic. Thus a large upload can delay the
+Each uploaded trajectory counts as one sample toward the backend's batch
+size. It does not count toward the pipeline's ``buffer_size``, so Reef never
+releases it to make room. A batch takes uploaded trajectories first, in
+upload order, and then the units of recorded traffic. Thus a large upload can delay the
 training of live traffic. The delay continues until the batches use all of
 the upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
@@ -386,7 +387,7 @@ runs instructions only and never batches on traffic; harness evolution
 runs an instruction alone, without samples. ``hybrid`` batches on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units an automatic batch would take next, up to
-``pipeline.task2batch.config.batch_size`` and possibly none, ride beside it
+``evolution.batch_size`` traces and possibly none, ride beside it
 as the batch's samples (scored traces, or unscored records when the
 ``pipeline`` section names the inference stages), so the proposer reads the
 request next to them; with none queued the step batches as ``auto`` does.
@@ -814,10 +815,10 @@ failure's own HTTP status.
 ``files`` is the rendered tree, path to text. An adapter whose descriptor
 declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
 file: the release's entries list, the same ``{id, name, config}`` objects the
-commit log persists, as one JSON array. A resident ``reef-native serve``
+commit history persists, as one JSON array. A resident ``reef-native serve``
 process mounts that list entry by entry; an older ``reef-native`` ignores the
 file and reads the rendered files as before. ``pi`` declares none: a pi
-release is its rendered files, and the entries stay in the commit log, where
+release is its rendered files, and the entries stay in the commit history, where
 the proposals route and the evolve step read them.
 
 ``requires`` is what the release needs from the person who installs it:
@@ -848,7 +849,7 @@ Catalog and manifest reads do not wait for an evolve step's proposer or
 evaluation episodes: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
 rollback so a manifest's artifact and evaluation metrics come from the same
-release: reads do not interleave with head movement and its commit-log
+release: reads do not interleave with head movement and its commit-history
 update.
 
 Proposals
@@ -1194,6 +1195,9 @@ its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
 a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
 or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
 not be read. ``batch_ready`` says whether the processor has a batch waiting.
+``processor`` includes ``ready_samples``, the samples of the held record sets
+and uploaded trajectories; ``batch_size``, the samples an automatic batch
+needs; and ``buffer_size``, the most samples the held record sets keep.
 A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
 ``training_mode``, ``processor`` status and ``last_committed_step``. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
@@ -1205,7 +1209,7 @@ commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
 step that skipped or rejected its candidate. A rollback advances
 ``scenario_step`` without replacing the latest training outcome. A deployment
-without an agent-record directory has no historical commit log, so after a
+without an agent-record directory has no durable commit history, so after a
 restart from a rollback checkpoint this field is ``null`` until the next
 training commit.
 ``serving`` is runtime-wide but recipe-shaped: a LoRA deployment reports the
@@ -1323,7 +1327,7 @@ All these reads require service authentication and return
 content. A platform must bind the upstream scenario to the authenticated
 workspace. Each response is a live read; concurrent training and retention
 can change subsequent pages. Reading commit pages may scan the scenario's
-cached commit log; the response is bounded, not a new persisted index.
+cached commit history; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation

@@ -14,7 +14,7 @@ from typing import Any
 
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.runtime.deployment import (
-    ADAPTER_FILES_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
     DeploymentResources,
     InferenceConnection,
     InferenceResources,
@@ -123,6 +123,13 @@ class StubControl:
             ray.get([engine.set_runtime_load_id.remote(runtime_load_id) for engine in self.engines])
         self.loaded.append((lora_name, lora_path, runtime_load_id))
 
+    def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> None:
+        import ray
+
+        if runtime_load_id is not None:
+            ray.get([engine.set_runtime_load_id.remote(runtime_load_id) for engine in self.engines])
+        self.loaded.append(("", model_path, runtime_load_id))
+
     def loads(self) -> list[tuple[str, str, str | None]]:
         return list(self.loaded)
 
@@ -137,7 +144,7 @@ class StubEngineService(InferenceService):
     """Start the control actor in the deployment's Ray session on the reserved inference bundles."""
 
     connection_protocol = PROTOCOL
-    supported_transfer_protocols = (PROTOCOL, ADAPTER_FILES_PROTOCOL)
+    supported_transfer_protocols = (PROTOCOL, WEIGHT_FILES_PROTOCOL)
 
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = dict(config)

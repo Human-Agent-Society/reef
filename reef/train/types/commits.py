@@ -14,7 +14,7 @@ class PreparedCommit:
     commit; it never retires stored records.
 
     ``metrics`` is the objective's step result, carried opaquely: its schema is
-    owned by the processor or backend that produced it; the trainer and commit log
+    owned by the processor or backend that produced it; the trainer and commit history
     never interpret it, and the harness manifest republishes it verbatim as
     ``gate``. It rides the commit record because that is the only durable
     version-keyed store, so training metrics remain available when the

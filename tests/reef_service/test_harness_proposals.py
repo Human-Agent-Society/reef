@@ -304,7 +304,7 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it
         assert sorted(path.name for path in inbox.iterdir()) == ["claimed", "refused", "settled"]
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
 
-        # The commit log names the proposal on the steps that took one.
+        # The commit history names the proposal on the steps that took one.
         by_step = {
             row["metrics"]["steps"]: row["metrics"] for row in scenario.releases() if row["operation"] == "training"
         }

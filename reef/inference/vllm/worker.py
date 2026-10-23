@@ -86,6 +86,19 @@ class VLLMWorker:
         if runtime_load_id is not None:
             ray.get([engine.set_runtime_load_id.remote(runtime_load_id) for engine in engines])
 
+    def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> None:
+        """Reload every engine's weights from a Hugging Face directory and serve them as ``runtime_load_id``.
+
+        The trainer that wrote the files is elsewhere; the engines read the
+        directory themselves. Generation is already paused by the publisher.
+        """
+        engines = self.engines
+        if not engines:
+            raise RuntimeError("no vLLM engines can load weights")
+        ray.get(
+            [engine.update_weights_from_disk.remote(model_path, runtime_load_id=runtime_load_id) for engine in engines]
+        )
+
     def pause_generation_for_update(self) -> Any:
         return self._control.pause()
 

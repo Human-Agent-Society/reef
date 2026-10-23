@@ -102,8 +102,11 @@ the grid from the record stage.
    pipeline.record2task.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
    recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
 
-``TTTDBatches`` takes no config: one batch is always one complete step. Reef
-refuses ``groups_per_step`` or ``rollouts_per_group`` under ``recipe.config``
+``TTTDBatches`` reads only ``buffer_size``. One batch is always one complete
+grid. The backend's batch size, such as Slime's ``--global-batch-size``, must
+not exceed the grid's rollouts; with a larger one the scenario's pipeline
+fails to build. Set it equal to the grid to train one optimizer step per grid.
+Reef refuses ``groups_per_step`` or ``rollouts_per_group`` under ``recipe.config``
 and names the new place of the key.
 
 The report contract

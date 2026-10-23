@@ -9,8 +9,7 @@ from contextlib import closing
 import pytest
 
 from reef.core.artifact_ref import ArtifactRef
-from reef.storage.commit_log import CommitLog
-from reef.storage.commits import CommitLogError, CommitRecord
+from reef.storage.commits import CommitHistoryError, CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -53,6 +52,19 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
     assert open_storage().read_settings("code") == ScenarioSettings()
     storage.write_settings("math", ScenarioSettings(training_mode="hybrid"))
     assert open_storage().read_settings("math") == ScenarioSettings(training_mode="hybrid")
+
+
+def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_config, tmp_path):
+    url, schema = postgres_config
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
+        store = storage.open("math")
+        store.commit_step(expected_step=0, commit=committed())
+        storage.archive("math")
+        with pytest.raises(RuntimeError, match="archived"):
+            store.history()
+        with pytest.raises(RuntimeError, match="archived"):
+            store.records.count("math")
+        store.close()
 
 
 def test_archive_retires_settings_with_records_and_commits(open_storage):
@@ -110,28 +122,21 @@ def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postg
             assert store.recover(checkpoint=None) == committed(2)
 
 
-def test_postgres_imports_commit_logs_and_model_files_of_its_own_schema(postgres_config, tmp_path):
+def test_postgres_imports_model_files_of_its_own_schema(postgres_config, tmp_path):
     url, schema = postgres_config
     with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        storage_id = database.storage_id("math")
-    log = CommitLog(tmp_path / f"postgres-{storage_id}.commits.jsonl")
-    log.append(committed())
-    log.append(committed(2))
-    (tmp_path / f"{hashlib.sha256(b'math').hexdigest()}-model.json").write_text(json.dumps(MODEL))
-    other_schema_log = tmp_path / f"postgres-{'0' * 32}.commits.jsonl"
-    other_schema_log.write_text("")
+        database.storage_id("math")
+    model_file = tmp_path / f"{hashlib.sha256(b'math').hexdigest()}-model.json"
+    model_file.write_text(json.dumps(MODEL))
+    other_schema_file = tmp_path / f"{hashlib.sha256(b'other').hexdigest()}-model.json"
+    other_schema_file.write_text(json.dumps(MODEL))
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
         assert storage.read_settings("math") == ScenarioSettings(model_config=MODEL)
-        with closing(storage.open("math")) as store:
-            assert store.history() == (committed(), committed(2))
-    assert not log.path.exists()
-    assert other_schema_log.exists()
-    assert len(list((tmp_path / "archived").glob("imported-*/*"))) == 2
-    with (
-        closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage,
-        closing(storage.open("math")) as store,
-    ):
-        assert store.history() == (committed(), committed(2))
+    assert not model_file.exists()
+    assert other_schema_file.exists()
+    assert len(list((tmp_path / "archived").glob("imported-*/*"))) == 1
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
+        assert storage.read_settings("math") == ScenarioSettings(model_config=MODEL)
 
 
 def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_content(postgres_config, tmp_path):
@@ -143,6 +148,6 @@ def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_con
         store.commit_step(expected_step=0, commit=committed())
         commits = store.commit_history
         commits.append(CommitRecord.from_dict({**committed().to_dict(), "recorded_at": 5.0}))
-        with pytest.raises(CommitLogError, match="conflicts with its existing record"):
+        with pytest.raises(CommitHistoryError, match="conflicts with its existing record"):
             commits.append(CommitRecord.from_dict({**committed().to_dict(), "checkpoint": False}))
         assert commits.records() == (committed(),)
