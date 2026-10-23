@@ -22,7 +22,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.client.tasks import TaskPlay
+from reef.harness.client.tasks import TaskPlay, TaskPlayer
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
 from reef.recipe.generated_tasks.processor import GeneratedTaskRecord2Record, RoundSettings, TaskGroupSettings
@@ -41,6 +41,7 @@ from reef.record2task.generator import (
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
+    ReefTaskPlays,
     TaskChecks,
     TaskNameConflict,
     TaskPlays,
@@ -124,7 +125,7 @@ class StandInPlays(TaskPlays):
         self.reward = reward
         self.calls: list[dict[str, object]] = []
 
-    def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
+    async def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
         self.calls.append(
             {
                 "task": task_path.name,
@@ -152,6 +153,20 @@ class StandInPlays(TaskPlays):
             )
             for n in range(plays)
         )
+
+
+class GatedPlays(StandInPlays):
+    """Plays that wait for ``gate``, so a test sees what runs beside the plays in flight."""
+
+    def __init__(self, gate: threading.Event) -> None:
+        super().__init__()
+        self.gate = gate
+        self.waiting = 0
+
+    async def play(self, task_path, **arguments):
+        self.waiting += 1
+        await asyncio.to_thread(self.gate.wait)
+        return await super().play(task_path, **arguments)
 
 
 class StandInProbe(ReadinessProbe):
@@ -417,6 +432,61 @@ def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: P
 
     run_with(built, body)
     assert len(checks.calls) == 1
+
+
+def test_a_check_and_a_second_play_run_while_a_play_waits(tmp_path: Path) -> None:
+    gate = threading.Event()
+    plays = GatedPlays(gate)
+    built, _, _, _ = service(tmp_path, plays=plays)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        arguments = {"scenario": "spade", "arm": "plain", "plays": 1, "is_reporting": False}
+        playing = [
+            asyncio.ensure_future(generator.play(written.path, extra_instruction_files=(), tags={}, **arguments))
+            for _ in range(2)
+        ]
+        try:
+            assert (await generator.check(written.path)).is_solvable, "the check does not wait behind the plays"
+            deadline = time.monotonic() + 10.0
+            while plays.waiting < 2 and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            assert plays.waiting == 2, "the second play does not wait behind the first"
+        finally:
+            gate.set()
+        return await asyncio.gather(*playing)
+
+    first, second = run_with(built, body)  # type: ignore[misc]
+    assert len(first) == len(second) == 1
+
+
+def test_the_task_plays_keep_at_most_concurrency_episodes_of_all_plays_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    in_flight = 0
+    most_in_flight = 0
+
+    async def episode(self: TaskPlayer, task_path: Path) -> TaskPlay:
+        nonlocal in_flight, most_in_flight
+        in_flight += 1
+        most_in_flight = max(most_in_flight, in_flight)
+        await asyncio.sleep(0.02)
+        in_flight -= 1
+        return TaskPlay(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+
+    monkeypatch.setattr(TaskPlayer, "play_async", episode)
+    task_plays = ReefTaskPlays(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
+
+    async def two_plays() -> list[tuple[TaskPlay, ...]]:
+        arguments = {"scenario": "s", "model": "m", "arm": "plain", "plays": 3, "is_reporting": False}
+        return await asyncio.gather(
+            *(task_plays.play(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments) for _ in range(2))
+        )
+
+    assert [len(played) for played in asyncio.run(two_plays())] == [3, 3]
+    assert most_in_flight == 2
 
 
 def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
