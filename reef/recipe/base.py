@@ -600,9 +600,8 @@ class WeightTrainingRecipe(Recipe):
                 f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
                 f"or override build()"
             )
-        # Validate the method and its schedule before starting workers. The
-        # runtime carries the reference and the schedule to the backend, which
-        # resolves the objective in its own process before batch partitioning.
+        # Validate the method and its schedule before starting workers. Each job
+        # checks the selected objective again before it runs the objective.
         resolve_objective(spec.objective).validate_scheduling(spec.scheduling)
         candidate_evaluator = None
         if self.candidate_evaluation is not None:

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.support.backend_steps import prepare_tinker_step
+from tests.support.training_steps import prepare_runtime_step
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
@@ -39,7 +41,6 @@ from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
-from reef.train.tinker_backend.preparation import prepare_tinker_step
 from reef.train.tinker_backend.runtime import INCUMBENT, TinkerTrainingRuntime
 
 
@@ -170,7 +171,7 @@ def item(version, group="g"):
 
 def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return runtime.training.prepare_training_step(batch, TrainingMethod(objective.name), {}, SCHEDULING, step)
+    return prepare_runtime_step(runtime.training, batch, TrainingMethod(objective.name), {}, SCHEDULING, step)
 
 
 def decision(selected):
@@ -701,7 +702,7 @@ def scheduled(runtime, objective, schedule, *, step=0):
     version = runtime.inference.serving_runtime_load_id()
     batch = TrainingBatch(f"batch-{step}", tuple(item(version, group=str(index)) for index in range(3)))
     method = TrainingMethod(objective.name, schedule)
-    return runtime.training.prepare_training_step(batch, method, {}, ONE_SAMPLE_STEPS, step).payload
+    return prepare_runtime_step(runtime.training, batch, method, {}, ONE_SAMPLE_STEPS, step).payload
 
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(runtime, objective):
@@ -769,7 +770,7 @@ def test_a_method_without_a_tinker_loss_is_refused_before_training(runtime):
     value, client = runtime
     batch = TrainingBatch("batch", (item(value.inference.serving_runtime_load_id()),))
     with pytest.raises(ValueError, match="unsupported Tinker loss family 'sft'"):
-        value.training.prepare_training_step(batch, TrainingMethod("sft"), {}, SCHEDULING, 0)
+        prepare_runtime_step(value.training, batch, TrainingMethod("sft"), {}, SCHEDULING, 0)
     assert client.calls == []
 
 

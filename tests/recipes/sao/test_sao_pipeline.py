@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 import yaml
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
@@ -29,22 +30,15 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import (
-    ActivatedModel,
-    ModelCandidate,
-    PreparedTrainingStep,
-    StaleCandidate,
-    TrainingMethod,
-)
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, StaleCandidate, TrainingMethod, TrainingPayload
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
 from reef.train.types import TrainingBatch
-
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 
@@ -457,25 +451,16 @@ class _StubTrainingRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self._served_version
 
-    def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
-    ):
-        assert isinstance(batch, TrainingBatch)
-        sample = batch.items[0]
-        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
-        assert prepared.payload is not None
+    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+        sample = job.batch.items[0]
+        built = build_slime_payload(job, step_size=self.batch_size)
         payload = {
-            **prepared.payload,
+            **built.payload,
             "scenario_step": scenario_step,
             "reward": trajectory_reward(sample),
             "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
-        return PreparedTrainingStep(
-            action="train",
-            payload=payload,
-            next_algorithm_state=prepared.next_algorithm_state,
-            metrics=prepared.metrics,
-        )
+        return TrainingPayload(payload, built.metrics)
 
     def train_candidate(self, payload):
         scenario_step = payload["scenario_step"]

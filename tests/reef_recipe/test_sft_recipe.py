@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact.artifact import LiveWeightArtifactRef
@@ -29,7 +30,6 @@ from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.slime_backend.sft import SftAlgorithm
 
 TOKENIZER_PATH = "/models/served"

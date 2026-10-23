@@ -10,15 +10,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.batches import StepScheduling, TrainingBatch, TrajectoryItem, trajectories
+from reef.core.batches import TrainingBatch, TrajectoryItem, trajectories
 from reef.runtime.executor.connection import CoordinatorClient, training_job_status
 from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     ModelCandidate,
-    PreparedTrainingStep,
     StaleCandidate,
+    TrainingJob,
     TrainingJobResult,
-    TrainingMethod,
+    TrainingPayload,
     TrainingRuntime,
     TrainingRuntimeError,
 )
@@ -52,36 +52,18 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     def training_job_status(self) -> Mapping[str, Any]:
         return training_job_status(self._train_group_handle)
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-        *,
-        parent_runtime_load_id: str | None = None,
-    ) -> PreparedTrainingStep:
-        prepared = self._train_group_handle.prepare_training_step(batch, method, algorithm_state, scheduling)
-        if not isinstance(prepared, PreparedTrainingStep):
-            raise TrainingRuntimeError(
-                f"train group handle returned invalid prepared training step: {type(prepared).__name__}"
-            )
-        if prepared.action == "skip":
-            return prepared
-        if prepared.payload is None:
-            raise TrainingRuntimeError("non-skip training preparation must carry a payload")
-        payload = dict(prepared.payload)
-        samples = _ordered_samples(batch, payload.pop("source_rows", None))
+    def build_training_payload(
+        self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
+    ) -> TrainingPayload:
+        built = self._train_group_handle.build_training_payload(job)
+        if not isinstance(built, TrainingPayload):
+            raise TrainingRuntimeError(f"train group handle returned invalid training payload: {type(built).__name__}")
+        payload = dict(built.payload)
+        samples = _ordered_samples(job.batch, payload.pop("source_rows", None))
         payload.update(self.version_fields(samples, parent_runtime_load_id))
         # The backend numbers its own checkpoints; the job records the scenario step it trains.
         payload["scenario_step"] = scenario_step
-        return PreparedTrainingStep(
-            action="train",
-            payload=payload,
-            next_algorithm_state=prepared.next_algorithm_state,
-            metrics=prepared.metrics,
-        )
+        return TrainingPayload(payload, built.metrics)
 
     def version_fields(self, samples: Sequence[TrajectoryItem], parent_runtime_load_id: str | None) -> dict[str, Any]:
         """Return the versions of one job: the producing versions of each sample, and the parent version.

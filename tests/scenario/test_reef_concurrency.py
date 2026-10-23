@@ -24,7 +24,7 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, TrainingPayload
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.types import TrainStepResult
 
@@ -41,16 +41,8 @@ class CountingRuntime(StubTrainingRuntime):
     def inference_handler(self):
         return None
 
-    def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
-    ):
-        del batch, objective
-        return PreparedTrainingStep(
-            action="train",
-            payload={"scenario_step": scenario_step},
-            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
-            metrics={},
-        )
+    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+        return TrainingPayload({"scenario_step": scenario_step})
 
     def train_candidate(self, payload):
         with self._lock:

@@ -12,11 +12,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingMethod, TrainingRuntimeError
+from reef.runtime.interfaces import TrainingJob, TrainingJobResult, TrainingPayload, TrainingRuntimeError
 
 DEFAULT_ACTOR_NAME = "reef-train-bridge"
 DEFAULT_NAMESPACE = "reef"
@@ -60,13 +59,7 @@ class CoordinatorClient(ABC):
         """Return backend health and durable training-job state."""
 
     @abstractmethod
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-    ) -> PreparedTrainingStep: ...
+    def build_training_payload(self, job: TrainingJob) -> TrainingPayload: ...
 
     @abstractmethod
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult: ...
@@ -121,14 +114,8 @@ class ExecutorCoordinatorClient(CoordinatorClient):
         version = self._rpc("serving_runtime_load_id")
         return None if version is None else str(version)
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-    ) -> PreparedTrainingStep:
-        return self._rpc("prepare_training_step", batch, method, dict(algorithm_state), scheduling)
+    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
+        return self._rpc("build_training_payload", job)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self._rpc("execute_training_job", dict(payload))

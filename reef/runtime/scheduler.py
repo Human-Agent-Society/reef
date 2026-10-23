@@ -28,7 +28,6 @@ from dataclasses import replace
 from threading import Lock, RLock
 from typing import Any
 
-from reef.core.batches import StepScheduling, TrainingBatch
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -38,14 +37,14 @@ from reef.runtime.interfaces import (
     InferenceRuntime,
     ModelCandidate,
     PreparedTrainingJob,
-    PreparedTrainingStep,
     RuntimeContractError,
     StaleCandidate,
     TrainingBackend,
+    TrainingJob,
     TrainingJobResult,
     TrainingJobState,
     TrainingJobStore,
-    TrainingMethod,
+    TrainingPayload,
     TrainingRuntime,
     TrainingRuntimeError,
 )
@@ -291,21 +290,9 @@ class RuntimeScheduler:
 
     # -- Training
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-    ) -> PreparedTrainingStep:
-        return self.training_runtime.prepare_training_step(
-            batch,
-            method,
-            algorithm_state,
-            scheduling,
-            scenario_step,
-            parent_runtime_load_id=self.inference_runtime.current_runtime_load_id(),
+    def build_training_payload(self, job: TrainingJob, scenario_step: int) -> TrainingPayload:
+        return self.training_runtime.build_training_payload(
+            job, scenario_step, parent_runtime_load_id=self.inference_runtime.current_runtime_load_id()
         )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
@@ -490,14 +477,8 @@ class TrainingCoordinator:
         recovered = self._execution.recover()
         self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(recovered)
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-    ) -> PreparedTrainingStep:
-        return self._training.prepare_training_step(batch, method, algorithm_state, scheduling)
+    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
+        return self._training.build_training_payload(job)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""

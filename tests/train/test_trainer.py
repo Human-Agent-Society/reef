@@ -7,6 +7,7 @@ import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
+from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
 
 import reef.record2task.assembly as reported_module
@@ -28,12 +29,12 @@ from reef.evaluation import (
 from reef.recipe import WeightTrainingRecipe
 from reef.record2record import ExclusiveReportRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingMethod
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, TrainingMethod, TrainingPayload
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectory_groups
 
 NUM_GPUS = 0
@@ -865,18 +866,10 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         def inference_handler(self):
             return None
 
-        def prepare_training_step(
-            self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
-        ):
-            prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
-            assert prepared.payload is not None
-            self.calls.append(("prepare", batch, objective))
-            return PreparedTrainingStep(
-                action="train",
-                payload={**prepared.payload, "scenario_step": scenario_step},
-                next_algorithm_state=prepared.next_algorithm_state,
-                metrics=prepared.metrics,
-            )
+        def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+            built = build_slime_payload(job, step_size=self.batch_size)
+            self.calls.append(("prepare", job.batch, job.method))
+            return TrainingPayload({**built.payload, "scenario_step": scenario_step}, built.metrics)
 
         def train_candidate(self, payload):
             self.calls.append(("execute", payload))

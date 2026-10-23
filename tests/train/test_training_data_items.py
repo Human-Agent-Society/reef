@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import policy_trajectory, recorded_trajectory
+from tests.support.backend_steps import prepare_slime_step
 
 from reef.core import AgentRecord, RequestType, RuntimeLoadSpan
 from reef.core.training_request import TrainingRequest
@@ -21,7 +22,6 @@ from reef.core.trajectories import (
 from reef.runtime.interfaces import InferenceStream, TrainingMethod
 from reef.service.streaming import stream_record
 from reef.train.algos import StepScheduling
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TaskItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
 
 

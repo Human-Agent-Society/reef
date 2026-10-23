@@ -13,13 +13,15 @@ from tests.support.runtime_stubs import StubTrainingRuntime
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
-    PreparedTrainingStep,
     TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.scheduler import training_job_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.algos import StepScheduling
+from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.registry import register_objective
+from reef.train.algos.signals import StepSignal
 from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.types import TrainingBatch
 
@@ -104,25 +106,22 @@ def test_the_method_takes_part_in_the_job_identity() -> None:
         TrainingMethod("sft", SFT.to_dict())  # type: ignore[arg-type]
 
 
-class RecordingRuntime(StubTrainingRuntime):
-    """Record the method of every prepared job and skip it, advancing the objective's step counter."""
+class SkippingObjective(TrainingObjective):
+    """Skip every job and advance the step counter, recording the committed state of each call."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.prepared: list[tuple[TrainingMethod, dict[str, Any]]] = []
+    loss_family = "sft"
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-        *,
-        parent_runtime_load_id: str | None = None,
-    ) -> PreparedTrainingStep:
-        self.prepared.append((method, dict(algorithm_state)))
-        return PreparedTrainingStep("skip", {"steps": algorithm_state.get("steps", 0) + 1}, {"steps": 1})
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.states: list[dict[str, Any]] = []
+
+    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+        self.states.append(dict(state))
+        return StepSignal("skip", {"steps": state.get("steps", 0) + 1}, {"steps": 1})
+
+
+SUPERVISED = register_objective(SkippingObjective("test-methods-supervised"))
+POLICY = register_objective(SkippingObjective("test-methods-policy"))
 
 
 class SupervisedThenPolicy(TrainingMethodSelector):
@@ -133,35 +132,36 @@ class SupervisedThenPolicy(TrainingMethodSelector):
 
     def select(self, batch: TrainingBatch, algorithm_state: Mapping[str, Any]) -> TrainingMethod:
         if algorithm_state.get("steps", 0) < self.supervised_steps:
-            return TrainingMethod("sft", SFT)
-        return TrainingMethod("rl-objective", RL)
+            return TrainingMethod(SUPERVISED.name, SFT)
+        return TrainingMethod(POLICY.name, RL)
 
 
 @pytest.mark.unit
 def test_the_backend_selects_every_jobs_method_from_the_committed_state() -> None:
-    runtime = RecordingRuntime()
+    runtime = StubTrainingRuntime()
     backend = RuntimeCandidateBackend(
         runtime, SupervisedThenPolicy(supervised_steps=2), StepScheduling(), inference_runtime=runtime.inference
     )
     state: Mapping[str, Any] = {}
+    methods = []
     for step in range(4):
         prepared = backend.prepare_step(TrainingBatch(f"batch-{step}"), state, step)
         assert prepared.outcome == "skip"
+        # The selected method is logged with the job's metrics.
+        methods.append(TrainingMethod.from_dict(prepared.metrics["training_method"]))
         state = prepared.state
-    assert [method for method, _ in runtime.prepared] == [
-        TrainingMethod("sft", SFT),
-        TrainingMethod("sft", SFT),
-        TrainingMethod("rl-objective", RL),
-        TrainingMethod("rl-objective", RL),
+    assert methods == [
+        TrainingMethod(SUPERVISED.name, SFT),
+        TrainingMethod(SUPERVISED.name, SFT),
+        TrainingMethod(POLICY.name, RL),
+        TrainingMethod(POLICY.name, RL),
     ]
-    # The selected method is logged with the job's metrics.
-    assert prepared.metrics["training_method"] == TrainingMethod("rl-objective", RL).to_dict()
     assert backend.experiment_config()["training_method_selector"].endswith("SupervisedThenPolicy")
 
     # A retry prepares the kept batch against the same committed state and selects the same method.
     retry = backend.prepare_step(TrainingBatch("batch-1"), {"steps": 1}, 1)
-    assert runtime.prepared[-1][0] == TrainingMethod("sft", SFT)
-    assert retry.metrics["training_method"] == TrainingMethod("sft", SFT).to_dict()
+    assert SUPERVISED.states[-1] == {"steps": 1}
+    assert retry.metrics["training_method"] == TrainingMethod(SUPERVISED.name, SFT).to_dict()
 
 
 @pytest.mark.unit
@@ -170,18 +170,17 @@ def test_the_backend_refuses_a_selector_that_returns_no_method() -> None:
         def select(self, batch: TrainingBatch, algorithm_state: Mapping[str, Any]) -> TrainingMethod:
             return "sft"  # type: ignore[return-value]
 
-    runtime = RecordingRuntime()
+    runtime = StubTrainingRuntime()
     with pytest.raises(TypeError, match="TrainingMethodSelector"):
         RuntimeCandidateBackend(runtime, "sft", StepScheduling(), inference_runtime=runtime.inference)  # type: ignore[arg-type]
     backend = RuntimeCandidateBackend(runtime, Broken(), StepScheduling(), inference_runtime=runtime.inference)
     with pytest.raises(TypeError, match=r"Broken\.select must return a TrainingMethod"):
         backend.prepare_step(TrainingBatch("batch"), {}, 0)
-    assert runtime.prepared == []
 
 
 @pytest.mark.unit
 def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> None:
-    runtime = RecordingRuntime()
+    runtime = StubTrainingRuntime()
     recipe = StagedRecipe(training_runtime=runtime, runtime=runtime.inference)
     selector = recipe.training_method_selector()
     assert isinstance(selector, FixedTrainingMethodSelector)
@@ -199,12 +198,15 @@ def test_a_recipe_selector_reaches_the_runtime_through_the_default_build() -> No
         def training_method_selector(self) -> TrainingMethodSelector:
             return SupervisedThenPolicy(supervised_steps=1)
 
-    runtime = RecordingRuntime()
+    runtime = StubTrainingRuntime()
     trainer = SwitchingRecipe(training_runtime=runtime, runtime=runtime.inference).build(
         "scenario", SQLiteRecordStore()
     )
     backend = trainer.candidate_backend
     assert isinstance(backend, RuntimeCandidateBackend)
-    backend.prepare_step(TrainingBatch("first"), {}, 0)
-    backend.prepare_step(TrainingBatch("second"), {"steps": 1}, 1)
-    assert [method.objective for method, _ in runtime.prepared] == ["sft", "rl-objective"]
+    first = backend.prepare_step(TrainingBatch("first"), {}, 0)
+    second = backend.prepare_step(TrainingBatch("second"), {"steps": 1}, 1)
+    assert [step.metrics["training_method"]["objective"] for step in (first, second)] == [
+        SUPERVISED.name,
+        POLICY.name,
+    ]

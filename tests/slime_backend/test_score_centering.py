@@ -8,12 +8,12 @@ from types import SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step
 
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.distill import DistillSettings
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.slime_backend.score_centering import (
     ROLLOUT_KEYS,
     TOPK_INDICES_KEY,

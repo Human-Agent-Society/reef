@@ -1,72 +1,43 @@
-"""Slime-owned step preparation: resolve an objective signal and build the payload.
+"""Slime-owned payload building: materialize Slime's wire rows from a ``TrainingJob``.
 
-Backend-agnostic step signals (which loss family, what advantages) live in
-``reef.train.algos`` and are reusable by any training backend.
-The only thing left here is ``_build_payload``, which materializes Slime's
-own wire tuples from a resolved signal.
+Reef's service process resolves the objective and runs its backend-neutral
+``prepare`` (``reef.train.algos``); this module only lays out the job's rows
+in Slime's optimizer steps.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingPayload
 from reef.train.algos import StepScheduling
-from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 
-def prepare_slime_step(
-    batch: TrainingBatch,
-    method: TrainingMethod,
-    algorithm_state: Mapping[str, Any],
-    scheduling: StepScheduling,
-    *,
-    step_size: int,
-    sampler_topk: bool = False,
-) -> PreparedTrainingStep:
-    """Resolve the job's training objective and produce its complete Slime training payload.
+def build_slime_payload(job: TrainingJob, *, step_size: int, sampler_topk: bool = False) -> TrainingPayload:
+    """The complete Slime training payload of ``job``, with the metrics of its step layout.
 
-    ``method`` is the objective and learning-rate schedule the recipe selected;
-    the payload records it, so it is part of the job's identity.
-    ``scheduling`` is the recipe's step schedule; the objective rejects one its
-    loss cannot train before any payload is built. ``step_size`` is Slime's
-    ``--global-batch-size``, the rollouts in one optimizer step.
-    ``sampler_topk`` adds each row's recorded sampler top-K, which score
-    centering reads.
+    The payload records ``job.method``, so the method is part of the job's
+    identity. ``step_size`` is Slime's ``--global-batch-size``, the rollouts in
+    one optimizer step. ``sampler_topk`` adds each row's recorded sampler
+    top-K, which score centering reads.
     """
-    objective = resolve_objective(method.objective)
-    objective.validate_scheduling(scheduling)
-    signal = objective.prepare(batch, algorithm_state)
-    if signal.action == "skip":
-        return PreparedTrainingStep(
-            action="skip",
-            next_algorithm_state=signal.next_algorithm_state,
-            metrics=signal.metrics,
-        )
-    schedule = _materialize(batch, scheduling, step_size)
+    schedule = _materialize(job.batch, job.scheduling, step_size)
     payload = _build_payload(
-        batch, objective.loss_family, signal.advantages, scheduling, step_size=step_size, sampler_topk=sampler_topk
+        job.batch, job.loss_family, job.advantages, job.scheduling, step_size=step_size, sampler_topk=sampler_topk
     )
-    payload["method"] = method.to_dict()
-    metrics = dict(signal.metrics)
+    payload["method"] = job.method.to_dict()
+    metrics: dict[str, Any] = {"optimizer_steps": schedule.optimizer_steps}
     if schedule.epochs > 1:
-        metrics.setdefault("epochs", schedule.epochs)
-    metrics.setdefault("optimizer_steps", schedule.optimizer_steps)
+        metrics["epochs"] = schedule.epochs
     if schedule.dropped_rollouts:
-        metrics.setdefault("dropped_rollouts", schedule.dropped_rollouts)
+        metrics["dropped_rollouts"] = schedule.dropped_rollouts
     if schedule.tail_rollouts:
-        metrics.setdefault("partial_step_rollouts", schedule.tail_rollouts)
-    return PreparedTrainingStep(
-        action="train",
-        payload=payload,
-        next_algorithm_state=signal.next_algorithm_state,
-        metrics=metrics,
-    )
+        metrics["partial_step_rollouts"] = schedule.tail_rollouts
+    return TrainingPayload(payload, metrics)
 
 
 def _materialize(batch: TrainingBatch, scheduling: StepScheduling, step_size: int) -> MaterializedSchedule:
@@ -104,8 +75,6 @@ def _build_payload(
     """
     samples = trajectories(batch)
     shape_row = resolve_loss_family(loss_family).shape_sample_row
-    if advantages is not None and len(advantages) != len(samples):
-        raise ValueError(f"advantages length {len(advantages)} does not match sample count {len(samples)}")
     schedule = _materialize(batch, scheduling, step_size)
     payload: dict[str, Any] = {
         "samples": [shape_row(samples[row]) for row in schedule.row_indices],

@@ -7,6 +7,7 @@ import time
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLBatches, OpenClawRLRecipe
@@ -26,7 +27,6 @@ from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.runtime_backend import RuntimeCandidateBackend
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
 
 

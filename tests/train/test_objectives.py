@@ -7,15 +7,14 @@ from dataclasses import replace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step, prepare_tinker_step
 
 from recipes.sao.objective import SaoObjective
 from recipes.tttd.objective import TttdObjective
 from reef.recipe import WeightTrainingSpec
-from reef.runtime.interfaces import TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingMethod
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
 from reef.train.algos.registry import ObjectiveRegistry, register_objective, resolve_objective, unregister_objective
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.tinker_backend.preparation import prepare_tinker_step
 from reef.train.types import TrainingBatch
 
 
@@ -139,6 +138,29 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
         assert slime.metrics == {"reason": "no signal"}
     finally:
         unregister_objective(objective.name)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error", "message"),
+    [
+        ({"loss_family": ""}, ValueError, "loss_family must be a non-empty string"),
+        ({"advantages": (1.0,)}, ValueError, "advantages length 1 does not match sample count 2"),
+        ({"advantages": [1.0, 0.0]}, TypeError, "advantages must be a tuple or None"),
+        ({"method": "sft"}, TypeError, "method must be a TrainingMethod"),
+    ],
+)
+def test_a_training_job_checks_its_values_at_construction(changes, error, message):
+    sample = policy_trajectory("s", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
+    values = {
+        "batch": TrainingBatch("batch", (sample, sample)),
+        "method": TrainingMethod("sft"),
+        "scheduling": StepScheduling(),
+        "loss_family": "pg",
+        "advantages": (1.0, 0.0),
+    }
+    TrainingJob(**values)
+    with pytest.raises(error, match=message):
+        TrainingJob(**{**values, **changes})
 
 
 def test_group_advantages_are_shared_across_backends_before_optimizer_partitioning():

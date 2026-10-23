@@ -28,7 +28,7 @@ from reef.runtime.executor.connection import (
     RayRuntimeError,
 )
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingMethod, TrainingPayload
 from reef.runtime.interfaces import TrainingRuntimeError
 from reef.runtime.interfaces import TrainingRuntimeError as ContractTrainingRuntimeError
 from reef.service import assembly
@@ -48,11 +48,9 @@ class Coordinator(DeferredWeightUpdateTrainGroupHandle):
     def health(self):
         return {**super().health(), "inference_url": self.inference_url}
 
-    def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
+    def build_training_payload(self, job):
         self.calls.append("prepare")
-        return PreparedTrainingStep(
-            action="train", payload={"samples": ["prepared"]}, next_algorithm_state=dict(algorithm_state), metrics={}
-        )
+        return TrainingPayload({"samples": ["prepared"]})
 
     def shutdown(self):
         self.shutdown_events.append("shutdown")
@@ -81,8 +79,8 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
     try:
         assert runtime.model_path == "model-path"
         assert runtime.base_url == "http://router"
-        prepared = runtime.prepare_training_step(
-            policy_batch(), TrainingMethod("custom-objective"), {}, StepScheduling(), 0
+        prepared = runtime.scheduler.build_training_payload(
+            TrainingJob(policy_batch(), TrainingMethod("custom-objective"), StepScheduling(), "pg"), 0
         )
         # The job records the samples' producing version and the published version that it trains from.
         assert prepared.payload["producing_runtime_load_ids"] == ["v0", "v0"]

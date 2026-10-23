@@ -3,16 +3,20 @@
 The adapter also asks the recipe for the training method of each job. A
 weight recipe returns a :class:`TrainingMethodSelector` from
 ``WeightTrainingRecipe.training_method_selector``. Reef calls it once for each
-job, before the backend prepares the batch, with the batch and the committed
-algorithm state; retries of a job reuse the batch and that state, so they
-select the same method. The default :class:`FixedTrainingMethodSelector` trains every
-job with the recipe's ``training_spec().objective``.
+job, with the batch and the committed algorithm state; retries of a job reuse
+the batch and that state, so they select the same method. The default
+:class:`FixedTrainingMethodSelector` trains every job with the recipe's
+``training_spec().objective``.
+
+The adapter then resolves the selected objective, checks the recipe's step
+scheduling against it and runs ``TrainingObjective.prepare`` on the batch. A
+step that trains becomes a ``TrainingJob``, and the training runtime builds
+its backend payload; the backend refuses a loss family it cannot train.
 
 When to switch is recipe logic: a selector may read the batch or the
 committed state, such as the ``steps`` counter every shipped objective keeps
 (``reef.train.algos.helpers.next_steps``). It does not list its objectives in
-advance; the backend resolves and validates each selected objective before
-that job trains, and refuses one it cannot train.
+advance.
 """
 
 from __future__ import annotations
@@ -28,16 +32,34 @@ from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     InferenceRuntime,
     ModelCandidate,
-    PreparedTrainingStep,
     RuntimeContractError,
     StaleCandidate,
+    TrainingJob,
     TrainingMethod,
     TrainingRuntime,
 )
 from reef.runtime.scheduler import JOB_OWNER_KEY, RuntimeScheduler
 from reef.train.algos import StepScheduling
+from reef.train.algos.registry import resolve_objective
+from reef.train.algos.signals import StepSignal
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
+
+
+def prepare_training_job(
+    batch: TrainingBatch, method: TrainingMethod, algorithm_state: Mapping[str, Any], scheduling: StepScheduling
+) -> tuple[StepSignal, TrainingJob | None]:
+    """Run the objective of ``method`` on ``batch``; return its signal and the job it trains.
+
+    The objective is resolved in this process and checks ``scheduling`` first.
+    The job is ``None`` exactly when the signal skips the step.
+    """
+    objective = resolve_objective(method.objective)
+    objective.validate_scheduling(scheduling)
+    signal = objective.prepare(batch, algorithm_state)
+    if signal.action == "skip":
+        return signal, None
+    return signal, TrainingJob(batch, method, scheduling, objective.loss_family, signal.advantages)
 
 
 class TrainingMethodSelector(ABC):
@@ -154,15 +176,15 @@ class RuntimeCandidateBackend(CandidateBackend):
         if not isinstance(method, TrainingMethod):
             selector_name = type(self.training_method_selector).__name__
             raise TypeError(f"{selector_name}.select must return a TrainingMethod, got {type(method).__name__}")
-        prepared = self.prepare_training_step(batch, method, state, self.scheduling, scenario_step)
-        next_state = dict(prepared.next_algorithm_state)
-        metrics = {**prepared.metrics, "training_method": method.to_dict()}
-        if prepared.action == "skip":
+        signal, job = prepare_training_job(batch, method, state, self.scheduling)
+        next_state = dict(signal.next_algorithm_state)
+        metrics = {**signal.metrics, "training_method": method.to_dict()}
+        if job is None:
             return PreparedStep.skipped(state=next_state, metrics=metrics)
-        if prepared.payload is None:
-            raise RuntimeContractError("training runtime prepared a train step without a payload")
+        built = self.scheduler.build_training_payload(job, scenario_step)
+        metrics = {**built.metrics, **metrics}
         runtime = self.training_runtime
-        payload = dict(prepared.payload)
+        payload = dict(built.payload)
         if self._scenario is not None:
             # The job marker names the scenario that owns the job, so a delete can tell whose job is out;
             # the job identity leaves the owner out.
@@ -221,16 +243,6 @@ class RuntimeCandidateBackend(CandidateBackend):
     def abort_step(self, prepared: PreparedStep) -> None:
         self.reject_candidate(self._prepared_candidate(prepared))
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-    ) -> PreparedTrainingStep:
-        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
-
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         return self.scheduler.train_candidate(payload)
 
@@ -254,4 +266,4 @@ class RuntimeCandidateBackend(CandidateBackend):
         return cls._model_candidate(candidate)
 
 
-__all__ = ["RuntimeCandidateBackend"]
+__all__ = ["RuntimeCandidateBackend", "prepare_training_job"]

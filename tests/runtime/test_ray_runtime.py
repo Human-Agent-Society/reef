@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _TEST_GROUPED_OBJECTIVE
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step as slime_prepare_step
 from tests.support.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.artifact import LiveWeightArtifactRef
@@ -22,16 +23,17 @@ from reef.runtime.interfaces import (
     InferenceAdmissionController,
     InferenceHandler,
     InferenceStream,
-    PreparedTrainingStep,
+    TrainingJob,
     TrainingJobResult,
     TrainingMethod,
+    TrainingPayload,
     TrainingRuntime,
 )
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
+from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
 from reef.train.types import TaskItem, TrainingBatch, trajectories
 
 _TEST_SFT_OBJECTIVE = "tests.runtime.test_ray_runtime:SampleSftObjective"
@@ -58,14 +60,8 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
             },
         }
 
-    def prepare_training_step(
-        self,
-        batch,
-        objective: str,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-    ) -> PreparedTrainingStep:
-        return slime_prepare_step(batch, objective, algorithm_state, scheduling, step_size=1)
+    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
+        return build_slime_payload(job, step_size=1)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         del payload
@@ -626,12 +622,8 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids() -> None:
 
 
 @pytest.mark.unit
-def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypatch) -> None:
-    expected = PreparedTrainingStep(
-        action="skip",
-        next_algorithm_state={"steps": 3},
-        metrics={"warmup": True},
-    )
+def test_remote_handle_delegates_payload_building_to_the_backend_actor(monkeypatch) -> None:
+    expected = TrainingPayload({"loss": "openclawrl"}, {"optimizer_steps": 1})
 
     class RemoteMethod:
         def __init__(self):
@@ -642,7 +634,7 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
             return expected
 
     class Bridge:
-        prepare_training_step = RemoteMethod()
+        build_training_payload = RemoteMethod()
 
     class FakeRay:
         @staticmethod
@@ -653,14 +645,10 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
     actor = Bridge()
     handle = RemoteRayCoordinatorClient(train_group_actor=actor)
 
-    prepared = handle.prepare_training_step(
-        policy_batch(), TrainingMethod("openclawrl"), {"steps": 2}, StepScheduling(unit="sample")
-    )
+    job = TrainingJob(policy_batch(), TrainingMethod("openclawrl"), StepScheduling(unit="sample"), "openclawrl")
 
-    assert prepared is expected
-    assert actor.prepare_training_step.calls == [
-        (policy_batch(), TrainingMethod("openclawrl"), {"steps": 2}, StepScheduling(unit="sample"))
-    ]
+    assert handle.build_training_payload(job) is expected
+    assert actor.build_training_payload.calls == [(job,)]
 
 
 @pytest.mark.unit

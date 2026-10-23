@@ -314,8 +314,8 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
 def test_slime_step_preparation_resolves_tttd_torch_lazily() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['torch'] = None; "
-        "from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step; "
-        "assert callable(prepare_slime_step)"
+        "from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload; "
+        "assert callable(build_slime_payload)"
     )
 
 

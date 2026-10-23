@@ -30,6 +30,7 @@ from reef.surface.adapter import adapter_name
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.runtime_backend import prepare_training_job
 from reef.train.tinker_backend.backend import ADAPTER_DIR, TinkerTrainingBackend
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerConfig
@@ -172,13 +173,14 @@ class Stack:
 
     def payload(self, objective, *, step, schedule=None):
         version = self.coordinator.serving_runtime_load_id()
-        prepared = self.coordinator.prepare_training_step(
+        _, job = prepare_training_job(
             TrainingBatch("b", (item(version, sample=step),)),
             TrainingMethod(objective.name, schedule),
             {},
             StepScheduling(unit="sample"),
         )
-        return {**prepared.payload, "scenario": "math", "scenario_step": step, "parent_runtime_load_id": version}
+        built = self.coordinator.build_training_payload(job)
+        return {**built.payload, "scenario": "math", "scenario_step": step, "parent_runtime_load_id": version}
 
 
 def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(tmp_path, objective):

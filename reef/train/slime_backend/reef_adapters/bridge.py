@@ -24,21 +24,21 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA
-from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
     PreparedTrainingJob,
-    PreparedTrainingStep,
     ScenarioHistoryStore,
     TrainingBackend,
     TrainingCheckpoint,
     TrainingContext,
     TrainingCoordinationConfig,
+    TrainingJob,
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
+    TrainingPayload,
     WeightFiles,
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
@@ -57,7 +57,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     prepare_checkpoint_storage,
     validate_bridge_args,
 )
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
 from reef.train.slime_backend.reef_adapters.train_groups import (
     DEFAULT_TRAIN_RPC_TIMEOUT_S,
     SlimeTrainGroup,
@@ -556,25 +556,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise ValueError("per-scenario LoRA training jobs must name their scenario")
         return scenario
 
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-    ) -> PreparedTrainingStep:
-        """Prepare a framework-neutral Reef batch with Slime-owned logic; refuse a method the workers cannot train."""
-        prepared = prepare_slime_step(
-            batch,
-            method,
-            algorithm_state,
-            scheduling,
-            step_size=self.args.global_batch_size,
-            sampler_topk=self._score_centering is not None,
+    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
+        """Build the Slime payload of ``job``; refuse a method the workers cannot train."""
+        built = build_slime_payload(
+            job, step_size=self.args.global_batch_size, sampler_topk=self._score_centering is not None
         )
-        if prepared.payload is not None:
-            self.algorithm_for_loss_family(prepared.payload["loss"]).validate_payload(prepared.payload)
-        return prepared
+        self.algorithm_for_loss_family(job.loss_family).validate_payload(built.payload)
+        return built
 
     def _checkpoint_path(self, rollout_id: int) -> str:
         return self._save_hf_template.format(rollout_id=rollout_id)

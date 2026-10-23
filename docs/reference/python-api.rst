@@ -1297,8 +1297,8 @@ backend with the objective reference. An objective declares only what its loss
 tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
 after the first, which train off-policy against log-probs computed once, are
 valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
-``epochs > 1`` otherwise, at recipe build and again in each backend before
-preparation.
+``epochs > 1`` otherwise, at recipe build and again before each job runs
+``prepare``.
 
 ``WeightTrainingRecipe.training_method_selector()`` returns a
 ``TrainingMethodSelector`` (``reef.train.runtime_backend``). Its
@@ -1318,13 +1318,16 @@ identity. See `Write a recipe
   existing step lifecycle.
 - ``metrics``: method telemetry carried to the commit record.
 
-``prepare`` runs on the complete reserved batch before optimizer or worker
-partitioning. Compute group-relative statistics here. Keep this entry point
-free of torch, Ray, Slime and Tinker imports. It must not mutate the batch,
-execute training, or commit state. Model-dependent terms (critic-based GAE,
-reference-model KL) stay in the backend implementation after the required
-forward passes. Both Slime and Tinker use the same objective preparation;
-the selected backend resolves its own loss implementation lazily.
+``prepare`` runs in Reef's service process on the complete reserved batch,
+before optimizer or worker partitioning. Compute group-relative statistics
+here. Keep this entry point free of torch, Ray, Slime and Tinker imports. It
+must not mutate the batch, execute training, or commit state. A step that
+trains becomes a ``TrainingJob`` (``reef.runtime.interfaces``): the batch, the
+method, the scheduling, the objective's ``loss_family`` and the advantages.
+The training backend builds its own payload from it with its loss
+implementation of that family, which it resolves lazily. Model-dependent terms
+(critic-based GAE, reference-model KL) stay in that implementation after the
+required forward passes.
 
 Migration: move the former ``StepPreparer.__call__`` body to
 ``TrainingObjective.prepare`` in the method's ``objective.py``, declare
@@ -1550,8 +1553,9 @@ Runtime responsibilities
 ``TrainingRuntime`` and ``InferenceRuntime`` are independent interfaces. Neither
 inherits from the other, and there is no aggregate runtime.
 
-* ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
-  candidates and restores training weights/optimizer state. It receives serving
+* ``TrainingRuntime`` builds the backend payload of a ``TrainingJob``, produces
+  candidate checkpoints, rejects candidates and restores training
+  weights/optimizer state. It receives serving
   versions as values; it does not own an inference endpoint or request backend.
   Its ``batch_size`` property is the samples in one optimizer step. The
   deployment reads it from the training options (Slime's

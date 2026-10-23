@@ -34,7 +34,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, TrainingPayload
 from reef.storage.commit_history import RECORD_KIND, CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -304,19 +304,9 @@ class RecordingRuntime(StubTrainingRuntime):
     def inference_handler(self):
         return None
 
-    def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
-    ):
-        del objective
-        payload = {
-            "scenario_step": scenario_step,
-            "sources": [source_record_id(sample) for sample in batch.items],
-        }
-        return PreparedTrainingStep(
-            action="train",
-            payload=payload,
-            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
-            metrics={},
+    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+        return TrainingPayload(
+            {"scenario_step": scenario_step, "sources": [source_record_id(sample) for sample in job.batch.items]}
         )
 
     def train_candidate(self, payload):

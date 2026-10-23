@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.backend_steps import prepare_slime_step
 
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
 from recipes.openclawrl.prm import (
@@ -24,7 +25,6 @@ from reef.core.trajectories import source_record_id
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrajectoryItem
 
 pytestmark = pytest.mark.unit

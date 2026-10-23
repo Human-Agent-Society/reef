@@ -4,6 +4,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.opd import OpdObjective, OPDRecipe, OPDSettings, OPDTasks
@@ -21,7 +22,6 @@ from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import settings_from_args
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
 
 TOKENS = [5, 6, 7, 1, 2, 3]
