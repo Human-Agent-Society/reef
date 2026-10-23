@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tomllib
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -112,38 +114,33 @@ def test_finalize_grads_hook_empties_the_cache_only_when_memory_is_low(monkeypat
     cleared: list[bool] = []
     memory_utils = importlib.import_module("slime.utils.memory_utils")
     monkeypatch.setattr(memory_utils, "clear_memory", lambda: cleared.append(True))
-    free = {"bytes": 10 * 1024**3}
+    free_bytes = {"value": 10 * 1024**3}
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (free["bytes"], 80 * 1024**3))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (free_bytes["value"], 80 * 1024**3))
+    monkeypatch.setattr(worker_hooks, "FINALIZE_GRADS_RELIEF", worker_hooks.FinalizeGradsRelief())
 
-    worker_hooks._install_finalize_grads_memory_relief()
+    worker_hooks.install_finalize_grads_memory_relief()
     wrapped = model.finalize_model_grads
-    worker_hooks._install_finalize_grads_memory_relief()
+    worker_hooks.install_finalize_grads_memory_relief()
     assert model.finalize_model_grads is wrapped
 
     assert model.finalize_model_grads("model", 4) == "finalized"
     assert cleared == []
-    free["bytes"] = 2 * 1024**3
+    free_bytes["value"] = 2 * 1024**3
     assert model.finalize_model_grads("model", 4) == "finalized"
     assert cleared == [True]
     assert finalized == [("model", 4), ("model", 4)]
 
 
 @pytest.mark.unit
-def test_finalize_grads_hook_leaves_a_slime_with_the_guard_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    def original(*_args):
-        return "finalized"
+def test_finalize_grads_hook_targets_the_pinned_slime() -> None:
+    pyproject = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    pins = [dependency for dependency in pyproject["dependency-groups"]["runtime"] if dependency.startswith("slime @")]
 
-    model = _stub_module(
-        monkeypatch,
-        "slime.backends.megatron_utils.model",
-        finalize_model_grads=original,
-        _finalize_model_grads=original,
-    )
-
-    worker_hooks._install_finalize_grads_memory_relief()
-
-    assert model.finalize_model_grads is original
+    # A new pin from THUDM/slime@2f4280e3 on has the guard itself: drop the hook.
+    assert pins == [
+        f"slime @ git+https://github.com/THUDM/slime.git@{worker_hooks.SLIME_REVISION_WITHOUT_FINALIZE_GUARD}"
+    ]
 
 
 @pytest.mark.unit
@@ -424,6 +421,7 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
     for name in (
         "_install_external_batch_keys",
         "_install_step_batch_size",
+        "install_finalize_grads_memory_relief",
         "_install_metric_capture",
         "_install_rollout_logging",
         "_install_critic_metrics",
