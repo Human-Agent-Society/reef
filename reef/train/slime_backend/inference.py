@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from reef.train.deployment import remote_engine_config
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
@@ -32,6 +33,8 @@ def inference_config(
         env["REEF_INFERENCE_HOST"] = env.pop("SLIME_HOST_IP")
     colocate = bool(getattr(args, "colocate", False))
     if backend == "vllm":
+        # SGLang's variables configure no vLLM engine.
+        env = {name: value for name, value in env.items() if not name.startswith("SGLANG_")}
         return vllm_inference_config(args, inference_options or {}, env=env, colocate=colocate)
     # Colocated engines retract already, because their KV allocation must
     # leave the GPU during training. A disjoint engine preserves in-flight KV
@@ -66,6 +69,24 @@ def inference_config(
         "executor": getattr(args, "reef_rollout_executor_backend", "auto"),
         "executor_options": getattr(args, "reef_rollout_executor_options", {}),
     }
+
+
+def remote_inference_config(
+    args: Any, backend: str, inference_options: Mapping[str, Any] | None, *, model_path: str
+) -> dict[str, Any]:
+    """``inference_config`` for engines on a remote component's host.
+
+    The component loads ``model_path`` on one node. Values that describe this
+    host do not cross: its addresses and proxy settings, a router or external
+    engines in this cluster, and its GPUs per node. Engine settings
+    (``SGLANG_*`` variables and options) stay as they are.
+    """
+    config = remote_engine_config(inference_config(args, backend, inference_options), model_path)
+    config["env_vars"] = {name: value for name, value in config["env_vars"].items() if name.startswith("SGLANG_")}
+    config["gpus_per_node"] = max(int(config["num_gpus"]), int(config["gpus_per_engine"]))
+    if backend == "sglang":
+        config.update(external_engines=(), router_host=None, router_port=None)
+    return config
 
 
 def vllm_inference_config(

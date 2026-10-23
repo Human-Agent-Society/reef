@@ -46,7 +46,7 @@ class UnknownFamilyObjective(TrainingObjective):
 
 
 #: The recipe's step schedule for one batch; the runtime trains it as one step.
-ONE_STEP = StepScheduling(unit="sample", batch_size="actual")
+ONE_STEP = StepScheduling(unit="sample")
 
 
 def sample(reward: float) -> TrajectoryItem:
@@ -134,10 +134,10 @@ def test_preparation_runs_the_objective_in_process(tmp_path: Path) -> None:
             ONE_STEP,
             "learning-rate schedule",
         ),
-        (TrainingMethod("mlx-test-tttd"), StepScheduling(unit="sample", batch_size="actual", epochs=3), "epochs=3"),
-        (TrainingMethod("mlx-test-tttd"), StepScheduling(unit="sample", batch_size=4), "batch_size=4"),
+        (TrainingMethod("mlx-test-tttd"), StepScheduling(unit="sample", epochs=3), "epochs=3"),
+        (TrainingMethod("mlx-test-tttd"), StepScheduling(unit="sample", shuffle=True), "shuffle=True"),
     ],
-    ids=["loss-family", "learning-rate-schedule", "epochs", "sub-batching"],
+    ids=["loss-family", "learning-rate-schedule", "epochs", "shuffle"],
 )
 def test_a_method_the_runtime_cannot_train_is_refused_before_training(
     tmp_path: Path, method: TrainingMethod, scheduling: StepScheduling, message: str
@@ -149,13 +149,11 @@ def test_a_method_the_runtime_cannot_train_is_refused_before_training(
     assert runtime.engine.trained == []
 
 
-def test_a_configured_batch_size_is_the_reserved_batch(tmp_path: Path) -> None:
-    runtime = build(tmp_path)
-    prepared = runtime.prepare_training_step(
-        batch(), TrainingMethod("mlx-test-tttd"), {}, StepScheduling(unit="sample"), 0
-    )
-
-    assert prepared.action == "train"
+def test_the_batch_size_comes_from_the_training_options(tmp_path: Path) -> None:
+    assert build(tmp_path).batch_size == 1
+    assert build(tmp_path / "eight", batch_size=8).batch_size == 8
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        build(tmp_path / "zero", batch_size=0)
 
 
 def test_a_candidate_is_exported_and_serving_keeps_its_weights(tmp_path: Path) -> None:

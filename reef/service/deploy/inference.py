@@ -169,6 +169,7 @@ _CONFIGURED_FIELDS = {
     "teacher_options",
     "teacher_timeout",
     "inference_url",
+    "inference_remote",
     "inference_handler_factory",
     "inference_handler_config",
     "ray_address",

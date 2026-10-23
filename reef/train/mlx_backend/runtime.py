@@ -44,6 +44,7 @@ class MLXRuntime(TrainingRuntime):
         loss_options: LossOptions,
         max_train_tokens: int = 0,
         min_train_rows: int = 1,
+        batch_size: int = 1,
     ) -> None:
         super().__init__()
         self._serving = serving
@@ -53,8 +54,13 @@ class MLXRuntime(TrainingRuntime):
         self._loss_options = loss_options
         self._max_train_tokens = max_train_tokens
         self._min_train_rows = min_train_rows
+        self._batch_size = batch_size
         #: The optimizer state before the step of the candidate that awaits Reef's decision.
         self._pending_optimizer: tuple[str, OptimizerSnapshot] | None = None
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
 
     @property
     def serving(self) -> MLXServingRuntime:
@@ -85,21 +91,15 @@ class MLXRuntime(TrainingRuntime):
                 f"the mlx runtime trains at training.options.learning_rate; {method.objective!r} "
                 "selects a learning-rate schedule it does not implement"
             )
-        # One optimizer step per reserved batch. "configured" names the
-        # backend's own batch size, and the reserved batch is that size here.
+        # One optimizer step per reserved batch.
         unsupported = [
             *([f"epochs={scheduling.epochs}"] if scheduling.epochs != 1 else []),
             *(["shuffle=True"] if scheduling.shuffle else []),
-            *(
-                [f"batch_size={scheduling.batch_size!r}"]
-                if scheduling.batch_size not in ("actual", "configured")
-                else []
-            ),
         ]
         if unsupported:
             raise RuntimeContractError(
                 f"the mlx runtime trains one step per reserved batch; {method.objective!r} asks for "
-                f"{', '.join(unsupported)}. Supported: epochs=1, shuffle=False, batch_size='actual'."
+                f"{', '.join(unsupported)}. Supported: epochs=1, shuffle=False."
             )
         objective.validate_scheduling(scheduling)
         signal = objective.prepare(batch, algorithm_state)
@@ -267,6 +267,7 @@ def mlx_runtimes(settings: MLXConfig, engine: ModelEngine) -> tuple[MLXRuntime, 
         loss_options=LossOptions(settings.kl_coef, settings.loss_options),
         max_train_tokens=settings.max_train_tokens,
         min_train_rows=settings.min_train_rows,
+        batch_size=settings.batch_size,
     )
     return training, serving
 

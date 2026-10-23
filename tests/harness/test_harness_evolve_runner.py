@@ -1,7 +1,7 @@
 """Guarantees of the ``tutorials/evolve-your-harness`` runner, hermetic: no service, no model, no episodes.
 
-The recipe batches valid scored reports -- passing ones included -- and ``batch_size: 1`` makes each report its
-own batch, so every report the runner submits triggers one evolve step whatever its score was. The number of
+The recipe batches valid scored reports -- passing ones included -- and ``evolution.batch_size: 1`` makes each
+report its own batch, so every report the runner submits triggers one evolve step whatever its score was. The number of
 failing reports is therefore not the number of steps the run triggers, and an all-passing run is not a run that
 batched nothing: it waits for three verdicts like any other. A run whose steps all ended rejected or skipped ends
 on those verdicts instead of waiting on a head change that cannot come.

@@ -29,7 +29,7 @@ from reef.storage.tasks import TaskFileStore
 class ServiceConfig:
     """The HTTP service's settings, translated from a deployment config.
 
-    Recipe-specific config fields (batch sizes, group counts, checkpoint cadence)
+    Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
@@ -69,7 +69,9 @@ class ServiceConfig:
         None, public_path=("inference", "model_path"), help="Local model directory or Hugging Face repository ID."
     )
     inference_backend: str | None = config_option(
-        None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
+        None,
+        public_path=("inference", "backend"),
+        help="Managed local inference backend (default: sglang); none trains without an inference engine.",
     )
     tensor_parallel_size: int | None = config_option(
         None,
@@ -84,6 +86,15 @@ class ServiceConfig:
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
+    )
+    inference_remote: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata(
+            "Run the engines that inference.backend names on a remote inference component: url, "
+            "control-token-env, inference-token-env and startup-timeout-s. Resolution replaces it with the "
+            "fields of the validated RemoteInferenceSettings.",
+            public_path=("inference", "remote"),
+        ),
     )
     teacher_model_path: str | None = config_option(
         None, public_path=("teacher", "model_path"), help="Teacher engine HF model or directory; frozen SGLang."
@@ -201,6 +212,16 @@ class ServiceConfig:
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
     )
+    task_import_manifest: str | None = config_option(
+        None,
+        public_path=("task_import", "manifest"),
+        help="Split manifest of the Harbor tasks that each scenario imports into its task store imported-tasks.",
+    )
+    task_import_tasks_root: str | None = config_option(
+        None,
+        public_path=("task_import", "tasks_root"),
+        help="Directory that holds a Harbor task directory for each task name of task-import.manifest.",
+    )
     record_database_url: str | None = field(
         default=None,
         repr=False,
@@ -310,6 +331,10 @@ class ServiceConfig:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
+            raise ValueError("task-import needs both manifest and tasks-root")
+        if self.task_import_manifest == "" or self.task_import_tasks_root == "":
+            raise ValueError("task-import.manifest and task-import.tasks-root must be non-empty paths")
         if self.record_backend == "postgres":
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
                 raise ValueError("reef.record_database_url is required for the postgres backend")

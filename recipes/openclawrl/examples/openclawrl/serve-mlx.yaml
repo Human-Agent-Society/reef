@@ -100,6 +100,10 @@ training:
     # term to the loss, as the slime reference does. Set `loss_options.kl_coef`
     # to set that term separately.
     kl_coef: 0.05
+    # Judged turns per optimizer step. The reference uses 16. A value of 8
+    # gives a 72-session stream twice the steps on one machine, but each
+    # gradient is noisier.
+    batch_size: 8
     loss_options:
       # Center and scale the distillation gap over each training job, then
       # bound it to +-5, as the OPD recipe does. The raw gap of the hinted
@@ -118,8 +122,6 @@ training:
 
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
-  config:
-    checkpoint-every-n-versions: 1
 
 pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
@@ -165,12 +167,6 @@ pipeline:
       # The teacher renders its hint-enhanced prompt as the policy's was.
       teacher_chat_template_kwargs:
         enable_thinking: false
-  task2batch:
-    config:
-      # Judged turns per optimizer step. The reference uses 16. A value of 8
-      # gives a 72-session stream twice the steps on one machine, but each
-      # gradient is noisier.
-      batch_size: 8
 
 storage:
   agent-record-dir: work/mlx/agent-record

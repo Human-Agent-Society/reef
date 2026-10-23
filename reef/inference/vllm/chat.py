@@ -22,6 +22,7 @@ from reef.inference.chat import (
     finite_log_prob,
     integer_tokens,
 )
+from reef.inference.http import RequestHeadersFactory
 from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
@@ -251,7 +252,9 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
         capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
         client: NativeGenerateClient | None = None,
+        request_headers: RequestHeadersFactory | None = None,
     ) -> None:
         super().__init__(
             upstream_url,
@@ -263,6 +266,8 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
             capture_topk=capture_topk,
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
+            chat_template_kwargs=chat_template_kwargs,
+            request_headers=request_headers,
         )
 
 

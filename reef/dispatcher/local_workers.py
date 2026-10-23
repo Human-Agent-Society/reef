@@ -97,10 +97,10 @@ class LocalTrainingWorkers:
         """Wake each trainer of ``current`` that has a backend: the training thread, or a local worker."""
         if current.training_runtime is not None:
             self.training_ready.set()
-        for bound in current.trainers:
-            backend = bound.trainer.candidate_backend
+        for component_trainer in current.trainers:
+            backend = component_trainer.trainer.candidate_backend
             if backend is not None and not backend.dispatched:
-                self.start(current.name, bound.component)
+                self.start(current.name, component_trainer.component)
 
     def remove(self, scenario: str) -> None:
         """Unregister workers without joining them under the registry lock."""
@@ -361,7 +361,10 @@ class LocalTrainingWorkers:
     def reload(self, scenario: str, current: Scenario | None) -> Scenario:
         """Rebuild durable state, retaining failed instructions that still need skip rows."""
         failures = (
-            {bound.component: bound.trainer.instruction_failures() for bound in current.trainers}
+            {
+                component_trainer.component: component_trainer.trainer.instruction_failures()
+                for component_trainer in current.trainers
+            }
             if current is not None
             else {}
         )

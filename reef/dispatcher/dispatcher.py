@@ -15,6 +15,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.core.batches import TrajectoryItem
 from reef.core.errors import ScenarioBusy, ScenarioCapacityFull, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
@@ -24,7 +25,6 @@ from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.training_loop import DispatchedTrainingLoop, in_flight_job_marker
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
@@ -204,8 +204,8 @@ class Dispatcher(ScenarioLifecycle):
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)
             if dropped is not None:
-                for bound in dropped.trainers:
-                    backend = bound.trainer.candidate_backend
+                for component_trainer in dropped.trainers:
+                    backend = component_trainer.trainer.candidate_backend
                     if backend is not None:
                         backend.retire_scenario(scenario)
                 dropped.close()
@@ -235,7 +235,6 @@ class Dispatcher(ScenarioLifecycle):
         - Its storage is durable.
         - No request runs on it.
         - No trainer has records that it would still train on.
-        - No release exists only in memory.
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
@@ -244,11 +243,11 @@ class Dispatcher(ScenarioLifecycle):
         """
         if current.training_runtime is not None or not current.store.durable:
             return False
-        if current.operations.active_count() > 0 or current.repository.holds_local_releases:
+        if current.operations.active_count() > 0:
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
-        return not any(bound.trainer.holds_untrained_records() for bound in current.trainers)
+        return not any(component_trainer.trainer.holds_untrained_records() for component_trainer in current.trainers)
 
     def unload_if_idle(self, scenario: str) -> bool:
         """Unload ``scenario`` if it is idle, and return whether it was unloaded.
@@ -427,6 +426,19 @@ class Dispatcher(ScenarioLifecycle):
                 self.process_accepted_records(current)
             return stored
 
+    def accept_trajectories(
+        self, scenario: str, trajectories: tuple[tuple[str, TrajectoryItem], ...], *, release_id: str | None = None
+    ) -> None:
+        """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction, then wake their consumer."""
+        if not trajectories:
+            raise ValueError("an upload must hold one or more trajectories")
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, release_id=release_id)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            if ingest.append_trajectories(current, trajectories):
+                self.process_accepted_records(current)
+
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""
         # Every component's trainer sees the record. A dispatched backend wakes the
@@ -435,9 +447,9 @@ class Dispatcher(ScenarioLifecycle):
         self.local_workers.wake(current)
         if current.training_runtime is not None:
             return
-        for bound in current.trainers:
-            if bound.trainer.candidate_backend is None:
-                current.prepare_training_step(bound.component)
+        for component_trainer in current.trainers:
+            if component_trainer.trainer.candidate_backend is None:
+                current.prepare_training_step(component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
 
@@ -557,7 +569,6 @@ class Dispatcher(ScenarioLifecycle):
 def build_default_dispatcher(
     *,
     backend_factory: RepositoryBackendFactory | None = None,
-    checkpoint_strategy: CheckpointStrategy | None = None,
     local_artifact_dir: Path | None = None,
     scenario_storage: ScenarioStorage,
 ) -> Dispatcher:
@@ -575,11 +586,8 @@ def build_default_dispatcher(
         initial = root / "initial"
         initial.mkdir()
         backend_factory = InMemoryRepositoryBackend.factory(initial, root=root / "repository")
-    recipe = Recipe(
-        checkpoint_strategy=checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1),
-    )
     return Dispatcher(
-        recipe,
+        Recipe(),
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         scenario_storage=scenario_storage,

@@ -131,6 +131,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         candidate_backend=backend,
         candidate_evaluator=None,
         state=backend.initial_state(),
+        batch_size=1,
     )
     try:
         for cycle in range(2):

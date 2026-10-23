@@ -26,6 +26,7 @@ def prepare_slime_step(
     algorithm_state: Mapping[str, Any],
     scheduling: StepScheduling,
     *,
+    step_size: int,
     sampler_topk: bool = False,
 ) -> PreparedTrainingStep:
     """Resolve the job's training objective and produce its complete Slime training payload.
@@ -33,8 +34,10 @@ def prepare_slime_step(
     ``method`` is the objective and learning-rate schedule the recipe selected;
     the payload records it, so it is part of the job's identity.
     ``scheduling`` is the recipe's step schedule; the objective rejects one its
-    loss cannot train before any payload is built. ``sampler_topk`` adds each
-    row's recorded sampler top-K, which score centering reads.
+    loss cannot train before any payload is built. ``step_size`` is Slime's
+    ``--global-batch-size``, the rollouts in one optimizer step.
+    ``sampler_topk`` adds each row's recorded sampler top-K, which score
+    centering reads.
     """
     objective = resolve_objective(method.objective)
     objective.validate_scheduling(scheduling)
@@ -45,14 +48,15 @@ def prepare_slime_step(
             next_algorithm_state=signal.next_algorithm_state,
             metrics=signal.metrics,
         )
-    schedule = _materialize(batch, scheduling)
-    payload = _build_payload(batch, objective.loss_family, signal.advantages, scheduling, sampler_topk=sampler_topk)
+    schedule = _materialize(batch, scheduling, step_size)
+    payload = _build_payload(
+        batch, objective.loss_family, signal.advantages, scheduling, step_size=step_size, sampler_topk=sampler_topk
+    )
     payload["method"] = method.to_dict()
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)
-    if schedule.optimizer_steps is not None:
-        metrics.setdefault("optimizer_steps", schedule.optimizer_steps)
+    metrics.setdefault("optimizer_steps", schedule.optimizer_steps)
     if schedule.dropped_rollouts:
         metrics.setdefault("dropped_rollouts", schedule.dropped_rollouts)
     if schedule.tail_rollouts:
@@ -65,8 +69,8 @@ def prepare_slime_step(
     )
 
 
-def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> MaterializedSchedule:
-    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order."""
+def _materialize(batch: TrainingBatch, scheduling: StepScheduling, step_size: int) -> MaterializedSchedule:
+    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order and steps of ``step_size``."""
     samples = trajectories(batch)
     if scheduling.unit == "sample":
         source_rollout_ids = list(range(len(samples)))
@@ -80,7 +84,7 @@ def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> Materializ
                 else ("sample", index)
             )
             source_rollout_ids.append(group_ids.setdefault(key, len(group_ids)))
-    return materialize_schedule(source_rollout_ids, scheduling, seed=batch_schedule_seed(batch))
+    return materialize_schedule(source_rollout_ids, scheduling, step_size=step_size, seed=batch_schedule_seed(batch))
 
 
 def _build_payload(
@@ -89,21 +93,20 @@ def _build_payload(
     advantages: tuple[float, ...] | None,
     scheduling: StepScheduling,
     *,
+    step_size: int,
     sampler_topk: bool = False,
 ) -> dict[str, Any]:
-    """Materialize Slime's wire rows in the order ``scheduling`` trains them.
+    """Materialize Slime's wire rows in the order ``scheduling`` trains them, in steps of ``step_size`` rollouts.
 
     Rollout ids group the rows one optimizer step must keep together; the
-    schedule may repeat rows (epochs), reorder rollouts (shuffle) and fix the
-    step layout (``external_step_sizes``) — otherwise the runtime cuts steps
-    of its configured size and ``external_remainder`` says what it does with
-    a tail. See :class:`StepScheduling`.
+    schedule may repeat rows (epochs), reorder rollouts (shuffle), and fixes
+    the step layout (``external_step_sizes``). See :class:`StepScheduling`.
     """
     samples = trajectories(batch)
     shape_row = resolve_loss_family(loss_family).shape_sample_row
     if advantages is not None and len(advantages) != len(samples):
         raise ValueError(f"advantages length {len(advantages)} does not match sample count {len(samples)}")
-    schedule = _materialize(batch, scheduling)
+    schedule = _materialize(batch, scheduling, step_size)
     payload: dict[str, Any] = {
         "samples": [shape_row(samples[row]) for row in schedule.row_indices],
         "rollout_ids": list(schedule.rollout_ids),
@@ -118,8 +121,5 @@ def _build_payload(
         payload["advantages"] = [advantages[row] for row in schedule.row_indices]
     if sampler_topk:
         payload.update(sampler_topk_columns(samples, schedule.row_indices))
-    if schedule.step_sizes is not None:
-        payload["external_step_sizes"] = list(schedule.step_sizes)
-    else:
-        payload["external_remainder"] = scheduling.remainder
+    payload["external_step_sizes"] = list(schedule.step_sizes)
     return payload

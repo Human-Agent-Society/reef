@@ -29,6 +29,7 @@ def method_config():
                 "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"},
             },
         },
+        "training": {"options": {"global-batch-size": 1}},
     }
 
 

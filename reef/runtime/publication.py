@@ -28,6 +28,7 @@ from reef.core.errors import ReefError
 from reef.runtime.interfaces import (
     AdapterEngine,
     InferenceBackend,
+    InferenceMemoryHandoffBackend,
     RuntimeLoadId,
     ScenarioHistoryStore,
     TrainingBackend,
@@ -497,12 +498,11 @@ class TrainingPublication:
     The enclosing training coordinator must serialize these operations with
     training and shutdown. A single shared ``phase`` also lets its training and
     checkpoint operations report progress through the same health endpoint.
-    No tensor data passes through this object. A missing marker path supports
-    legacy coordinators that never execute durable training jobs.
+    No tensor data passes through this object.
     """
 
     def __init__(
-        self, store: TrainingJobStore | None, publisher: WeightPublisher, state: TrainingJobState | None = None
+        self, store: TrainingJobStore, publisher: WeightPublisher, state: TrainingJobState | None = None
     ) -> None:
         self._store = store
         self._publisher = publisher
@@ -516,15 +516,10 @@ class TrainingPublication:
     def phase(self, phase: str) -> None:
         self.state.phase = phase
 
-    def _require_store(self) -> TrainingJobStore:
-        if self._store is None:
-            raise RuntimeError("training job checkpoint path is not configured")
-        return self._store
-
     def _job_marker(self, job_id: str) -> dict[str, Any]:
         if not job_id:
             raise ValueError("training_job_id must be non-empty")
-        marker = self._require_store().read()
+        marker = self._store.read()
         if marker is None or marker["job_id"] != job_id:
             raise RuntimeError(f"unknown training job {job_id!r}")
         return marker
@@ -564,13 +559,13 @@ class TrainingPublication:
             # barrier, so a publication that fails from here on replays as a
             # recovery rather than as a fresh checkpoint.
             if not recovering:
-                self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                self._store.transition(marker, "UPDATING_WEIGHTS")
                 engines_declared_uncertain = True
             self.phase = "publishing"
             version = self._publisher.publish(marker, force_full=recovering)
             if not isinstance(version, str) or not version:
                 raise RuntimeError("weight publisher returned an empty runtime load ID")
-            self._require_store().transition(marker, "READY_TO_COMMIT", runtime_load_id=version)
+            self._store.transition(marker, "READY_TO_COMMIT", runtime_load_id=version)
             self.phase = "awaiting_commit"
         except AdapterEvictionFailed:
             self._abort()
@@ -595,7 +590,7 @@ class TrainingPublication:
         replay rebuilds the engines and forces a full publication.
         """
         with suppress(Exception):
-            self._require_store().transition(marker, "UPDATING_WEIGHTS")
+            self._store.transition(marker, "UPDATING_WEIGHTS")
 
     def reject(self, job_id: str) -> Mapping[str, Any]:
         """Durably reject before restoring the incumbent's released resources."""
@@ -604,11 +599,11 @@ class TrainingPublication:
         if status == "REJECTED":
             return marker
         if status == "CHECKPOINT":
-            self._require_store().transition(marker, "REJECTING")
+            self._store.transition(marker, "REJECTING")
         elif status != "REJECTING":
             raise RuntimeError(f"cannot reject training job {job_id!r} from {status}")
         self._publisher.restore_incumbent()
-        self._require_store().transition(marker, "REJECTED")
+        self._store.transition(marker, "REJECTED")
         self.phase = "serving"
         return marker
 
@@ -621,14 +616,14 @@ class TrainingPublication:
         marker = self._job_marker(job_id)
         if marker["status"] == "COMPLETE":
             if marker.get("commit_acknowledged") is not True:
-                self._require_store().write({**marker, "commit_acknowledged": True})
+                self._store.write({**marker, "commit_acknowledged": True})
             return
         if marker["status"] == "READY_TO_COMMIT":
-            marker = self._require_store().transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
+            marker = self._store.transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
         if marker["status"] != "HEAD_COMMITTED":
             raise RuntimeError(f"cannot acknowledge training job {job_id!r} from {marker['status']}")
         self._publisher.resume()
-        self._require_store().transition(marker, "COMPLETE", commit_acknowledged=True)
+        self._store.transition(marker, "COMPLETE", commit_acknowledged=True)
         self.phase = "serving"
 
     @contextmanager
@@ -652,7 +647,7 @@ class TrainingPublication:
                 self._publisher.pause()
                 self.phase = "recovering"
                 if marker is not None and marker["status"] == "CHECKPOINT":
-                    self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                    self._store.transition(marker, "UPDATING_WEIGHTS")
         except BaseException:
             if marker is not None and marker["status"] == "CHECKPOINT":
                 # Startup retires the engines the same way a publication does,
@@ -677,7 +672,7 @@ class TrainingPublication:
                     f"{marker['runtime_load_id']!r} to {runtime_load_id!r}"
                 )
             if marker is not None and status == "UPDATING_WEIGHTS":
-                self._require_store().transition(marker, "READY_TO_COMMIT", runtime_load_id=runtime_load_id)
+                self._store.transition(marker, "READY_TO_COMMIT", runtime_load_id=runtime_load_id)
                 self.phase = "awaiting_commit"
             elif status == "READY_TO_COMMIT":
                 self.phase = "awaiting_commit"
@@ -708,13 +703,22 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         training: TrainingBackend,
         inference: InferenceBackend,
         state: TrainingJobState,
-        store: TrainingJobStore | None,
+        store: TrainingJobStore,
     ) -> None:
         self._store = store
         self.training = training
         self.inference = inference
         self.context = training.context
         self.config = training.config
+        # The receiver's GPU-memory handoff, used only by colocated training: set exactly when
+        # training is colocated, so a receiver without the handoff serves every other deployment.
+        self.memory_handoff: InferenceMemoryHandoffBackend | None
+        if not self.config.colocate:
+            self.memory_handoff = None
+        elif isinstance(inference, InferenceMemoryHandoffBackend):
+            self.memory_handoff = inference
+        else:
+            raise TypeError(f"colocated training cannot share GPUs with {type(inference).__name__}")
         self.state = state
         self.history = self.context.history
         self.residency = AdapterResidencyManager(self.config.adapter_capacity) if self.config.lora else None
@@ -757,9 +761,11 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def load_adapter(self, name: str, payload: Any) -> None:
         scenario, version = parse_adapter_name(name)
-        files = self.training.adapter_files(scenario, version)
+        files = self.training.weight_files(scenario, version)
         if files is not None:
-            self.inference.load_adapter_files(name, files, None)
+            if files.layout != "adapter":
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=None)
             return
         self.training.send_adapter(scenario, name)
 
@@ -791,19 +797,19 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Colocated memory handoff
 
     def prepare_training(self) -> None:
-        if self.config.colocate:
+        if self.memory_handoff is not None:
             self.pause_generation()
-            self.inference.offload(self.release_tags)
+            self.memory_handoff.offload(self.release_tags)
 
     def restore_incumbent(self) -> None:
-        if not self.config.colocate:
+        if self.memory_handoff is None:
             return
         # Pairs with the training step's offload: resuming a region that was
         # never released fails, because the receiver resumes by removing the tag
         # from the set release added it to.
         if self.release_tags is None:
-            self.inference.onload_weights()
-        self.inference.onload_kv()
+            self.memory_handoff.onload_weights()
+        self.memory_handoff.onload_kv()
         self.resume()
 
     # -- Version identity
@@ -827,8 +833,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if marker is not None:
             # Persist intent before any bytes leave the sender. An uncertain
             # partial transfer and process restart must reuse the same target.
-            if self._store is None:
-                raise RuntimeError("training checkpoint path is not configured")
             self._store.write({**marker, "target_runtime_load_id": target})
         return target
 
@@ -871,25 +875,28 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def _transfer(self, target: str, *, force_full: bool, scenario: str | None = None) -> str:
         """Send the trainer's weights as ``target`` and verify every engine received them."""
-        if scenario is not None:
-            files = self.training.adapter_files(scenario, target)
-            if files is not None:
-                # A trainer that delivers files never sends: Reef's receiver loads the adapter.
-                self.inference.load_adapter_files(adapter_name(scenario, target), files, target)
-                self._verify_engines_serve(target, "after update")
-                return target
-        if self.config.colocate:
+        files = self.training.weight_files(scenario, target)
+        if files is not None:
+            # A trainer that delivers files never sends: Reef's receiver loads them.
+            if files.layout != ("full" if scenario is None else "adapter"):
+                raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
+            name = None if scenario is None else adapter_name(scenario, target)
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=target)
+            self._verify_engines_serve(target, "after update")
+            return target
+        handoff = self.memory_handoff
+        if handoff is not None:
             # Repeatable release also covers retry after a partial receive:
             # a released sender may need to reconstruct GPU workers.
-            self.inference.offload(self.release_tags)
+            handoff.offload(self.release_tags)
         self.training.prepare_weights(target, force_full=force_full)
-        if self.config.colocate and self.release_tags is None:
-            self.inference.onload_weights()
+        if handoff is not None and self.release_tags is None:
+            handoff.onload_weights()
         version = self.training.send_weights(target, force_full=force_full)
         if version != target:
             raise RuntimeError(f"weight sender returned runtime load ID {version!r}; expected {target!r}")
-        if self.config.colocate:
-            self.inference.onload_kv()
+        if handoff is not None:
+            handoff.onload_kv()
         self._verify_engines_serve(version, "after update")
         return version
 
@@ -917,18 +924,16 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
             self.restore_scenario_adapters(marker)
 
     def restore_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
-        """Re-register every scenario's committed adapter after a restart.
+        """Re-register every scenario's current adapter on replacement engines.
 
-        The Megatron checkpoint restores only the slot's last occupant; the
-        other scenarios come back from their persisted slot snapshots. Each
-        is loaded under the name its last publication recorded, so Reef's
+        The trainer still holds each scenario's newest state, so each adapter
+        is loaded under the name its last publication recorded, and Reef's
         routing for that scenario keeps resolving. The marker's scenario is
-        activated last: the regular startup republication then publishes it
-        under the recovered runtime load ID.
+        activated last, and the job's complete transfer then publishes it.
         """
         history = self.require_history()
         residency = self.require_residency()
-        # A rejected job publishes nothing at startup: its scenario comes back from history like a peer.
+        # A rejected job publishes nothing: its scenario comes back from history like a peer.
         active = marker.get("scenario") if marker is not None and marker.get("status") != "REJECTED" else None
         pending = [
             (scenario, adapter)
@@ -938,10 +943,37 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if not pending and active is None:
             return
         self.pause_generation()
-        if self.config.colocate:
-            self.inference.onload_weights()
+        if self.memory_handoff is not None:
+            self.memory_handoff.onload_weights()
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(scenario, version, self)
+        if active is not None:
+            self.training.activate_scenario(active)
+
+    def republish_scenario_checkpoints(self, marker: Mapping[str, Any] | None) -> None:
+        """Publish every scenario's checkpoint under a new runtime load ID after a restart.
+
+        Each scenario comes back from its persisted slot snapshot, which its
+        last checkpoint wrote, as full-weight training comes back from its
+        checkpoint. The versions it committed after that checkpoint do not
+        train again. Serving routes the scenario's checkpoint release to the
+        new adapter until the scenario's next step publishes. The marker's
+        scenario is activated last: the regular startup republication then
+        publishes it under the recovered runtime load ID.
+        """
+        history = self.require_history()
+        # A rejected job publishes nothing at startup: its scenario comes back from history like a peer.
+        active = marker.get("scenario") if marker is not None and marker.get("status") != "REJECTED" else None
+        scenarios = [scenario for scenario in history.scenarios if scenario != active]
+        if not scenarios and active is None:
+            return
+        self.pause_generation()
+        if self.memory_handoff is not None:
+            self.memory_handoff.onload_weights()
+        for scenario in scenarios:
+            self.training.activate_scenario(scenario)
+            published = self.update_serving(force_full=True, scenario=scenario)
+            history.record_publication(scenario, published, adapter_name(scenario, published))
         if active is not None:
             self.training.activate_scenario(active)

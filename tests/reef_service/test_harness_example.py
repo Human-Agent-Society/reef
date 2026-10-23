@@ -9,8 +9,10 @@ import importlib
 import json
 import logging
 import re
+import sqlite3
 import sys
 import types
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -882,8 +884,8 @@ def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
-    assert set(result) == {"recipe", "pipeline", "inference"}
-    assert result["pipeline"] == {"task2batch": {"config": {"batch_size": 1}}}
+    assert set(result) == {"recipe", "inference"}
+    assert result["recipe"]["config"]["evolution"]["batch_size"] == 1
 
 
 def _write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
@@ -895,7 +897,6 @@ def _write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
                     "implementation": config["implementation"],
                     "config": {**config["data"], "evolution": evolution},
                 },
-                "pipeline": config["pipeline"],
                 "execution": config["execution"],
             }
         )
@@ -929,7 +930,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
@@ -1129,7 +1130,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
     assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
-    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",
@@ -1188,8 +1189,8 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
     assert trainer.pipeline.training_mode == "hybrid"
-    # Each report is one batch: the deployment's pipeline section sets batch_size 1.
-    assert trainer.pipeline.task2batch.batch_size == 1
+    # Each report is one batch: the deployment sets evolution.batch_size 1.
+    assert trainer.batch_size == 1
     trainer.close()
     records.close()
 
@@ -1319,6 +1320,18 @@ def _session_events(session: str, release: str, stages, tool: str | None = None)
     return events
 
 
+def write_commits(directory: Path, *commits: dict) -> None:
+    """Replace the commits of one scenario database with the given JSON objects, at steps 1, 2, ..."""
+    database = directory / "x.sqlite3"
+    SQLiteRecordStore(database).close()
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DELETE FROM scenario_commit")
+        connection.executemany(
+            "INSERT INTO scenario_commit (step, commit_json) VALUES (?, ?)",
+            [(step, json.dumps(commit)) for step, commit in enumerate(commits, start=1)],
+        )
+
+
 def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Path, monkeypatch) -> None:
     replay = _method(monkeypatch, "replay")
     work = tmp_path / "work"
@@ -1357,7 +1370,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "selection": {"reason": "candidate won 2 task pairings and lost 0"},
         },
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n")
+    write_commits(work / "agent-record", commit)
     for name, release, tool in (("s1", "r1", "harness_propose"), ("s2", "r2", None)):
         events = _session_events(name, release, ["think"], tool)
         (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
@@ -1440,7 +1453,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
             "mutations": [{"op": "update", "id": "main", "options": {"name": "native_graph", "config": graph}}],
         },
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(updated) + "\n")
+    write_commits(work / "agent-record", updated)
     first_update = replay.collect(work)
     assert first_update["releases"][1]["diff"] == {
         "added": [],
@@ -1458,7 +1471,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "metrics": None,
         "algorithm_state": None,
     }
-    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n" + json.dumps(rollback) + "\n")
+    write_commits(work / "agent-record", commit, rollback)
     with_rollback = replay.collect(work)
     assert [(r["kind"], r["step"], r["release_id"]) for r in with_rollback["releases"]] == [
         ("seed", 0, "r1"),

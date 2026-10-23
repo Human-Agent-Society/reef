@@ -193,6 +193,32 @@ def test_worker_loads_an_adapter_directory_into_every_engine_then_stamps_the_ver
         worker.load_adapter_from_disk("x", "/p", "inc:2")
 
 
+def test_worker_reloads_full_weights_into_every_updatable_engine(monkeypatch):
+    from reef.inference.sglang import worker as worker_module
+
+    calls = []
+
+    class Remote:
+        def __init__(self, result):
+            self.result = result
+
+        def remote(self, *args, **kwargs):
+            calls.append(kwargs)
+            return self.result
+
+    def engine(result=None):
+        return SimpleNamespace(update_weights_from_disk=Remote(result or {"success": True}))
+
+    monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
+    worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
+    worker.servers = {"default": SimpleNamespace(update_weights=True, engines=[engine(), engine()])}
+    worker.load_weights_from_disk("/ckpt/hf", "inc:3")
+    assert calls == [{"model_path": "/ckpt/hf", "runtime_load_id": "inc:3"}] * 2
+    worker.servers = {"default": SimpleNamespace(update_weights=True, engines=[engine({"success": False})])}
+    with pytest.raises(RuntimeError, match="refused weights"):
+        worker.load_weights_from_disk("/ckpt/hf", "inc:3")
+
+
 def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
     from reef.inference.sglang import worker as worker_module
     from reef.inference.sglang.launch import SGLangEngineGroup, SGLangModel

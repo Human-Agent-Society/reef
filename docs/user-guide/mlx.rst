@@ -110,6 +110,7 @@ All keys are under ``training.options``. Only ``checkpoint_dir`` is required.
    training.options.seed | 0 | MLX random seed
    training.options.capture_topk | 0 | top-K candidates recorded for each generated token; the ``openclawrl`` loss needs a value above 0
    training.options.chat_template_kwargs | {} | default chat-template values for every request, such as ``enable_thinking``
+   training.options.batch_size | 1 | samples in one optimizer step; Reef reserves a batch once at least this many samples are ready
    training.options.micro_batch_size | 8 | maximum sequences in one backward pass; a larger batch accumulates over several passes
    training.options.checkpoint_layers | false | recompute each adapted block's forward pass during the backward pass, to save memory
    training.options.log_probs_chunk_size | 0 | response positions scored in one pass over the output head; 0 scores all at once
@@ -150,8 +151,8 @@ The backend refuses these jobs before training:
 
 - a job whose loss family is not ``openclawrl`` or ``tttd``;
 - a job that selects a learning-rate schedule;
-- a schedule with ``epochs`` other than 1, with ``shuffle``, or with an
-  integer ``batch_size``. The reserved batch is always one optimizer step.
+- a schedule with ``epochs`` other than 1, or with ``shuffle``. The reserved
+  batch is always one optimizer step.
 
 A training step that leaves every adapter tensor unchanged fails. Reef does
 not publish an adapter that is identical to its predecessor.

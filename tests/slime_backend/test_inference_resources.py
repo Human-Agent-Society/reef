@@ -95,7 +95,7 @@ def plan_for(state, *, colocate=False):
     )
 
     class Training:
-        weight_transfer_protocol = inference_service.INFERENCE_PROTOCOL
+        weight_transfer_protocols = (inference_service.INFERENCE_PROTOCOL,)
 
         def start(self, supplied):
             assert supplied is allocation
@@ -202,7 +202,7 @@ def test_failed_component_shutdown_requires_process_retirement(resource_runtime,
     assert resource_runtime.events[-2:] == ["retire-processes", "disconnect"]
 
 
-def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job():
+def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job(tmp_path):
     from reef.runtime.executor.failure import ExecutorFailedError
     from reef.runtime.executor.uniproc import UniProcExecutor
     from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -217,7 +217,10 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
 
     group = TrainingGroup()
     operations = SlimeTrainingBackend(
-        group, batch_processor=SimpleNamespace(), args=SlimeArguments(), save_hf_template=None
+        group,
+        batch_processor=SimpleNamespace(),
+        args=SlimeArguments(global_batch_size=1),
+        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
     )
     try:
         operations.start()
@@ -227,3 +230,28 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
             operations.check_health()
     finally:
         group.executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("rollout_num_gpus", "rollout_external", "expected"),
+    [
+        (4, False, ModelGpuLayout(8, 4)),
+        (0, True, ModelGpuLayout(8, 0, external_inference=True)),
+        # inference.backend: none starts no engine; every model GPU trains.
+        (0, False, ModelGpuLayout(8, 0, external_inference=True)),
+    ],
+)
+def test_the_reservation_holds_only_the_gpus_of_local_engines(rollout_num_gpus, rollout_external, expected):
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+    layout = resources.model_gpu_layout(
+        SlimeArguments(
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=8,
+            rollout_num_gpus=rollout_num_gpus,
+            rollout_external=rollout_external,
+            colocate=False,
+        )
+    )
+    assert layout == expected
+    assert layout.total == 8 + rollout_num_gpus

@@ -42,6 +42,7 @@ class OPDTasks(ReportTasks):
     """
 
     def __init__(self, settings: OPDSettings) -> None:
+        super().__init__()
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
         self.overflow_count = 0

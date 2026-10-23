@@ -7,7 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.runtime.interfaces import MULTIMODAL_ROUTES, InferenceHandler
+from reef.runtime.interfaces import INFERENCE_ABORT_ERROR, MULTIMODAL_ROUTES, InferenceHandler, inference_aborted
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (
@@ -109,7 +109,13 @@ async def _relay_inference_stream(
         "",
     )
     is_sse = "text/event-stream" in content_type.lower()
-    if not is_sse and record:
+
+    def engine_aborted() -> bool:
+        # A stream cannot restart after it sent frames. An engine-aborted stream
+        # ends like an incomplete one, without a receipt.
+        return upstream.record_response is not None and inference_aborted(upstream.record_response)
+
+    if not is_sse and record and not engine_aborted():
         response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
     response = web.StreamResponse(status=upstream.status, headers=response_headers)
     body = bytearray()
@@ -134,6 +140,9 @@ async def _relay_inference_stream(
                 await relay.finish()
             if relay.terminal is None:
                 error = "upstream SSE ended without a terminal event"
+            elif engine_aborted():
+                error = INFERENCE_ABORT_ERROR
+                await response.write(relay.terminal)
             else:
                 record_attempted = True
                 # Off the loop: recording takes the scenario's lock, which a commit may hold for a while.
@@ -154,7 +163,10 @@ async def _relay_inference_stream(
             async for chunk in upstream.chunks:
                 body.extend(chunk)
                 await response.write(chunk)
-            complete = True
+            if engine_aborted():
+                error = INFERENCE_ABORT_ERROR
+            else:
+                complete = True
     except ConnectionResetError:
         error = "client disconnected"
     except Exception as exc:

@@ -4,10 +4,9 @@ A recipe is *how records and their feedback become a new version of the
 weights or the harness*. This package holds everything a method binds to:
 
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
-  ``build``, ``build_surface``, the ``CheckpointStrategy``) and
+  ``build``, ``build_surface``) and
   ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (training objective and data processor).
-- ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per release component
   and runs their trainers side by side in one scenario.

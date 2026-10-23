@@ -25,14 +25,25 @@ from reef.runtime.interfaces import (
 
 
 class ExecutorTrainingRuntime(TrainingRuntime):
-    """Train and export checkpoints through a supplied worker control connection."""
+    """Train and export checkpoints through a supplied worker control connection.
 
-    def __init__(self, train_group_handle: CoordinatorClient) -> None:
+    ``batch_size`` is the positive int that the deployment read from the
+    training options; the constructor refuses another value.
+    """
+
+    def __init__(self, train_group_handle: CoordinatorClient, *, batch_size: int) -> None:
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError(f"batch_size must be a positive int, got {batch_size!r}")
         self._train_group_handle = train_group_handle
+        self._batch_size = batch_size
 
     @property
     def train_group_handle(self) -> CoordinatorClient:
         return self._train_group_handle
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size
 
     @property
     def concurrent_training_scenarios(self) -> bool:

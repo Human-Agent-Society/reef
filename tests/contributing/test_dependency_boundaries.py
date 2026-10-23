@@ -209,7 +209,14 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
     allowed_domains = {
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
-        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits", "reef.storage.tasks"),
+        "reef.storage.trajectories": ("reef.core",),
+        "reef.storage.scenario": (
+            "reef.core",
+            "reef.storage.records",
+            "reef.storage.commits",
+            "reef.storage.tasks",
+            "reef.storage.trajectories",
+        ),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)
@@ -293,15 +300,6 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
     # interpreter import in either direction must not deadlock on a cycle.
     _assert_isolated_import("from reef.scenario.factory import ScenarioFactory; assert ScenarioFactory")
     _assert_isolated_import("import reef; from reef.scenario.factory import ScenarioFactory")
-
-
-def test_checkpoint_strategy_is_a_leaf_module() -> None:
-    module = importlib.import_module("reef.recipe.checkpoint_strategy")
-    tree = ast.parse(inspect.getsource(module))
-    reef_imports = [
-        node for node in tree.body if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("reef")
-    ]
-    assert reef_imports == []
 
 
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
@@ -521,11 +519,16 @@ def test_training_backends_never_import_inference_implementations() -> None:
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
 
 
-def test_task_generation_input_definition_does_not_depend_on_consumers() -> None:
-    module = importlib.import_module("reef.core.tasks.generation")
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.core.tasks")
-    for dependency in ("reef.train", "reef.record2task.generator", "recipes"):
-        assert _imports_of(imported, dependency) == []
+def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
+    # The generator service owns the request; the generated-task recipe owns the generator contract.
+    for module_name, package, consumers in (
+        ("reef.record2task.generator.inputs", "reef.record2task.generator", ("reef.train", "reef.recipe", "recipes")),
+        ("reef.recipe.generated_tasks.generator", "reef.recipe.generated_tasks", ("reef.train", "recipes")),
+    ):
+        module = importlib.import_module(module_name)
+        imported = _imported_modules(ast.parse(inspect.getsource(module)), package=package)
+        for dependency in consumers:
+            assert _imports_of(imported, dependency) == [], module_name
 
 
 def test_background_jobs_depend_only_on_the_standard_library() -> None:

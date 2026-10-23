@@ -6,7 +6,7 @@ import json
 
 import pytest
 from tests.reef_service.test_skill_delivery import FakeStream
-from tests.scenario.test_commit_log import RecordingRuntime, TestPolicyRecipe, wait_for_step
+from tests.scenario.test_commit_history import RecordingRuntime, TestPolicyRecipe, wait_for_step
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -14,7 +14,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
 from reef.observability import TracingConfig, build_record_observer
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
@@ -451,8 +450,6 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     dispatcher = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(RecordingRuntime(served_version="w0")),
-            batch_size=1,
-            checkpoint_strategy=EveryNVersions(1000),
         ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",

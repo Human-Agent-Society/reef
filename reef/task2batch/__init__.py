@@ -1,12 +1,14 @@
-"""Task to batch: the stage that shapes the tasks of the selected record sets into one batch.
+"""Task to batch: the stage that buffers samples and shapes the samples of the selected record sets into one batch.
 
 Reef reuses records in a pipeline of three stages::
 
     record ─► record2record ─► record set ─► record2task ─► task ─► task2batch ─► batch
 
-The training pipeline (``reef.train.pipeline.TrainingPipeline``) reserves the
-next batch's record sets from ``reef.record2record`` and gives their tasks,
-which ``reef.record2task`` made, to this stage.
+The tasks of a record set enter this stage as samples. The stage's buffer
+holds at most ``buffer_size`` samples. When it holds the candidate backend's
+batch size, the training pipeline (``reef.train.pipeline.TrainingPipeline``)
+reserves whole record sets from ``reef.record2record`` and gives their
+samples to this stage.
 
 Entry point: ``Task2Batch`` in ``base.py``. A recipe writes ``make_batch`` and
 names the class in its ``pipeline_spec()``.
@@ -21,11 +23,11 @@ on ``reef.core``, ``reef.observability``, ``reef.pipeline_context``, and the
 two earlier stage packages, whose classes ``Task2Batch.from_config`` receives.
 """
 
-from reef.task2batch.base import BatchSettings, NoBatches, Task2Batch
+from reef.task2batch.base import BufferSettings, NoBatches, Task2Batch
 from reef.task2batch.distill import DistillBatches
 
 __all__ = [
-    "BatchSettings",
+    "BufferSettings",
     "DistillBatches",
     "NoBatches",
     "Task2Batch",

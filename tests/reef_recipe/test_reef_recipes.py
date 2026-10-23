@@ -19,7 +19,6 @@ from reef.core.reports import ScoredRolloutReport
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.storage.sqlite import SQLiteRecordStore
@@ -82,7 +81,7 @@ def test_dotted_reference_resolves_an_external_recipe_class() -> None:
     [
         ("nowhere.to.be:Found", "cannot import recipe reference"),
         ("reef.recipe.base:missing", "cannot import recipe reference"),
-        ("reef.recipe.base:config_positive_int", "is not a Recipe class"),
+        ("reef.recipe.base:config_field", "is not a Recipe class"),
         (":Recipe", "must be 'package.module:ClassName'"),
     ],
 )
@@ -98,7 +97,7 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
         (
             OpenClawRLRecipe(
                 **runtime_bindings(StubTrainingRuntime()),
-                pipeline_stages=pipeline_stages(OpenClawRLRecipe, {"task2batch": {"config": {"batch_size": 3}}}),
+                pipeline_stages=pipeline_stages(OpenClawRLRecipe, {"task2batch": {"config": {"buffer_size": 3}}}),
             ),
             "openclawrl",
             OpenClawRLBatches,
@@ -108,7 +107,7 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
         (
             SAORecipe(
                 **runtime_bindings(StubTrainingRuntime()),
-                pipeline_stages=pipeline_stages(SAORecipe, {"task2batch": {"config": {"batch_size": 1}}}),
+                pipeline_stages=pipeline_stages(SAORecipe, {"task2batch": {"config": {"buffer_size": 4}}}),
             ),
             "sao",
             SAOBatches,
@@ -232,10 +231,10 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
     # Unsupported multi-turn training fails explicitly and preserves its inputs.
     trainer = recipe.build("math", SQLiteRecordStore())
     pipeline = trainer.pipeline
-    pipeline.ingest(_turn_inference("i1", [10, 20], -0.1))
-    pipeline.ingest(_turn_inference("i2", [10, 20, 11, 21], -0.2))
+    pipeline.push(_turn_inference("i1", [10, 20], -0.1))
+    pipeline.push(_turn_inference("i2", [10, 20, 11, 21], -0.2))
     with pytest.raises(ValueError, match="accept_multi_turn"):
-        pipeline.ingest(
+        pipeline.push(
             AgentRecord.create(
                 scenario="math",
                 request_type=RequestType.REPORT,
@@ -245,7 +244,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
             )
         )
 
-    assert not pipeline.ready()
+    assert not pipeline.ready(1)
     assert "r1" not in pipeline.releasable_record_ids()
 
 
@@ -254,7 +253,7 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # held for retention only — terminal on sight, releasable, never a candidate.
     trainer = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
     pipeline = trainer.pipeline
-    pipeline.ingest(
+    pipeline.push(
         AgentRecord.create(
             scenario="math",
             request_type=RequestType.REPORT,
@@ -263,7 +262,7 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
             references=("i1",),
         )
     )
-    assert not pipeline.ready()
+    assert not pipeline.ready(1)
     decision = pipeline.releasable_record_ids()
     assert "r1" in decision
     assert "r1" in decision
@@ -306,15 +305,13 @@ def test_recipe_config_routes_sections_to_their_consumers() -> None:
     settings = recipe_config_from_mapping(
         {
             "implementation": "recipes.openclawrl.recipe:OpenClawRLRecipe",
-            "pipeline": {"task2batch": {"config": {"batch_size": 4}}},
-            "artifact": {"checkpoint_every_n_versions": 3},
+            "pipeline": {"task2batch": {"config": {"buffer_size": 4}}},
             "model": {"path": "/models/qwen"},
         }
     )
     recipe = build_recipe(settings["implementation"], {}, config=settings, **runtime_bindings(StubTrainingRuntime()))
 
-    assert recipe.stages().task2batch.config == {"batch_size": 4}
-    assert recipe.checkpoint_strategy == EveryNVersions(3)
+    assert recipe.stages().task2batch.config == {"buffer_size": 4}
 
 
 def test_recipe_config_requires_implementation(tmp_path) -> None:
@@ -460,7 +457,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
     assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}
 
 
-def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
+def test_opd_recipe_uses_configured_runtime() -> None:
     from recipes.opd import OPDRecipe
 
     runtime = StubTrainingRuntime()
@@ -468,12 +465,40 @@ def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
         "recipes.opd.recipe:OPDRecipe",
         {},
         config={
-            "pipeline": {"task2batch": {"config": {"batch_size": 4}}},
-            "artifact": {"checkpoint_every_n_versions": 20},
+            "pipeline": {"task2batch": {"config": {"buffer_size": 16}}},
         },
         **runtime_bindings(runtime),
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.training_runtime is runtime
-    assert recipe.checkpoint_strategy == EveryNVersions(20)
-    assert recipe.build_pipeline(PipelineContext("math")).task2batch.batch_size == 4
+    assert recipe.build_pipeline(PipelineContext("math", default_buffer_size=4)).task2batch.buffer_size == 16
+
+
+def test_cordis_recipe_reads_the_evolution_batch_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.recipe.cordis import CordisRecipe
+
+    (tmp_path / "batch_size_strategies.py").write_text(
+        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.train.cordis_backend.strategies import Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def evolution(**settings: object) -> dict[str, object]:
+        return {
+            "evolution": {
+                "propose": "batch_size_strategies:Propose",
+                "evaluate": "batch_size_strategies:Evaluate",
+                "tasks": ["task one"],
+                **settings,
+            }
+        }
+
+    assert CordisRecipe.from_environment({}, config=evolution()).batch_size == 1
+    assert CordisRecipe.from_environment({}, config=evolution(batch_size=3)).batch_size == 3
+    for invalid in (0, -2, 2.5, "3", True):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.batch_size must be an integer of at least 1"):
+            CordisRecipe.from_environment({}, config=evolution(batch_size=invalid))

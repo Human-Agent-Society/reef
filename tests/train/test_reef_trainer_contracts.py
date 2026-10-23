@@ -40,14 +40,14 @@ class ExamplePipeline(TrainingPipeline):
         self.items: list[AgentRecord] = []
         self.pending: ExampleBatch | None = None
 
-    def ingest(self, item: AgentRecord) -> None:
-        self.events.append(f"ingest:{item.agent_record_id}")
+    def push(self, item: AgentRecord) -> None:
+        self.events.append(f"push:{item.agent_record_id}")
         self.items.append(item)
 
-    def ready(self) -> bool:
-        return bool(self.items)
+    def ready(self, sample_count: int) -> bool:
+        return len(self.items) >= sample_count
 
-    def build_batch(self) -> ExampleBatch:
+    def build_batch(self, sample_count: int) -> ExampleBatch:
         self.events.append("build")
         self.pending = ExampleBatch(batch_id="batch-1", values=(self.items[0].agent_record_id,))
         return self.pending
@@ -103,14 +103,14 @@ class ExampleBackend(CandidateBackend):
 @pytest.mark.unit
 def test_training_pipeline_is_the_no_update_default() -> None:
     processor = TrainingPipeline(PipelineContext(scenario="math"))
-    assert processor.ready() is False
+    assert processor.ready(1) is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
-    processor.ingest(record)
+    processor.push(record)
     assert processor.releasable_record_ids() == frozenset()
     # The default holds no batch-ready units, so it never becomes ready and
     # build_batch refuses on that ground — the same refusal every pipeline gives.
     with pytest.raises(RuntimeError, match="no batch ready"):
-        processor.build_batch()
+        processor.build_batch(1)
     with pytest.raises(ValueError, match="unknown batch_id"):
         processor.acknowledge("math:whatever:1")
 
@@ -165,8 +165,8 @@ def test_trainer_dispatches_only_required_data_types() -> None:
     )
     trainer.run_once()
 
-    assert "ingest:report" in events
-    assert "ingest:inference" not in events
+    assert "push:report" in events
+    assert "push:inference" not in events
     assert trainer.data_offset == 2
 
 
@@ -192,7 +192,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     assert result.metrics["selection"]["policy"] == "always"
     assert events == [
         "initialize:math",
-        "ingest:report",
+        "push:report",
         "build",
         "prepare:batch-1",
     ]
@@ -202,7 +202,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     trainer.commit(prepared)
     assert events == [
         "initialize:math",
-        "ingest:report",
+        "push:report",
         "build",
         "prepare:batch-1",
         "commit:math:1",
@@ -302,5 +302,5 @@ def test_trainer_reads_only_new_records() -> None:
     records.append(report)
     trainer.run_once()
 
-    assert events.count("ingest:report") == 1
+    assert events.count("push:report") == 1
     assert trainer.data_offset == 1

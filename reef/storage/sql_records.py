@@ -55,6 +55,33 @@ class RecordTables:
         return and_(true(), *(table.c[key] == value for key, value in self.scope.items()))
 
 
+@dataclass(frozen=True)
+class ScopedTable:
+    """One table of a database, and the namespace of one store in it.
+
+    Values: ``table`` is a SQLAlchemy table. ``scope`` maps column names of
+    ``table`` to values; every name in ``scope`` is a column of ``table``, and
+    the constructor checks it. ``scope`` is empty for a table without a
+    namespace, and it names ``storage_id`` for a table that has that column.
+
+    Purpose: a SQL adapter makes it for one store. The store restricts each
+    operation to the rows whose columns equal ``scope`` (``condition``) and
+    writes ``scope`` into each row it inserts.
+    """
+
+    table: Table
+    scope: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        unknown = set(self.scope) - set(self.table.c.keys())
+        if unknown:
+            raise ValueError(f"the scope names columns that {self.table.name} does not have: {sorted(unknown)!r}")
+
+    def condition(self) -> ColumnElement[bool]:
+        """Select the rows of this store: every column in ``scope`` equals its value."""
+        return and_(true(), *(self.table.c[key] == value for key, value in self.scope.items()))
+
+
 class EncodedRecord(NamedTuple):
     """One record in its stored column order, as the ``agent_record`` row.
 

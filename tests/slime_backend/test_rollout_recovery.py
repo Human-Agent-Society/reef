@@ -570,6 +570,7 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
         {
             "tokens": [[10], [20]],
             "rollout_ids": [0, 1],
+            "external_step_sizes": [2],
             "producing_runtime_load_ids": ["engine:1", "engine:2"],
             "producing_runtime_load_spans": spans,
         }
@@ -625,16 +626,11 @@ def test_dp_packaging_splices_reef_step_sizes_with_a_partial_tail(monkeypatch: p
 
 
 @pytest.mark.unit
-def test_dp_packaging_configured_size_honors_remainder_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dp_packaging_trains_a_partial_last_step(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _manager_for_schedule(monkeypatch, global_batch_size=2)
     data = {"tokens": [[1], [2], [3], [4], [5]], "rollout_ids": [0, 1, 2, 3, 4]}
 
-    with pytest.raises(ValueError, match="do not form complete global batches of 2"):
-        manager._split_train_data_by_dp(dict(data))
-    with pytest.raises(ValueError, match="do not form complete global batches of 2"):
-        manager._split_train_data_by_dp({**data, "external_remainder": "error"})
-
-    packed = manager._split_train_data_by_dp({**data, "external_remainder": "partial"})
+    packed = manager._split_train_data_by_dp({**data, "external_step_sizes": [2, 2, 1]})
     assert packed[0]["global_batch_sizes"] == [2, 2, 1]
     assert packed[0]["num_microbatches"] == [1, 1, 1]
     assert [rank["partition"] for rank in packed] == [[0, 2, 4], [1, 3]]

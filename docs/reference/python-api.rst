@@ -76,7 +76,9 @@ The engine supervision hooks an inference integration also implements
 ``reef/runtime/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
-SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+SGLang's ``SGLangInferenceBackend`` inherits ``InferenceMemoryHandoffBackend``, an
+``InferenceBackend`` that can also release GPU memory to a trainer and take it
+back; it serves colocated and separate deployments alike. Reef's
 coordinator owns publication and recovery ordering across them. Component
 allocation and service shutdown belong to ``TrainingService`` and
 ``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces
@@ -86,8 +88,12 @@ that only happen to expose similarly named methods.
 Two other extension points have separate names and purposes:
 
 - ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
-  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
-  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+  including harness edits. ``RuntimeCandidateBackend`` connects weight
+  updates to Reef's scheduler; ``Trainer`` accepts it as
+  ``candidate_backend``. ``Trainer.build(..., batch_size=...)`` takes the
+  samples in one training step: a weight recipe passes the training
+  runtime's ``batch_size``, and a harness recipe passes
+  ``evolution.batch_size``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -187,9 +193,6 @@ Common members
 | ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
-|                                                   |                             | ``EveryNVersions(1)``          |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
 | ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
 |                                                   |                             | ``Trainer.build``              |
@@ -271,7 +274,7 @@ parser, and an optional environment fallback:
 
 .. code:: python
 
-   batch_size: int = config_field(4, env="REEF_MY_METHOD_BATCH_SIZE")
+   clip_ratio: float = config_field(0.2, env="REEF_MY_METHOD_CLIP_RATIO")
 
 Precedence is explicit configuration, then environment, then the default.
 ``from_environment()`` builds the recipe. On weight-training recipes,
@@ -424,8 +427,8 @@ directory preserves SQLite schemas, JSONL format, and scenario filenames.
 The storage service keeps all per-scenario state. This includes the
 ``ScenarioSettings`` of each scenario: the model configuration and the
 selected training mode. The scenario registry uses ``read_settings`` and
-``write_settings``. The per-scenario state also includes the tasks that
-record-to-task stages generate (see `Generated task stores`_). ``archive``
+``write_settings``. The per-scenario state also includes the published
+Harbor tasks of its task stores (see `Task stores`_). ``archive``
 retires the settings and tasks with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
@@ -454,10 +457,11 @@ removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostic
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
 Concrete storage classes live under ``reef.storage``:
-``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
-``TaskStorage`` (``tasks=``), and a ``CommitHistory``, either the JSONL
-``commit_log.CommitLog`` or the ``postgres.PostgresCommitTable``. The bundled
-record stores give their ``TaskStorage`` from ``task_storage()``. ``sqlite.SQLiteScenarioStorage`` and
+``commit_history.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
+``TaskStorage`` (``tasks=``), and a ``CommitHistory``. The bundled record
+stores give their ``TaskStorage`` from ``task_storage()`` and their
+``sql_commits.SQLCommitHistory`` from ``commit_history()``; the commits are a
+``scenario_commit`` table in the same database as the records. ``sqlite.SQLiteScenarioStorage`` and
 ``postgres.PostgresScenarioStorage`` assemble their respective backends. The
 scenario package depends only on storage contracts. The storage contract is:
 
@@ -504,8 +508,8 @@ The session contract is:
      - Whether committed history survives session/process restart. A durable
        store requires a repository backend supporting staged releases.
    * - ``tasks``
-     - The ``TaskStorage`` that opens the generated task stores of the
-       scenario (see `Generated task stores`_). The stores close with the
+     - The ``TaskStorage`` that opens the task stores of the
+       scenario (see `Task stores`_). The stores close with the
        session and survive restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order, including rollback and
@@ -534,10 +538,11 @@ expected step, or a retry with conflicting content, raises
 ``ScenarioStoreConflict`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
-``CommitLog`` uses a local POSIX file lock. Its fsynced JSONL line is the
-durable commit point. ``PostgresCommitTable`` holds an advisory lock in one
-transaction and inserts the commit row in that transaction. The commit is
-durable when the transaction ends. Direct writes through a ``CommitHistory``
+``SQLCommitHistory`` holds one write transaction of the record store, which
+SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
+store generation. It reads the history and inserts the commit row in that
+transaction. The commit is durable when the transaction ends; an exception
+before then stores no commit. Direct writes through a ``CommitHistory``
 bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
@@ -559,28 +564,31 @@ closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
 
-Generated task stores
-~~~~~~~~~~~~~~~~~~~~~
+Task stores
+~~~~~~~~~~~
 
-A record-to-task stage that generates tasks saves them in a ``TaskStore``
-before any rollout. Thus generation and rollout can recover independently
-after a restart. The contract and its values are in ``reef.storage.tasks``.
+A ``TaskStore`` holds published Harbor tasks, each in the ``train`` or
+``eval`` split. A record-to-task stage that generates tasks saves them in a
+task store before any rollout. Thus generation and rollout can recover
+independently after a restart. A caller can also add a task directory with
+``add_task``. The contract and its values are in ``reef.storage.tasks``.
 
-To open a store, call
-``task_storage.open(name, split=SplitSettings(eval_fraction=..., seed=...))``.
-Each record-to-task stage uses its own ``name``. The first open saves the
-split settings. A later open with different settings raises
-``TaskStoreError``.
+To open a store, call ``task_storage.open(name)``. Each record-to-task stage
+uses its own ``name``.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
 The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
 which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
 give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
-components never share a store.
+components never share a store, except ``imported-tasks``
+(``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
+which every component opens by that name and only the service writes.
 
 A store holds generations. A generation holds its source record ids and its
-candidates. Each ``TaskCandidate`` holds a ``GeneratedTask`` and its outcome:
+candidates. ``save_candidates`` saves a copy of each candidate task directory
+in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
+``files_digest`` of its directory, and its outcome:
 
 - A published candidate has a ``split``, ``train`` or ``eval``. The stage
   chooses the split, and the store keeps it.
@@ -588,11 +596,12 @@ candidates. Each ``TaskCandidate`` holds a ``GeneratedTask`` and its outcome:
 - A pending candidate has neither. After a restart, the stage validates the
   candidates in ``GenerationState.pending_indices``.
 
-A published task is a Harbor task directory. ``publish_task`` saves the
-directory in the task file store first, and then it records the publication
-in the database. The database keeps the digest of the files
-(``StoredTask.files_digest``). The task file store accepts text and binary
-files. A ``GeneratedTask`` holds text files only.
+A task is a Harbor task directory. The database keeps the state of the store
+and the digest of each task directory. The task file store keeps the files,
+text or binary, under that digest. ``publish_task`` records the publication of
+a saved candidate. ``add_task`` saves a task directory, such as one with
+images, and then records its publication. A ``StoredTask`` holds the task
+``name``, its ``split`` and its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -603,12 +612,17 @@ files. A ``GeneratedTask`` holds text files only.
    * - ``begin_generation(generation=..., source_record_ids=...)``
      - Create the checkpoint of a generation. A retry with the same source
        record ids returns the checkpoint.
-   * - ``save_candidates(generation=..., candidates=...)``
-     - Save the candidates once, before validation or play.
+   * - ``save_candidates(generation=..., directories=...)``
+     - Save a copy of each candidate task directory once, before validation or
+       play. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
        same split. It then returns the published task.
+   * - ``add_task(directory=..., split=...)``
+     - Publish a Harbor task directory under its directory name, and return
+       its ``StoredTask``. The caller checks that the directory is a Harbor
+       task. A retry with the same files and split returns the published task.
    * - ``reject_task(generation=..., index=..., reason=...)``
      - Save the rejection of one candidate.
    * - ``complete_generation(generation=...)``
@@ -616,11 +630,12 @@ files. A ``GeneratedTask`` holds text files only.
    * - ``generation(generation)``, ``generations()``
      - Return one checkpoint or all checkpoints.
    * - ``tasks(split=None)``
-     - Return the published tasks in generation and candidate order. Give a
-       ``split`` to return only the tasks of that split.
-   * - ``path(task)``
-     - Return the local Harbor task directory of a published task, for
-       example for ``TaskPlayer.play``. Do not change it.
+     - Return the published tasks in publication order. Give a ``split`` to
+       return only the tasks of that split.
+   * - ``path(files_digest)``
+     - Return the local task directory of a candidate or a published task,
+       for example for ``read_harbor_task`` or ``TaskPlayer.play``. Do not
+       change it.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -768,8 +783,8 @@ The URL constructor owns its pool. To share a pool across sessions, construct
 close sessions before closing the database. Both close operations are idempotent.
 ``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
 (the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
-the schema. It uses ``directory`` only to import the commit logs and model
-configuration files of earlier versions on start. Pass it through
+the schema. It uses ``directory`` only to import the model configuration
+files of earlier versions on start. Pass it through
 ``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
 selects this storage service with ``storage.record_backend: postgres``; see
@@ -837,7 +852,7 @@ and keeps consumption metadata out of record reads.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
-the read API does not guess which. Use the commit log's per-step
+the read API does not guess which. Use the commit history's per-step
 ``consumed_ids`` to determine consumption, including intentional skips; it is
 not proof that every named record produced a model update.
 
@@ -918,21 +933,29 @@ record2task=..., task2batch=...)``):
   train, including data more than ``max_staleness`` versions behind the
   serving version (see `the staleness check
   <../developer-guide/processors.rst#the-record-to-record-stage>`__). Without
-  one, each record passes through and nothing trains.
+  one, the pipeline forms no record set and nothing trains.
 - ``record2task``: the record-to-task stage
   (``reef.record2task.Record2Task``). It turns each record set into tasks
   (``TrainDataItem`` values). Reported feedback supplies a ``make_sample`` hook
   on ``ReportTasks`` that assembles valid reports; computed feedback supplies
   a ``JudgedTasks`` after an asynchronous ``judge`` derives new feedback.
-  A stage with slow work returns ``TaskResult.pending()`` from ``make_tasks``
-  and hands the result back through ``take_finished()`` (see `pending tasks
-  <../developer-guide/processors.rst#pending-tasks>`__).
+  The pipeline pushes each record set (``push``) and pulls the results
+  (``pull``). Most stages inherit ``ImmediateRecord2Task`` and implement
+  ``make_tasks``; a stage with slow work returns a result later (see `slow
+  record-to-task work <../developer-guide/processors.rst#slow-record-to-task-work>`__).
 - ``task2batch``: the task-to-batch stage (``reef.task2batch.Task2Batch``).
   Its ``make_batch(tasks, batch_id)`` shapes the tasks of the selected
   sets into a batch with the ID ``batch_id``. The pipeline assigns the ID.
   An automatic batch gets ``<scenario>:batch:<number>``. An instruction's
   batch gets ``<scenario>:instruction:<request id>``. The number counts the
   batches of one pipeline. It is not a training step.
+  ``Task2Batch.__init__(context, buffer_size)`` sets the most samples that
+  wait for a batch. ``None`` takes ``context.default_buffer_size``, four
+  times the trainer's batch size. ``Trainer.build`` raises
+  ``PluginConfigError`` for a buffer smaller than one batch, and for a batch
+  size above the stage's ``max_batch_samples`` (an SDPO or TTTD grid).
+  ``BufferSettings`` parses the ``buffer_size`` key, and a stage with more
+  keys extends it.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
@@ -963,7 +986,7 @@ in the same scenario.
 ``TrainingPipeline.training_mode`` selects automatic, instruction-triggered or
 combined batching. A ``Task2Batch`` declares ``supported_training_modes``. In
 ``manual`` an instruction's batch has no tasks; in ``hybrid`` it takes the sets
-an automatic batch would. Ingestion, acknowledgement, retention, buffer release
+an automatic batch would. Record push, acknowledgement, retention, buffer release
 and background derivation are shared. See
 `Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.
 
@@ -993,7 +1016,8 @@ The recipe owns the report policy. Its record stage is a subclass of
 ordered_groups=False)``; ``ReportRecord2Record(context, ReportGrouping())``
 trains every report by itself. ``ExclusiveReportRecord2Record(context)`` also
 trains every report by itself, and a report that ends owns its inference
-records. A ``ReportGrouping`` runs in the
+records. No inference is in two record sets: a report that references an
+inference of another report ends without training. A ``ReportGrouping`` runs in the
 record-to-record stage and reads only records:
 
 .. list-table::
@@ -1064,6 +1088,9 @@ the judged samples into batches.
 | ``required_request_types``               | optionally restrict which record  |
 |                                          | types reach the pipeline          |
 +------------------------------------------+-----------------------------------+
+| ``accepts_trajectories``                 | optionally set True to train on   |
+|                                          | uploaded ATIF trajectories        |
++------------------------------------------+-----------------------------------+
 
 Before each ``observe``, the stage retires expired records and absorbs finished
 judgments. ``observe`` then uses the stage's ``track(record)``,
@@ -1077,17 +1104,16 @@ Task generation
 
 .. code:: python
 
-   from reef.core.tasks import (
-       GeneratedTask, HarborTask, PlayArm, TaskGenerationRequest, TaskGenerator,
-       TaskPlayResult, TaskValidationResult,
-   )
+   from reef.core.tasks import HarborTask
+   from reef.recipe.generated_tasks import TaskGenerator, TaskPlayResult, TaskValidationResult
+   from reef.record2task.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
 ``pipeline.record2task.config.generator``. Subclasses implement:
 
 - the class method ``from_config(config, *, scenario, environ)``, which returns
   the generator of one scenario;
-- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``;
+- ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
 ``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
@@ -1110,14 +1136,8 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``GeneratedTask(task, measurement_arms=())`` holds one task and the
-measurement arms the generator wants played on it. ``PlayArm(name, count,
-extra_instruction_files=())`` names an arm, its number of plays, and the task
-files shown after the instruction. Arm names are unique for each task.
-
-``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="")``
-holds the rewards of the training plays and, by arm name, of each measurement
-arm. Each tuple holds only the episodes that ran. ``is_played`` is true when
+``TaskPlayResult(task, training_rewards=(), error="", split="train")`` holds
+the rewards of the training plays, only of the episodes that ran. ``is_played`` is true when
 ``error`` is empty. A task that was not played has no rewards.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
@@ -1127,9 +1147,9 @@ exceptions instead.
 Migration: ``reef.train.processors.TaskGenerationProcessor`` is removed. Move
 its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 
-- ``generate`` returns a tuple of ``GeneratedTask`` values instead of one task.
+- ``generate`` returns a tuple of ``HarborTask`` values instead of one task.
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
-- Import ``TaskValidationResult`` from ``reef.core.tasks``.
+- Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
 Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
 not needed.
@@ -1268,8 +1288,10 @@ the recipe nor the signal repeats that choice.
 
 ``WeightTrainingSpec.scheduling`` is the recipe's ``StepScheduling``
 (``reef.core.batches``): the rollout unit (``comparison_set`` or ``sample``),
-rollouts per optimizer step (``configured``, ``actual`` or an int), ``epochs``,
-``shuffle`` and ``remainder`` handling. It is deployment configuration rather
+``epochs``, ``shuffle`` and ``remainder`` handling. The backend's batch size
+(Slime's ``--global-batch-size``, Tinker's ``batch_size``) is the rollouts in
+one optimizer step; ``remainder`` decides what happens to a shorter last step.
+It is deployment configuration rather
 than method math, so it lives on the recipe and the runtime carries it to the
 backend with the objective reference. An objective declares only what its loss
 tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
@@ -1531,6 +1553,10 @@ inherits from the other, and there is no aggregate runtime.
 * ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
   candidates and restores training weights/optimizer state. It receives serving
   versions as values; it does not own an inference endpoint or request backend.
+  Its ``batch_size`` property is the samples in one optimizer step. The
+  deployment reads it from the training options (Slime's
+  ``--global-batch-size``, Tinker's ``batch_size``) when it builds the
+  runtime; a hand-assembled runtime config sets ``batch_size``.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
   serving weights without restoring optimizer state. Its ``model_path`` property
@@ -1591,10 +1617,12 @@ publishes through ``activate_checkpoint``. With a local inference engine the
 same deployment instead returns a model-driver plan: ``TinkerTrainingService``
 supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
 that delivers each published adapter as a PEFT directory through
-``adapter_files``; Reef's publisher then calls the receiver's
-``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
-transfer any engine that loads adapter directories can declare), so the
-trainer never holds an engine handle. The HTTP service connects through the
+``weight_files``, which returns a ``WeightFiles`` value with the ``"adapter"``
+layout. Reef's publisher then calls the receiver's
+``InferenceBackend.load_weight_files``, so the trainer never holds an engine
+handle. This is the ``reef-weight-files-v1`` transfer. A receiver that declares
+it loads both layouts: ``"adapter"`` under the adapter name Reef chooses, and
+``"full"`` (a Hugging Face checkpoint) in place of the served weights. The HTTP service connects through the
 ``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.

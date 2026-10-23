@@ -18,6 +18,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import make_trajectory
+from reef.inference.chat import template_kwargs_of
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
 from reef.record2task import ReportTasks, SkippedReport
@@ -31,14 +32,14 @@ SFT_TARGETS = ("demonstration", "response")
 
 
 class SFTRecord2Record(ExclusiveReportRecord2Record):
-    """Make each valid report its own record set, and never drop a set as stale. No config.
+    """Make each valid report its own record set, and never drop a unit as stale. No config.
 
     The staleness check drops tokens that an older model version sampled. An
     SFT target is fixed text, not sampled tokens. Thus the stage keeps each
-    held set until a batch uses it.
+    held unit until a batch uses it.
     """
 
-    def drop_stale_sets(self, max_staleness: int) -> None:
+    def drop_stale_units(self, max_staleness: int) -> None:
         return
 
 
@@ -56,6 +57,13 @@ class SFTSettings(PluginSettings):
     max_tokens: int = config_option(
         0, help="The maximum tokens in a sample. Reef skips a longer report. 0 disables the limit."
     )
+    chat_template_kwargs: Mapping[str, Any] | None = config_option(
+        None,
+        help=(
+            "Chat template arguments for the render, for example {enable_thinking: false}. "
+            "Set the inference handler's chat_template_kwargs to the same value."
+        ),
+    )
 
     def __post_init__(self) -> None:
         if not self.tokenizer_path.strip():
@@ -64,6 +72,7 @@ class SFTSettings(PluginSettings):
             raise ValueError(f"target must be one of: {', '.join(SFT_TARGETS)}")
         if self.max_tokens < 0:
             raise ValueError("max_tokens must be non-negative (0 disables the limit)")
+        template_kwargs_of(self.chat_template_kwargs, "chat_template_kwargs")
 
 
 class SFTTasks(ReportTasks):
@@ -80,11 +89,14 @@ class SFTTasks(ReportTasks):
 
     def __init__(self, settings: SFTSettings) -> None:
         # transformers is part of the training environment. The service never renders a sample.
+        super().__init__()
         from transformers import AutoTokenizer
 
         self.target = settings.target
         self.max_tokens = settings.max_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer_path, trust_remote_code=True)
+        #: The chat template arguments of every render; a task-to-batch stage that renders reuses them.
+        self.chat_template_kwargs = template_kwargs_of(settings.chat_template_kwargs, "chat_template_kwargs")
         self.overflow_count = 0
 
     @classmethod
@@ -126,12 +138,18 @@ class SFTTasks(ReportTasks):
                 tokenize=True,
                 add_generation_prompt=True,
                 return_dict=False,
+                **self.chat_template_kwargs,
             ),
         )
         sequence_ids = cast(
             list[int],
             self.tokenizer.apply_chat_template(
-                list(conversation), tools=template_tools, tokenize=True, add_generation_prompt=False, return_dict=False
+                list(conversation),
+                tools=template_tools,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_dict=False,
+                **self.chat_template_kwargs,
             ),
         )
         if sequence_ids[: len(prompt_ids)] != prompt_ids:

@@ -28,7 +28,7 @@ from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
@@ -78,27 +78,6 @@ def install_service_url(headers: Mapping[str, str]) -> str | None:
     if not host:
         return None
     return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
-
-
-def _inference_aborted(response: Mapping[str, Any]) -> bool:
-    def aborted(value: Any) -> bool:
-        return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
-
-    meta = response.get("meta_info")
-    if aborted(response.get("finish_reason")) or (isinstance(meta, Mapping) and aborted(meta.get("finish_reason"))):
-        return True
-    training = response.get("training")
-    if isinstance(training, Mapping) and aborted(training.get("finish_reason")):
-        return True
-    choices = response.get("choices")
-    return isinstance(choices, list) and any(
-        isinstance(choice, Mapping)
-        and (
-            aborted(choice.get("finish_reason"))
-            or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
-        )
-        for choice in choices
-    )
 
 
 def normalize_request_payload(
@@ -298,7 +277,7 @@ class RequestService:
                         raise InferenceRetryTimeout(timeout_error) from exc
                     finally:
                         remaining_budget -= loop.time() - started
-                    interrupted = _inference_aborted(response)
+                    interrupted = inference_aborted(response)
                     if not interrupted:
                         # A completed response with invalid runtime-load-ID information is a
                         # handler contract error, not a retryable inference abort.
@@ -365,9 +344,12 @@ class RequestService:
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
-                    if prepared.hooks is not None:
-                        prepared.hooks.verify_response(prepared.artifact, path, record_response)
-                    self._stamp_durable_runtime_load_id(prepared, payload, record_response)
+                    # An engine-aborted generation may carry no runtime-load ID; the route
+                    # records it as incomplete, and the record stage excludes it from training.
+                    if not inference_aborted(record_response):
+                        if prepared.hooks is not None:
+                            prepared.hooks.verify_response(prepared.artifact, path, record_response)
+                        self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                     # Buffered streaming backends have already finished model
                     # execution. Downstream client backpressure must not leave a
                     # stale admission handle across the colocated pause lifecycle.
@@ -438,12 +420,13 @@ class RequestService:
         succeeded = False
         try:
             payload = dict(pending.item.payload)
-            # A token-native streaming handler fills record_response only when
-            # the upstream generation finishes. Validate that final capture
-            # here, after the route has drained the stream but before it can
-            # become a training record. Incomplete/disconnected streams have
-            # no training block and remain delivery diagnostics only.
-            if pending.deferred_prepared is not None and isinstance(response.get("training"), Mapping):
+            # An abort may have no runtime-load ID. Preserve its captured response;
+            # the record stage decides whether it can enter task creation.
+            if (
+                pending.deferred_prepared is not None
+                and isinstance(response.get("training"), Mapping)
+                and not inference_aborted(response)
+            ):
                 if pending.path is None:
                     raise ReefError("deferred inference response has no request path")
                 hooks = pending.deferred_prepared.hooks

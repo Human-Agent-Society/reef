@@ -1,4 +1,7 @@
-"""Record sets: the records that a pipeline uses together, and the fields that the pool reads."""
+"""Record sets and record set units: the input of the record-to-task stage, and the unit that a batch takes.
+
+Notation: ``refs(r)`` is the set of records that a record ``r`` references.
+"""
 
 from __future__ import annotations
 
@@ -11,39 +14,95 @@ from reef.core.records_types import AgentRecord
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSet(ABC):
-    """Records that are used together, such as one record, a report with its inferences, or a ready group.
+    """The records that the record-to-task stage makes tasks from, together.
 
-    A stage forms record sets, and its pool holds and orders them. The pool
-    and the selection policies read only these fields:
+    Values: ``X`` is a record set if and only if ``records(X)`` is not empty and
+    ``refs(r) ⊆ records(X)`` for each record ``r`` in ``records(X)``. ``set_id``
+    identifies ``X`` among the sets of its record stage. ``arrival_index`` is
+    the position in which the stage formed ``X``. No record is in two record
+    sets of one stage (``Record2Record.form``).
 
-    * ``set_id`` identifies the set in the pool.
-    * ``arrival_index`` tells when the stage received the set. A group
-      uses the index of its oldest member.
-    * ``group_key`` names the group of a set that is a group.
+    Purpose: the record stage forms it, and the pipeline pushes it to the
+    record-to-task stage. Its one result settles all records of the set together.
     """
 
     set_id: Hashable
     arrival_index: int
-    group_key: Hashable | None = None
+
+    def __post_init__(self) -> None:
+        records = self.records()
+        if not records:
+            raise ValueError("a record set must hold one or more records")
+        missing = {reference for record in records for reference in record.references} - set(self.record_ids())
+        if missing:
+            raise ValueError(f"record set {self.set_id!r} does not hold the referenced records {sorted(missing)!r}")
 
     @abstractmethod
+    def records(self) -> tuple[AgentRecord, ...]:
+        """Return the records of the set."""
+
     def record_ids(self) -> tuple[str, ...]:
-        """Return the IDs of the records in the set."""
-
-    def formed_set_ids(self) -> tuple[Hashable, ...]:
-        """Return the IDs of the formed sets whose tasks this set trains on.
-
-        A stage that holds the sets it formed returns ``set_id``. A stage that
-        combines formed sets, such as a ready group, returns their IDs in batch order.
-        """
-        return (self.set_id,)
+        """Return the IDs of the records of the set, in the order of ``records``."""
+        return tuple(record.agent_record_id for record in self.records())
 
 
 @dataclass(frozen=True, kw_only=True)
 class SingleRecordSet(RecordSet):
-    """One record by itself. ``set_id`` is the record's ID."""
+    """One record that references no other record. ``set_id`` is the record ID."""
 
     record: AgentRecord
 
-    def record_ids(self) -> tuple[str, ...]:
-        return (self.record.agent_record_id,)
+    def records(self) -> tuple[AgentRecord, ...]:
+        return (self.record,)
+
+
+@dataclass(frozen=True, kw_only=True)
+class RecordSetUnit(ABC):
+    """Record sets that must train in the same batch.
+
+    Values: ``U`` is a record set unit if and only if ``record_sets(U)`` is not
+    empty. Its record sets are distinct and share no record, because a record
+    stage forms each record into one set only. ``unit_id`` identifies ``U`` in
+    its pool. ``arrival_index`` orders the units of a pool. ``group_key`` names
+    the group of a unit that is a group. It is None for any other unit.
+
+    Purpose: the record stage puts it in its pool when the tasks of its record
+    sets are ready. A batch takes all its tasks or none of them, and the
+    batch size counts each of its tasks as one sample. Consuming ``U`` writes
+    ``consumed_ids(U)``, the IDs of the records of its record sets, to the commit.
+    """
+
+    unit_id: Hashable
+    arrival_index: int
+    group_key: Hashable | None = None
+
+    def __post_init__(self) -> None:
+        if not self.record_sets():
+            raise ValueError(f"record set unit {self.unit_id!r} must hold one or more record sets")
+
+    @abstractmethod
+    def record_sets(self) -> tuple[RecordSet, ...]:
+        """Return the record sets of the unit, in batch order."""
+
+    def set_ids(self) -> tuple[Hashable, ...]:
+        """Return the IDs of the record sets of the unit, in batch order."""
+        return tuple(record_set.set_id for record_set in self.record_sets())
+
+    def consumed_ids(self) -> frozenset[str]:
+        """Return the record IDs that consuming the unit writes to the commit."""
+        return frozenset(record_id for record_set in self.record_sets() for record_id in record_set.record_ids())
+
+
+@dataclass(frozen=True, kw_only=True)
+class SingleSetUnit(RecordSetUnit):
+    """A batch unit of one record set, with the ID and the arrival index of that set. ``of`` makes it."""
+
+    record_set: RecordSet
+
+    @classmethod
+    def of(cls, record_set: RecordSet) -> SingleSetUnit:
+        """Return the unit of ``record_set``."""
+        return cls(unit_id=record_set.set_id, arrival_index=record_set.arrival_index, record_set=record_set)
+
+    def record_sets(self) -> tuple[RecordSet, ...]:
+        return (self.record_set,)

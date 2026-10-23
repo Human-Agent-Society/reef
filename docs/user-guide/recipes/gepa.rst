@@ -99,6 +99,7 @@ one block of its own under ``evolution``:
 .. code:: yaml
 
    evolution:
+     batch_size: 3                       # the third report closes the minibatch
      evaluate: harness.aime:AIMEAnswerScorer
      feedback: harness.aime:feedback     # optional; the score restated when absent
      tasks: [...]                        # the validation set

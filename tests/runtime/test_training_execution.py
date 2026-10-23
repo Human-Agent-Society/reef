@@ -34,7 +34,7 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
         self.state = TrainingJobState()
         self.prior = None
         self.payload = None
-        self._config = TrainingCoordinationConfig(save_hf_template=None)
+        self._config = TrainingCoordinationConfig(save_hf_template=str(root / "hf-{rollout_id}"))
         self._context = TrainingContext()
 
     @property
@@ -419,23 +419,20 @@ def test_training_and_publication_share_progress_and_keep_serving_unchanged_unti
     assert coordinator(backend).execute(PAYLOAD).outcome == "complete"
 
 
-def test_only_a_marker_of_a_job_still_out_must_name_its_scenario_step(tmp_path):
-    """A settled marker an earlier release left without ``scenario_step`` does not stop a start; a job still out is
-    finished by the step it trained, so its marker must name it."""
+@pytest.mark.parametrize("status", ["CHECKPOINT", "COMPLETE"])
+def test_every_marker_names_its_scenario_step(tmp_path, status):
     path = tmp_path / ".reef-latest-job.json"
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     settled = {
-        "status": "COMPLETE",
+        "status": status,
         "job_id": "earlier",
         "rollout_id": 4,
         "checkpoint_path": str(checkpoint),
         "runtime_load_id": "engine:4",
-        "commit_acknowledged": True,
+        "commit_acknowledged": status == "COMPLETE",
     }
     markers.write_marker(path, settled)
-    assert markers.read_marker(path) == settled
-    markers.write_marker(path, {**settled, "status": "CHECKPOINT", "commit_acknowledged": False})
     with pytest.raises(RuntimeError, match="scenario step"):
         markers.read_marker(path)
 
@@ -451,6 +448,7 @@ def test_running_keeps_the_committed_marker_it_replaces(backend, status):
         "checkpoint_path": str(settled_checkpoint),
         "runtime_load_id": "engine:0",
         "commit_acknowledged": status == "COMPLETE",
+        "scenario_step": 0,
     }
     markers.write_marker(backend.path, settled)
     backend.checkpoint = TrainingCheckpoint(1, backend.path.parent / "checkpoint", scenario_step=0)

@@ -97,7 +97,7 @@ import a concrete integration.
 |                         | episodes, built-in selection policies, and the           | artifact publication                       |
 |                         | ``evaluation`` plugin configuration                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/task2batch/``    | shaping the tasks of the selected record sets into one   | which records train, the training loop,    |
+| ``reef/task2batch/``    | shaping the tasks of the selected batch units into one   | which records train, the training loop,    |
 |                         | batch (``Task2Batch``)                                   | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/runtime/``       | backend-neutral runtime contracts, scheduling,           | concrete inference and training            |
@@ -181,7 +181,7 @@ and ``core/evaluation.py``. ``core/training_request.py`` validates training-requ
 payloads and holds the queued instruction carried by a training batch. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
-with surface contracts, while checkpoint cadence is recipe policy.
+with surface contracts.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
@@ -232,7 +232,12 @@ share: the coordinator backend, the inference service, the control actor and its
 default serving executor. ``inference/sglang/`` owns SGLang engine launch,
 capture and control independently of training; ``inference/vllm/`` owns vLLM capture,
 the KV connector that stamps tokens with their weight version, and engine launch and
-control over vLLM's HTTP control routes. ``train/slime_backend/inference.py`` only
+control over vLLM's HTTP control routes. ``inference/remote/`` runs those engines
+on another host: its component (``python -m reef.inference.remote``) serves their
+control operations and requests over HTTP, and ``RemoteInferenceService`` is the
+control plane's receiver for it. ``inference/null.py`` is the receiver of
+``inference.backend: none``: it runs no engine, records the version that the
+trainer holds and refuses every request. ``train/slime_backend/inference.py`` only
 translates Slime options into plain launch data; the selected inference factory
 constructs its own configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions.
@@ -270,7 +275,7 @@ The extension points those packages expose are in `Python API
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
-  and opens the scenario's generated task stores (``reef/storage/tasks.py``);
+  and opens the scenario's task stores (``reef/storage/tasks.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or play them with an agent? Put it in ``reef/record2task/generator/``, the
@@ -278,20 +283,24 @@ The extension points those packages expose are in `Python API
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
   child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which plays generated tasks
   through that service and trains on them, is in
-  ``reef/recipe/generated_tasks/``. The ``TaskGenerator`` contract is in
-  ``reef/core/tasks/``. What a method asks the designer for, and what it does
+  ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
+  (``generator.py``). The request, ``TaskGenerationRequest``, is in
+  ``reef/record2task/generator/inputs.py``, because the generator service
+  reads it too. ``reef/core/tasks/`` keeps the Harbor task values and the
+  split manifests. What a method asks the designer for, and what it does
   with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
-  shares SQL record and retention operations. ``sql_tasks.py`` shares the
-  task tables and task store operations in the same database.
-  ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts,
-  as ``commit_log.py`` holds the JSONL commit history. ``sqlite.py`` supplies SQLite
-  schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
-  PostgreSQL tables, the commit table, pooled transactions, and retention.
-  ``commit_log.py`` owns the ``CommitHistory`` base, the JSONL ``CommitLog``, and
+  shares SQL record and retention operations, and ``ScopedTable``, one table
+  with the namespace of one store. ``sql_tasks.py``,
+  ``sql_trajectories.py`` and ``sql_commits.py`` share the task, trajectory
+  and commit tables and their operations in the same database.
+  ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
+  ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
+  maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,
+  and retention. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
-  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time upgrades of older schemas
-  and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
+  upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes? Put it in
@@ -373,7 +382,10 @@ Deployment modules
 * ``config_utils.py`` reads YAML, expands environment/config references and locates
   recipe source packages. It does not download models or validate process graphs.
 * ``service_config.py`` declares shared HTTP, storage and runtime fields and
-  converts effective values into ``ServiceConfig`` for app assembly.
+  converts effective values into ``ServiceConfig`` for app assembly. With a
+  ``task-import`` section, assembly wraps the scenario storage in
+  ``reef/service/task_import.py``, so that each scenario that opens imports the
+  deployment's Harbor tasks.
 * ``deployment_config.py`` declares ``DeploymentConfig`` defaults, loads selected
   recipe/runtime declarations, translates the versioned public layout and
   validates component values.

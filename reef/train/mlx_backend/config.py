@@ -134,6 +134,7 @@ class MLXConfig(MLXEngineConfig):
     min_train_rows: int = config_option(
         1, help="Rows a step needs after max_train_tokens; a batch with fewer is skipped."
     )
+    batch_size: int = config_option(1, help="Samples per optimizer step; a batch holds at least this many samples.")
     train_timeout_s: float | None = config_option(None, help="Unsupported; training runs in this process.")
 
     def __post_init__(self) -> None:
@@ -152,12 +153,9 @@ class MLXConfig(MLXEngineConfig):
             or self.max_train_tokens < 0
         ):
             raise ValueError("max_train_tokens must be a non-negative integer")
-        if (
-            isinstance(self.min_train_rows, bool)
-            or not isinstance(self.min_train_rows, int)
-            or self.min_train_rows < 1
-        ):
-            raise ValueError("min_train_rows must be a positive integer")
+        for name, value in (("min_train_rows", self.min_train_rows), ("batch_size", self.batch_size)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
         if self.train_timeout_s is not None:
             raise ValueError("the mlx backend trains in the service process and has no train timeout")
 

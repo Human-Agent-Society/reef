@@ -106,8 +106,8 @@ class SampleObjective(TrainingObjective):
         )
 
 
-# The schedule a recipe over this objective binds: one step over every sample.
-SCHEDULING = StepScheduling(unit="sample", batch_size="actual")
+# The schedule a recipe over this objective binds: steps of the configured batch size of samples.
+SCHEDULING = StepScheduling(unit="sample")
 
 
 @pytest.fixture
@@ -341,10 +341,10 @@ def test_unsupported_chat_options_fail_explicitly(runtime, tmp_path, extra):
 
 def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.supports_multiple_epochs = True
-    scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
+    scheduling = StepScheduling(unit="comparison_set", epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
     step = prepare_tinker_step(
-        batch, TrainingMethod(objective.name), {}, scheduling, runtime_load_id="v", batch_size=1, kl_coef=0.0
+        batch, TrainingMethod(objective.name), {}, scheduling, runtime_load_id="v", batch_size=2, kl_coef=0.0
     )
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
@@ -591,7 +591,8 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     initial = tmp_path / "initial"
     initial.mkdir()
     remote = RemoteClient()
-    runtime = Deployment(TinkerConfig(state_dir=str(tmp_path / "runtime")), remote)
+    # A batch size of the whole grid trains it as one optimizer step.
+    runtime = Deployment(TinkerConfig(state_dir=str(tmp_path / "runtime"), batch_size=4), remote)
     step_grid = PipelineConfig.from_setting(
         {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
         spec=TTTDRecipe.pipeline_spec(),
@@ -657,9 +658,9 @@ def test_a_release_carrying_the_served_sampler_forward_serves_under_the_active_l
     assert inference.snapshot(base)[1] == first
 
 
-def test_configured_batch_size_respects_error_remainder(objective):
-    scheduling = StepScheduling(batch_size="configured", remainder="error")
-    with pytest.raises(ValueError, match="configured batch_size"):
+def test_step_size_respects_error_remainder(objective):
+    scheduling = StepScheduling(remainder="error")
+    with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
         prepare_tinker_step(
             TrainingBatch("batch", (item("v"),)),
             TrainingMethod(objective.name),
@@ -674,7 +675,7 @@ def test_configured_batch_size_respects_error_remainder(objective):
 WARMUP = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
 POLICY = LearningRateSchedule("policy", 1e-5, warmup_steps=2)
 # Three samples, one optimizer step each: a schedule advances inside one job.
-ONE_SAMPLE_STEPS = StepScheduling(unit="sample", batch_size=1)
+ONE_SAMPLE_STEPS = StepScheduling(unit="sample")
 
 
 class TttdLossObjective(SampleObjective):

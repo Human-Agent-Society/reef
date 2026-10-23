@@ -94,13 +94,13 @@ class SessionBatches(Task2Batch):
         return TrainingBatch(batch_id, tasks)
 
 
-def session_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+def session_pipeline(context: PipelineContext) -> TrainingPipeline:
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
         record2record=JudgingRecord2Record(_SessionJudging(), _JudgedAtOnce()),
         record2task=_SessionTasks(),
-        task2batch=SessionBatches(context, batch_size),
+        task2batch=SessionBatches(context, None),
     )
 
 
@@ -122,11 +122,11 @@ class _StepGrouping(ReportGrouping):
         return GroupDecision.READY
 
 
-def step_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+def step_pipeline(context: PipelineContext) -> TrainingPipeline:
     """TTTD's shape: a step is one group of two (step, slot) reports, sources are exclusive, a step with a report
     marked mixed is discarded once complete, and a report that names no step is another role's and released."""
     stage = ReportRecord2Record(context, _StepGrouping(), exclusive_sources=True, ordered_groups=True)
-    return threshold_pipeline(context, batch_size=batch_size, record2record=stage)
+    return threshold_pipeline(context, record2record=stage)
 
 
 def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -136,7 +136,7 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record),
+        task2batch=TTTDBatches(context, record2record, None),
     )
 
 
@@ -148,20 +148,13 @@ class _Recipe(_TwoTrainerRecipe):
         self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
     ):
         pipelines = dict(self.pipelines)
-
-        def factory_for(component: str):
-            build_pipeline = pipelines[component]
-            if build_pipeline is tttd_pipeline:
-                return tttd_pipeline
-            return lambda context: build_pipeline(context, batch_size=1)
-
         return tuple(
             ComponentTrainer(
                 component,
                 Trainer.build(
                     scenario,
                     records,
-                    pipeline_factory=factory_for(component),
+                    pipeline_factory=pipelines[component],
                     candidate_backend=backend,
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,

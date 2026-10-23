@@ -9,20 +9,31 @@ that the trainer gives records to and takes batches from. A recipe writes the
 stages; it does not subclass the pipeline:
 
 * the record-to-record stage (:class:`~reef.record2record.Record2Record`)
-  decides which records train, in which sets, and in what order;
+  decides which records train, in which record sets and batch units, and in
+  what order;
 * the record-to-task stage (:class:`~reef.record2task.Record2Task`) turns each
   record set into tasks;
-* the task-to-batch stage (:class:`~reef.task2batch.Task2Batch`) shapes
-  the tasks of the selected sets into a batch.
+* the task-to-batch stage (:class:`~reef.task2batch.Task2Batch`) bounds
+  the sample buffer and shapes the samples of the selected batch units into a
+  batch.
 
 The pipeline owns what is the same for every recipe: it routes records, gives
-each formed set's task result back to its stage, keeps the tasks of held sets,
-hands out one batch at a time until the trainer acknowledges or releases it,
-and runs the training modes and the training instructions.
+each record set's task result back to its stage, keeps the samples of held
+sets in the buffer, releases the oldest sets when the buffer is over the
+stage's ``buffer_size``, hands out one batch at a time until the trainer
+acknowledges or releases it, and runs the training modes and the training
+instructions. The pipeline does not know the batch size: the trainer passes
+it to ``ready`` and ``build_batch``. An automatic batch holds at least that
+many samples. It takes whole record sets, so it can hold more.
+
+A client can also upload an ATIF trajectory. It is not a record, so it does not
+go through the first two stages. It counts as one sample. A batch takes
+uploaded trajectories first.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field, replace
@@ -34,26 +45,25 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.record2record import PassThroughRecord2Record, Record2Record, RecordSet, TaskStatus
+from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, TaskStatus, UnitDropReason
 from reef.record2record.staleness import producing_runtime_load_ids
-from reef.record2task import NoTasks, Record2Task, TaskResult
+from reef.record2task import NoTasks, Record2Task
+from reef.storage.trajectories import consumed_trajectory_id
 from reef.task2batch import NoBatches, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch
-
-
-#: In manual mode the pipeline holds at most this many batches of sets; it releases older ones.
-MANUAL_HELD_BATCHES = 4
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
 PIPELINE_STAGES = ("record2record", "record2task", "task2batch")
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class PipelineSpec:
     """A recipe's default stage classes. A deployment's ``pipeline`` section can name others."""
 
-    record2record: type[Record2Record] = PassThroughRecord2Record
+    record2record: type[Record2Record] = NoRecordSets
     record2task: type[Record2Task] = NoTasks
     task2batch: type[Task2Batch] = NoBatches
 
@@ -146,7 +156,18 @@ class TrainingPipeline:
     Without stages it is the no-update default: it reads records for audit
     but never becomes ready and never produces a batch.
 
-    The trainer-facing methods (``ingest``, ``ready``, ``build_batch``, and
+    The samples of a held unit are the tasks of its record sets; an uploaded
+    trajectory is one sample. In ``auto``, ``ready(sample_count)`` is True if
+    and only if the held units and uploaded trajectories hold at least
+    ``sample_count`` samples. ``build_batch(sample_count)`` takes the uploaded
+    trajectories first, then whole units in selection order until the batch
+    holds ``sample_count`` samples or the units run out. When ``buffer_size``
+    is set, after it moves record sets, the unreserved units hold at most
+    ``buffer_size`` samples, or are one unit: it releases the oldest ones
+    beyond that and keeps the newest, so a unit larger than the buffer still
+    trains.
+
+    The trainer-facing methods (``push``, ``ready``, ``build_batch``, and
     the others) run on the trainer's thread under its lock and must not block
     on network or model latency. Stages that call models run that work on a
     background worker and release it in ``close``, which the owning scenario
@@ -166,10 +187,10 @@ class TrainingPipeline:
         self.context = context
         self.scenario = context.scenario
         #: The record-to-record stage that turns the records into record sets.
-        self.record2record = PassThroughRecord2Record() if record2record is None else record2record
+        self.record2record = NoRecordSets() if record2record is None else record2record
         #: The record-to-task stage that turns each record set into tasks.
         self.record2task = NoTasks() if record2task is None else record2task
-        #: The task-to-batch stage that shapes the tasks of the selected sets into a batch.
+        #: The task-to-batch stage that shapes the tasks of the selected units into a batch.
         self.task2batch = NoBatches(context) if task2batch is None else task2batch
         self.supported_training_modes = self.task2batch.supported_training_modes
         # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
@@ -186,8 +207,15 @@ class TrainingPipeline:
         self.batch_number = 0
         #: Tasks by the ID of the record set that made them, until the set trains or ends.
         self.tasks: dict[Hashable, tuple[TrainDataItem, ...]] = {}
-        #: Formed sets that the record-to-task stage still works on, by set ID. Their records stay held until settled.
-        self.pending_sets: dict[Hashable, RecordSet] = {}
+        #: Record sets pushed to the record-to-task stage that have no result yet, by set ID. Their records stay held.
+        self.waiting_sets: dict[Hashable, RecordSet] = {}
+        #: Uploaded trajectories by trajectory ID, in upload order, until a batch consumes them.
+        self.uploaded_trajectories: dict[str, TrajectoryItem] = {}
+        #: The IDs of the uploaded trajectories in the handed out batch.
+        self.reserved_trajectory_ids: tuple[str, ...] = ()
+        #: The commit IDs of the uploaded trajectories that a batch consumed. A second read of one does not queue it.
+        self.consumed_trajectory_ids: set[str] = set()
+        self.buffer_release_warned = False
         self.set_training_mode(context.training_mode)
 
     @property
@@ -201,9 +229,14 @@ class TrainingPipeline:
         return self.task2batch.required_request_types
 
     @property
-    def batch_size(self) -> int:
-        """The number of record sets in one batch."""
-        return self.task2batch.batch_size
+    def accepts_trajectories(self) -> bool:
+        """Whether the trainer gives the pipeline uploaded trajectories."""
+        return self.task2batch.accepts_trajectories
+
+    @property
+    def buffer_size(self) -> int | None:
+        """The most samples that the held record sets keep, or None for every sample; the task-to-batch stage sets it."""
+        return self.task2batch.buffer_size
 
     @property
     def training_mode(self) -> str:
@@ -216,16 +249,14 @@ class TrainingPipeline:
         return self.context.experiment_logger
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches while preserving the held sets and the reservation."""
+        """Select future batches while preserving the held units and the reservation."""
         if training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(
                 f"{type(self.task2batch).__name__} does not implement training_mode={training_mode!r}"
             )
-        # Manual mode batches on instructions, not sets, so the held sets are bounded instead.
-        held_set_limit = self.batch_size * MANUAL_HELD_BATCHES if training_mode == "manual" else None
-        self.context = replace(self.context, training_mode=training_mode, held_set_limit=held_set_limit)
+        self.context = replace(self.context, training_mode=training_mode)
         self.record2record.context_changed(self.context)
         self.forget_ended_sets()
 
@@ -284,34 +315,67 @@ class TrainingPipeline:
         for set_id in self.record2record.take_ended():
             self.tasks.pop(set_id, None)
 
-    def make_formed_tasks(self) -> None:
-        """Make tasks from each set that the stage formed, give each result back, and forget the sets that ended."""
-        for record_set in self.record2record.take_formed():
-            self.settle_task_result(record_set, self.record2task.make_tasks(record_set))
+    def count_unit_samples(self, unit: RecordSetUnit) -> int:
+        """The samples of one held batch unit: the tasks of its record sets."""
+        return sum(len(self.tasks[set_id]) for set_id in unit.set_ids())
+
+    def count_held_samples(self) -> int:
+        """The samples that a batch can take now: those of the held units and the uploaded trajectories."""
+        pool = self.record2record.pool
+        return sum(self.count_unit_samples(unit) for unit in pool.units()) + len(self.uploaded_trajectories)
+
+    def release_over_buffer(self) -> None:
+        """Release the oldest unreserved units while their samples are more than ``buffer_size``.
+
+        The reserved batch and the newest unreserved unit stay. Uploaded trajectories do not count: their store
+        keeps them. Without a ``buffer_size`` nothing is released.
+        """
+        buffer_size = self.buffer_size
+        if buffer_size is None:
+            return
+        pool = self.record2record.pool
+        reserved = {unit.unit_id for unit in pool.reserved_units()}
+        unreserved = sorted(
+            (unit for unit in pool.units() if unit.unit_id not in reserved), key=lambda unit: unit.arrival_index
+        )
+        held = sum(self.count_unit_samples(unit) for unit in unreserved)
+        for unit in unreserved[:-1]:
+            if held <= buffer_size:
+                break
+            held -= self.count_unit_samples(unit)
+            self.record2record.drop_held_unit(unit, reason=UnitDropReason.BUFFER_LIMIT)
+            if not self.buffer_release_warned:
+                logger.warning(
+                    "scenario %r released a held record set beyond the buffer size %d (further releases are not logged)",
+                    self.scenario,
+                    buffer_size,
+                )
+                self.buffer_release_warned = True
         self.forget_ended_sets()
 
-    def settle_finished_tasks(self) -> None:
-        """Give the record stage the result of each pending set that finished. A set settles one time only."""
-        stage_name = type(self.record2task).__name__
-        for set_id, result in self.record2task.take_finished():
-            if result.status is TaskStatus.PENDING:
-                raise ValueError(f"{stage_name}.take_finished returned a pending result for set {set_id!r}")
-            if set_id not in self.pending_sets:
+    def move_record_sets(self) -> None:
+        """Push each record set that the record stage formed to the task stage, and settle each task result.
+
+        The task stage returns the result of each pushed set one time. Until
+        then the set waits, and its records stay held. A ready set's tasks
+        enter the buffer, and the oldest sets leave it when it is over its size.
+        """
+        for record_set in self.record2record.pull():
+            self.record2task.push(record_set)
+            self.waiting_sets[record_set.set_id] = record_set
+        for set_id, result in self.record2task.pull():
+            if set_id not in self.waiting_sets:
                 raise ValueError(
-                    f"{stage_name}.take_finished returned a result for set {set_id!r}, which is not pending"
+                    f"{type(self.record2task).__name__} returned a result for set {set_id!r}, which no set waits for"
                 )
-            self.settle_task_result(self.pending_sets.pop(set_id), result)
+            record_set = self.waiting_sets.pop(set_id)
+            if result.status is TaskStatus.READY:
+                self.tasks[set_id] = result.tasks
+            self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
+        self.forget_ended_sets()
+        self.release_over_buffer()
 
-    def settle_task_result(self, record_set: RecordSet, result: TaskResult) -> None:
-        """Hold a pending set, or keep a ready set's tasks and settle the set in the record stage."""
-        if result.status is TaskStatus.PENDING:
-            self.pending_sets[record_set.set_id] = record_set
-            return
-        if result.status is TaskStatus.READY:
-            self.tasks[record_set.set_id] = result.tasks
-        self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.tasks))
-
-    def ingest(self, item: AgentRecord) -> None:
+    def push(self, item: AgentRecord) -> None:
         """Read one record. Training instructions stay here; every other record goes through the record stage."""
         if item.request_type is RequestType.TRAIN:
             if item.scenario != self.scenario:
@@ -320,8 +384,15 @@ class TrainingPipeline:
             if request.id not in self.consumed_requests:
                 self.training_requests.setdefault(request.id, request)
             return
-        self.record2record.ingest(item)
-        self.make_formed_tasks()
+        self.record2record.push(item)
+        self.move_record_sets()
+
+    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
+        """Read one uploaded trajectory. It waits here for a batch."""
+        if not self.accepts_trajectories:
+            raise ValueError(f"{type(self.task2batch).__name__} does not accept uploaded trajectories")
+        if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
+            self.uploaded_trajectories.setdefault(trajectory_id, trajectory)
 
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
         """Give the record stage the runtime load ID that serves the scenario now, for its staleness check."""
@@ -329,28 +400,40 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------ batch cycle
     #
-    # Batch when enough sets are held (auto, hybrid) or an instruction is
-    # queued (manual, hybrid), hand the same batch out until it is
-    # acknowledged, then end the sets that it consumed.
+    # Batch when the held units and uploaded trajectories hold the trainer's
+    # sample count (auto, hybrid) or an instruction is queued (manual, hybrid), hand
+    # the same batch out until it is acknowledged, then end the units and
+    # trajectories it consumed.
 
-    def ready(self) -> bool:
+    def advance(self) -> None:
+        """Advance background work and settle its results without reserving a training batch.
+
+        Apply buffer limits and, without a pending batch, staleness checks.
+        This operation needs no backend sample count. Call it on the same
+        serialized path as other pipeline operations; it starts no new thread.
+        """
         # Background work, such as judgments or finished rounds, forms sets without a new record.
-        self.settle_finished_tasks()
-        self.record2record.poll(time.monotonic())
-        self.make_formed_tasks()
+        self.record2record.advance(time.monotonic())
+        self.move_record_sets()
+        if self.pending is None:
+            self.record2record.drop_stale_units(self.context.max_staleness)
+            self.forget_ended_sets()
+
+    def ready(self, sample_count: int) -> bool:
+        """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples."""
+        self.advance()
         if self.pending is not None:
             return True
-        self.record2record.drop_stale_sets(self.context.max_staleness)
-        self.forget_ended_sets()
         if self.training_mode == "manual":
             return bool(self.training_requests)
         if self.training_mode == "hybrid" and self.training_requests:
             return True
-        return len(self.record2record.pool) >= self.batch_size
+        return self.count_held_samples() >= sample_count
 
-    def build_batch(self) -> TrainingBatch:
+    def build_batch(self, sample_count: int) -> TrainingBatch:
+        """Return the handed out batch, or build one of at least ``sample_count`` samples when ``ready``."""
         if self.pending is None:
-            if not self.ready():
+            if not self.ready(sample_count):
                 raise RuntimeError(f"scenario {self.scenario!r} has no batch ready")
             self.batch_number += 1
             # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
@@ -359,15 +442,22 @@ class TrainingPipeline:
                 if self.training_mode != "auto" and self.training_requests
                 else None
             )
-            # In manual mode an instruction runs alone; in hybrid it takes the sets that an automatic batch would.
-            selected = self.record2record.pool.reserve(
-                0 if request is not None and self.training_mode == "manual" else self.batch_size
-            )
-            tasks = tuple(
-                task
-                for record_set in selected
-                for formed_set_id in record_set.formed_set_ids()
-                for task in self.tasks[formed_set_id]
+            # In manual mode an instruction runs alone; in hybrid it takes the samples that an automatic batch would.
+            batch_samples = 0 if request is not None and self.training_mode == "manual" else sample_count
+            # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
+            # the rest of the batch until it holds ``batch_samples`` samples.
+            self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:batch_samples]
+            missing = batch_samples - len(self.reserved_trajectory_ids)
+            units: list[RecordSetUnit] = []
+            for unit in self.record2record.pool.ordered_units():
+                if missing <= 0:
+                    break
+                units.append(unit)
+                missing -= self.count_unit_samples(unit)
+            selected = self.record2record.pool.reserve(tuple(units))
+            tasks = (
+                *(self.uploaded_trajectories[trajectory_id] for trajectory_id in self.reserved_trajectory_ids),
+                *(task for unit in selected for set_id in unit.set_ids() for task in self.tasks[set_id]),
             )
             if request is None:
                 self.pending = self.task2batch.make_batch(tasks, f"{self.scenario}:batch:{self.batch_number}")
@@ -377,16 +467,21 @@ class TrainingPipeline:
         return self.pending
 
     def acknowledge(self, batch_id: str, *, trained: bool = True) -> frozenset[str]:
-        """The training step consumed the batch: end its sets, and return the IDs of the records they consumed.
+        """The training step consumed the batch: end its units and uploaded trajectories, and return the consumed IDs.
 
         ``trained`` is False when the backend dropped the batch as stale, for
         a record stage that paces work on what trained.
         """
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed_sets = self.record2record.pool.consume_reserved()
-        consumed = self.record2record.consume(consumed_sets, trained=trained)
+        consumed_units = self.record2record.pool.consume_reserved()
+        consumed = self.record2record.consume(consumed_units, trained=trained)
         self.forget_ended_sets()
+        for trajectory_id in self.reserved_trajectory_ids:
+            self.uploaded_trajectories.pop(trajectory_id)
+            self.consumed_trajectory_ids.add(consumed_trajectory_id(trajectory_id))
+        consumed = consumed | {consumed_trajectory_id(trajectory_id) for trajectory_id in self.reserved_trajectory_ids}
+        self.reserved_trajectory_ids = ()
         if self.pending.request is not None:
             self.consume_request(self.pending.request.id)
             consumed = consumed | {self.pending.request.id}
@@ -398,29 +493,35 @@ class TrainingPipeline:
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         self.pending = None
+        self.reserved_trajectory_ids = ()
         self.record2record.pool.release_reservation()
 
     # ------------------------------------------------------------- lifecycle
 
     def releasable_record_ids(self) -> frozenset[str]:
-        """Records whose held state can be released after a durable commit. A pending set's records stay held."""
-        pending = {record_id for record_set in self.pending_sets.values() for record_id in record_set.record_ids()}
-        return (frozenset(self.consumed_requests) | self.record2record.releasable_record_ids()) - pending
+        """Records whose held state can be released after a durable commit. A waiting set's records stay held."""
+        waiting = {record_id for record_set in self.waiting_sets.values() for record_id in record_set.record_ids()}
+        return (
+            frozenset(self.consumed_requests)
+            | frozenset(self.consumed_trajectory_ids)
+            | self.record2record.releasable_record_ids()
+        ) - waiting
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         """Release committed in-memory state without changing stored records."""
         self.consumed_requests -= agent_record_ids
+        self.consumed_trajectory_ids -= agent_record_ids
         self.record2record.release_records(agent_record_ids)
 
     def background_jobs_running(self) -> bool:
-        """Return True while background work runs: a pending set, or a record stage job such as a judgment.
+        """Return True while background work runs: a waiting set, or a record stage job such as a judgment.
 
         A finished job can make the pipeline ready without a new record.
         While this is True, the training thread polls at a fixed interval.
         Otherwise it sleeps until the next accepted record. The training
         thread reads this between drains. It must not block.
         """
-        return bool(self.pending_sets) or self.record2record.background_jobs_running()
+        return bool(self.waiting_sets) or self.record2record.background_jobs_running()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
@@ -433,14 +534,19 @@ class TrainingPipeline:
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that callers need while waiting.
 
-        ``ready_units`` against ``batch_size`` says how close the next batch
-        is. A caller waiting on a release needs it to tell a batch that is
+        ``ready_samples`` against the trainer's ``batch_size`` says how close
+        the next batch is; ``buffer_size`` is the most samples the held record
+        sets keep, or None for every sample. A
+        caller waiting on a release needs it to tell a batch that is
         still filling from one that never will: a scenario whose producer
         stopped short sits below the batch size with nothing else to report.
         The stages add terminal outcomes that can never train, so a bounded
         external wait can fail explicitly.
         """
-        state: dict[str, Any] = {"ready_units": len(self.record2record.pool), "batch_size": self.batch_size}
+        state: dict[str, Any] = {
+            "ready_samples": self.count_held_samples(),
+            "buffer_size": self.buffer_size,
+        }
         if self.supported_training_modes & {"manual", "hybrid"}:
             state["buffered_requests"] = self.buffered_requests()
         return {**state, **self.record2record.status(), **self.record2task.status()}

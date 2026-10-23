@@ -22,6 +22,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
+from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
@@ -31,6 +32,7 @@ from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
+from reef.storage.trajectories import TrajectoryStore, consumed_trajectory_id
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.pipeline import InstructionFailure, TrainingPipeline
 from reef.train.types import PreparedCommit, TrainingBatch, TrainStepResult
@@ -73,6 +75,9 @@ class ComponentTrainer:
 
 logger = logging.getLogger(__name__)
 
+#: The batches that the sample buffer holds when ``pipeline.task2batch.config.buffer_size`` is not set.
+DEFAULT_BUFFER_BATCHES = 4
+
 
 class Trainer:
     """Turn scenario data into transactional local or backend training steps."""
@@ -94,7 +99,19 @@ class Trainer:
         training_mode: str = "auto",
         max_staleness: int = 0,
         task_storage: TaskStorage | None = None,
+        batch_size: int = 1,
     ) -> Trainer:
+        """Build a trainer and its pipeline.
+
+        ``batch_size`` is the samples in one training step, a positive int:
+        the training runtime's batch size, or ``evolution.batch_size`` for
+        harness evolution. The pipeline's buffer holds four batches unless the
+        task-to-batch stage sets ``buffer_size``. A buffer smaller than one
+        batch, or a batch size above the stage's ``max_batch_samples``, is a
+        ``PluginConfigError``.
+        """
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError(f"batch_size must be a positive int, got {batch_size!r}")
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend")
         if candidate_evaluator is not None and not isinstance(candidate_evaluator, CandidateEvaluationPlugin):
@@ -107,11 +124,25 @@ class Trainer:
                 training_mode=training_mode,
                 max_staleness=max_staleness,
                 task_storage=task_storage,
+                # A trainer without a candidate backend trains nothing, so its pipeline keeps every sample.
+                default_buffer_size=DEFAULT_BUFFER_BATCHES * batch_size if candidate_backend is not None else None,
             )
         )
         if pipeline.training_mode != training_mode:
             pipeline.close()
             raise ValueError("pipeline_factory must preserve the requested training_mode")
+        stage = type(pipeline.task2batch).__name__
+        if pipeline.buffer_size is not None and pipeline.buffer_size < batch_size:
+            pipeline.close()
+            raise PluginConfigError(
+                f"{stage} buffer_size {pipeline.buffer_size} is smaller than the batch size {batch_size}"
+            )
+        max_batch_samples = pipeline.task2batch.max_batch_samples
+        if max_batch_samples is not None and batch_size > max_batch_samples:
+            pipeline.close()
+            raise PluginConfigError(
+                f"{stage} holds at most {max_batch_samples} samples in one batch, not the batch size {batch_size}"
+            )
         default_state = candidate_backend.initial_state() if candidate_backend is not None else {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         return cls(
@@ -121,6 +152,7 @@ class Trainer:
             candidate_backend=candidate_backend,
             candidate_evaluator=candidate_evaluator,
             state=initial_state,
+            batch_size=batch_size,
         )
 
     def __init__(
@@ -132,8 +164,11 @@ class Trainer:
         candidate_backend: CandidateBackend | None,
         candidate_evaluator: CandidateEvaluationPlugin | None,
         state: Mapping[str, Any],
+        batch_size: int,
     ) -> None:
         self._scenario = scenario
+        #: The samples in one training step: an automatic batch holds at least this many.
+        self.batch_size = batch_size
         self._records = records
         self._pipeline = pipeline
         self._candidate_backend = candidate_backend
@@ -146,6 +181,10 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
+        #: The uploaded trajectories of the scenario, after ``read_uploaded_trajectories``.
+        self.trajectory_store: TrajectoryStore | None = None
+        #: The sequence of the last uploaded trajectory that the trainer read.
+        self.trajectory_sequence = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -160,7 +199,7 @@ class Trainer:
         Unread records are not necessarily trainable. Pipeline counts retain
         their recipe-defined names rather than being guessed into batch depth.
         A busy pipeline omits its gauges for this sample instead of blocking
-        execution metrics behind ingestion or commit work.
+        execution metrics behind record push or commit work.
         """
         loss = self._records.loss(self.scenario)
         values = {f"training/{key}": value for key, value in self.operations.snapshot().items()}
@@ -183,7 +222,11 @@ class Trainer:
             )
             values["training/reserved_batches"] = int(self._pending is not None)
             values["training/auto_enabled"] = int(self._pipeline.training_mode in {"auto", "hybrid"})
-            pipeline_metrics = {**self._pipeline.status(), **self._pipeline.operational_metrics()}
+            pipeline_metrics = {
+                **self._pipeline.status(),
+                "batch_size": self.batch_size,
+                **self._pipeline.operational_metrics(),
+            }
             for name, value in pipeline_metrics.items():
                 if isinstance(value, (int, float)) and math.isfinite(value):
                     values[f"processor/{name}"] = int(value) if isinstance(value, bool) else value
@@ -196,7 +239,7 @@ class Trainer:
         return self._scenario
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Serialize mode selection with record ingestion and batch reservation."""
+        """Serialize mode selection with record push and batch reservation."""
         with self._lock:
             self._pipeline.set_training_mode(training_mode)
 
@@ -271,7 +314,7 @@ class Trainer:
     def batch_ready(self) -> bool:
         """Whether a reserved or buildable batch is waiting on the training thread."""
         with self._lock:
-            return self._pending is not None or self._pipeline.ready()
+            return self._pending is not None or self._pipeline.ready(self.batch_size)
 
     def holds_untrained_records(self) -> bool:
         """Whether this trainer has records that its backend would still train on.
@@ -284,18 +327,41 @@ class Trainer:
         if self._candidate_backend is None:
             return False
         with self._lock:
-            if self._pending is not None or self._pipeline.background_jobs_running() or self._pipeline.ready():
+            if (
+                self._pending is not None
+                or self._pipeline.background_jobs_running()
+                or self._pipeline.ready(self.batch_size)
+            ):
+                return True
+            trajectories = self.trajectory_store
+            if (
+                trajectories is not None
+                and self._pipeline.accepts_trajectories
+                and trajectories.count(after_sequence=self.trajectory_sequence) > 0
+            ):
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
+
+    def read_uploaded_trajectories(self, store: TrajectoryStore) -> None:
+        """Read the uploaded trajectories of the scenario from ``store``, from the first one.
+
+        The scenario factory calls this when it builds the trainer. An uploaded
+        trajectory that a commit consumed is in ``consumed_record_ids`` after
+        recovery, so the trainer skips it.
+        """
+        with self._lock:
+            self.trajectory_store = store
+            self.trajectory_sequence = 0
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
             loss = self._records.loss(self.scenario)
+            status = {**self._pipeline.status(), "batch_size": self.batch_size}
             if not loss.record_count:
-                return dict(self._pipeline.status())
+                return status
             return {
-                **self._pipeline.status(),
+                **status,
                 "record_data_incomplete": loss.record_count > 0,
                 "evicted_record_count": loss.record_count,
                 "evicted_body_bytes": loss.body_bytes,
@@ -309,7 +375,7 @@ class Trainer:
         batches enter the trainer turns a drifting recipe into a loud error
         instead of a backend-side shape failure.
         """
-        batch = self._pipeline.build_batch()
+        batch = self._pipeline.build_batch(self.batch_size)
         schema = self._pipeline.output_schema
         if not isinstance(batch, schema):
             raise TypeError(
@@ -318,7 +384,7 @@ class Trainer:
             )
         return batch
 
-    def ingest_retained(self, item: AgentRecord) -> None:
+    def push_retained(self, item: AgentRecord) -> None:
         """Consumption state is independent of record visibility in storage."""
         if item.agent_record_id in self.consumed_record_ids:
             return
@@ -338,9 +404,23 @@ class Trainer:
                 self.skipped_record_ids.add(item.agent_record_id)
                 return
         if item.request_type in self.pipeline.required_request_types:
-            self._pipeline.ingest(item)
+            self._pipeline.push(item)
 
     def _consume_data(self) -> None:
+        # Uploaded trajectories go first in a batch, so the trainer reads them before the records.
+        while self.trajectory_store is not None and self._pipeline.accepts_trajectories:
+            stored_trajectories = self.trajectory_store.page(
+                after_sequence=self.trajectory_sequence, limit=self._DATA_READ_BATCH_SIZE
+            )
+            if not stored_trajectories:
+                break
+            for stored in stored_trajectories:
+                self.trajectory_sequence = stored.sequence
+                if consumed_trajectory_id(stored.trajectory_id) in self.consumed_record_ids:
+                    continue
+                self._pipeline.push_trajectory(stored.trajectory_id, stored.trajectory)
+                if self._pipeline.ready(self.batch_size):
+                    return
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -350,10 +430,10 @@ class Trainer:
             if not items:
                 return
             for sequence, item in items:
-                self.ingest_retained(item)
+                self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if self._pipeline.ready():
+                if self._pipeline.ready(self.batch_size):
                     return
 
     def run_once(
@@ -469,7 +549,7 @@ class Trainer:
         if serving_runtime_load_id is not None:
             self._pipeline.observe_serving_runtime_load_id(serving_runtime_load_id)
         self._consume_data()
-        if not self._pipeline.ready():
+        if not self._pipeline.ready(self.batch_size):
             return None
         batch = self._build_validated_batch()
         self._pending = _PendingStep(batch=batch, result=None)
@@ -630,7 +710,7 @@ class Trainer:
             self._pending = None
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Notify the backend after ``state`` enters the durable commit log."""
+        """Notify the backend after ``state`` enters the durable commit history."""
         backend = self._candidate_backend
         if backend is not None:
             backend.commit_applied(state)
@@ -639,7 +719,7 @@ class Trainer:
         """Release pipeline and backend resources owned by the trainer.
 
         Held under the trainer lock so a pipeline is never closed while a
-        batch is being ingested or built on the training thread.
+        record is being pushed or a batch built on the training thread.
         """
         with self._lock:
             try:
@@ -648,7 +728,7 @@ class Trainer:
                 if self._candidate_backend is not None:
                     self._candidate_backend.close()
 
-    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
+    def replay_retained(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild pipeline memory from retained rows at or below a watermark.
 
         The committed high-water mark is a consumption cursor, not a liveness
@@ -656,9 +736,9 @@ class Trainer:
         passes rows of the next, still-incomplete step, and retention keeps
         them stored. Only pipeline memory knew about them, and a rebuilt
         pipeline starts empty: without this replay, a report arriving after
-        recovery waits forever on a reference that can never be ingested
+        recovery waits forever on a reference that can never be pushed
         again. ``consumed_ids`` names the rows committed batches consumed —
-        the commit log records them per step because retention may keep a
+        the commit history records them per step because retention may keep a
         consumed row stored (audit-only retention is contract-legal), and a
         row a committed batch consumed must never train twice. Skipping them
         while replaying the retained prefix reconstructs the live state the
@@ -683,14 +763,14 @@ class Trainer:
                         return
                     if item.agent_record_id in consumed_ids:
                         continue
-                    self.ingest_retained(item)
+                    self.push_retained(item)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.
 
         Without this, a recovered trainer would page the record store from
-        sequence 0 and re-ingest consumed rows the retention policy protected
-        from deletion — re-training them. Restoring the watermark makes
+        sequence 0 and push again the consumed rows that the retention policy
+        protected from deletion — re-training them. Restoring the watermark makes
         replay start exactly where the recovered step left off.
         """
         if after_sequence < 0 or offset < 0:

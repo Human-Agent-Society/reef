@@ -24,10 +24,11 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
-from reef.record2record import PassThroughRecord2Record
+from reef.record2record import NoRecordSets
 from reef.record2task.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
-from reef.train import PipelineContext
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -91,6 +92,7 @@ def _report(step: int, group: int, rollout: int, score: float) -> AgentRecord:
 
 
 def _processor(experiment_logger=None) -> TrainingPipeline:
+    # A test asks for a batch of the grid's six rollouts, so a batch is one step.
     context = PipelineContext(
         "discovery",
         report_type=TTTDGroupedRolloutReport,
@@ -101,7 +103,7 @@ def _processor(experiment_logger=None) -> TrainingPipeline:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record),
+        task2batch=TTTDBatches(context, record2record, None),
     )
 
 
@@ -133,7 +135,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
     assert (pipeline.record2task.groups_per_step, pipeline.record2task.rollouts_per_group) == (2, 3)
     assert (pipeline.task2batch.groups_per_step, pipeline.task2batch.rollouts_per_group) == (2, 3)
     assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
-    assert pipeline.batch_size == 1
+    assert pipeline.task2batch.max_batch_samples == 6
 
 
 @pytest.mark.unit
@@ -158,7 +160,7 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
         ({"record2record": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
         ({"record2record": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
         ({"record2task": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
-        ({"task2batch": {"config": {"batch_size": 2}}}, "TTTDBatches takes no config"),
+        ({"task2batch": {"config": {"batch_size": 2}}}, "TTTDBatches: unknown config fields: batch_size"),
     ],
 )
 def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, message: str) -> None:
@@ -168,10 +170,24 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 
 
 @pytest.mark.unit
+def test_the_trainer_refuses_a_tttd_batch_size_above_one_grid() -> None:
+    def build(batch_size: int) -> Trainer:
+        return Trainer.build(
+            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(), batch_size=batch_size
+        )
+
+    build(6).close()
+    with pytest.raises(
+        PluginConfigError, match="TTTDBatches holds at most 6 samples in one batch, not the batch size 7"
+    ):
+        build(7)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("stage", [TTTDTasks, TTTDBatches])
 def test_tttd_later_stages_need_the_tttd_record_stage(stage: type) -> None:
     context = PipelineContext("discovery")
-    stages = {"record2record": PassThroughRecord2Record()}
+    stages = {"record2record": NoRecordSets()}
     if stage is TTTDBatches:
         stages["record2task"] = TTTDTasks(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
     with pytest.raises(PluginConfigError, match=f"{stage.__name__} needs TTTDRecord2Record"):
@@ -237,16 +253,16 @@ def test_tttd_waits_for_every_rollout_in_one_policy_step() -> None:
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
             if (group, rollout) != (1, 2):
-                processor.ingest(_report(0, group, rollout, float(group + rollout)))
+                processor.push(_report(0, group, rollout, float(group + rollout)))
 
-    assert not processor.ready()
+    assert not processor.ready(6)
 
-    processor.ingest(_report(0, 1, 2, 3.0))
+    processor.push(_report(0, 1, 2, 3.0))
 
-    assert processor.ready()
-    batch = processor.build_batch()
+    assert processor.ready(6)
+    batch = processor.build_batch(6)
     assert batch.batch_id == "discovery:batch:1"
     assert len(trajectory_groups(batch)) == 2
     assert [[trajectory_reward(sample) for sample in group] for group in trajectory_groups(batch)] == [
@@ -260,10 +276,10 @@ def test_tttd_does_not_mix_complete_groups_from_different_steps() -> None:
     processor = _processor()
     for step, group in ((0, 0), (1, 1)):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-{step}-{group}-{rollout}", 100 + rollout))
-            processor.ingest(_report(step, group, rollout, float(rollout)))
+            processor.push(_inference(f"i-{step}-{group}-{rollout}", 100 + rollout))
+            processor.push(_report(step, group, rollout, float(rollout)))
 
-    assert not processor.ready()
+    assert not processor.ready(6)
 
 
 @pytest.mark.unit
@@ -272,16 +288,16 @@ def test_tttd_accepts_one_durable_release_id() -> None:
     artifact_ref = ArtifactRef("artifact-1", "checkpoint-1", None)
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(
+            processor.push(
                 _inference(
                     f"i-0-{group}-{rollout}",
                     100 + group * 3 + rollout,
                     artifact_ref=artifact_ref,
                 )
             )
-            processor.ingest(_report(0, group, rollout, float(group + rollout)))
+            processor.push(_report(0, group, rollout, float(group + rollout)))
 
-    assert processor.ready()
+    assert processor.ready(6)
 
 
 @pytest.mark.unit
@@ -291,16 +307,16 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
         for group in range(2):
             for rollout in range(3):
                 version = "checkpoint-1" if (group, rollout) != (1, 2) else "checkpoint-2"
-                processor.ingest(
+                processor.push(
                     _inference(
                         f"i-0-{group}-{rollout}",
                         100 + group * 3 + rollout,
                         artifact_ref=ArtifactRef(f"artifact-{version}", version, None),
                     )
                 )
-                processor.ingest(_report(0, group, rollout, float(group + rollout)))
+                processor.push(_report(0, group, rollout, float(group + rollout)))
 
-    assert not processor.ready()
+    assert not processor.ready(6)
     assert "span releases" in caplog.text
     assert processor.status()["failed_steps"] == [
         {
@@ -317,7 +333,7 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
 
 
 @pytest.mark.unit
-def test_tttd_caches_policy_samples_at_ingest(monkeypatch) -> None:
+def test_tttd_caches_policy_samples_at_push(monkeypatch) -> None:
     from reef.record2task import assembly as reported_module
 
     calls = 0
@@ -332,12 +348,12 @@ def test_tttd_caches_policy_samples_at_ingest(monkeypatch) -> None:
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-            processor.ingest(_report(0, group, rollout, float(group + rollout)))
-            processor.ready()
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+            processor.push(_report(0, group, rollout, float(group + rollout)))
+            processor.ready(6)
 
     for _ in range(5):
-        assert processor.ready()
+        assert processor.ready(6)
     assert calls == 6
 
 
@@ -347,14 +363,14 @@ def test_tttd_refuses_reports_before_their_inferences() -> None:
     for group in range(2):
         for rollout in range(3):
             with pytest.raises(ReportValidationError, match="unavailable"):
-                processor.ingest(_report(0, group, rollout, float(group + rollout)))
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-    assert not processor.ready()
+                processor.push(_report(0, group, rollout, float(group + rollout)))
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+    assert not processor.ready(6)
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_report(0, group, rollout, float(group + rollout)))
+            processor.push(_report(0, group, rollout, float(group + rollout)))
     assert [
-        [trajectory_reward(sample) for sample in group] for group in trajectory_groups(processor.build_batch())
+        [trajectory_reward(sample) for sample in group] for group in trajectory_groups(processor.build_batch(6))
     ] == [
         [0.0, 1.0, 2.0],
         [1.0, 2.0, 3.0],
@@ -365,8 +381,8 @@ def test_tttd_refuses_reports_before_their_inferences() -> None:
 def test_tttd_invalid_single_report_does_not_wait_for_missing_inference() -> None:
     processor = _processor()
     with pytest.raises(ReportValidationError):
-        processor.ingest(_report(0, processor.record2task.groups_per_step, 0, 1.0))
-    assert not processor.ready()
+        processor.push(_report(0, processor.record2task.groups_per_step, 0, 1.0))
+    assert not processor.ready(6)
 
 
 @pytest.mark.unit
@@ -375,10 +391,10 @@ def test_tttd_filters_constant_groups_after_step_barrier() -> None:
     rewards = ((1.0, 1.0, 1.0), (1.0, 2.0, 3.0))
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-            processor.ingest(_report(0, group, rollout, rewards[group][rollout]))
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+            processor.push(_report(0, group, rollout, rewards[group][rollout]))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(6)
 
     assert len(trajectory_groups(batch)) == 1
     assert [trajectory_reward(sample) for sample in trajectory_groups(batch)[0]] == [1.0, 2.0, 3.0]
@@ -391,10 +407,10 @@ def test_tttd_logs_full_grid_reward_and_filter_metrics() -> None:
     rewards = ((0.0, 0.0, 0.0), (1.0, 2.0, 3.0))
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-            processor.ingest(_report(0, group, rollout, rewards[group][rollout]))
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+            processor.push(_report(0, group, rollout, rewards[group][rollout]))
 
-    processor.build_batch()
+    processor.build_batch(6)
 
     assert len(experiment_logger.events) == 1
     namespace, metrics = experiment_logger.events[0]
@@ -420,11 +436,11 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
-            processor.ingest(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
-            processor.ingest(_report(0, group, rollout, 1.0))
+            processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
+            processor.push(_report(0, group, rollout, 1.0))
 
-    batch = processor.build_batch()
-    result = prepare_slime_step(batch, TrainingMethod("tttd"), {}, StepScheduling(unit="sample", batch_size="actual"))
+    batch = processor.build_batch(6)
+    result = prepare_slime_step(batch, TrainingMethod("tttd"), {}, StepScheduling(unit="sample"), step_size=6)
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None
