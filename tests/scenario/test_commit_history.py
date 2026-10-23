@@ -509,7 +509,6 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario.repository.require_current_artifact() == second.artifact_ref
     assert scenario.committed_training_job_id == "job-1"
-    assert scenario.committed_training_without_job_id is False
 
 
 @pytest.mark.unit
@@ -532,7 +531,6 @@ def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
     [record] = committed_records(agent_record_dir)
     assert record.training_job_id == "job-0"
     assert scenario.committed_training_job_id == "job-0"
-    assert scenario.committed_training_without_job_id is False
 
 
 @pytest.mark.unit

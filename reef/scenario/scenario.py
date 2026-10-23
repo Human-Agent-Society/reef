@@ -276,15 +276,6 @@ class Scenario:
                 return None
             return record.training_job_id
 
-    @property
-    def committed_training_without_job_id(self) -> bool:
-        """Whether the dispatched component's newest commit is a pre-identity training commit."""
-        with self._committer.lock:
-            record = self._committer.last_record_for(self.dispatched_component)
-            if record is None or not self._committer.record_is_current(record):
-                return False
-            return record.operation == "training" and record.operation_verified and record.training_job_id is None
-
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)

@@ -174,12 +174,9 @@ def _validate_marker(value: dict[str, Any], path: Path) -> None:
         raise RuntimeError(f"invalid training marker: {path}")
     if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
         raise RuntimeError(f"invalid training marker: {path}")
-    # A job still out is finished by the scenario step it trained; a settled marker needs none, so one an earlier
-    # release left behind when no job was out does not stop a start.
-    if "scenario_step" in value or marker_in_flight(value):
-        scenario_step = value.get("scenario_step")
-        if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-            raise RuntimeError(f"invalid training marker scenario step: {path}")
+    scenario_step = value.get("scenario_step")
+    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
+        raise RuntimeError(f"invalid training marker scenario step: {path}")
     commit_acknowledged = value.get("commit_acknowledged")
     if commit_acknowledged is not None and not isinstance(commit_acknowledged, bool):
         raise RuntimeError(f"invalid training marker commit acknowledgement: {path}")
@@ -803,7 +800,7 @@ class TrainingRecovery:
         recovered_runtime_load_id = None
         if marker is not None and status in PUBLISHED_STATES:
             recovered_runtime_load_id = str(marker["runtime_load_id"])
-        if config.save_hf_template is not None and status != "REJECTED" and not (config.lora and marker is None):
+        if status != "REJECTED" and not (config.lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot inference. Publish actor weights before construction returns
             # so the first Reef inference uses the actual training version. A
@@ -829,6 +826,4 @@ class TrainingRecovery:
             publisher.initialize_version()
         elif marker is not None and status == "REJECTED":
             publisher.runtime_load_id = str(marker.get("parent_runtime_load_id") or versions[0])
-            publisher.initialize_version()
-        elif config.save_hf_template is None:
             publisher.initialize_version()

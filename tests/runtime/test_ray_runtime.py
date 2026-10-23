@@ -52,7 +52,6 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
         return {
             "colocate": False,
             "training_job": {
-                "deferred_weight_update": True,
                 "status": getattr(self, "status", "IDLE"),
                 "scenario_step": 0,
                 "training_job_id": "job-0",
@@ -122,7 +121,6 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
             "colocate": self.colocate,
             "lora_adapter": self.lora_adapter,
             "training_job": {
-                "deferred_weight_update": True,
                 "status": self.status,
                 "scenario_step": self.scenario_step,
                 "training_job_id": self.training_job_id,
@@ -341,16 +339,6 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
     candidate = runtime.train_candidate(payload)
     assert candidate.training_job_id == "job-0" and candidate.checkpoint_path == "/checkpoint"
     assert runtime.activate_candidate(candidate) == ActivatedModel("job-0", "v1")
-
-
-@pytest.mark.unit
-def test_ray_runtime_requires_deferred_weight_updates() -> None:
-    class AtomicHandle(FakeTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            return {"training_job": {"deferred_weight_update": False, "status": "COMPLETE"}}
-
-    with pytest.raises(RayRuntimeError, match="requires deferred serving-weight updates"):
-        ExecutorRuntimeFixture(train_group_handle=AtomicHandle(), inference_url="http://router")
 
 
 @pytest.mark.unit
@@ -721,14 +709,6 @@ def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) ->
 
 
 @pytest.mark.unit
-def test_remote_handle_rejects_an_old_actor_before_training_side_effects() -> None:
-    handle = RemoteRayCoordinatorClient(train_group_actor=object())
-
-    with pytest.raises(RayRuntimeError, match="restart the Reef service and training actor together"):
-        handle.health()
-
-
-@pytest.mark.unit
 def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
     class RemoteMethod:
         def __init__(self):
@@ -974,53 +954,6 @@ def test_recovery_does_not_acknowledge_an_unrelated_later_commit() -> None:
     runtime.reconcile_training_job(
         scenario_step=5,
         committed_training_job_id="rollback-job",
-    )
-
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-
-@pytest.mark.unit
-def test_legacy_complete_marker_stays_closed_until_reef_commit_is_proven() -> None:
-    class LegacyCompleteHandle(DeferredWeightUpdateTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            health = dict(super().health())
-            health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
-            return health
-
-    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
-    runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
-
-    runtime.reconcile_training_job(scenario_step=3)
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-    runtime.reconcile_training_job(scenario_step=4)
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-    runtime.reconcile_training_job(
-        scenario_step=4,
-        committed_training_without_job_id=True,
-    )
-    assert handle.calls == ["acknowledge"]
-    assert runtime.inference_admission_status == {"open": True, "active": 0}
-
-
-@pytest.mark.unit
-def test_legacy_complete_marker_does_not_trust_an_unrelated_later_training_commit() -> None:
-    class LegacyCompleteHandle(DeferredWeightUpdateTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            health = dict(super().health())
-            health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
-            return health
-
-    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
-    runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
-
-    runtime.reconcile_training_job(
-        scenario_step=5,
-        committed_training_without_job_id=True,
     )
 
     assert handle.calls == []
