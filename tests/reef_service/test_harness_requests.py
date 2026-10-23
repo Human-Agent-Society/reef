@@ -52,7 +52,7 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
         return Mutation("create", "requested-rules", {"name": "rules", "config": {"text": "marker rules"}})
 
     # A large auto batch must not keep an explicit manual request waiting.
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), pipeline_stages=harness_stages(100)))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), batch_size=100))
     scenario = dispatcher.get_or_create_scenario("ask-scenario")
 
     async def run():
@@ -529,7 +529,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
         trainer = Trainer.build(
             "agents",
             records,
-            pipeline_factory=harness_stages(1, inference=True).build,
+            pipeline_factory=harness_stages(inference=True).build,
             candidate_backend=_RequiresBackend(written),
             training_mode="manual",
         )

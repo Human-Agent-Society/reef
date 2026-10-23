@@ -55,12 +55,12 @@ class FeedbackBatches(Task2Batch):
         return TrainingBatch(batch_id, tasks)
 
 
-def feedback_pipeline(context, batch_size):
+def feedback_pipeline(context):
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()),
         record2task=FeedbackTasks(),
-        task2batch=FeedbackBatches(context, batch_size),
+        task2batch=FeedbackBatches(context, None),
     )
 
 
@@ -86,12 +86,13 @@ class LearningRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: feedback_pipeline(context, batch_size=2),
+            pipeline_factory=feedback_pipeline,
             candidate_backend=LearningBackend(scenario, self.batches),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
+            batch_size=2,
         )
 
 

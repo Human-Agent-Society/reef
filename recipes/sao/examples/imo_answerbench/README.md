@@ -83,9 +83,9 @@ self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]},
    (`inference_with_record`) and keep the returned `agent_record_id` as the
    generation receipt.
 2. After the local grader computes the reward, report it against that exact
-   receipt. The dispatcher collects `batch_size` reports into one training
-   step; this smoke config sets `pipeline.task2batch.config.batch_size: 1`,
-   so each report is one step.
+   receipt. The dispatcher collects the global batch size of reports into
+   one training step; this smoke config sets
+   `training.config.global_batch_size: 1`, so each report is one step.
 
 A third piece runs after the trial. Harbor writes `result.json` when the
 verifier finishes, and a watcher thread posts the verifier's reward as one
@@ -219,17 +219,18 @@ step), actor and critic `grad_norm`, and the asynchrony telemetry `sao/policy_la
 Change `inference.model-path`, the GPU counts and parallelism flags, and
 `--seq-length` and `--rollout-max-response-len` in `serve.yaml`. The
 objective flags are the paper's reasoning-domain values and do not change
-with model size. `pipeline.task2batch.config.batch_size` and `training.config.global_batch_size` must stay
-equal, because each rollout sample is its own data-parallel unit.
+with model size. `training.config.global_batch_size` sets both the batch
+size and Slime's `--global-batch-size`; each rollout sample is its own
+data-parallel unit.
 
 ## Paper fidelity
 
 The integration reproduces:
 
 - single-rollout sampling, one rollout per prompt with no comparison group and
-  no slowest-sample barrier, with `batch_size` such rollouts per optimizer
-  step (the default is the paper's 128; this smoke config sets
-  `batch_size: 1`, `--global-batch-size=1`, see below);
+  no slowest-sample barrier, with the global batch size of such rollouts per
+  optimizer step (the paper uses 128; this smoke config sets
+  `global_batch_size: 1`, see below);
 - a value model colocated with the actor and two critic steps per actor step
   (`--critic-steps-per-actor=2`), trained at the paper's value learning rate
   of `5e-6` (`--critic-lr=5e-6`) with the paper's 10-step value warmup
@@ -250,7 +251,7 @@ The integration reproduces:
 The paper trains with "a batch size of 128, a group size of 1" (§4.1): one
 rollout per prompt, 128 prompts per optimizer step. Single-rollout is a
 statement about the group, not about the step. `run.py` and `serve.yaml` set
-`batch_size: 1` and `--global-batch-size=1`, which is a different estimator:
+`global_batch_size: 1`, which is a different estimator:
 each optimizer step is one REINFORCE sample with a critic baseline. That is
 the smallest instance of the paper's loop and a good smoke test, but the gradient of one rollout at the
 paper's learning rate is mostly noise, and two of its diagnostics are
@@ -264,9 +265,8 @@ uses the paper's shape at a budget one node can afford.
 `stream.py` keeps `SAO_IN_FLIGHT` requests open at all times, each on a
 problem drawn from a training pool, grades each completion with the
 verifier's rule and reports it against its receipt; `serve-30b.yaml` takes
-the optimizer step size from `SAO_BATCH` (the batch stage's
-`pipeline.task2batch.config.batch_size` and the driver's
-`--global-batch-size`, which must agree). Held-out problem indices
+the optimizer step size from `SAO_BATCH` (`training.config.global_batch_size`,
+the driver's `--global-batch-size`). Held-out problem indices
 are never served, and `evaluate.py` scores the base and the trained weights
 on them afterwards with fresh samples.
 
@@ -311,7 +311,7 @@ The cookbook configuration is a functional smoke rather than the paper's
 setup: it serves Qwen2.5-1.5B-Instruct with a 2048-token generation window,
 trains on the benchmark's own problems, starts from the public
 instruction-tuned checkpoint, and runs one optimizer step per rollout
-(`batch_size: 1`). That last point matters more than the model size. The paper
+(`global_batch_size: 1`). That last point matters more than the model size. The paper
 trains with a batch of 128 rollouts from 128 prompts per step (§4.1); "single
 rollout" refers to one rollout per prompt, not one rollout per update. A batch
 of one gives the critic a single sample per step, so it cannot learn a

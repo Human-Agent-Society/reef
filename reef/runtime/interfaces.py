@@ -801,6 +801,16 @@ class TrainingRuntime(ABC):
     """
 
     @property
+    @abstractmethod
+    def batch_size(self) -> int:
+        """The rollouts in one optimizer step, a positive int: the samples in one training batch.
+
+        The deployment reads it from the training options (Slime's
+        ``--global-batch-size``, Tinker's ``batch_size``) and gives it to the
+        runtime; a recipe passes it to ``Trainer.build``.
+        """
+
+    @property
     def concurrent_training_scenarios(self) -> bool:
         """Whether several scenarios may train on this runtime at once.
 
@@ -903,7 +913,7 @@ class PreparedTrainingJob(ABC):
 class TrainingCoordinationConfig:
     """Deployment policy interpreted only by Reef's coordinator."""
 
-    save_hf_template: str | None
+    save_hf_template: str
     colocate: bool = False
     lora: bool = False
     adapter_capacity: int | None = None

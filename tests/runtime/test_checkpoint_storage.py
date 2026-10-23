@@ -598,6 +598,7 @@ def committed_marker(storage: CheckpointStorage, rollout_id: int = 0, **override
         "status": "COMPLETE",
         "job_id": f"job-{rollout_id}",
         "rollout_id": rollout_id,
+        "scenario_step": rollout_id,
         "checkpoint_path": str(storage.pair_paths(rollout_id)[0]),
         "runtime_load_id": f"load-{rollout_id}",
         "commit_acknowledged": True,

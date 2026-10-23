@@ -85,8 +85,9 @@ with ``RecipeConfigError``. See `Manual training
 
 ``requests`` contains one mapping with ``id``, ``text``, ``session``,
 ``release_id``, ``requires``, and ``untrusted=True``. In ``manual`` mode,
-``samples`` is empty. In ``hybrid`` mode, it contains up to ``batch_size``
-samples from the next automatic batch, and may be empty. These samples are
+``samples`` is empty. In ``hybrid`` mode, it contains up to
+``evolution.batch_size`` samples from the next automatic batch, and may be
+empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
 batching modes" below describes.
 
@@ -177,8 +178,8 @@ Two batching modes
 ~~~~~~~~~~~~~~~~~~
 
 The deployment's ``pipeline`` section selects the source of each batch.
-``pipeline.task2batch.config.batch_size`` (default 1) sets the number of
-units in one batch.
+``recipe.config.evolution.batch_size`` (default 1) sets the number of
+traces in one batch.
 
 - The recipe's default stages batch valid reports with explicit scores. Use
   them when a grader, test, or user action supplies an outcome.
@@ -198,8 +199,8 @@ units in one batch.
 Configure it
 ~~~~~~~~~~~~
 
-The recipe config names the plugin classes, the tasks, and the first-boot
-tree. The ``pipeline`` section sets the batch size:
+The recipe config names the plugin classes, the tasks, the batch size, and
+the first-boot tree:
 
 .. code:: yaml
 
@@ -209,6 +210,7 @@ tree. The ``pipeline`` section sets the batch size:
        evolution:
          adapter: pi
          binary: pi
+         batch_size: 1
          propose: methods.mine:FinalLineRule
          evaluate: methods.mine:ExactAnswer
          tasks:
@@ -222,10 +224,6 @@ tree. The ``pipeline`` section sets the batch size:
              url: https://api.openai.com
              model: gpt-4o
              api_key_env: OPENAI_API_KEY
-   pipeline:
-     task2batch:
-       config:
-         batch_size: 1
    inference:
      upstream-model: qwen3-8b
 

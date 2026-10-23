@@ -22,7 +22,7 @@ from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError
-from reef.record2record import InferenceRecord2Record, SingleRecordSet, SingleSetUnit
+from reef.record2record import InferenceRecord2Record
 from reef.runtime.interfaces import TrainingRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -86,9 +86,10 @@ def build(records, backend, processor=records_pipeline, mode="manual", batch_siz
     return Trainer.build(
         "s",
         records,
-        pipeline_factory=lambda ctx: processor(ctx, batch_size),
+        pipeline_factory=processor,
         candidate_backend=backend,
         training_mode=mode,
+        batch_size=batch_size,
     )
 
 
@@ -195,7 +196,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
 
 
 def test_manual_requires_an_explicit_recipe_assembler():
-    def default_pipeline(context, batch_size):
+    def default_pipeline(context):
         return TrainingPipeline(context)
 
     records = SQLiteRecordStore()
@@ -216,7 +217,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path)
         seen.append((requests[0], samples))
         called.set()
 
-    recipe = replace(_recipe(tmp_path, propose), training_mode="manual", pipeline_stages=harness_stages(100))
+    recipe = replace(_recipe(tmp_path, propose), training_mode="manual", pipeline_stages=harness_stages())
     dispatcher = _dispatcher(tmp_path, recipe)
     dispatcher.get_or_create_scenario("s")
 
@@ -282,8 +283,8 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
         def make_batch(self, tasks, batch_id):
             return ExampleBatch(batch_id, values=tuple(source_record_id(task) for task in tasks))
 
-    def instruction_pipeline(context, batch_size=1):
-        return TrainingPipeline(context, task2batch=InstructionBatches(context, batch_size))
+    def instruction_pipeline(context):
+        return TrainingPipeline(context, task2batch=InstructionBatches(context, None))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         instruction_pipeline(PipelineContext("s"))
@@ -304,7 +305,7 @@ def test_pipeline_context_keeps_mode_when_recipe_takes_instructions():
     context = PipelineContext("s", training_mode="manual")
     configured = replace(context, manual_enabled=True)
     assert configured.training_mode == "manual"
-    processor = reports_pipeline(configured, 100)
+    processor = reports_pipeline(configured)
     assert processor.training_mode == "manual"
     assert RequestType.TRAIN in processor.required_request_types
     processor.close()
@@ -318,7 +319,7 @@ def test_missing_mode_implementation_fails_at_processor_initialization():
     for mode in ("manual", "hybrid"):
         context = PipelineContext("s", training_mode=mode)
         with pytest.raises(NotImplementedError, match=rf"AutoOnlyBatches.*{mode}"):
-            TrainingPipeline(context, task2batch=AutoOnlyBatches(context, 1))
+            TrainingPipeline(context, task2batch=AutoOnlyBatches(context, None))
     with pytest.raises(ValueError, match="training_mode"):
         PipelineContext("s", training_mode="invalid")
 
@@ -335,12 +336,12 @@ def test_manual_instruction_batch_never_falls_back_to_auto():
         context,
         record2record=InferenceRecord2Record(),
         record2task=InferenceTasks(),
-        task2batch=TraceOnlyBatches(context, 1),
+        task2batch=TraceOnlyBatches(context, None),
     )
     pipeline.push(inference("held"))
-    assert not pipeline.ready()
+    assert not pipeline.ready(1)
     pipeline.push(instruction("one"))
-    batch = pipeline.build_batch()
+    batch = pipeline.build_batch(1)
     # The instruction runs alone: the held set an automatic batch would take stays held.
     assert batch.request.id == "one"
     assert batch.items == ()
@@ -362,24 +363,22 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
         def make_batch(self, tasks, batch_id):
             return TrainingBatch(batch_id, tasks)
 
-    stage = InferenceRecord2Record()
     context = PipelineContext("s", training_mode="auto")
-    pipeline = TrainingPipeline(context, record2record=stage, task2batch=CountedBatches(context, 4))
-
-    def hold(count):
-        for index in range(len(stage.pool), count):
-            record = inference(f"inf-{index}")
-            stage.pool.put(
-                SingleSetUnit.of(SingleRecordSet(set_id=record.agent_record_id, arrival_index=index, record=record))
-            )
-
-    assert pipeline.status() == {"ready_units": 0, "batch_size": 4}
-    hold(3)
-    assert pipeline.status() == {"ready_units": 3, "batch_size": 4}
-    assert not pipeline.ready()
-    hold(4)
-    assert pipeline.status() == {"ready_units": 4, "batch_size": 4}
-    assert pipeline.ready()
+    pipeline = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=CountedBatches(context, 6),
+    )
+    assert pipeline.status() == {"ready_samples": 0, "buffer_size": 6}
+    for index in range(3):
+        pipeline.push(inference(f"inf-{index}"))
+    assert pipeline.status() == {"ready_samples": 3, "buffer_size": 6}
+    assert not pipeline.ready(4)
+    pipeline.push(inference("inf-3"))
+    assert pipeline.status()["ready_samples"] == 4
+    assert pipeline.ready(4)
+    pipeline.close()
 
 
 def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_hybrid_only():
@@ -391,7 +390,7 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
             return TrainingBatch(batch_id, tasks)
 
     context = PipelineContext("s", training_mode="hybrid")
-    pipeline = TrainingPipeline(context, task2batch=HybridOnlyBatches(context, 1))
+    pipeline = TrainingPipeline(context, task2batch=HybridOnlyBatches(context, None))
     pipeline.push(instruction("one"))
     assert pipeline.status()["buffered_requests"] == 1
     pipeline.close()
@@ -411,12 +410,12 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> ExampleBatch:
             return ExampleBatch(batch_id, values=tuple(source_record_id(task) for task in tasks))
 
-    def trajectory_pipeline(context, batch_size):
+    def trajectory_pipeline(context):
         return TrainingPipeline(
             context,
             record2record=InferenceRecord2Record(),
             record2task=InferenceTasks(),
-            task2batch=TrajectoryBatches(context, batch_size),
+            task2batch=TrajectoryBatches(context, None),
         )
 
     records, backend = SQLiteRecordStore(), CaptureBackend()
@@ -1211,15 +1210,15 @@ def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
     processor.push(instruction("first"))
     processor.push(instruction("second"))
     assert processor.status()["buffered_requests"] == 2
-    assert processor.ready()
-    batch = processor.build_batch()
+    assert processor.ready(1)
+    batch = processor.build_batch(1)
     assert batch.batch_id == "s:instruction:first"
     assert batch.request.id == "first"
-    assert processor.build_batch() is batch
+    assert processor.build_batch(1) is batch
     assert processor.acknowledge(batch.batch_id) == frozenset({"first"})
-    assert processor.build_batch().request.id == "second"
+    assert processor.build_batch(1).request.id == "second"
     assert processor.acknowledge("s:instruction:second") == frozenset({"second"})
-    assert not processor.ready()
+    assert not processor.ready(1)
     processor.close()
 
 
@@ -1227,7 +1226,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
     processor = reports_pipeline(PipelineContext("s", training_mode="hybrid"))
     processor.push(inference("a"))
     processor.push(report("a"))
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
     assert batch.batch_id == "s:batch:1"
     assert batch.request is None
     assert [source_record_id(sample) for sample in batch.items] == ["a"]
@@ -1388,50 +1387,49 @@ def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batchin
         dispatcher.close()
 
 
-def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold_them_all(caplog):
-    def fill(mode):
-        processor = reports_pipeline(PipelineContext("s", training_mode=mode))
-        for i in range(20):
-            processor.push(inference(f"inf-{i}"))
-            processor.push(
-                AgentRecord.create(
-                    scenario="s",
-                    request_type=RequestType.REPORT,
-                    payload={"score": 0, "references": [f"inf-{i}"]},
-                    agent_record_id=f"rep-{i}",
-                )
+@pytest.mark.parametrize("mode", ["auto", "manual", "hybrid"])
+def test_every_mode_releases_the_oldest_held_units_beyond_the_buffer(caplog, mode):
+    # The trainer's default buffer holds four batches of batch size 1, one sample each.
+    processor = reports_pipeline(PipelineContext("s", training_mode=mode, default_buffer_size=4))
+    assert processor.buffer_size == 4
+
+    def fail(index):
+        processor.push(inference(f"inf-{index}"))
+        processor.push(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.REPORT,
+                payload={"score": 0, "references": [f"inf-{index}"]},
+                agent_record_id=f"rep-{index}",
             )
-        return processor
+        )
 
-    with caplog.at_level(logging.WARNING, logger="reef.record2record.reports"):
-        manual = fill("manual")
-    assert len(manual.record2record.pool) == 4
-    assert not manual.ready()
-    retention = manual.releasable_record_ids()
-    shed = {f"inf-{i}" for i in range(16)} | {f"rep-{i}" for i in range(16)}
-    assert shed <= retention
-    kept = {f"inf-{i}" for i in range(16, 20)} | {f"rep-{i}" for i in range(16, 20)}
-    assert retention.isdisjoint(kept)
-    assert sum("released report rep-0" in record.message for record in caplog.records) == 1
+    with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
+        for index in range(20):
+            fail(index)
+    assert len(processor.record2record.pool) == 4
+    retention = processor.releasable_record_ids()
+    assert {f"inf-{i}" for i in range(16)} | {f"rep-{i}" for i in range(16)} <= retention
+    assert retention.isdisjoint({f"inf-{i}" for i in range(16, 20)} | {f"rep-{i}" for i in range(16, 20)})
+    # One warning names the buffer size; later releases are not logged.
     assert len(caplog.records) == 1
-    manual.push(instruction("do-it"))
-    batch = manual.build_batch()
-    assert batch.items == ()
-    assert manual.acknowledge(batch.batch_id) == frozenset({"do-it"})
-    assert len(manual.record2record.pool) == 4
-    manual.close()
-
-    for mode in ("auto", "hybrid"):
-        uncapped = fill(mode)
-        assert len(uncapped.record2record.pool) == 20
-        # The switch to manual trims the pile at once; the batch already handed out keeps its unit.
-        reserved = uncapped.build_batch()
-        uncapped.set_training_mode("manual")
-        assert len(uncapped.record2record.pool) == 4
-        assert "inf-0" not in uncapped.releasable_record_ids()
-        assert uncapped.acknowledge(reserved.batch_id) == frozenset({"inf-0", "rep-0"})
-        assert len(uncapped.record2record.pool) == 3
-        uncapped.close()
+    assert "buffer size 4" in caplog.records[0].message
+    if mode == "manual":
+        processor.push(instruction("do-it"))
+        batch = processor.build_batch(1)
+        assert batch.items == ()
+        assert processor.acknowledge(batch.batch_id) == frozenset({"do-it"})
+        assert len(processor.record2record.pool) == 4
+    else:
+        reserved = processor.build_batch(1)
+        fail(20)
+        fail(21)
+        # The handed-out batch keeps its unit and does not count; the buffer releases the oldest unreserved one.
+        assert "inf-16" not in processor.releasable_record_ids()
+        assert "inf-17" in processor.releasable_record_ids()
+        assert processor.acknowledge(reserved.batch_id) == frozenset({"inf-16", "rep-16"})
+        assert len(processor.record2record.pool) == 4
+    processor.close()
 
 
 def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
@@ -1445,9 +1443,7 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
             )
         )
 
-    recipe = replace(
-        _recipe(tmp_path, propose), training_mode="hybrid", promote_failures=True, pipeline_stages=harness_stages(2)
-    )
+    recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid", promote_failures=True, batch_size=2)
     dispatcher = _dispatcher(tmp_path, recipe)
 
     def gate_rows():

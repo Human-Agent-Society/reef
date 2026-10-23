@@ -208,7 +208,10 @@ def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
             "inference": {"model-path": "/student", "num-gpus": 1},
             "teacher": {"model-path": "/teacher", "num-gpus": 2, "port": 30123},
             "recipe": {"implementation": "recipes.opd.recipe:OPDRecipe"},
-            "training": {"backend": "slime", "options": {"opd-teacher": "separate", "opd-top-k": 1}},
+            "training": {
+                "backend": "slime",
+                "options": {"opd-teacher": "separate", "opd-top-k": 1, "global-batch-size": 1},
+            },
         },
         None,
         tmp_path / "serve.yaml",

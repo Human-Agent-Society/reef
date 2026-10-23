@@ -209,7 +209,7 @@ def start_dispatcher(tmp_path: Path):
         runtime = DurableRuntime(tmp_path / "checkpoints", **runtime_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
+            TestPolicyRecipe(**runtime_bindings(runtime)),
             factory,
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
@@ -415,7 +415,6 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
         "objective": "sft",
         "scheduling": {
             "unit": "comparison_set",
-            "batch_size": "configured",
             "epochs": 1,
             "shuffle": False,
             "remainder": "partial",
@@ -429,10 +428,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.produced_runtime_load_id == "job:job-0"
     assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]
     scenario.trainer.pipeline.experiment_logger.log({"accepted": 1}, namespace="processor")
-    assert tracker.loggers["math"].logged == [
-        ("recipe", {"batch_size": 1}),
-        ("processor", {"accepted": 1}),
-    ]
+    assert tracker.loggers["math"].logged == [("processor", {"accepted": 1})]
 
 
 @pytest.mark.unit
@@ -513,6 +509,9 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     assert sample["training/reserved_batches"] == 1
     assert sample["processor/unreserved_reports"] == 0
     assert sample["processor/reserved_reports"] == 1
+    # The pipeline status is exported too; the default buffer holds four batches of the trainer's batch size.
+    assert "processor/ready_samples" in sample
+    assert (sample["processor/batch_size"], sample["processor/buffer_size"]) == (1, 4)
     assert not tracker.events
     runtime.release.set()
     _wait_for_step(dispatcher, 2)

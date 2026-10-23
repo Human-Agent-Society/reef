@@ -24,11 +24,11 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     applies the verbatim upstream top-K select objective.
 
     The deployment's ``pipeline`` section configures the stages: the
-    sessions and the PRM judge in ``record2record``, and the batch size and
-    the PRM record file in ``task2batch``. Without ``prm_url`` the recipe is
-    correlate-only: sessions resolve, nothing trains, and records stay
-    compactable. ``batch_size`` must equal the Slime driver's
-    ``--global-batch-size`` (each turn-sample is its own rollout). Teacher
+    sessions and the PRM judge in ``record2record``, and the PRM record file
+    in ``task2batch``. Without ``prm_url`` the recipe is correlate-only:
+    sessions resolve, nothing trains, and records stay compactable. A batch
+    holds the Slime driver's ``--global-batch-size`` of judged turns (each
+    turn-sample is its own rollout). Teacher
     scoring is on the trainer: the Megatron teacher pass computes exact
     log-probs on the trainer's own tempered scale.
     """

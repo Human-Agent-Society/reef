@@ -57,6 +57,8 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
         "rollout_ids": list(range(len(rows))) if rollout_ids is None else rollout_ids,
         "loss": "sao",
         "method": TrainingMethod("sao").to_dict(),
+        # The rows train as one optimizer step.
+        "external_step_sizes": [len(rows)],
     }
 
 

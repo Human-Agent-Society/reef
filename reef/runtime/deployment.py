@@ -663,6 +663,9 @@ class RuntimeConnectionConfig:
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
     train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
+    batch_size: int = config_option(
+        1, help="Samples in one training step; Reef's Slime and Tinker deployments set it from the training options."
+    )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
@@ -674,6 +677,8 @@ class RuntimeConnectionConfig:
         ):
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"runtime.{name} must be a positive finite number")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size <= 0:
+            raise ValueError("runtime.batch_size must be a positive integer")
 
 
 @dataclass(frozen=True)

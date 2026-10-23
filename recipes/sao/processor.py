@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Self
 
-from reef.core.config import config_option
 from reef.core.records_types import AgentRecord
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.samples import make_policy_trajectory, recorded_training
-from reef.task2batch import Task2Batch
-from reef.task2batch.base import BatchSettings
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 
@@ -66,34 +63,21 @@ class SAOTasks(ReportTasks):
         return sample
 
 
-@dataclass(frozen=True)
-class SAOBatchSettings(BatchSettings):
-    """The config of ``SAOBatches``."""
-
-    # The default is the paper's rollouts per optimizer step (arXiv:2607.07508, §4.1).
-    batch_size: int = config_option(
-        128,
-        help=(
-            "The scored rollouts, from as many prompts, in one optimizer step. It must equal the "
-            "driver's --global-batch-size. 1 trains on every rollout and is a smoke setting only."
-        ),
-    )
-
-
 class SAOBatches(Task2Batch):
     """Batch scored rollouts as independently scheduled SAO samples.
 
     Single-Rollout Asynchronous Optimization ships each completed rollout on
     its own — no comparison group, no slowest-sample barrier. The pipeline
-    collects ``batch_size`` accepted rollouts (from as many prompts) into one
-    training step; the default is the paper's 128, and 1 trains once per
-    accepted rollout for smoke runs.
+    collects the backend's batch size (Slime ``--global-batch-size``) of
+    accepted rollouts, from as many prompts, into one optimizer step; the
+    paper uses 128 (arXiv:2607.07508, §4.1), and 1 trains once per accepted
+    rollout for smoke runs.
 
     SAO reuses ``TrajectoryItem`` / ``TrainingBatch`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
     tensors; malformed training input fails explicitly.
 
-    Config: ``batch_size`` (``SAOBatchSettings``).
+    Config: ``buffer_size`` (``BufferSettings``).
     """
 
     @classmethod
@@ -106,7 +90,7 @@ class SAOBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, SAOBatchSettings.parse(config, plugin_class=cls).batch_size)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, items)

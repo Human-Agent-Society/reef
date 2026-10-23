@@ -113,7 +113,7 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
 
 def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
     propose, entered, release = _blocking_proposer()
-    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
+    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose, batch_size=3))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -135,6 +135,8 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             processor = (await status.json())["scenarios"]["agents"]["processor"]
             assert processor["buffered_requests"] == 1
             assert processor["pending_instructions"] == 10
+            # The batch size is the trainer's (evolution.batch_size); the default buffer holds four batches.
+            assert (processor["ready_samples"], processor["batch_size"], processor["buffer_size"]) == (0, 3, 12)
             assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 10
             # Retrying an accepted instruction does not add another pending request.
             retry = await _post(client, {**_request("request 0"), "agent_record_id": ids[0]})

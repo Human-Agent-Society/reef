@@ -207,6 +207,7 @@ def test_null_is_kept_for_optional_fields(tmp_path):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     raw["recipe"]["config"] = {}
     raw["inference"] = {"model-path": "/models/demo", "upstream-api-key": None}
+    raw["training"] = {"options": {"global-batch-size": 1}}
     config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "config.yaml")
     assert config["reef"]["upstream_api_key"] is None
 
@@ -222,7 +223,7 @@ def test_recipe_config_refuses_the_removed_artifact_cadence(tmp_path):
 
 
 def test_recipe_config_refuses_a_stage_setting(tmp_path):
-    # batch_size belongs to the task-to-batch stage, under the pipeline section.
+    # The training backend owns batch_size; the recipe config has no such field.
     raw = {
         "inference": {"model-path": "/models/demo"},
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe", "config": {"batch-size": 4}},

@@ -69,16 +69,14 @@ pipeline:
           # A model call on the same Reef reviews each task's tests; a task they grade on what the instruction does
           # not state is refused.
           review: refuse
-  # A batch is tasks_per_step complete task groups.
-  task2batch:
-    config:
-      tasks_per_step: 2
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 1800
   options:
     state-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/tinker
+    # Episodes in one batch and one optimizer step: two complete task groups of plays_per_task plays.
+    batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004
 storage:

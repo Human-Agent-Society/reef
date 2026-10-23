@@ -292,6 +292,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         recipe="reef_config_extension:Training",
         model_path="model",
         ray_address="local",
+        training_backend_options={"global-batch-size": 1},
         recipe_settings={"count": "2", "max_staleness": "3"},
     )
     recipe = assembly._training_recipe(ExtensionRecipe, settings, {}, connect)

@@ -67,8 +67,8 @@ class RecordSetUnit(ABC):
     the group of a unit that is a group. It is None for any other unit.
 
     Purpose: the record stage puts it in its pool when the tasks of its record
-    sets are ready. A batch takes all its tasks or none of them, and
-    ``batch_size`` counts it as one unit. Consuming ``U`` writes
+    sets are ready. A batch takes all its tasks or none of them, and the
+    batch size counts each of its tasks as one sample. Consuming ``U`` writes
     ``consumed_ids(U)``, the IDs of the records of its record sets, to the commit.
     """
 

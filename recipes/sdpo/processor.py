@@ -31,7 +31,7 @@ from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
 from reef.record2task.samples import recorded_request, recorded_response
-from reef.task2batch import Task2Batch
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.
@@ -210,8 +210,8 @@ class SDPOTasks(ReportTasks):
 
 
 @dataclass(frozen=True)
-class SDPODemonstrationSettings(PluginSettings):
-    """The config of ``SDPOBatches``: which sibling the teacher reads, and whether it reads the feedback."""
+class SDPODemonstrationSettings(BufferSettings):
+    """The config of ``SDPOBatches``: which sibling the teacher reads, whether it reads the feedback, and the buffer."""
 
     success_reward_threshold: float = config_option(0.5, help="An attempt at or above this score is correct.")
     allow_own_success_as_demonstration: bool = config_option(
@@ -226,6 +226,7 @@ class SDPODemonstrationSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not math.isfinite(self.success_reward_threshold):
             raise ValueError("success_reward_threshold must be finite")
 
@@ -243,7 +244,9 @@ class SDPOBatches(Task2Batch):
     weight of 0, so an all-unsuccessful step still takes its optimizer step,
     as the reference does. The teacher's renderer and windows come from
     ``SDPOTasks``. A teacher sequence over ``max_teacher_tokens`` fails the
-    step instead of dropping part of the grid.
+    step instead of dropping part of the grid. ``max_batch_samples`` is the
+    grid, so the trainer refuses a larger batch size and a batch takes
+    exactly one grid.
     """
 
     def __init__(self, context: PipelineContext, settings: SDPODemonstrationSettings, record2task: SDPOTasks) -> None:
@@ -256,8 +259,9 @@ class SDPOBatches(Task2Batch):
         self.remove_thinking_from_demonstration = settings.remove_thinking_from_demonstration
         self.include_environment_feedback = settings.include_environment_feedback
         self.environment_feedback_only_without_solution = settings.environment_feedback_only_without_solution
-        # A batch is one unit: the whole step.
-        super().__init__(context, 1)
+        super().__init__(context, settings.buffer_size)
+        # One batch is one grid: a larger batch size would mix the coordinates of two grids.
+        self.max_batch_samples = record2task.groups_per_step * record2task.rollouts_per_group
 
     @classmethod
     def from_config(

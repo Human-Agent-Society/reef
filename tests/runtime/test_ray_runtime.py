@@ -52,7 +52,6 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
         return {
             "colocate": False,
             "training_job": {
-                "deferred_weight_update": True,
                 "status": getattr(self, "status", "IDLE"),
                 "scenario_step": 0,
                 "training_job_id": "job-0",
@@ -66,7 +65,7 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return slime_prepare_step(batch, objective, algorithm_state, scheduling)
+        return slime_prepare_step(batch, objective, algorithm_state, scheduling, step_size=1)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         del payload
@@ -122,7 +121,6 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
             "colocate": self.colocate,
             "lora_adapter": self.lora_adapter,
             "training_job": {
-                "deferred_weight_update": True,
                 "status": self.status,
                 "scenario_step": self.scenario_step,
                 "training_job_id": self.training_job_id,
@@ -344,16 +342,6 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
 
 
 @pytest.mark.unit
-def test_ray_runtime_requires_deferred_weight_updates() -> None:
-    class AtomicHandle(FakeTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            return {"training_job": {"deferred_weight_update": False, "status": "COMPLETE"}}
-
-    with pytest.raises(RayRuntimeError, match="requires deferred serving-weight updates"):
-        ExecutorRuntimeFixture(train_group_handle=AtomicHandle(), inference_url="http://router")
-
-
-@pytest.mark.unit
 def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
@@ -452,7 +440,7 @@ def test_ray_runtime_rejects_empty_serving_runtime_load_id() -> None:
 
 @pytest.mark.unit
 def test_slime_backend_preparation_emits_framework_agnostic_rows() -> None:
-    prepared = slime_prepare_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling())
+    prepared = slime_prepare_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -487,7 +475,7 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fi
         ),
     )
 
-    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -524,7 +512,7 @@ def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> 
         ),
     )
 
-    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -718,14 +706,6 @@ def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) ->
     monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     assert RemoteRayCoordinatorClient(train_group_actor=Bridge()).serving_runtime_load_id() is None
-
-
-@pytest.mark.unit
-def test_remote_handle_rejects_an_old_actor_before_training_side_effects() -> None:
-    handle = RemoteRayCoordinatorClient(train_group_actor=object())
-
-    with pytest.raises(RayRuntimeError, match="restart the Reef service and training actor together"):
-        handle.health()
 
 
 @pytest.mark.unit
@@ -974,53 +954,6 @@ def test_recovery_does_not_acknowledge_an_unrelated_later_commit() -> None:
     runtime.reconcile_training_job(
         scenario_step=5,
         committed_training_job_id="rollback-job",
-    )
-
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-
-@pytest.mark.unit
-def test_legacy_complete_marker_stays_closed_until_reef_commit_is_proven() -> None:
-    class LegacyCompleteHandle(DeferredWeightUpdateTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            health = dict(super().health())
-            health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
-            return health
-
-    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
-    runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
-
-    runtime.reconcile_training_job(scenario_step=3)
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-    runtime.reconcile_training_job(scenario_step=4)
-    assert handle.calls == []
-    assert runtime.inference_admission_status == {"open": False, "active": 0}
-
-    runtime.reconcile_training_job(
-        scenario_step=4,
-        committed_training_without_job_id=True,
-    )
-    assert handle.calls == ["acknowledge"]
-    assert runtime.inference_admission_status == {"open": True, "active": 0}
-
-
-@pytest.mark.unit
-def test_legacy_complete_marker_does_not_trust_an_unrelated_later_training_commit() -> None:
-    class LegacyCompleteHandle(DeferredWeightUpdateTrainGroupHandle):
-        def health(self) -> Mapping[str, Any]:
-            health = dict(super().health())
-            health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
-            return health
-
-    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
-    runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
-
-    runtime.reconcile_training_job(
-        scenario_step=5,
-        committed_training_without_job_id=True,
     )
 
     assert handle.calls == []
@@ -1330,7 +1263,7 @@ def test_ray_runtime_producing_versions_follow_the_step_schedule() -> None:
         grouped_policy_batch(versions=("engine:0", "engine:1")),
         TrainingMethod("tests.runtime.test_ray_runtime:TwoEpochObjective"),
         {},
-        StepScheduling(unit="sample", batch_size="actual", epochs=2),
+        StepScheduling(unit="sample", epochs=2),
         0,
     )
 

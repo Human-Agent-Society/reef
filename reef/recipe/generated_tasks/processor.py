@@ -4,8 +4,9 @@ The record stage (``GeneratedTaskRecord2Record``) groups the task player's repor
 episode of the training arm names its task under ``metadata.task``, the episodes of one task form a
 group, and a group is complete at ``plays_per_task`` episodes. A training play that reports nothing, such
 as a failed trial, never joins its group. So when a task's plays end, its group is complete at the number
-of plays that reported, and a group of one is discarded. ``GeneratedTaskBatches`` batches
-``tasks_per_step`` complete groups, in arrival order. When a round is due, the record stage gives a
+of plays that reported, and a group of one is discarded. ``GeneratedTaskBatches`` batches complete
+groups, in arrival order, until the batch holds the backend's batch size of episodes. When a round is
+due, the record stage gives a
 ``TaskGenerationRound`` to ``GeneratedTaskTasks``. That stage runs the round with the
 deployment's :class:`~reef.recipe.generated_tasks.TaskGenerator` and returns a ``RoundResult`` when the round ends. A
 round is not a record set and does not train; the episodes that its plays report do.
@@ -64,12 +65,11 @@ from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.tasks import SplitName, TaskConflict, TaskStore
-from reef.task2batch import Task2Batch
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TASKS_PER_STEP = 4
 DEFAULT_PLAYS_PER_TASK = 4
 # Qwen3 with thinking off ends the generation prompt with an empty think block of four tokens.
 DEFAULT_SCAFFOLD_TOLERANCE = 8
@@ -369,17 +369,6 @@ class RoundSettings(PluginSettings):
             raise ValueError("rounds need a description (what the tasks are about) and a state_dir")
         if self.generator is not None:
             TaskGenerator.reference(self.generator, setting="pipeline.record2task.config.generator")
-
-
-@dataclass(frozen=True)
-class TaskBatchSettings(PluginSettings):
-    """The config of ``GeneratedTaskBatches``."""
-
-    tasks_per_step: int = config_option(DEFAULT_TASKS_PER_STEP, help="The complete task groups in one batch.")
-
-    def __post_init__(self) -> None:
-        if self.tasks_per_step <= 0:
-            raise ValueError("tasks_per_step must be positive")
 
 
 class GeneratedTaskRecord2Record(ReportRecord2Record):
@@ -839,7 +828,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
 
 
 class GeneratedTaskBatches(Task2Batch):
-    """Batch the training arm's complete task groups, ``tasks_per_step`` groups to a batch."""
+    """Batch the training arm's complete task groups; one record set of a batch is one group."""
 
     @classmethod
     def from_config(
@@ -851,11 +840,7 @@ class GeneratedTaskBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, TaskBatchSettings.parse(config, plugin_class=cls))
-
-    def __init__(self, context: PipelineContext, settings: TaskBatchSettings) -> None:
-        # One record set of the batch is one complete task group.
-        super().__init__(context, settings.tasks_per_step)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
