@@ -36,7 +36,9 @@ def slime_args(**options):
     )
 
 
-def test_vllm_inference_config_uses_reef_option_names_and_placement_decisions():
+def test_vllm_inference_config_uses_reef_option_names_and_placement_decisions(monkeypatch):
+    # SGLang images set SGLANG_* variables; a vLLM engine receives none of them.
+    monkeypatch.setenv("SGLANG_IMAGE_TAG", "lmsysorg/sglang:test")
     values = inference_config(
         slime_args(colocate=True, offload_rollout=True), "vllm", {"max-model-len": 4096, "gpu-memory-utilization": 0.5}
     )
@@ -45,7 +47,7 @@ def test_vllm_inference_config_uses_reef_option_names_and_placement_decisions():
     assert config.options["gpu_memory_utilization"] == 0.5
     assert config.options["trust_remote_code"] is True
     assert config.options["seed"] == 1
-    assert "sglang" not in str(values)
+    assert "sglang" not in str(values) and not any(name.startswith("SGLANG_") for name in values["env_vars"])
     assert config.offload is True and config.shared_gpus == 1 and config.pause_mode == "retract"
     disjoint = VLLMConfig(**inference_config(slime_args(), "vllm"))
     assert disjoint.offload is False and disjoint.shared_gpus == 0 and disjoint.pause_mode == "in_place"
