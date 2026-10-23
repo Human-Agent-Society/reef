@@ -24,6 +24,7 @@ monkey_patch_torch_dist()
 
 # isort: split
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
+from slime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_to_path
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.misc import Box
@@ -288,6 +289,33 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 updater.update_weights = previous
             else:
                 delattr(updater, "update_weights")
+
+    def export_weight_files(self, directory: str) -> None:
+        """Write this actor's current full weights to ``directory`` for Reef's file transfer.
+
+        The same Hugging Face writer as the disk transfer, without a receiver:
+        Reef's coordinator delivers the directory. LoRA actors are refused;
+        their adapters need the native transfer.
+        """
+        if megatron_lora_enabled(self.args):
+            raise RuntimeError("Slime delivers only full weights as files")
+        updater = self.weight_updater
+        if self.args.offload_train:
+            self.wake_up()
+        try:
+            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+                save_hf_model_to_path(
+                    self.args,
+                    Path(directory),
+                    self.model,
+                    model_name=updater.model_name,
+                    quantization_config=updater.quantization_config,
+                    progress_desc="Save HF weights for Reef's file transfer",
+                )
+            dist.barrier(group=get_gloo_group())
+        finally:
+            if self.args.offload_train:
+                self.sleep()
 
     def save_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and

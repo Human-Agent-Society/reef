@@ -541,6 +541,22 @@ def test_failure_observer_follows_recreated_training_workers(make_group):
 
 
 @pytest.mark.parametrize("release_train", [False, True])
+def test_weight_file_export_runs_on_every_rank_without_a_receiver(make_group, monkeypatch, tmp_path, release_train):
+    calls = []
+
+    def export(worker, directory):
+        calls.append((worker.rank, directory))
+
+    monkeypatch.setattr(_Worker, "export_weight_files", export, raising=False)
+    group = make_group(release_train=release_train, train_rpc_timeout_s=43200)
+    group.create(rollout_manager=None)
+    if release_train:
+        group.release()
+    group.export_weight_files(tmp_path / "inc-1")
+    assert sorted(calls) == [(0, str(tmp_path / "inc-1")), (1, str(tmp_path / "inc-1"))]
+
+
+@pytest.mark.parametrize("release_train", [False, True])
 def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepare(
     make_group, monkeypatch, tmp_path, release_train
 ):

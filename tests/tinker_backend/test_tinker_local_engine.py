@@ -392,6 +392,7 @@ def test_remote_engine_topology_keeps_the_model_remote_and_pairs_with_the_compon
         "control_token_env": "REEF_REMOTE_CONTROL_TOKEN",
         "inference_token_env": "GPU_HOST_TOKEN",
         "startup_timeout_s": 3600.0,
+        "model_path": "Qwen/Qwen3-8B",
     }
 
     monkeypatch.setenv("RAY_ADDRESS", "ray://head:10001")
@@ -423,10 +424,6 @@ def test_remote_engine_topology_refuses_an_incomplete_section(tmp_path, monkeypa
         raw["inference"] = {**raw["inference"], **change}
         with pytest.raises(DeployConfigError, match=match):
             resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    raw = _remote_engine_config(tmp_path)
-    raw["training"] = {"backend": "slime"}
-    with pytest.raises(DeployConfigError, match="does not support remote engines"):
-        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 def test_training_service_hands_the_coordinator_a_backend_only_after_engines_attach(tmp_path):

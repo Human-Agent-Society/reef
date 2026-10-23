@@ -339,6 +339,7 @@ def test_component_refuses_an_archive_that_leaves_its_directory(component, tmp_p
         ({"url": "https://host?x=1"}, "without credentials, query"),
         ({"url": "https://host", "control-token-env": "SAME", "inference-token-env": "SAME"}, "different"),
         ({"url": "https://host", "startup-timeout-s": 0}, "positive"),
+        ({"url": "https://host", "model-path": " "}, "model-path must be a non-empty string"),
         ({"url": "https://host", "control-token-env": ""}, "control-token-env must be"),
         ({"url": "https://host", "region": "us"}, "unknown inference.remote fields: region"),
     ],

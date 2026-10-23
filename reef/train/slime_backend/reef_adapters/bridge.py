@@ -14,7 +14,9 @@ the job marker, written with each checkpoint, so a restart continues it.
 
 from __future__ import annotations
 
+import json
 import math
+import shutil
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -36,6 +38,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
+    WeightFiles,
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
 )
@@ -92,6 +95,10 @@ class WorkerTrainingSettings:
     schedule_state: LearningRateScheduleState | None
 
 
+#: Where a file session's exported weights live, beside the HF and Megatron checkpoint roots.
+WEIGHT_FILES_DIRNAME = "weight-files"
+
+
 class _NullAlgorithm(SlimeAlgorithm):
     """Stateless no-op algorithm for bridges started without a loss family."""
 
@@ -137,8 +144,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_runtime: SlimeAlgorithm | None = None,
         score_centering: ScoreCenteringSettings | None = None,
         train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+        weight_files_root: Path | None = None,
     ) -> None:
         self.train_rpc_timeout_s = train_rpc_timeout_s
+        #: Set for a file session: each publication exports the actor's full weights here.
+        self.weight_files_root = weight_files_root
         self._worker_failure: ExecutorFailure | None = None
         self._score_centering = score_centering
         self._group = actor_group
@@ -459,6 +469,41 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise RuntimeError("the Slime bridge keeps learning-rate schedule progress beside --save-hf")
         write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
 
+    def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
+        """Export the actor's current full weights as ``runtime_load_id`` when the session delivers files.
+
+        Without a file session this returns None and Reef uses the native
+        sender. The export is a Hugging Face checkpoint in
+        ``weight_files_root``; it replaces the previous export, which the
+        receiver loaded before Reef asks for the next one. Per-scenario LoRA
+        adapters are not exported.
+        """
+        root = self.weight_files_root
+        if root is None:
+            return None
+        if scenario is not None:
+            raise RuntimeError(
+                "Slime delivers only full weights as files; per-scenario adapters need its native transfer"
+            )
+        if root.exists():
+            for previous in root.iterdir():
+                shutil.rmtree(previous)
+        directory = root / runtime_load_id.replace(":", "-")
+        root.mkdir(parents=True, exist_ok=True)
+        self._group.export_weight_files(directory)
+        index = directory / "model.safetensors.index.json"
+        if directory.is_symlink() or not (directory / "config.json").is_file() or not index.is_file():
+            raise RuntimeError(f"exported weights are missing or incomplete: {directory}")
+        missing = sorted(
+            set(json.loads(index.read_text())["weight_map"].values()) - {path.name for path in directory.iterdir()}
+        )
+        if missing:
+            # Each training node writes its own shards; the coordinator reads them on rank 0's node.
+            raise RuntimeError(
+                f"exported weights lack shards {missing} on this node; multi-node training needs {root} on shared storage"
+            )
+        return WeightFiles(directory, "full")
+
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
 
@@ -630,8 +675,13 @@ def create_training_backend(
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
     train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+    delivers_weight_files: bool = False,
 ) -> SlimeTrainingBackend:
-    """Build a training-only adapter around already-started Slime workers."""
+    """Build a training-only adapter around already-started Slime workers.
+
+    With ``delivers_weight_files``, exports go to ``weight-files`` beside the
+    HF and Megatron checkpoint roots, outside the roots that retention scans.
+    """
     from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
 
     return SlimeTrainingBackend(
@@ -658,4 +708,9 @@ def create_training_backend(
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),
         train_rpc_timeout_s=train_rpc_timeout_s,
+        weight_files_root=(
+            Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent / WEIGHT_FILES_DIRNAME
+            if delivers_weight_files
+            else None
+        ),
     )

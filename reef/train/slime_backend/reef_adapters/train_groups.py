@@ -278,6 +278,16 @@ class SlimeTrainGroup:
             self._released_runtime_load_id = exported
             self.release()
 
+    def export_weight_files(self, directory: Path) -> None:
+        """Write the actor's current full weights to ``directory`` as a Hugging Face checkpoint.
+
+        Every rank takes part; rank 0 writes the configuration and each node's
+        writer rank its shards. No receiver is involved.
+        """
+        if self._executor is None and self._release_train_enabled():
+            self.create()
+        self.executor.collective_rpc("export_weight_files", args=(str(directory),), timeout=self.train_rpc_timeout_s)
+
     def send_prepared_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         """Send the prepared target after Reef has restored receiver memory."""
         if not self._full_disk_weight_update_enabled():

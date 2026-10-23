@@ -204,6 +204,7 @@ class SlimeDeployment(TrainingDeployment):
     """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
 
     supports_teacher_engine = True
+    supports_remote_inference = True
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -219,7 +220,16 @@ class SlimeDeployment(TrainingDeployment):
         native_arguments(options, reserved={"ready-file"})
         # Refuse a missing batch size at deploy time; the HTTP service reads it again, resolved.
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
-        if settings["inference_backend"] == "vllm":
+        remote = bool(settings["inference_remote"])
+        if remote:
+            # Remote engines receive full Hugging Face weights as files; no native transfer reaches them.
+            if settings["colocate"]:
+                raise DeployConfigError("training.colocate shares GPUs with the engines; remote engines run elsewhere")
+            if int(options.get("megatron-lora-rank", 0) or 0) > 0:
+                raise DeployConfigError(
+                    "Slime publishes only full weights to remote engines; remove training.options.megatron-lora-rank"
+                )
+        elif settings["inference_backend"] == "vllm":
             require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)
         reef = config["reef"]
@@ -275,6 +285,12 @@ class SlimeDeployment(TrainingDeployment):
             "train_timeout_s": settings["train_timeout_s"],
             "batch_size": global_batch_size(normalize_native_options(settings["training_backend_options"])),
         }
+        if settings["inference_remote"]:
+            runtime_config["inference_runtime"] = "remote"
+            runtime_config["inference_runtime_options"] = {
+                "engine": settings["inference_backend"] or "sglang",
+                "inference_token_env": settings["inference_remote"]["inference_token_env"],
+            }
         inference_handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if inference_handler_factory is not None:
             runtime_config["inference_handler_factory"] = inference_handler_factory
