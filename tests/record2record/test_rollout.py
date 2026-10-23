@@ -117,7 +117,7 @@ def test_saved_tasks_roll_out_and_only_their_settled_groups_form_the_batch() -> 
     ((batch, (first, second)),) = rollout.submitted
     assert pipeline.background_jobs_running() and pipeline.status()["rollout"]["batch"] == batch
     reports = {first: tuple(episode(pipeline, batch, first, f"{first}-{name}") for name in "ab")}
-    assert not pipeline.ready(SAMPLE_COUNT), "the plays have not ended, so no group knows its reports"
+    assert not pipeline.ready(SAMPLE_COUNT), "the episodes have not ended, so no group knows its reports"
     reports[second] = tuple(episode(pipeline, batch, second, f"{second}-{name}") for name in "ab")
     rollout.finish(reports)
     assert pipeline.ready(SAMPLE_COUNT) and pipeline.pending is None, "a ready batch waits for build_batch"
@@ -224,7 +224,7 @@ def test_a_report_that_arrives_while_its_batch_waits_is_released_when_the_batch_
 
 
 @pytest.mark.unit
-def test_a_group_waits_for_the_reports_its_plays_returned_until_the_settle_deadline() -> None:
+def test_a_group_waits_for_the_reports_its_episodes_returned_until_the_settle_deadline() -> None:
     pipeline, _, rollout = rollout_pipeline(tasks=1, tasks_per_step=1)
     pipeline.ready(SAMPLE_COUNT)
     ((batch, (task_use,)),) = rollout.submitted

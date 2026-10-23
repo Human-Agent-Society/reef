@@ -6,9 +6,9 @@ Dockerfile step that keeps the repository's history up to the base commit only. 
 on a copy under the generator service's tasks root. ``generate`` keeps the open generation in
 ``open-<generation>.json`` under the state directory, named by the recipe's generation number, and ``validate``
 adds each task's check results to it. ``record_results`` closes it, also after later generations started or after
-a restart: it places each played task against the band ``[band_low, band_high]`` and writes the generation report.
+a restart: it places each task that ran against the band ``[band_low, band_high]`` and writes the generation report.
 A second call for a closed generation does nothing.
-Eval tasks remain unplayed and receive no band measurement. A task that could not run is an outage, not a band
+Eval tasks run no episodes and receive no band measurement. A task that could not run is an outage, not a band
 measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
 directory lets a restart continue with the next session.
 """
@@ -42,7 +42,7 @@ from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewC
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
 from reef.record2task.generator.client import DuplicateTask, Generator, GeneratorError, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.designer import parse_harbor_reply
 from reef.record2task.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
@@ -105,10 +105,10 @@ STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission 
 STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
-STAGE_PLAY = "play"  # the recipe could not play the task
-STAGE_BAND = "band"  # the task played, and its pass rate is outside the band
-STAGE_UNREACHED = "unreached"  # the round ended before it played the task
-STAGE_HELD_OUT = "held_out"  # the task is in the eval split, so the recipe did not play it
+STAGE_RUN = "run"  # the recipe could not run the task
+STAGE_BAND = "band"  # the task ran, and its pass rate is outside the band
+STAGE_UNREACHED = "unreached"  # the round ended before it ran the task
+STAGE_HELD_OUT = "held_out"  # the task is in the eval split, so the recipe did not run it
 # Where a pass rate falls against the band.
 BAND_BELOW = "below"
 BAND_INSIDE = "inside"
@@ -349,7 +349,7 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 @dataclass(frozen=True)
 class TaskOutcome:
-    """A played task: its rewards, the solver's pass rate (the mean training reward), and its place in the band.
+    """A task that ran: its rewards, the solver's pass rate (the mean training reward), and its place in the band.
 
     ``path`` is where the task is under the generator service's tasks root.
     """
@@ -699,13 +699,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
             )
             raise
         finally:
-            # A copy that was already staged belongs to its writer, which may be playing it.
+            # A copy that was already staged belongs to its writer, which may be running it.
             if written.created:
                 await self.service.delete_task(task.name)
         self.save_validation(task.name, tuple(results), stage, str(written.path))
         return TaskValidationResult(errors)
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
         """Close an open generation: save training pass rates, band measurements and held-out outcomes in its report.
 
         An eval task gets the stage ``held_out``. The band is only recorded in the report. It does not change the
@@ -724,11 +724,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
             if result.split == "eval":
                 proposals.append(replace(proposal, stage=STAGE_HELD_OUT))
                 continue
-            if not result.is_played:
+            if not result.has_episodes:
                 if result.infrastructure_failure:
                     stage = STAGE_OUTAGE
                 else:
-                    stage = state.stages.get(result.task.name) or STAGE_PLAY
+                    stage = state.stages.get(result.task.name) or STAGE_RUN
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
                 continue
             pass_rate = statistics.fmean(result.training_rewards) if result.training_rewards else 0.0
@@ -756,7 +756,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 replace(proposal, stage=STAGE_BAND, refusal=f"outside the solver band: pass rate {pass_rate:.2f}")
             )
         proposals.extend(
-            replace(proposal, stage=STAGE_UNREACHED, refusal="the round ended before it played the task")
+            replace(proposal, stage=STAGE_UNREACHED, refusal="the round ended before it ran the task")
             for proposal in pending.values()
         )
         proposals.sort(key=lambda proposal: proposal.index)
@@ -776,7 +776,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         report_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         open_path.unlink()
         logger.info(
-            "AutoEnvScaling generation %d on scenario %r: %d tasks inside the band of %d played, %d sessions; %s",
+            "AutoEnvScaling generation %d on scenario %r: %d tasks inside the band of %d that ran, %d sessions; %s",
             state.number,
             self.scenario,
             sum(outcome.band == BAND_INSIDE for outcome in outcomes.values()),

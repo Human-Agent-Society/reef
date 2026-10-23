@@ -21,7 +21,7 @@ changes nothing. A deployment selects the file store in
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
 A store also keeps what happens to the train tasks of its generations after
-they are published: each task's first play result, the generations whose
+they are published: each task's first training result, the generations whose
 results reached the generator, and the tasks that trained.
 
 A task store belongs to a scenario session. Archiving the scenario retires its
@@ -76,7 +76,7 @@ class TaskCandidate:
 
     Purpose: ``TaskStore`` makes it in ``GenerationState.candidates``. The
     record-to-task stage reads the task directory (``TaskStore.path``) and the
-    outcome, to validate, publish or play the candidate, also after a restart.
+    outcome, to validate, publish or run the candidate, also after a restart.
     """
 
     name: str
@@ -152,14 +152,14 @@ class StoredTask:
 
 
 @dataclass(frozen=True)
-class PlayedResult:
-    """What the first play of a generation's train task returned.
+class TrainingEpisodesResult:
+    """What the first training episodes of a generation's train task returned.
 
     Values: ``task_name`` names a train task that the generation published.
     ``training_rewards`` are the rewards of the training episodes that ran. A
-    non-empty ``error`` means that the task was not played;
+    non-empty ``error`` means that the task ran no episodes;
     ``infrastructure_failure`` says that it could not run at all.
-    Purpose: the record-to-task stage saves it when the task first plays, and
+    Purpose: the record-to-task stage saves it when the task's episodes first end, and
     sends the results of a generation to its generator once each train task of
     the generation has one, also after a restart.
     """
@@ -196,7 +196,7 @@ class TaskStore(ABC):
 
     @abstractmethod
     def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
-        """Save a copy of each candidate task directory of a generation, in order, before validation or play.
+        """Save a copy of each candidate task directory of a generation, in order, before validation or episodes.
 
         The name of a candidate is the name of its directory. Raises
         ``TaskStoreError`` if the generation does not exist or has other
@@ -255,8 +255,8 @@ class TaskStore(ABC):
         """Return the published tasks in publication order, optionally of one split."""
 
     @abstractmethod
-    def record_result(self, *, generation: int, result: PlayedResult) -> None:
-        """Save the first play result of a train task that the generation published.
+    def record_result(self, *, generation: int, result: TrainingEpisodesResult) -> None:
+        """Save the first training result of a train task that the generation published.
 
         An identical retry changes nothing. Raises ``TaskStoreError`` if the
         task already has another result, or if the generation did not publish
@@ -264,8 +264,8 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def results(self, generation: int) -> tuple[PlayedResult, ...]:
-        """Return the saved play results of a generation's tasks, in candidate order."""
+    def results(self, generation: int) -> tuple[TrainingEpisodesResult, ...]:
+        """Return the saved training results of a generation's tasks, in candidate order."""
 
     @abstractmethod
     def mark_delivered(self, *, generation: int) -> None:
@@ -459,7 +459,6 @@ __all__ = [
     "IMPORTED_TASK_STORE",
     "GenerationState",
     "LocalTaskFileStore",
-    "PlayedResult",
     "SplitName",
     "StoredTask",
     "TaskCandidate",
@@ -468,5 +467,6 @@ __all__ = [
     "TaskStorage",
     "TaskStore",
     "TaskStoreError",
+    "TrainingEpisodesResult",
     "files_digest",
 ]

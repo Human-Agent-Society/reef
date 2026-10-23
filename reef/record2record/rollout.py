@@ -4,7 +4,7 @@ A record stage that rolls out tasks holds two pools. Its task pool holds the sav
 out. Its ordinary pool holds the groups of rollout episodes: the training reports of one task use in one
 rollout batch, keyed by ``(batch, task_use)`` from the episode labels, form one group.
 
-The pipeline begins a rollout batch with its task uses. When the plays end, it hands over the reports that
+The pipeline begins a rollout batch with its task uses. When the episodes end, it hands over the reports that
 each use's training episodes produced. A group settles when each of those reports joined it or ended, or
 when the pipeline closes the batch's groups after its settle deadline. A report whose batch is not active, whose
 task use is not one of the batch's, or whose arm is not the training arm, never trains.
@@ -28,14 +28,14 @@ TASK_USE_LABEL = "task_use"
 
 
 def reported_label(report: AgentRecord, name: str) -> str | None:
-    """Read one of the episode's labels from a task-player report."""
+    """Read one of the episode's labels from an episode report."""
     labels = reported_episode(report).get("labels")
     label = labels.get(name) if isinstance(labels, Mapping) else None
     return label if isinstance(label, str) else None
 
 
 def reported_episode_id(report: AgentRecord) -> str | None:
-    """Read the episode ID from a task-player report; several reports of one episode share it."""
+    """Read the episode ID from an episode report; several reports of one episode share it."""
     episode_id = reported_episode(report).get("id")
     return episode_id if isinstance(episode_id, str) and episode_id else None
 
@@ -65,7 +65,7 @@ class PooledTask:
 
     Values: ``task_id`` identifies the task in its pool. ``arrival_index``
     orders the tasks of a pool. ``group_key`` names what the task came from,
-    such as its generation. ``item`` is the task that a rollout plays.
+    such as its generation. ``item`` is the task that a rollout runs.
     Purpose: a record stage puts it in its ``TaskPool``; the pipeline takes it
     from the pool to submit it in a rollout batch, and puts it back when the
     batch did not train it.
@@ -116,13 +116,13 @@ class RolloutGrouping(ReportGrouping):
     """The training episodes of one task use in one rollout batch form one group.
 
     Values: ``active_keys`` holds the ``(batch, task_use)`` keys of the active batches. ``expected_reports``
-    maps a key whose plays ended to the report IDs of its training episodes; ``ended_reports`` maps a key to
+    maps a key whose episodes ended to the report IDs of its training episodes; ``ended_reports`` maps a key to
     its reports that ended without training; ``closed`` holds the keys whose batch's settle deadline passed.
     Every key in the last three sets is in ``active_keys`` until its batch ends.
-    Purpose: ``RolloutReportRecord2Record`` owns it and updates it as batches begin, end their plays and end;
+    Purpose: ``RolloutReportRecord2Record`` owns it and updates it as batches begin, end their episodes and end;
     the report stage asks it which reports train and when a group settles.
 
-    A group settles when every report that its plays returned joined it or ended without training, or when
+    A group settles when every report that its episodes returned joined it or ended without training, or when
     its batch's groups are closed. A group of fewer than two training episodes has no relative reward and is
     discarded; several reports of one episode count as one episode. A report without an episode ID never
     trains, because its episode cannot be counted; it ends, and so still counts toward its group. With a
@@ -133,7 +133,7 @@ class RolloutGrouping(ReportGrouping):
         self.training_arm = training_arm
         #: The ``(batch, task_use)`` keys of the active rollout batches; only their episodes may train.
         self.active_keys: set[tuple[str, str]] = set()
-        #: The reports that each group's plays returned, by group key, once its plays ended.
+        #: The reports that each group's episodes returned, by group key, once its episodes ended.
         self.expected_reports: dict[Hashable, frozenset[str]] = {}
         #: The reports of each group that ended without training, such as a skipped sample.
         self.ended_reports: dict[Hashable, set[str]] = {}
@@ -184,10 +184,10 @@ class RolloutReportRecord2Record(ReportRecord2Record):
         self.rollout_uses[batch] = task_uses
         self.rollout_grouping.active_keys.update((batch, task_use) for task_use in task_uses)
 
-    def plays_ended(self, key: Hashable, report_ids: tuple[str, ...]) -> None:
-        """The plays of the group ``key`` ended; these are the reports of its training episodes."""
+    def episodes_ended(self, key: Hashable, report_ids: tuple[str, ...]) -> None:
+        """The episodes of the group ``key`` ended; these are the reports of its training episodes."""
         self.rollout_grouping.expected_reports[key] = frozenset(report_ids)
-        # The plays can end before the group's first report arrives.
+        # The episodes can end before the group's first report arrives.
         if key in self.groups:
             self.refresh_group(key)
 

@@ -91,7 +91,7 @@ import a concrete integration.
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2task/``   | turning a record set into tasks (``Record2Task``,        | which records train, batch shape,          |
 |                         | ``ReportTasks``, ``JudgedTasks``), and the generator     | training loops                             |
-|                         | service that writes, checks, and plays Harbor tasks      |                                            |
+|                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | proposing candidates, training loops,      |
 |                         | episodes, built-in selection policies, and the           | artifact publication                       |
@@ -275,10 +275,10 @@ The extension points those packages expose are in `Python API
   and opens the scenario's task stores (``reef/storage/tasks.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
-  or play them with an agent? Put it in ``reef/record2task/generator/``, the
+  or run them with an agent? Put it in ``reef/record2task/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
-  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which plays generated tasks
+  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which runs generated tasks
   through that service and trains on them, is in
   ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
   (``generator.py``). The request, ``TaskGenerationRequest``, is in

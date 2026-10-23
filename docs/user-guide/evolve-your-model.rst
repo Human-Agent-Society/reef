@@ -243,8 +243,8 @@ feedback reports, and release queries. To compare learning signals before
 choosing a training config, see `Choose a recipe for agent learning
 <recipes.rst>`__.
 
-Play Harbor tasks and report
-----------------------------
+Run Harbor tasks and report
+---------------------------
 
 .. code-block:: bash
 
@@ -252,7 +252,7 @@ Play Harbor tasks and report
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
-Each task directory is played by a Harbor agent (``terminus-2`` unless
+Each task directory runs one episode with a Harbor agent (``terminus-2`` unless
 ``--agent-json`` names another) whose model calls go through Reef, so every
 inference is a record. When the verifier scores the episode, one report reaches
 ``/reef/report``: the reward as the score, the receipts as the references, and

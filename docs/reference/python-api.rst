@@ -614,7 +614,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        record ids returns the checkpoint.
    * - ``save_candidates(generation=..., directories=...)``
      - Save a copy of each candidate task directory once, before validation or
-       play. The name of a candidate is the name of its directory.
+       episodes. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
@@ -634,7 +634,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskPlayer.play``. Do not
+       for example for ``read_harbor_task`` or ``TaskEpisodeRunner.run``. Do not
        change it.
 
 Each write is durable when it returns. An identical retry of a write changes
@@ -1105,7 +1105,7 @@ Task generation
 .. code:: python
 
    from reef.core.tasks import HarborTask
-   from reef.recipe.generated_tasks import TaskGenerator, TaskPlayResult, TaskValidationResult
+   from reef.recipe.generated_tasks import TaskGenerator, GeneratedTaskResult, TaskValidationResult
    from reef.record2task.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
@@ -1116,7 +1116,7 @@ Task generation
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
-``async record_results(results: tuple[TaskPlayResult, ...], *, generation: int)``
+``async record_results(results: tuple[GeneratedTaskResult, ...], *, generation: int)``
 is optional. It receives the results of one earlier ``generate`` call, named by
 ``TaskGenerationRequest.generation``, possibly after later calls and after a
 restart. A second call for the same generation must have no effect. The
@@ -1139,9 +1139,9 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``TaskPlayResult(task, training_rewards=(), error="", split="train")`` holds
-the rewards of the training plays, only of the episodes that ran. ``is_played`` is true when
-``error`` is empty. A task that was not played has no rewards.
+``GeneratedTaskResult(task, training_rewards=(), error="", split="train")`` holds
+the rewards of the training episodes, only of the episodes that ran. ``has_episodes`` is true for a train
+task with an empty ``error``. A task that ran no episodes has no rewards.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
@@ -1154,7 +1154,7 @@ its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
 - Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
-Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
+Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe runs the tasks and trains, so the processor half of the method is
 not needed.
 
 Batch

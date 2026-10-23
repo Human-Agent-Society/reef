@@ -368,7 +368,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     With ``eval_task_store``, each step evaluates on the eval split of that
     task store as the step reads it (:func:`eval_task_paths`), and ``tasks``
     is the split when the backend was built. A step fixes its list, so both
-    sides of a comparison play the same tasks.
+    sides of a comparison run the same tasks.
     """
 
     def __init__(

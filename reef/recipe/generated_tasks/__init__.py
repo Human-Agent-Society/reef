@@ -6,12 +6,12 @@ names the generator (:class:`reef.recipe.generated_tasks.TaskGenerator`) in
 generator's method:
 
 - ``generator``: the contract of the task generator: ``TaskGenerator``,
-  ``TaskValidationResult`` and ``TaskPlayResult``. The request,
+  ``TaskValidationResult`` and ``GeneratedTaskResult``. The request,
   ``TaskGenerationRequest``, is the generator service's
   (``reef.record2task.generator.inputs``).
 - ``processor``: the three stages. ``GeneratedTaskRecord2Record`` groups the
-  training plays by task and starts each task-generation round when it is
-  due; ``GeneratedTaskTasks`` runs the rounds (generate, validate, play
+  training episodes by task and starts each task-generation round when it is
+  due; ``GeneratedTaskTasks`` runs the rounds (generate, validate, run
   through the generator service, send the results back) and turns the
   training arm's episodes into tasks; and
   ``GeneratedTaskBatches`` batches complete task groups.
@@ -19,10 +19,10 @@ generator's method:
   importance sampling loss.
 - ``recipe``: the objective, the step schedule, and the report contract.
 
-The recipe plays tasks through the generator service (``reef.record2task.generator``).
+The recipe runs the episodes of its tasks through the generator service (``reef.record2task.generator``).
 """
 
-from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.generated_tasks.processor import GeneratedTaskBatches, GeneratedTaskRecord2Record, GeneratedTaskTasks
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
@@ -31,9 +31,9 @@ __all__ = [
     "GeneratedTaskBatches",
     "GeneratedTaskRecipe",
     "GeneratedTaskRecord2Record",
+    "GeneratedTaskResult",
     "GeneratedTaskTasks",
     "TaskGenerator",
     "TaskGroupObjective",
-    "TaskPlayResult",
     "TaskValidationResult",
 ]

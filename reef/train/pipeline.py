@@ -149,7 +149,7 @@ class RolloutStages:
     """The two stages of a pipeline that rolls tasks out.
 
     Values: ``record2record`` holds the task pool and groups the rollout
-    episodes; ``task2batch`` plays the rollout batches and builds their
+    episodes; ``task2batch`` runs the rollout batches and builds their
     training batches.
     Purpose: ``TrainingPipeline`` makes it when its task-to-batch stage is a
     ``RolloutTask2Batch``, and its rollout loop reads both stages through it.
@@ -161,11 +161,11 @@ class RolloutStages:
 
 @dataclass(frozen=True)
 class ActiveRollout:
-    """The rollout batch that plays, or that waits for its groups and its training.
+    """The rollout batch that runs, or that waits for its groups and its training.
 
     Values: ``task_uses`` are the batch's task uses, and ``tasks`` the pooled
-    tasks that they play, in the same order. ``plays_ended_at`` is the
-    monotonic time when the plays ended, or None while they run; the settle
+    tasks that they run, in the same order. ``episodes_ended_at`` is the
+    monotonic time when the episodes ended, or None while they run; the settle
     deadline counts from it. ``ready_uses`` are the uses whose groups settled
     ready to train, before the staleness check.
     Purpose: the pipeline keeps it from submit until the batch trains or ends.
@@ -175,7 +175,7 @@ class ActiveRollout:
     batch: str
     task_uses: tuple[str, ...]
     tasks: tuple[PooledTask, ...]
-    plays_ended_at: float | None = None
+    episodes_ended_at: float | None = None
     ready_uses: frozenset[str] = frozenset()
 
 
@@ -493,7 +493,7 @@ class TrainingPipeline:
 
     def rollout_ready(self, stages: RolloutStages) -> bool:
         """Advance the rollout loop; return True when a settled rollout batch can train."""
-        self.record_finished_plays(stages)
+        self.record_finished_episodes(stages)
         if self.pending is not None:
             return True
         if self.rollout is not None:
@@ -514,29 +514,29 @@ class TrainingPipeline:
         self.start_rollout(stages)
         return False
 
-    def record_finished_plays(self, stages: RolloutStages) -> None:
-        """Hand each task use's training reports to the record stage when the rollout's plays end."""
+    def record_finished_episodes(self, stages: RolloutStages) -> None:
+        """Hand each task use's training reports to the record stage when the rollout's episodes end."""
         for result in stages.task2batch.take_finished():
             if self.rollout is None or result.batch != self.rollout.batch:
                 logger.warning(
-                    "scenario %r ignores the plays of rollout %r, which is not running", self.scenario, result.batch
+                    "scenario %r ignores the episodes of rollout %r, which is not running", self.scenario, result.batch
                 )
                 continue
             # A use without reports, as after a rollout job that failed, has no episode to wait for.
             for task_use in self.rollout.task_uses:
-                stages.record2record.plays_ended(
+                stages.record2record.episodes_ended(
                     (result.batch, task_use), tuple(result.training_reports.get(task_use, ()))
                 )
-            self.rollout = replace(self.rollout, plays_ended_at=time.monotonic())
+            self.rollout = replace(self.rollout, episodes_ended_at=time.monotonic())
 
     def rollout_settled(self, stages: RolloutStages) -> bool:
         """Whether every group of the rollout batch settled; past the settle deadline, the groups settle as they are."""
-        if self.rollout is None or self.rollout.plays_ended_at is None:
+        if self.rollout is None or self.rollout.episodes_ended_at is None:
             return False
         batch = self.rollout.batch
         if stages.record2record.batch_groups_settled(batch):
             return True
-        if time.monotonic() - self.rollout.plays_ended_at < stages.task2batch.settle_timeout_seconds:
+        if time.monotonic() - self.rollout.episodes_ended_at < stages.task2batch.settle_timeout_seconds:
             return False
         logger.warning("scenario %r settles rollout %r without the reports it still waits for", self.scenario, batch)
         stages.record2record.close_groups(batch)
@@ -717,7 +717,7 @@ class TrainingPipeline:
             else {
                 "batch": self.rollout.batch,
                 "task_uses": len(self.rollout.task_uses),
-                "is_playing": self.rollout_stages.task2batch.running(),
+                "is_running": self.rollout_stages.task2batch.running(),
             }
         )
         return {

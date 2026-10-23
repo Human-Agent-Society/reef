@@ -1,9 +1,9 @@
-"""The task generator contract of the generated-task recipe: the generator, its validation results, and play results.
+"""The task generator contract of the generated-task recipe: the generator, its validation results, and task results.
 
 A deployment selects one :class:`TaskGenerator` in its
 ``pipeline.record2task.config.generator`` setting. The recipe asks the
 generator for tasks with a ``TaskGenerationRequest``
-(:mod:`reef.record2task.generator.inputs`), validates each one, plays the
+(:mod:`reef.record2task.generator.inputs`), validates each one, runs the
 valid ones, and sends the results back to the generator. This module holds the
 values, their field validation, and the generator interface. Consumers own
 file reads, transport limits, and execution.
@@ -46,17 +46,17 @@ class TaskValidationResult:
 
 
 @dataclass(frozen=True)
-class TaskPlayResult:
+class GeneratedTaskResult:
     """What became of one generated task in a round.
 
-    ``training_rewards`` holds the rewards of the plays the recipe trains on,
+    ``training_rewards`` holds the rewards of the episodes the recipe trains on,
     only of the episodes that ran. An episode that ran and returned no reward
     counts as 0. ``error`` is not
-    empty when the task was not played: it failed validation, the task player
+    empty when the task ran no episodes: it failed validation, the generator service
     refused it, or the agent could not start on it. ``infrastructure_failure``
     marks an error where the task could not run at all, for example because
     the sandbox failed; it is not a failure of the solver.
-    An eval task has no rewards and is not played, even with an empty error.
+    An eval task has no rewards and runs no episodes, even with an empty error.
     """
 
     task: HarborTask
@@ -78,7 +78,7 @@ class TaskPlayResult:
         if not isinstance(self.error, str):
             raise TypeError("error must be text")
         if self.error and self.training_rewards:
-            raise ValueError("a task that was not played has no rewards")
+            raise ValueError("a task that ran no episodes has no rewards")
         if self.split not in ("train", "eval"):
             raise ValueError("task result split must be train or eval")
         if self.split == "eval" and self.training_rewards:
@@ -87,12 +87,12 @@ class TaskPlayResult:
             raise ValueError("an infrastructure failure needs the error that stopped the task")
 
     @property
-    def is_played(self) -> bool:
+    def has_episodes(self) -> bool:
         return self.split == "train" and not self.error
 
 
 class TaskGenerator(Plugin, ABC):
-    """Makes tasks for one scenario, and adapts to how the agent played them.
+    """Makes tasks for one scenario, and adapts to how the agent did on them.
 
     A deployment names the class in ``pipeline.record2task.config.generator``. Reef calls
     :meth:`from_config` once for each scenario. A generator gets what it needs
@@ -119,18 +119,18 @@ class TaskGenerator(Plugin, ABC):
 
     @abstractmethod
     async def validate(self, task: HarborTask) -> TaskValidationResult:
-        """Check one generated task before the recipe plays it.
+        """Check one generated task before the recipe runs its episodes.
 
         Return task defects as validation errors. Raise when the checks cannot
         run; the exception stops the round. The task is a value: a validation
         that needs a directory writes its own copy.
         """
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
         """Receive the results of the tasks that the :meth:`generate` call of ``generation`` returned.
 
         The recipe calls this once each train task of the generation has a
-        result from its first play: possibly after later ``generate`` calls,
+        result from its first episodes: possibly after later ``generate`` calls,
         and after a restart. A crash before the recipe records the delivery
         sends the same results again, so a second call for the same generation
         must change nothing. The default keeps nothing.

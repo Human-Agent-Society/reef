@@ -5,11 +5,11 @@ Designer call through the generator service (``reef.record2task.generator``), wi
 results in the prompt as SPADE's experience section.
 
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
-and removes it again: the generated-task recipe writes the valid task once more to play it.
+and removes it again: the generated-task recipe writes the valid task once more to run it.
 
 ``generate`` keeps the open generation, its proposals and refusals, in ``open-<generation>.json`` under
 ``state_dir``, named by the recipe's generation number. ``record_results`` closes it, also after later
-generations started or after a restart. For each train task that the recipe played and that has
+generations started or after a restart. For each train task that the recipe ran and that has
 ``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
 file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
 them. It reports each proposal's regret against the Designer's receipt (0 for a refused one) and keeps the
@@ -47,7 +47,7 @@ from recipes.beta.spade.generation import (
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
-from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
 from reef.recipe.generated_tasks.processor import rewards_of
 from reef.record2task.generator.client import (
     DuplicateTask,
@@ -274,22 +274,22 @@ class SpadeTaskGenerator(TaskGenerator):
         except GeneratorError as exc:
             self.save_error(task.name, str(exc))
             raise
-        # A copy that was already staged belongs to its writer, which may be playing it.
+        # A copy that was already staged belongs to its writer, which may be running it.
         if written.created:
             await self.service.delete_task(task.name)
         return TaskValidationResult(() if oracle.is_solvable else (f"oracle check refused: {oracle.reason}",))
 
     async def hint_rewards(self, task: HarborTask, *, generation: int) -> tuple[float, ...]:
-        """Play a task that the recipe played ``hint_plays`` times with its hint, and return the rewards of the plays.
+        """Run a task that the recipe ran ``hint_plays`` times with its hint, and return the rewards of the plays.
 
-        Staging the task again returns the copy that the recipe played. The plays report on the ``hint`` arm,
+        Staging the task again returns the copy that the recipe ran. The plays report on the ``hint`` arm,
         which the recipe does not train on.
         """
-        episodes = await self.service.play(
+        episodes = await self.service.run_episodes(
             (await self.service.write_task(task)).path,
             scenario=self.scenario,
             arm=HINT_ARM,
-            plays=self.hint_plays,
+            count=self.hint_plays,
             is_reporting=True,
             extra_instruction_files=(HINT_FILE,),
             tags={"generation": str(generation)},
@@ -308,7 +308,7 @@ class SpadeTaskGenerator(TaskGenerator):
             await self.service.delete_task(task.name)
             return await self.service.write_task(task)
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...], *, generation: int) -> None:
+    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
         """Close an open generation: save its report and experience, and report Designer rewards for train tasks."""
         path = self.open_path(generation)
         if not path.is_file():
@@ -326,7 +326,7 @@ class SpadeTaskGenerator(TaskGenerator):
             if result.split == "eval":
                 proposals.append((replace(proposal, task_name=result.task.name, split="eval"), None))
                 continue
-            if not result.is_played:
+            if not result.has_episodes:
                 proposals.append((replace(proposal, infrastructure_failure=result.infrastructure_failure), None))
                 continue
             plain = result.training_rewards

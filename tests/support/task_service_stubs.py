@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
-from reef.harness.client.tasks import TaskPlay
+from reef.harness.client.tasks import TaskEpisode
 from reef.record2task.generator import (
     DesignerRequest,
     DuplicateTask,
@@ -81,7 +81,7 @@ class StandInGenerator(Generator):
         same_port: bool = False,
         is_solvable: bool = True,
         rewards: Mapping[str, float] | None = None,
-        play_error: str = "",
+        episode_error: str = "",
         fail_after: int | None = None,
         taken: Sequence[str] = (),
         check_fail_after: int | None = None,
@@ -93,13 +93,13 @@ class StandInGenerator(Generator):
         self.taken = set(taken)
         self.is_solvable = is_solvable
         self.rewards = dict(rewards or {"plain": 0.25, "hint": 0.75})
-        self.play_error = play_error
+        self.episode_error = episode_error
         self.fail_after = fail_after
         self.check_fail_after = check_fail_after
         self.proposals: list[dict[str, object]] = []
         self.writes: list[str] = []
         self.checks: list[Path] = []
-        self.plays: list[dict[str, object]] = []
+        self.episode_requests: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
         self.deleted: list[str] = []
         self.episodes = 0
@@ -167,37 +167,39 @@ class StandInGenerator(Generator):
             return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
 
-    async def play(self, task_path, *, scenario, arm, plays, is_reporting, extra_instruction_files, tags, model=None):
-        self.plays.append(
+    async def run_episodes(
+        self, task_path, *, scenario, arm, count, is_reporting, extra_instruction_files, tags, model=None
+    ):
+        self.episode_requests.append(
             {
                 "task": task_path.name,
                 "arm": arm,
-                "plays": plays,
+                "count": count,
                 "is_reporting": is_reporting,
                 "extra": tuple(extra_instruction_files),
                 "tags": dict(tags),
                 "model": model,
             }
         )
-        reward = None if self.play_error else self.rewards[arm]
+        reward = None if self.episode_error else self.rewards[arm]
         rows = []
-        for _ in range(plays):
+        for _ in range(count):
             self.episodes += 1
-            # A task's reports are numbered from 0 across its plays, as a test that reports them names them.
+            # A task's reports are numbered from 0 across its episodes, as a test that reports them names them.
             index = self.task_episodes.get(task_path.name, 0)
             self.task_episodes[task_path.name] = index + 1
             rows.append(
-                TaskPlay(
+                TaskEpisode(
                     task_path=task_path,
                     name=task_path.name,
                     episode_id=f"episode-{self.episodes}",
                     reward=reward,
                     rewards={} if reward is None else {"reward": reward},
-                    error=self.play_error,
-                    receipts=() if self.play_error else (f"rec-{self.episodes}",),
+                    error=self.episode_error,
+                    receipts=() if self.episode_error else (f"rec-{self.episodes}",),
                     failed_calls=0,
                     report_agent_record_ids=(
-                        (f"rep-{task_path.name}-{index}",) if is_reporting and not self.play_error else ()
+                        (f"rep-{task_path.name}-{index}",) if is_reporting and not self.episode_error else ()
                     ),
                     trial_uri=None,
                 )

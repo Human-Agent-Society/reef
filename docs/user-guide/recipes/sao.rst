@@ -128,7 +128,7 @@ CEO-Bench
 
 The `CEO-Bench example <../../../recipes/sao/examples/ceobench>`__ trains the
 same recipe on `CEO-Bench <https://ceobench.com>`__, a 500-day simulated
-startup. The harness is the benchmark's own bash agent played from the host,
+startup. The harness is the benchmark's own bash agent run from the host,
 its prompt, tools, and tool executor taken from the pinned checkout in the
 task image and its model calls served by Reef; the two simulator roles stay
 outside Reef, and the verifier reads final cash, survival days, and bankruptcy

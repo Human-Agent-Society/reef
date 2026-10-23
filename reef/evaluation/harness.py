@@ -102,7 +102,7 @@ class EpisodeScorer(ConfiguredPlugin, ABC):
 def verifier_reward(task: str, result: EpisodeResult) -> float:
     """The Harbor verifier's reward for a task directory episode; :class:`VerifierRewardScorer` scores with it.
 
-    The terminus runner writes one ``verifier`` row per episode with the task it played and the rewards
+    The terminus runner writes one ``verifier`` row per episode with the task it ran and the rewards
     its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
     episode or a verifier that wrote nothing scores 0 (the gate has already set aside an episode whose
     trial never ran); an episode that exited without a row scores 0; a row for another task, several

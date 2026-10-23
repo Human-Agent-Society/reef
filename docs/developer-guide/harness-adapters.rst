@@ -413,7 +413,7 @@ Tree entries map to Terminus 2 configuration as follows:
   ``AgentConfig.import_path``. Without an extension, it runs stock Terminus 2.
 
 Terminus is a batch runner, not a session. ``reef-terminus`` takes only
-``--task`` and plays one Harbor task, so the adapter declares no install
+``--task`` and runs one Harbor task, so the adapter declares no install
 section. ``GET /reef/harness/install?adapter=terminus`` answers HTTP 400,
 there is no ``reef-terminus`` client wrapper (``reef-terminus evolve`` does
 not exist), and there is no session to type ``/reefine`` into. A request

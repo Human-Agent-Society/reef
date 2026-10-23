@@ -437,27 +437,27 @@ generator gets what it needs from its ``config`` and from these calls only:
   task. Empty ``errors`` means the task passed. Return task defects as errors.
   Raise when the checks cannot run; the recipe retries the generation. The task is a value, so the check does not
   need a file system that it shares with Reef.
-- ``async record_results(results: tuple[TaskPlayResult, ...], *, generation: int)``
+- ``async record_results(results: tuple[GeneratedTaskResult, ...], *, generation: int)``
   receives the results of the ``generate`` call numbered ``generation``, once
   every train task of it has a result. Later generations may have started
   before, and the process may have restarted since. A generator keeps what it
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
 
-A ``TaskPlayResult`` holds the task, ``training_rewards``, a ``split``
+A ``GeneratedTaskResult`` holds the task, ``training_rewards``, a ``split``
 (``train`` by default), an ``error``, and ``infrastructure_failure``. The
 rewards include only episodes that ran. An episode that ran
-without a reward counts as 0. A non-empty ``error`` means that the task was not
-played: it failed validation, the generator service refused it, or the agent
+without a reward counts as 0. A non-empty ``error`` means that the task ran no
+episodes: it failed validation, the generator service refused it, or the agent
 could not start on it. ``infrastructure_failure`` marks an error where the task
 could not run at all; it is not a failure of the solver.
 
-An eval result has ``split="eval"``, no rewards, and no error. The task was
-not played. A generator must not use an eval result as training feedback or as
+An eval result has ``split="eval"``, no rewards, and no error. The task ran
+no episodes. A generator must not use an eval result as training feedback or as
 experience for later generations.
 
 The generator service scores an episode whose verifier ran past its timeout
-as 0, and reports it, so a training play of that kind trains. The task's
+as 0, and reports it, so a training episode of that kind trains. The task's
 oracle passed the same verifier, so the timeout is the agent's.
 
 The recipe splits the work across its stages. A round is not a record set,
@@ -468,13 +468,13 @@ gives the round number and its sessions to the record-to-task stage
 ``BackgroundJobWorker``, outside the trainer lock, and tells the record stage
 when the round ends. One generation runs at a time.
 
-A generation job does not play. It:
+A generation job runs no episodes. It:
 
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
 2. Saves the candidates in the scenario's task store, then validates each
    task with the generator.
-3. Publishes each valid task with its train/eval split. It does not play eval
+3. Publishes each valid task with its train/eval split. It runs no eval
    tasks.
 
 A generator or check that fails to run is retried from the saved candidates,
@@ -488,17 +488,17 @@ Saved tasks roll out as batches. The pipeline runs a second loop:
 
 1. When no rollout batch runs, the pipeline takes up to ``tasks_per_step``
    tasks from the task pool and submits them as one rollout batch.
-2. ``GeneratedTaskBatches`` plays them all at once on its own worker. It
-   stages each saved task in the generator service (``write_task``) and plays
-   it ``plays_per_task`` times on the training arm. Staging the same task again
-   returns its staged copy, so a play that a stop interrupted can stage and
-   play again. The generator service runs at most ``generator.concurrency``
-   episodes at once, across all plays. Each episode
-   carries the labels ``batch`` and ``task_use``. A task's first play saves its
-   result. An episode with an error and no reward could not run; when every
+2. ``GeneratedTaskBatches`` runs them all at once on its own worker. It
+   stages each saved task in the generator service (``write_task``) and runs
+   ``episodes_per_task`` episodes of it on the training arm. Staging the same
+   task again returns its staged copy, so episodes that a stop interrupted can
+   stage the task and run again. The generator service runs at most
+   ``generator.concurrency`` episodes at once, across all requests. Each
+   episode carries the labels ``batch`` and ``task_use``. A task's first
+   episodes save its result. An episode with an error and no reward could not run; when every
    training episode of a task could not run, the task's result is an
    infrastructure failure, not a solver failure.
-3. When the plays end, the rollout hands over the reports of each task use's
+3. When the episodes end, the rollout hands over the reports of each task use's
    training episodes. The record stage groups the training reports by
    ``(batch, task_use)``. A group settles when each of those reports joined it
    or ended without training, for example because the record-to-task stage
@@ -515,7 +515,7 @@ Saved tasks roll out as batches. The pipeline runs a second loop:
 A report whose batch is not running, whose task use is not one of the batch's,
 or whose arm is not the training arm, never trains. A report that arrives after its batch was built is released
 when the batch ends. When a submit fails, its tasks stay in the task pool. If
-a task's play fails, the other tasks of the batch play on. If the whole rollout
+a task's episodes fail, the other tasks of the batch run on. If the whole rollout
 job fails, each of its tasks without a result gets an infrastructure-failure
 result, so its generation's feedback still goes out. A result that the task
 store fails to save is saved again by the next job. On a restart, the train
@@ -530,8 +530,8 @@ generation's results to ``record_results``. A generation can therefore close
 after later generations started. A generation whose delivery fails waits for
 the next job, and later generations still go out.
 
-The training plays carry the arm ``plain``, and only reports with that label
-train. A generator can play a task more times through the generator service
+The training episodes carry the arm ``plain``, and only reports with that label
+train. A generator can run more episodes of a task through the generator service
 on another arm, as SPADE does for its hint plays; those reports do not train.
 The ``task_group`` objective centers and scales each reward within its
 task group, on Tinker's ``importance_sampling`` loss. The record stage
@@ -568,21 +568,21 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-play result, the generations whose results the generator received, and the
+training result, the generations whose results the generator received, and the
 tasks that trained.
 
 After a restart, the record-to-task stage continues with the next generation number.
 It puts the train tasks that did not train back in the task pool and sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
-A task whose play was running at the stop has no result, so it plays again.
+A task whose episodes were running at the stop has no result, so it runs again.
 ``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the task pool size.
 
 Container operations run in the generator service, ``reef.record2task.generator``.
 The record-to-task stage calls this service over HTTP. The task store is the
 source of each task; the service's tasks root holds staged copies. Staging the
-same task again under its name returns the staged copy, so a play that a stop
+same task again under its name returns the staged copy, so episodes that a stop
 interrupted, or a service that restarted with an empty tasks root, can still
-play a saved task. The ``generator`` deployment
+run a saved task. The ``generator`` deployment
 section configures the service that ``reef serve`` starts.
 See `generator configuration
 <../reference/configuration.rst#the-generator-section>`__ for its settings.

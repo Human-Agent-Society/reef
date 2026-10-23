@@ -121,11 +121,11 @@ class Task2Batch(ABC, Plugin):
 
 @dataclass(frozen=True)
 class RolloutResult:
-    """The plays of one rollout batch ended.
+    """The episodes of one rollout batch ended.
 
     Values: ``batch`` names the rollout batch. ``training_reports`` maps each
     task use of the batch to the report IDs of its training episodes; a use
-    without reports, such as one whose play failed, may be absent.
+    without reports, such as one whose episodes failed, may be absent.
     Purpose: ``RolloutTask2Batch.take_finished`` makes it. The pipeline gives
     each use's reports to the record stage, which settles the use's group when
     those reports joined it or ended.
@@ -139,27 +139,27 @@ class RolloutTask2Batch(Task2Batch):
     """A task-to-batch stage that rolls saved tasks out, then batches their episodes.
 
     The pipeline takes tasks from its record stage's task pool and submits them as one rollout batch. The
-    stage plays them on a worker that it owns, and each episode's records carry the batch and the task use.
-    ``take_finished`` hands back each use's training reports when the plays end. The pipeline then batches
+    stage runs them on a worker that it owns, and each episode's records carry the batch and the task use.
+    ``take_finished`` hands back each use's training reports when the episodes end. The pipeline then batches
     the rollout batch's settled groups through ``make_batch``. ``close`` stops the worker.
     """
 
     #: The most saved tasks of one rollout batch.
     tasks_per_step: int = 1
-    #: How long the groups of a batch whose plays ended may wait for their reports before they settle as they are.
+    #: How long the groups of a batch whose episodes ended may wait for their reports before they settle as they are.
     settle_timeout_seconds: float = 600.0
 
     @abstractmethod
     def submit(self, batch: str, tasks: tuple[TaskItem, ...]) -> tuple[str, ...]:
-        """Start playing the tasks as one rollout batch; return one task use ID for each task, in order."""
+        """Start running the tasks as one rollout batch; return one task use ID for each task, in order."""
 
     @abstractmethod
     def take_finished(self) -> tuple[RolloutResult, ...]:
-        """Return the rollout batches whose plays ended since the last call."""
+        """Return the rollout batches whose episodes ended since the last call."""
 
     @abstractmethod
     def running(self) -> bool:
-        """Whether a rollout batch is playing."""
+        """Whether a rollout batch is running."""
 
     @abstractmethod
     def rollout_trained(self, batch: str, task_uses: tuple[str, ...]) -> None:

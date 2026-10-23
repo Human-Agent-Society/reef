@@ -190,7 +190,7 @@ class PostgresRecordDatabase:
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
                 # generated_task with candidate_task and published_task, which keep each task by the digest
                 # of its directory, and no longer uses task_store. Version 8 adds task_result, task_delivery and
-                # task_trained, the play results, deliveries and trained marks of generated tasks. create_all adds
+                # task_trained, the training results, deliveries and trained marks of generated tasks. create_all adds
                 # them to an older schema.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)

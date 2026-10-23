@@ -3,7 +3,7 @@
 Two tasks made from a shared agent record go to the same split, so nothing
 the train split saw comes back, reworded, in the evaluation. A task keeps its
 split after it gets one. A split can be saved as a manifest file, which the
-task player and the Cordis evaluation read.
+episode runner and the Cordis evaluation read.
 """
 
 from __future__ import annotations

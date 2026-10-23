@@ -21,7 +21,6 @@ from reef.storage.sql_records import SQLRecordStore
 from reef.storage.tasks import (
     SPLIT_NAMES,
     GenerationState,
-    PlayedResult,
     SplitName,
     StoredTask,
     TaskCandidate,
@@ -30,6 +29,7 @@ from reef.storage.tasks import (
     TaskStorage,
     TaskStore,
     TaskStoreError,
+    TrainingEpisodesResult,
 )
 
 
@@ -41,7 +41,7 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
-    ``results`` holds the first play result of each played train task,
+    ``results`` holds the first training result of each train task that ran,
     ``deliveries`` one row for each generation whose results reached the
     generator, and ``trained`` one row for each task that trained.
     """
@@ -270,7 +270,7 @@ class SQLTaskStore(TaskStore):
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
 
-    def record_result(self, *, generation: int, result: PlayedResult) -> None:
+    def record_result(self, *, generation: int, result: TrainingEpisodesResult) -> None:
         document = result_document(result)
         results = self.tables.results
         with self.records._transaction(write=True) as connection:
@@ -293,7 +293,7 @@ class SQLTaskStore(TaskStore):
             elif existing != document:
                 raise TaskStoreError(f"task {result.task_name!r} of generation {generation} already has a result")
 
-    def results(self, generation: int) -> tuple[PlayedResult, ...]:
+    def results(self, generation: int) -> tuple[TrainingEpisodesResult, ...]:
         results = self.tables.results
         with self.records._transaction(write=False) as connection:
             state = self.read_generation(connection, generation)
@@ -424,8 +424,8 @@ class SQLTaskStore(TaskStore):
         )
 
 
-def result_document(result: PlayedResult) -> str:
-    """Encode a play result as canonical JSON text. An identical retry gives the same text."""
+def result_document(result: TrainingEpisodesResult) -> str:
+    """Encode a training result as canonical JSON text. An identical retry gives the same text."""
     return json.dumps(
         {
             "task_name": result.task_name,
@@ -439,10 +439,10 @@ def result_document(result: PlayedResult) -> str:
     )
 
 
-def result_from_document(text: str) -> PlayedResult:
+def result_from_document(text: str) -> TrainingEpisodesResult:
     """Decode the text of :func:`result_document`."""
     document = json.loads(text)
-    return PlayedResult(
+    return TrainingEpisodesResult(
         task_name=document["task_name"],
         training_rewards=tuple(document["training_rewards"]),
         error=document["error"],

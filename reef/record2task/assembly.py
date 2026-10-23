@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def reported_task(metadata: object) -> dict[str, Any] | None:
     """The task a report names, so a recipe can group samples by task; None when the report names none.
 
-    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``metadata.task`` is a mapping with at least a ``name`` (the episode runner also sends ``path`` and
     ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
     """
     if not isinstance(metadata, Mapping):

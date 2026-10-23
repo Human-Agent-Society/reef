@@ -43,7 +43,7 @@ tests/harness/test_node_credential_scan.py
 tests/harness/test_node_directive_scan.py
 tests/harness/test_requests_extension.py
 tests/harness/test_requests_requires.py
-tests/harness/test_task_player.py
+tests/harness/test_task_episode_runner.py
 tests/harness/test_terminus_agent.py
 tests/harness/test_terminus_episode.py
 tests/harness/test_terminus_tree.py

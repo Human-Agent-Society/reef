@@ -25,15 +25,15 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     ``task2batch``. Without that section, no round runs, no task rolls out,
     and nothing trains.
 
-    Enabled rounds save each task and its train/eval split in the scenario's task store before play.
-    Eval tasks stay in the store without plays or training feedback.
+    Enabled rounds save each task and its train/eval split in the scenario's task store before their episodes run.
+    Eval tasks stay in the store without episodes or training feedback.
     """
 
     name: str = "generated-tasks"
 
     @property
     def report_type(self) -> type[ReportBase]:
-        # The task player's report: the verifier reward as the score; the task under metadata.task.
+        # The episode report: the verifier reward as the score; the task under metadata.task.
         return ScoredRolloutReport
 
     @classmethod
