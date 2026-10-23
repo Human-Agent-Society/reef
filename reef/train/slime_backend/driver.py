@@ -214,9 +214,24 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
     spec.validate_backend_args(args, recipe=recipe)
     reef = config.get("reef", {})
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
-    from reef.train.slime_backend.inference import inference_config
+    from reef.train.slime_backend.inference import inference_config, remote_inference_config
 
     inference_backend = reef.get("inference_backend") or "sglang"
+    remote = reef.get("inference_remote")
+    inference_input: dict[str, Any]
+    if remote:
+        if prepared.lora or getattr(args, "colocate", False):
+            raise RuntimeError("Slime publishes only full weights to remote engines, without colocated training")
+        inference_input = {
+            "remote": dict(remote),
+            "engine": inference_backend,
+            "num_gpus": int(reef["inference_num_gpus"]),
+            "engine_config": remote_inference_config(
+                args, inference_backend, reef.get("inference_options"), model_path=remote["model_path"]
+            ),
+        }
+    else:
+        inference_input = inference_config(args, inference_backend, reef.get("inference_options"))
     training = SlimeTrainingService(
         args,
         preparation=prepared,
@@ -230,8 +245,9 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
             ray_address=ray_address,
             namespace=namespace,
             runtime_env=_job_runtime_env(),
+            remote_inference=bool(remote),
         ),
-        inference_config=inference_config(args, inference_backend, reef.get("inference_options")),
+        inference_config=inference_input,
         training=training,
         coordinator=_coordinator_config(args, actor_name=actor_name, namespace=namespace),
         monitor_components=not getattr(args, "rollout_external", False),

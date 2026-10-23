@@ -63,6 +63,13 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert runtime.closed
 
 
+def test_a_backend_without_remote_engines_refuses_an_inference_remote_section(tmp_path):
+    raw = deployment()
+    raw["inference"]["remote"] = {"url": "https://gpu-host.example"}
+    with pytest.raises(DeployConfigError, match="does not support remote engines"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
 @pytest.mark.parametrize("options", [{"lora-rank": 0}, {"unknown": 1}, {"type": "ray_training"}, {"connect": "x"}])
 def test_invalid_options_fail_before_constructing_runtime(tmp_path, options):
     raw = deployment()

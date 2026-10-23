@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib.metadata import entry_points
 from typing import Any
 
@@ -87,8 +87,12 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
     if settings.inference_remote:
-        # Every later reader gets the validated section, with underscore keys and defaults filled in.
-        config["reef"]["inference_remote"] = asdict(RemoteInferenceSettings.from_mapping(settings.inference_remote))
+        # Every later reader gets the validated section, with underscore keys and defaults filled in. The
+        # component loads the model as the file names it: a later download replaces reef.model_path on this host.
+        remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)
+        if remote.model_path is None:
+            remote = replace(remote, model_path=settings.model_path)
+        config["reef"]["inference_remote"] = asdict(remote)
         settings = service_config_from_mapping(config)
     config["reef"]["training_backend"] = settings.training_backend or "slime"
     dependencies = backend.prepare(config, asdict(settings))
