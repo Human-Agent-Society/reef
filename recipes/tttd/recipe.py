@@ -33,11 +33,8 @@ class TTTDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="tttd",
-            # One optimizer step over the whole grid, as --global-batch-size does for Slime.
-            scheduling=StepScheduling(unit="sample", batch_size="actual"),
-        )
+        # A batch is one grid; a batch size equal to the grid trains it as one optimizer step.
+        return WeightTrainingSpec(objective="tttd", scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

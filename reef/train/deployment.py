@@ -23,6 +23,9 @@ READY_PROBE = (
     "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-training-ready' else 1)"
 )
 
+#: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
+NO_INFERENCE_BACKEND = "none"
+
 # These alter engine creation or topology outside Reef's inference request.
 # Reject argparse abbreviations as well as full names, even for omitted values.
 INFERENCE_LAUNCH_OPTIONS = frozenset(
@@ -82,8 +85,7 @@ def prepare_inference_config(
     managed topology uses tensor parallel engines, with independent replicas
     when the total GPU budget exceeds the per-engine tensor parallel size.
     LoRA and colocated deployments retain their existing runtime lifecycle.
-    ``inference.num-gpus: 0`` selects a training-only deployment without
-    engines; :func:`validate_train_only` has already checked its settings.
+    ``inference.backend: none`` takes no inference GPUs and colocates with nothing.
     """
     for name in training_options:
         if (
@@ -98,7 +100,7 @@ def prepare_inference_config(
             )
         if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
             raise DeployConfigError(f"training.options.{name} places the model; use training.colocate instead")
-    if train_only(settings):
+    if settings["inference_backend"] == NO_INFERENCE_BACKEND:
         config["reef"].update(inference_num_gpus=0, inference_options={}, colocate=False)
         return
     parallel_size = settings["tensor_parallel_size"]
@@ -122,46 +124,6 @@ def prepare_inference_config(
         inference_options=options,
         colocate=bool(settings["colocate"]),
     )
-
-
-def train_only(settings: Mapping[str, Any]) -> bool:
-    """Whether the settings select a training-only deployment: ``inference.num-gpus: 0``.
-
-    ``settings`` is either the parsed service settings or the resolved ``reef``
-    section; both name the GPU count ``inference_num_gpus``.
-    """
-    return settings.get("inference_num_gpus") == 0
-
-
-#: Settings a training-only deployment refuses, with their public names. Each one configures
-#: engines or runs the model: inference engines, a teacher engine, candidate evaluation and task generation.
-TRAIN_ONLY_REFUSED_SETTINGS = (
-    ("inference_backend", "inference.backend"),
-    ("tensor_parallel_size", "inference.tensor-parallel-size"),
-    ("inference_options", "inference.options"),
-    ("inference_remote", "inference.remote"),
-    ("inference_url", "inference.url"),
-    ("inference_handler_factory", "inference.handler-factory"),
-    ("inference_handler_config", "inference.handler-config"),
-    ("colocate", "training.colocate"),
-    ("teacher_model_path", "teacher.model-path"),
-    ("evaluation_settings", "evaluation"),
-    ("generator_settings", "generator"),
-)
-
-
-def validate_train_only(settings: Mapping[str, Any]) -> None:
-    """Refuse settings that need inference engines in a training-only deployment.
-
-    The deployment trains on uploaded or imported data and serves no requests, so
-    nothing may configure engines, colocate with them, or run the model.
-    """
-    configured = [name for key, name in TRAIN_ONLY_REFUSED_SETTINGS if settings.get(key)]
-    if configured:
-        raise DeployConfigError(
-            "inference.num-gpus: 0 trains without inference engines and serves no requests; "
-            f"remove {', '.join(configured)}"
-        )
 
 
 def inference_handler_factory_for(path: str | None) -> type[InferenceHandler] | None:
@@ -230,8 +192,6 @@ class TrainingDeployment(ABC):
     supports_teacher_engine: bool = False
     #: Whether its model driver can run the engines on a remote component (an ``inference.remote`` section).
     supports_remote_inference: bool = False
-    #: Whether it can train without inference engines (``inference.num-gpus: 0``).
-    supports_train_only: bool = False
 
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

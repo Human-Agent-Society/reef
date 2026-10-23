@@ -702,17 +702,12 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     durable commit barrier; the scheduler serializes both with optimizer work.
     As the :class:`AdapterEngine` behind its residency manager, it loads an
     adapter by asking the sender for it and unloads one at the receiver.
-
-    ``inference`` is None when the deployment has no engines (training only).
-    The generation barrier is then empty, and a publication assigns the trained
-    weights their runtime load ID without a transfer. Such a deployment trains
-    full weights without colocation.
     """
 
     def __init__(
         self,
         training: TrainingBackend,
-        inference: InferenceBackend | None,
+        inference: InferenceBackend,
         state: TrainingJobState,
         store: TrainingJobStore | None,
     ) -> None:
@@ -724,8 +719,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         # The receiver's GPU-memory handoff, used only by colocated training: set exactly when
         # training is colocated, so a receiver without the handoff serves every other deployment.
         self.memory_handoff: InferenceMemoryHandoffBackend | None
-        if inference is None and (self.config.colocate or self.config.lora):
-            raise ValueError("training without inference engines cannot colocate or publish LoRA adapters")
         if not self.config.colocate:
             self.memory_handoff = None
         elif isinstance(inference, InferenceMemoryHandoffBackend):
@@ -758,12 +751,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
             raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")
         return self.history
 
-    def require_inference(self) -> InferenceBackend:
-        """The receiver; only a deployment with engines has one."""
-        if self.inference is None:
-            raise RuntimeError("this deployment has no inference engines")
-        return self.inference
-
     def require_residency(self) -> AdapterResidencyManager:
         if self.residency is None:
             raise RuntimeError("adapter residency requires a LoRA bridge")
@@ -784,17 +771,17 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if files is not None:
             if files.layout != "adapter":
                 raise RuntimeError(f"trainer delivered {files.layout} weight files for scenario {scenario!r}")
-            self.require_inference().load_weight_files(files, adapter_name=name, runtime_load_id=None)
+            self.inference.load_weight_files(files, adapter_name=name, runtime_load_id=None)
             return
         self.training.send_adapter(scenario, name)
 
     def unload_adapter(self, name: str) -> None:
-        self.require_inference().unload_adapter(name)
+        self.inference.unload_adapter(name)
 
     # -- Generation barrier
 
     def pause_generation(self, *, reconcile: bool = False) -> None:
-        if self.inference is None or (self.generation_paused and not reconcile):
+        if self.generation_paused and not reconcile:
             return
         self.inference.pause()
         self.generation_paused = True
@@ -805,14 +792,13 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         self.pause_generation(reconcile=True)
 
     def resume(self) -> None:
-        if self.inference is None or not self.generation_paused:
+        if not self.generation_paused:
             return
         self.inference.resume()
         self.generation_paused = False
 
     def abort(self) -> None:
-        if self.inference is not None:
-            self.inference.abort()
+        self.inference.abort()
 
     # -- Colocated memory handoff
 
@@ -836,8 +822,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
 
     def initialize_version(self) -> None:
         self.training.initialize_version(self.runtime_load_id)
-        if self.inference is None:
-            return
         self.inference.initialize_version(self.runtime_load_id)
         self._verify_engines_serve(self.runtime_load_id, "after version sync")
 
@@ -861,7 +845,7 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         return target
 
     def _verify_engines_serve(self, runtime_load_id: str, moment: str) -> None:
-        observed = [str(value) for value in self.require_inference().runtime_load_ids()]
+        observed = [str(value) for value in self.inference.runtime_load_ids()]
         if not observed or set(observed) != {runtime_load_id}:
             raise RuntimeError(f"serving engines disagree {moment}: {observed!r}")
 
@@ -898,12 +882,7 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         return version
 
     def _transfer(self, target: str, *, force_full: bool, scenario: str | None = None) -> str:
-        """Send the trainer's weights as ``target`` and verify every engine received them.
-
-        Without engines no weights leave the trainer: ``target`` names the weights the trainer holds.
-        """
-        if self.inference is None:
-            return target
+        """Send the trainer's weights as ``target`` and verify every engine received them."""
         files = self.training.weight_files(scenario, target)
         if files is not None:
             # A trainer that delivers files never sends: Reef's receiver loads them.
@@ -945,8 +924,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
     # -- Recovery
 
     def recover(self, marker: Mapping[str, Any] | None) -> None:
-        if self.inference is None:
-            return
         self.inference.recover()
         if self.history is not None:
             # Replacement engines boot without adapters. Restore other scenarios

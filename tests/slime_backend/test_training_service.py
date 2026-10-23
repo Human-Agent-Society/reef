@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from reef.runtime.deployment import NativeWeightTransferSession, WeightTransferSession
+from reef.runtime.deployment import NO_WEIGHT_TRANSFER_PROTOCOL, NativeWeightTransferSession, WeightTransferSession
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.train.slime_backend import training
@@ -101,10 +101,11 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     service.attach_weight_transport(NativeWeightTransferSession(PROTOCOL, "session-1", control))
     captured = []
 
-    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s):
+    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, version_receiver):
         assert actor.train_parallel_config == {"attached": True}
         assert critic.train_parallel_config == {"attached": True}
         assert train_rpc_timeout_s == (14400 if timeout is None else timeout)
+        assert version_receiver is None
         captured.append((args, preparation, loss_family_config))
         return object()
 
@@ -114,22 +115,26 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     service.close()
 
 
-def test_training_without_inference_reads_the_worker_layout_at_start(monkeypatch):
-    service, resources, events = service_and_resources(monkeypatch, critic=True, inference=None)
+@pytest.mark.parametrize("inference", ["none", "sglang"])
+def test_the_no_transfer_session_reads_the_worker_layout_and_connects_no_updater(monkeypatch, inference):
+    service, resources, events = service_and_resources(monkeypatch, critic=True, inference=inference)
+    native = () if inference == "none" else (PROTOCOL,)
+    assert service.weight_transfer_protocols == (*native, NO_WEIGHT_TRANSFER_PROTOCOL)
     service.start(resources)
-    # The batch split needs each worker's parallel layout; no transport will attach to provide it.
+    record = UniProcExecutor.from_workers([object()])
+    service.attach_weight_transport(NativeWeightTransferSession(NO_WEIGHT_TRANSFER_PROTOCOL, "session-1", record))
+    # The batch split needs each worker's parallel layout; no receiver handle reaches an updater.
     assert events == [("allocate",), ("attach", "actor", None), ("attach", "critic", None)]
     captured = []
 
-    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s):
-        assert actor.train_parallel_config == {"attached": True}
-        assert critic.train_parallel_config == {"attached": True}
-        captured.append(args)
+    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, version_receiver):
+        assert actor.train_parallel_config == critic.train_parallel_config == {"attached": True}
+        captured.append(version_receiver)
         return object()
 
     monkeypatch.setattr(training, "create_training_backend", create)
     assert service.backend() is service.backend()
-    assert captured == [service.args]
+    assert captured == [record]
     service.close()
 
 

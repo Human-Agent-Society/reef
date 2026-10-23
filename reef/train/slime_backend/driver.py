@@ -19,7 +19,7 @@ from reef.core.config import config_value
 from reef.runtime.deployment import CoordinatorConfig
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.algos.registry import loss_family_refs
-from reef.train.deployment import TrainingDeploymentPlan, train_only
+from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeploymentPlan
 from reef.train.slime_backend.launch import driver_arguments
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
@@ -216,8 +216,7 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
     from reef.train.slime_backend.inference import inference_config
 
-    # A training-only deployment (inference.num-gpus: 0) has no inference component to send weights to.
-    inference_backend = None if train_only(reef) else reef.get("inference_backend") or "sglang"
+    inference_backend = reef.get("inference_backend") or "sglang"
     training = SlimeTrainingService(
         args,
         preparation=prepared,
@@ -232,9 +231,10 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
             namespace=namespace,
             runtime_env=_job_runtime_env(),
         ),
+        # inference.backend: none starts no engine, so it has no engine input.
         inference_config=(
             {}
-            if inference_backend is None
+            if inference_backend == NO_INFERENCE_BACKEND
             else inference_config(args, inference_backend, reef.get("inference_options"))
         ),
         training=training,

@@ -146,6 +146,11 @@ class NativeWeightTransferSession(WeightTransferSession):
 
 #: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
 WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
+#: The transfer in which no weights leave the trainer: each version names the weights the trainer holds.
+#: Its session is native. The receiver's rank 0 records one runtime load ID: the trainer calls
+#: ``set_runtime_load_id(runtime_load_id)`` on it in place of a send, and the receiver's backend reports
+#: the recorded ID. Only a receiver that runs no engine, such as ``inference.backend: none``, accepts it.
+NO_WEIGHT_TRANSFER_PROTOCOL = "reef-no-weight-transfer-v1"
 
 
 class InferenceService(DeploymentHealth):
@@ -243,11 +248,8 @@ class CoordinatorConfig:
 class ModelDeploymentPlan:
     """Configured components; constructing a plan must not allocate resources.
 
-    A missing inference component is an explicit choice, never a fallback after
-    a separate component fails to start. With a coordinator it is a
-    training-only deployment: the coordinator commits training jobs and serves
-    no requests. Without one it selects the combined compatibility lifecycle.
-    Either way the trainer sends no weights.
+    A missing inference component explicitly selects a combined compatibility
+    lifecycle. It is never a fallback after a separate component fails to start.
     """
 
     resources: DeploymentResources
@@ -257,6 +259,8 @@ class ModelDeploymentPlan:
     coordinator: CoordinatorConfig | None = None
 
     def validate(self) -> None:
+        if self.coordinator is not None and self.inference is None:
+            raise ValueError("a Reef coordinator requires separate training and inference components")
         if self.inference is None:
             sent = self.training.weight_transfer_protocols
             if sent:
@@ -306,9 +310,9 @@ class ModelDeployment:
             self.plan.resources.start()
             connection = self._start_inference()
             self._start_training()
-            self._start_coordinator(connection)
-            if self.plan.inference is not None:
-                self.plan.inference.check_health()
+            if connection is not None:
+                self._start_coordinator(connection)
+                self.plan.inference.check_health()  # type: ignore[union-attr]
         except BaseException:
             try:
                 self.close()
@@ -345,14 +349,11 @@ class ModelDeployment:
             self.plan.training.attach_weight_transport(self.weight_transfer_session)
         self.plan.training.check_health()
 
-    def _start_coordinator(self, connection: InferenceConnection | None) -> None:
-        """Start the coordinator; a training-only deployment gives it no inference backend."""
+    def _start_coordinator(self, connection: InferenceConnection) -> None:
         config = self.plan.coordinator
-        if config is None:
-            return
-        training_backend = self.plan.training.backend()
         inference = self.plan.inference
-        inference_backend = None if inference is None or connection is None else inference.backend(connection)
+        if config is None or inference is None:
+            return
         # The coordinator verifies the checkpoints the trainer writes, so on a
         # multi-node cluster it runs on the trainer's node; node-local
         # checkpoint storage is invisible from anywhere else.
@@ -362,7 +363,7 @@ class ModelDeployment:
                 workers=(
                     WorkerSpec(
                         TrainingCoordinator,
-                        args=(training_backend, inference_backend),
+                        args=(self.plan.training.backend(), inference.backend(connection)),
                         kwargs={"owns_training": True},
                     ),
                 ),
@@ -522,12 +523,12 @@ _BUILTIN_FACTORIES = {
     "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "none": "reef.inference.null:NullRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
     "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",
-    "train_only": "reef.inference.train_only:TrainOnlyRuntimeFactory",
     "vllm": "reef.inference.vllm.runtime:VLLMRuntimeFactory",
 }
 
@@ -668,6 +669,9 @@ class RuntimeConnectionConfig:
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
     train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
+    batch_size: int = config_option(
+        1, help="Samples in one training step; Reef's Slime and Tinker deployments set it from the training options."
+    )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
@@ -679,6 +683,8 @@ class RuntimeConnectionConfig:
         ):
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"runtime.{name} must be a positive finite number")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size <= 0:
+            raise ValueError("runtime.batch_size must be a positive integer")
 
 
 @dataclass(frozen=True)

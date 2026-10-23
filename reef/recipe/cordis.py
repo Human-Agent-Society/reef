@@ -270,6 +270,8 @@ class CordisRecipe(Recipe):
     binary: str | None = None
     episode_timeout_s: float = 600.0
     episode_repeats: int = 1
+    #: The traces in one evolution step; the trainer makes a batch when the pipeline holds this many.
+    batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
     max_failure_streak: int = 0
@@ -337,6 +339,8 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -421,6 +425,9 @@ class CordisRecipe(Recipe):
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+        batch_size = evolution.get("batch_size", 1)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size < 1:
+            raise RecipeConfigError("evolution.batch_size must be an integer of at least 1")
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
@@ -580,6 +587,7 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
+            "batch_size": batch_size,
             "forbid_residue": forbid_residue,
             **budgets,
             "floor_score": float(floor_score),
@@ -796,4 +804,5 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            batch_size=self.batch_size,
         )

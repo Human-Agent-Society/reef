@@ -61,7 +61,7 @@ def _sample() -> TrajectoryItem:
 
 def _payload(teacher_tokens: list[Any], sample_weight: Any = 1.0, **overrides: Any) -> dict[str, Any]:
     row = ["i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, teacher_tokens, sample_weight]
-    return {"samples": [row], "rollout_ids": [0], "loss": "toydistill", **overrides}
+    return {"samples": [row], "rollout_ids": [0], "external_step_sizes": [1], "loss": "toydistill", **overrides}
 
 
 @pytest.mark.unit

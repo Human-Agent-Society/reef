@@ -53,7 +53,8 @@ SFT has three pipeline stages
   version sampled. Thus ``max-staleness`` has no effect.
 - ``SFTTasks`` makes one ``TrajectoryItem`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.
-- ``DistillBatches`` puts ``batch_size`` tasks into each batch.
+- ``DistillBatches`` batches the tasks in arrival order. A batch holds the
+  Slime ``--global-batch-size`` of samples.
 
 The ``sft`` objective (``SftObjective``) sends no advantages. The ``sft`` loss
 family in ``reef/train/slime_backend/sft.py`` selects Slime's ``sft_loss``.
@@ -95,10 +96,11 @@ Import the file with ``reef-client`` (`Import records for cold-start learning
 
    reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
 
-A batch trains when Reef holds ``batch_size`` reports. Thus the last reports
-of a dataset wait until that number of reports is available. Reef does not
-repeat a dataset. To train on the data again, import it again with new
-record IDs.
+A batch trains when Reef holds ``global_batch_size`` reports. Thus the last
+reports of a dataset wait until that number of reports is available. Reef
+reads the imported reports only as fast as batches train, so a large import
+waits in the record store, not in the buffer. Reef does not repeat a dataset. To train on the data again, import it again
+with new record IDs.
 
 Configuration
 -------------
@@ -117,9 +119,6 @@ config.
          tokenizer_path: /models/Qwen3-8B
          target: response
          max_tokens: 8192
-     task2batch:
-       config:
-         batch_size: 256
    training:
      backend: slime
      config:
@@ -135,7 +134,8 @@ config.
    pipeline.record2task.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
    pipeline.record2task.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
    pipeline.record2task.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
-   pipeline.task2batch.config.batch_size | 1 | the number of samples in one batch. ``--global-batch-size`` is the number of samples in one optimizer step. Thus a batch of 256 trains four steps of 64. A last step with fewer samples also trains.
+   pipeline.task2batch.config.buffer_size | four times the batch size | the most samples that wait for a batch. Reef releases the oldest reports beyond it.
+   training.config.global_batch_size | none | the batch size: the samples in one batch and in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
 
 A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
 mode unless ``enable_thinking`` is false: Qwen3.8 opens the system prompt with

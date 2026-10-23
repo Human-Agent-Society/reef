@@ -11,6 +11,7 @@ from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import InferenceService
 
 _BUILTINS = {
+    "none": "reef.inference.null:create_inference",
     "sglang": "reef.inference.sglang.deployment:create_inference",
     "vllm": "reef.inference.vllm.deployment:create_inference",
 }

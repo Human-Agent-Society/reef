@@ -21,21 +21,19 @@ class SAORecipe(WeightTrainingRecipe):
 
     "Single rollout" is one rollout per prompt: there is no comparison group
     and no slowest-sample barrier, so each scored rollout is accepted on its
-    own as it lands. ``batch_size`` of them, from ``batch_size`` different
-    prompts, form one optimizer step; the paper trains with 128 (§4.1). The
-    value model is what makes a single sample per prompt usable, and it needs
-    that many samples per step to learn, so ``batch_size=1`` (one step per
-    rollout) is a smoke setting, not the paper's estimator. The DIS ratio
+    own as it lands. The Slime driver's ``--global-batch-size`` of them, from
+    as many different prompts, form one optimizer step; the paper trains with
+    128 (§4.1). The value model is what makes a single sample per prompt
+    usable, and it needs that many samples per step to learn, so a batch size
+    of 1 (one step per rollout) is a smoke setting, not the paper's estimator. The DIS ratio
     needs the rollout log-probabilities as its behaviour proxy, so SAO requires
     an inference backend that attaches engine-native tensors
     (``reef.inference_handler_factory``); reef never re-tokenizes a rollout to
     reconstruct them.
 
     The stages are ``ExclusiveReportRecord2Record`` (every rollout trains by
-    itself), ``SAOTasks``, and ``SAOBatches``.
-    The deployment sets ``batch_size`` in ``pipeline.task2batch.config``
-    (default 128). It must equal the Slime driver's ``--global-batch-size``:
-    each rollout sample is its own DP unit.
+    itself), ``SAOTasks``, and ``SAOBatches``. Each rollout sample is its own
+    DP unit.
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
     parameters belong to the training backend. For Slime they are configured by

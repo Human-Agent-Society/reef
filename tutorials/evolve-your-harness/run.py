@@ -89,7 +89,7 @@ def main():
             references=[receipt],
         )
         # The recipe's default stages batch valid scored reports, passing ones included, and
-        # pipeline.task2batch.config.batch_size: 1 makes each report its own batch: one submitted report is one
+        # evolution.batch_size: 1 makes each report its own batch: one submitted report is one
         # step this run triggers.
         batched += 1
         if score == 0.0:
@@ -288,7 +288,7 @@ def native_main():
         score = evolution.grade_text(task, result["text"])
         report(score, prefix)
         # The recipe's default stages batch valid scored reports, passing ones included, and
-        # pipeline.task2batch.config.batch_size: 1 makes each report its own batch: one submitted report is one
+        # evolution.batch_size: 1 makes each report its own batch: one submitted report is one
         # step this run triggers.
         batched += 1
         if score == 0.0:

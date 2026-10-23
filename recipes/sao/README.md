@@ -11,7 +11,7 @@ Reproduction of [Single-Rollout Asynchronous Optimization](https://arxiv.org/abs
 ```text
 sao/
   recipe.py       SAORecipe: training spec, loss family "sao", default stages
-  processor.py    SAOTasks and SAOBatches: one scored rollout is one unit, batch_size units a step
+  processor.py    SAOTasks and SAOBatches: one scored rollout is one unit, the global batch size of units a step
   objective.py    selects the SAO loss; the recipe binds the per-sample step schedule
   slime/          the training-plane objective: DIS ratio, colocated critic
   examples/

@@ -29,7 +29,7 @@ def _processor(group_size=2):
         context,
         record2record=CoralRecord2Record(context, CoralGroupSettings(group_size=group_size)),
         record2task=CoralTasks(CoralAssemblySettings()),
-        task2batch=CoralBatches(context),
+        task2batch=CoralBatches(context, None),
     )
 
 
@@ -79,12 +79,12 @@ def test_sibling_group_trains_as_one_grouped_batch():
     processor.push(_inference("i1", [1, 2], [1], [-0.1]))
     processor.push(_inference("i2", [3, 4], [1], [-0.2]))
     processor.push(_attempt_report("r1", "i1", 0.3, commit="c-a", parent="p0"))
-    assert not processor.ready()  # one sibling is not a comparison group
+    assert not processor.ready(2)  # one sibling is not a comparison group
 
     processor.push(_attempt_report("r2", "i2", 0.9, commit="c-b", parent="p0"))
-    assert processor.ready()
+    assert processor.ready(2)
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(2)
     assert isinstance(batch, TrainingBatch)
     (group,) = trajectory_groups(batch)
     assert sorted(trajectory_reward(sample) for sample in group) == [0.3, 0.9]
@@ -96,8 +96,8 @@ def test_root_attempts_group_together():
     processor.push(_inference("i2", [3, 4], [1], [-0.2]))
     processor.push(_attempt_report("r1", "i1", 0.1, commit="c-a", parent=None))
     processor.push(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
-    assert processor.ready()
-    batch = processor.build_batch()
+    assert processor.ready(2)
+    batch = processor.build_batch(2)
     assert {item.group_id for item in batch.items} == {ROOT_GROUP}
 
 
@@ -108,7 +108,25 @@ def test_groups_do_not_mix_across_parents():
     processor.push(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
     processor.push(_attempt_report("r2", "i2", 0.6, commit="c-b", parent="p1"))
     # two half-full groups, no cross-parent comparison
-    assert not processor.ready()
+    assert not processor.ready(2)
+
+
+def test_a_batch_holds_complete_sibling_groups_each_grouped_by_its_own_parent():
+    processor = _processor(group_size=2)
+    for index in range(4):
+        processor.push(_inference(f"i{index}", [1, 2], [1], [-0.1]))
+    processor.push(_attempt_report("r0", "i0", 0.1, commit="c-0", parent="p0"))
+    processor.push(_attempt_report("r1", "i1", 0.2, commit="c-1", parent="p0"))
+    assert not processor.ready(4), "one sibling group is half a batch of four"
+    processor.push(_attempt_report("r2", "i2", 0.3, commit="c-2", parent="p1"))
+    processor.push(_attempt_report("r3", "i3", 0.4, commit="c-3", parent="p1"))
+    assert processor.ready(4)
+
+    groups = trajectory_groups(processor.build_batch(4))
+    assert [[(sample.group_id, trajectory_reward(sample)) for sample in group] for group in groups] == [
+        [("p0", 0.1), ("p0", 0.2)],
+        [("p1", 0.3), ("p1", 0.4)],
+    ]
 
 
 def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
@@ -118,11 +136,11 @@ def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
     processor.push(_attempt_report("r1", "i1", 0.5, commit="c-a", parent="p0"))
     # duplicate grader run for the same attempt commit, different record id
     processor.push(_attempt_report("r1b", "i1", 0.5, commit="c-a", parent="p0"))
-    assert not processor.ready()  # still one distinct sibling
+    assert not processor.ready(2)  # still one distinct sibling
 
     processor.push(_attempt_report("r2", "i2", 0.7, commit="c-b", parent="p0"))
-    assert processor.ready()
-    (group,) = trajectory_groups(processor.build_batch())
+    assert processor.ready(2)
+    (group,) = trajectory_groups(processor.build_batch(2))
     assert len(group) == 2
 
 
@@ -133,8 +151,8 @@ def test_multi_call_attempt_assembles_multi_turn():
     processor.push(_inference("i3", [5, 6], [1], [-0.3]))
     processor.push(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
     processor.push(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
-    assert processor.ready()
-    (group,) = trajectory_groups(processor.build_batch())
+    assert processor.ready(2)
+    (group,) = trajectory_groups(processor.build_batch(2))
     multi = next(s for s in group if trajectory_reward(s) == 0.5)
     assert multi.training["turn_count"] == 2
 

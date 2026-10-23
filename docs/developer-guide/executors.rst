@@ -496,7 +496,11 @@ allocation when there is none. The selected protocol sets the session type:
   and the sender drives the engines through it. For example,
   ``slime-sglang-control-v2`` carries engine/lock handles consumed by the
   sender. This is an explicit transport integration, not a universal tensor
-  format.
+  format. ``reef-no-weight-transfer-v1`` is the native protocol of
+  ``inference.backend: none``, which runs no engine. Its receiver records one
+  runtime load ID; in place of a send, the trainer records the version of the
+  weights it keeps. Slime lists it after its engine protocol, so a receiver
+  with engines keeps that protocol.
 - Any other accepted protocol is delivered by Reef. The
   ``WeightTransferSession`` carries no receiver handle: the trainer writes
   files and the coordinator asks the receiver to load them.

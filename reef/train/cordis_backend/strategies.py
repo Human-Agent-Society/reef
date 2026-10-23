@@ -126,7 +126,7 @@ class Proposer(ConfiguredPlugin, ABC):
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
     in ``hybrid`` it is what an automatic batch would take next, up to
-    ``batch_size`` and possibly none (scored traces, or unscored records
+    ``evolution.batch_size`` and possibly none (scored traces, or unscored records
     when the ``pipeline`` section names the inference stages). A proposer that takes
     instructions sets ``reads_requests``. It generates mutations against the current tree, then the
     same evaluation and publication policy used by automatic evolution apply.

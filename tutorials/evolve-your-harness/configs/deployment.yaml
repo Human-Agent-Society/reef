@@ -16,6 +16,9 @@ recipe:
   config:
     evolution:
       adapter: pi
+      # The default pipeline stages batch every valid scored report, a passing one included.
+      # batch_size 1 makes each report one evolve step.
+      batch_size: 1
       propose: tutorials.evolve-your-harness.harness.plugins:SelfProposer
       evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
       # The seed carries the /reefine command and the pi extension API skill the proposer reads.
@@ -70,13 +73,6 @@ recipe:
               '
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
-
-# The harness evolution pipeline: its default stages batch every valid scored report, a passing one
-# included. batch_size 1 makes each report one evolve step.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 1
 
 inference:
   upstream-url: ${REEF_UPSTREAM_URL:?}

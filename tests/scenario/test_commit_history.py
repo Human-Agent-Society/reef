@@ -382,7 +382,7 @@ def build_training_dispatcher(
     agent_record_dir=None,
 ):
     return Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
+        TestPolicyRecipe(**runtime_bindings(runtime)),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
@@ -568,12 +568,12 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
 class ProtectAllPipeline(TrainingPipeline):
     """Pairs like SFT but never releases a row: every pushed id is protected."""
 
-    def __init__(self, context, batch_size: int) -> None:
+    def __init__(self, context) -> None:
         super().__init__(
             context,
             record2record=ReportRecord2Record(context, ReportGrouping()),
             record2task=ThresholdTasks(),
-            task2batch=ThresholdBatches(context, batch_size),
+            task2batch=ThresholdBatches(context, None),
         )
         self._seen: set[str] = set()
 
@@ -591,7 +591,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: ProtectAllPipeline(context, self.batch_size),
+            pipeline_factory=ProtectAllPipeline,
             candidate_backend=candidate_backend(self.training_runtime, "sft", StepScheduling()),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
@@ -610,7 +610,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    recipe = lambda runtime: (ProtectAllPolicyRecipe(**runtime_bindings(runtime), batch_size=1))  # noqa: E731
+    recipe = lambda runtime: ProtectAllPolicyRecipe(**runtime_bindings(runtime))  # noqa: E731
 
     def build(runtime):
         return Dispatcher(
@@ -952,12 +952,13 @@ class _HarnessEvolveTestRecipe(Recipe):
                 context,
                 record2record=ReportRecord2Record(context, ReportGrouping()),
                 record2task=TraceTasks(),
-                task2batch=TraceBatches(context, self.batch_size),
+                task2batch=TraceBatches(context, None),
             ),
             candidate_backend=candidate_backend,
             candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            batch_size=self.batch_size,
         )
 
 

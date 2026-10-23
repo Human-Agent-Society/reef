@@ -29,7 +29,8 @@ The three stages
   rolls out. A batch may mix both.
 - The **task-to-batch stage** (``Task2Batch``, ``reef.task2batch``)
   shapes the tasks of the selected batch units into one ``TrainingBatch``. Grouped
-  recipes set ``group_id`` on each member.
+  recipes set ``group_id`` on each member. The stage also sets ``buffer_size``,
+  the most samples that wait for a batch.
 
 The pipeline moves values through the stages with the same two operations,
 ``push`` and ``pull``. The last stage is a function:
@@ -101,9 +102,11 @@ the pipeline pushes. Its status settles all records of the set together:
 - ``READY``: one or more tasks. The records wait in one batch unit.
 - ``SKIPPED``: no task. The stage ends the records.
 
-A batch unit is what a batch takes all of or none of, and what
-``batch_size`` counts. A unit is a record set unit or one uploaded trajectory
-(see `Uploaded trajectories <#uploaded-trajectories>`__).
+A batch unit is what a batch takes all of or none of. A unit is a record set
+unit or one uploaded trajectory (see `Uploaded trajectories
+<#uploaded-trajectories>`__). The pipeline counts units in samples: a record
+set unit counts the tasks of its record sets, and an uploaded trajectory
+counts one.
 
 A record set unit (``RecordSetUnit``) holds one or more record sets that must
 train in the same batch. A report by itself is a unit of one record set. A
@@ -125,13 +128,18 @@ The trainer calls it on its own thread, under its lock; no call may block:
   that are ready, and gives each result back to the record stage
   (``settle``). A set without a result waits, and its records stay held (see
   `Slow record-to-task work <#slow-record-to-task-work>`__).
-- ``ready()``: is a batch available. It first advances the record stage
-  (``advance``), for example to take in finished judgments or to start a
-  task-generation round that is due. Then it moves the record sets as
-  ``push`` does.
-- ``build_batch()``: reserve ``batch_size`` batch units from the record stage, in
-  its selection order, and give their tasks to ``make_batch``. Uploaded
-  trajectories come first (see `Uploaded trajectories <#uploaded-trajectories>`__). The trainer
+- ``advance()``: advance the record stage's background work, move and settle
+  record sets, and apply buffer and staleness limits. It needs no sample
+  count and reserves no batch. A pending batch keeps its reservation while
+  new results enter the buffer. Call it on the same serialized path as
+  other pipeline operations; it does not make the pipeline thread-safe.
+- ``ready(sample_count)``: call ``advance()`` and check whether a batch is
+  available for the backend's sample target.
+- ``build_batch(sample_count)``: reserve whole batch units from the record
+  stage, in its selection order, until the batch holds at least
+  ``sample_count`` samples,
+  and give their tasks to ``make_batch``. Uploaded trajectories come first
+  (see `Uploaded trajectories <#uploaded-trajectories>`__). The trainer
   validates the batch against ``output_schema``. The same batch stays
   reserved until it is acknowledged or released.
 - ``acknowledge(batch_id, trained=True)``: the training step consumed that
@@ -140,6 +148,24 @@ The trainer calls it on its own thread, under its lock; no call may block:
   consumed. The commit record persists these IDs, so recovery never pushes
   them again. ``trained=False`` says the backend dropped the batch as stale,
   for a record stage that paces work on what trained.
+
+The pipeline does not know the batch size. The trainer passes its
+``batch_size`` as ``sample_count``: Slime's ``--global-batch-size`` or
+Tinker's ``batch_size`` through ``TrainingRuntime.batch_size``, or
+``evolution.batch_size`` for harness evolution. Because a batch takes whole
+units, it can hold more than ``batch_size`` samples. Slime and Tinker cut it
+into optimizer steps of ``batch_size`` rollouts, and
+``StepScheduling.remainder`` decides what happens to a shorter last step.
+
+The held units are a buffer of at most ``buffer_size`` samples. The
+``Task2Batch`` sets it, and the trainer refuses one smaller than
+``batch_size``. Without a ``buffer_size`` setting, it is four times
+``batch_size``. After each move of
+record sets, in every training mode, the pipeline releases the oldest
+unreserved units while their samples are more than ``buffer_size``. It
+keeps the newest unit, so a unit larger than the buffer still trains. The
+record stage ends a released unit (``drop_held_unit``), and the pipeline logs
+one warning. Uploaded trajectories do not count toward the buffer.
 
 The pipeline also merges the record and task stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while a set waits for its result or the
@@ -159,8 +185,8 @@ report shaped for another component instead of failing it. The pipeline
 passes such changes to the record stage as its updated ``PipelineContext``
 (``context_changed``).
 
-``status()`` reports ``ready_units`` (the held record set units and uploaded trajectories) and
-``batch_size``. A stage adds an entry only when a terminal outcome cannot become a batch and an
+``status()`` reports ``ready_samples`` (the samples of the held record set
+units and uploaded trajectories), ``batch_size`` and ``buffer_size``. A stage adds an entry only when a terminal outcome cannot become a batch and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
 
@@ -192,8 +218,8 @@ trainer of the scenario accepts uploaded trajectories.
 An uploaded trajectory does not go to the record stage or the record-to-task
 stage. The pipeline holds it as a ``TrajectoryItem`` of the uploaded document
 until a batch takes it. A batch takes uploaded trajectories first, in upload
-order, and then record set units. Each uploaded trajectory counts as one batch
-unit. In ``manual`` mode, an instruction's batch takes no units. In a scenario
+order, and then record set units. Each uploaded trajectory is one batch unit
+and counts as one sample. It does not count toward ``buffer_size``. In ``manual`` mode, an instruction's batch takes no units. In a scenario
 of several components, each trainer that accepts uploaded trajectories trains
 on them. Acknowledgement consumes all units of the batch. The commit lists
 each uploaded trajectory as ``trajectory:<trajectory_id>``. Thus a rebuilt
@@ -236,8 +262,13 @@ scenario on a shared engine does not age the data. These rules also apply:
 * While the serving version is unknown, for example before the first
   publication, no data is stale.
 
-A stage that holds groups overrides ``drop_held_unit`` to end a whole group.
-``ReportRecord2Record`` does this for a ready group.
+A stage that holds groups overrides ``drop_held_unit(unit, *, reason)`` to
+end a whole group. ``ReportRecord2Record`` does this for a ready group.
+The caller supplies ``UnitDropReason.BUFFER_LIMIT`` for buffer eviction or
+``UnitDropReason.STALE`` for the serving-version check. Overrides must accept
+the reason; it lets a stage distinguish the two outcomes without inspecting
+already-released records. Neither outcome confirms training. Backend rejection
+of a reserved batch still uses ``consume(units, trained=False)``.
 
 .. list-table::
    :header-rows: 1
@@ -247,7 +278,7 @@ A stage that holds groups overrides ``drop_held_unit`` to end a whole group.
    * - ``NoRecordSets``
      - nothing; it forms no record set. The default of a pipeline that trains no weights
    * - ``ReportRecord2Record``
-     - report validation, groups and slots, the manual-mode limit, source release
+     - report validation, groups and slots, source release
    * - ``ExclusiveReportRecord2Record``
      - a ``ReportRecord2Record`` that trains every report by itself; a report that ends owns its inference records
    * - ``JudgingRecord2Record``
@@ -267,7 +298,8 @@ mode. ``GET /reef/status`` reports ``pending_instructions`` as the
 pipeline's ``buffered_requests`` plus the instructions still unread in
 storage.
 
-- ``auto`` batches when ``batch_size`` batch units are held.
+- ``auto`` batches when the held units and uploaded trajectories hold
+  ``batch_size`` samples.
 - ``manual`` batches on a queued TRAIN instruction. The instruction's batch
   has no units, so ``make_batch`` receives no tasks.
 - ``hybrid`` batches on either, and a queued instruction goes first. The
@@ -282,9 +314,8 @@ The trainer gives TRAIN records to the pipeline when ``RequestType.TRAIN`` is
 in the ``Task2Batch``'s ``required_request_types``. The pipeline queues them
 FIFO regardless of the selected mode; ``auto`` leaves the queue for a mode that
 takes it. The pipeline takes records normally in manual mode, so changing to auto
-or hybrid can batch data already collected. In manual mode the record stage
-holds at most four batches of units and releases the oldest beyond that with a
-warning, at the switch and as reports arrive.
+or hybrid can batch data already collected. In manual mode, as in the other
+modes, the pipeline releases the oldest held units beyond ``buffer_size``.
 
 Unsupported modes raise ``NotImplementedError``. An invalid mode name raises
 ``ValueError``.
@@ -359,8 +390,8 @@ cannot train, as Distill does for a teacher sequence that is too long. The
 stage releases the report.
 
 The stage handles report-id deduplication, group-slot retries, consumption,
-and retention. A batch is ready in automatic mode after ``batch_size`` batch
-units accumulate; a unit is one report or one complete group. A report that
+and retention. A batch is ready in automatic mode after the held units hold
+``batch_size`` samples; a unit is one report or one complete group. A report that
 references an inference of another report ends without training, whether the
 other report waits or already trained.
 
@@ -445,8 +476,8 @@ train. A generator can play a task more times through the generator service
 on another arm, as SPADE does for its hint plays; those reports do not train.
 The record stage groups
 the training reports by ``metadata.task.name``. A group is complete at
-``plays_per_task`` episodes, and a batch holds ``tasks_per_step`` complete
-groups. A training play that reports nothing, such as a failed trial, never
+``plays_per_task`` episodes. A batch takes complete groups, in arrival order,
+until it holds Tinker's ``batch_size`` of episodes. A training play that reports nothing, such as a failed trial, never
 joins its group. When the task's plays end, its group is complete at the
 number of plays that reported; a group of one is discarded. The
 ``task_group`` objective centers and scales each reward within its

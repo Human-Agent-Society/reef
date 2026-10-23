@@ -80,7 +80,6 @@ pipeline:
       prm_max_hint_candidates: 3
   task2batch:
     config:
-      batch_size: 16                   # MUST equal training.config.global_batch_size
       # The judged population, one JSON line per batch (upstream's
       # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
       # "the judges disagree" from "the judges never ran".

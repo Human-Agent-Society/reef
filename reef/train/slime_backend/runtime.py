@@ -20,6 +20,7 @@ TRAINING_CONFIG_KEYS = (
     "ray_address",
     "inference_timeout_s",
     "train_timeout_s",
+    "batch_size",
 )
 #: Keys forwarded verbatim to the independently selected inference factory.
 INFERENCE_CONFIG_KEYS = (
@@ -41,6 +42,7 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
         ray_address: str | None = None,
         inference_timeout_s: float = 300.0,
         train_timeout_s: float | None = None,
+        batch_size: int,
     ) -> None:
         super().__init__(
             connect_ray_coordinator(
@@ -50,6 +52,7 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
                 inference_timeout_s=inference_timeout_s,
                 train_timeout_s=train_timeout_s,
             ),
+            batch_size=batch_size,
         )
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -102,6 +105,8 @@ class SlimeRuntimeFactory(RuntimeFactory):
             if pair is None:
                 raise RuntimeConfigError("the configured training connector must return a runtime pair")
             return pair
+        if "batch_size" not in config:
+            raise RuntimeConfigError("runtime.batch_size is required: Slime's --global-batch-size")
         training = SlimeTrainingRuntime(**{key: config[key] for key in TRAINING_CONFIG_KEYS if key in config})
         try:
             inference = registry.build(

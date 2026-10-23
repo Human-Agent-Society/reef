@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 import ray
 
+from reef.inference.null import NullInferenceService
+from reef.runtime.deployment import NO_WEIGHT_TRANSFER_PROTOCOL
 from reef.train.slime_backend.driver import _job_runtime_env
 
 
@@ -65,7 +67,7 @@ def test_native_training_options_reach_slime(tmp_path, monkeypatch, managed):
 
 
 @pytest.mark.parametrize(
-    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external", "train-only"]
+    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external", "no-inference"]
 )
 @pytest.mark.parametrize(
     "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
@@ -84,7 +86,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         fp16=False,
         use_rollout_routing_replay=False,
         megatron_lora_rank=0,
-        rollout_num_gpus=0 if mode == "train-only" else 4,
+        rollout_num_gpus=0 if mode == "no-inference" else 4,
         rollout_num_gpus_per_engine=2,
         num_gpus_per_node=4,
         actor_num_nodes=1,
@@ -124,7 +126,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         pytest.fail("plan construction must not connect or allocate resources")
 
     monkeypatch.setattr(ray, "init", unexpected)
-    reef = {**timeout_config, **({"inference_num_gpus": 0} if mode == "train-only" else {})}
+    reef = {**timeout_config, **({"inference_backend": "none"} if mode == "no-inference" else {})}
     training = driver.create_training_plan({"reef": reef}, loss_family="loss")
     configured_timeout = timeout_config.get("train_timeout_s")
     expected_timeout = 14400 if configured_timeout is None else configured_timeout
@@ -132,11 +134,10 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     assert not hasattr(training, "inference")
     plan = assemble_model_plan({"reef": reef}, training)
     plan.validate()
-    # A training-only deployment has no inference component and sends no weights.
-    assert (plan.inference is None) == (mode == "train-only")
+    assert isinstance(plan.inference, NullInferenceService) == (mode == "no-inference")
+    assert plan.training.weight_transfer_protocols[-1] == NO_WEIGHT_TRANSFER_PROTOCOL
     assert plan.resources.allocate_models
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert bool(plan.training.weight_transfer_protocols) == (mode != "train-only")
-    assert plan.coordinator is not None
+    assert plan.training.weight_transfer_protocols

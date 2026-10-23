@@ -64,7 +64,7 @@ skillclaw/
 
 The day is the sealed day: each task runs in its WildClawBench container, the agent's model calls go through the embedded Reef service (which injects the served pool's catalog and records the exchange), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
 
-The night trigger is the batch: `pipeline.task2batch.config.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day batches - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
+The night trigger is the batch: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day batches - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 
 The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the version metrics, so every published pool version carries a measured before/after record without deciding on those scores.
 

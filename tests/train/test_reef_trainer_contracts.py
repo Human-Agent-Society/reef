@@ -44,10 +44,10 @@ class ExamplePipeline(TrainingPipeline):
         self.events.append(f"push:{item.agent_record_id}")
         self.items.append(item)
 
-    def ready(self) -> bool:
-        return bool(self.items)
+    def ready(self, sample_count: int) -> bool:
+        return len(self.items) >= sample_count
 
-    def build_batch(self) -> ExampleBatch:
+    def build_batch(self, sample_count: int) -> ExampleBatch:
         self.events.append("build")
         self.pending = ExampleBatch(batch_id="batch-1", values=(self.items[0].agent_record_id,))
         return self.pending
@@ -103,14 +103,14 @@ class ExampleBackend(CandidateBackend):
 @pytest.mark.unit
 def test_training_pipeline_is_the_no_update_default() -> None:
     processor = TrainingPipeline(PipelineContext(scenario="math"))
-    assert processor.ready() is False
+    assert processor.ready(1) is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.push(record)
     assert processor.releasable_record_ids() == frozenset()
     # The default holds no batch-ready units, so it never becomes ready and
     # build_batch refuses on that ground — the same refusal every pipeline gives.
     with pytest.raises(RuntimeError, match="no batch ready"):
-        processor.build_batch()
+        processor.build_batch(1)
     with pytest.raises(ValueError, match="unknown batch_id"):
         processor.acknowledge("math:whatever:1")
 

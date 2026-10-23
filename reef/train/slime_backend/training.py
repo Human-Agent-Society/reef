@@ -7,13 +7,16 @@ import math
 from typing import Any
 
 from reef.runtime.deployment import (
+    NO_WEIGHT_TRANSFER_PROTOCOL,
     DeploymentResources,
     NativeWeightTransferSession,
     TrainingService,
     WeightTransferSession,
 )
+from reef.runtime.executor import Executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.interfaces import TrainingBackend
+from reef.train.deployment import NO_INFERENCE_BACKEND
 from reef.train.slime_backend.reef_adapters.bridge import (
     BridgePreparation,
     create_train_groups,
@@ -22,6 +25,7 @@ from reef.train.slime_backend.reef_adapters.bridge import (
 from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
+
 #: The receiver control protocol Slime's updaters attach to, per inference backend.
 WEIGHT_TRANSFER_PROTOCOLS = {"sglang": "slime-sglang-control-v2", "vllm": "reef-vllm-control-v1"}
 
@@ -29,8 +33,11 @@ WEIGHT_TRANSFER_PROTOCOLS = {"sglang": "slime-sglang-control-v2", "vllm": "reef-
 class SlimeTrainingService(TrainingService):
     """Own actor/critic workers and a sender attachment, never the coordinator.
 
-    ``inference_backend`` None is a training-only deployment: the workers send
-    no weights, so they declare no transfer protocol and need no attachment.
+    The workers send ``inference_backend``'s native protocol, else
+    ``reef-no-weight-transfer-v1``; ``inference.backend: none`` has no native
+    protocol. With the no-transfer session, no updater connects to a receiver
+    and no weights leave the workers: the backend records each version in the
+    session's receiver instead.
     """
 
     def __init__(
@@ -39,16 +46,19 @@ class SlimeTrainingService(TrainingService):
         *,
         preparation: BridgePreparation,
         loss_family_config: object | None,
-        inference_backend: str | None = "sglang",
+        inference_backend: str = "sglang",
         train_rpc_timeout_s: float | None = None,
     ) -> None:
-        if inference_backend is not None and inference_backend not in WEIGHT_TRANSFER_PROTOCOLS:
+        if inference_backend == NO_INFERENCE_BACKEND:
+            native: tuple[str, ...] = ()
+        elif inference_backend in WEIGHT_TRANSFER_PROTOCOLS:
+            native = (WEIGHT_TRANSFER_PROTOCOLS[inference_backend],)
+        else:
             raise ValueError(
                 f"Slime weight transfer has no receiver protocol for inference backend {inference_backend!r}"
             )
-        self._weight_transfer_protocol = (
-            None if inference_backend is None else WEIGHT_TRANSFER_PROTOCOLS[inference_backend]
-        )
+        # Last, so that a receiver with engines keeps its native protocol.
+        self._weight_transfer_protocols = (*native, NO_WEIGHT_TRANSFER_PROTOCOL)
         if train_rpc_timeout_s is None:
             train_rpc_timeout_s = DEFAULT_TRAIN_RPC_TIMEOUT_S
         elif (
@@ -66,12 +76,14 @@ class SlimeTrainingService(TrainingService):
         self._critic_group: Any = None
         self._backend: TrainingBackend | None = None
         self._session_id: str | None = None
+        # The receiver of a no-transfer session; None before attachment and for a native session.
+        self._version_receiver: Executor | None = None
         self._started = False
         self._closed = False
 
     @property
     def weight_transfer_protocols(self) -> tuple[str, ...]:
-        return () if self._weight_transfer_protocol is None else (self._weight_transfer_protocol,)
+        return self._weight_transfer_protocols
 
     def start(self, resources: DeploymentResources) -> None:
         if self._started or self._closed:
@@ -85,30 +97,32 @@ class SlimeTrainingService(TrainingService):
             rollout_manager=None,
             train_rpc_timeout_s=self.train_rpc_timeout_s,
         )
-        if self._weight_transfer_protocol is None:
-            # No transport will attach: read the workers' parallel layout, which
-            # the batch split needs, without connecting them to any receiver.
-            for group in (self._actor_group, self._critic_group):
-                if group is not None:
-                    group.set_rollout_manager(None)
         # Ongoing observation belongs to the backend in the coordinator
         # process. Watching these driver-side handles would report intentional
         # release_train retirement as a deployment failure after serialization.
 
     def attach_weight_transport(self, session: WeightTransferSession) -> None:
-        """Attach the existing native sender protocol after workers are initialized."""
+        """Attach the selected sender protocol after workers are initialized."""
         if self._actor_group is None or self._closed:
             raise RuntimeError("start training workers before attaching their weight transport")
         if (
             not isinstance(session, NativeWeightTransferSession)
-            or self._weight_transfer_protocol is None
-            or session.protocol != self._weight_transfer_protocol
+            or session.protocol not in self._weight_transfer_protocols
         ):
             raise ValueError("Slime training received an incompatible weight transfer protocol")
         if self._session_id is not None:
             if self._session_id == session.session_id:
                 return
             raise RuntimeError("training workers cannot reuse a different deployment's weight transfer session")
+        if session.protocol == NO_WEIGHT_TRANSFER_PROTOCOL:
+            # No updater connects. The workers still report their parallel
+            # layout, which the batch split reads.
+            for group in (self._actor_group, self._critic_group):
+                if group is not None:
+                    group.set_rollout_manager(None)
+            self._version_receiver = session.receiver
+            self._session_id = session.session_id
+            return
         receiver = session.receiver
         if not isinstance(receiver, RayExecutor) or len(receiver.workers) != 1:
             raise ValueError("Slime weight transport requires one native Ray receiver")
@@ -121,8 +135,7 @@ class SlimeTrainingService(TrainingService):
         self._session_id = session.session_id
 
     def backend(self) -> TrainingBackend:
-        attached = self._session_id is not None or self._weight_transfer_protocol is None
-        if self._actor_group is None or not attached or self._closed:
+        if self._actor_group is None or self._session_id is None or self._closed:
             raise RuntimeError("training backend requires initialized workers and attached weight transport")
         if self._backend is None:
             self._backend = create_training_backend(
@@ -132,6 +145,7 @@ class SlimeTrainingService(TrainingService):
                 preparation=self.preparation,
                 loss_family_config=self.loss_family_config,
                 train_rpc_timeout_s=self.train_rpc_timeout_s,
+                version_receiver=self._version_receiver,
             )
         return self._backend
 

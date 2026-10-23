@@ -34,4 +34,4 @@ class DeployConfigError(ReefError):
 
 
 class InferenceUnavailable(ReefError):
-    """The deployment serves no inference requests, for example a training-only deployment without engines."""
+    """The deployment serves no inference requests, for example one with ``inference.backend: none``."""

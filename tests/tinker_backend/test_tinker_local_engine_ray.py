@@ -171,7 +171,7 @@ def model_driver(tmp_path, monkeypatch, inference, runtime, *, ray_gpus, driver_
         "inference": inference,
         "training": {
             "backend": "tinker",
-            "options": {"state-dir": str(tmp_path / "tinker"), "lora-rank": 32, "batch-size": 1, "kl-coef": 0.0},
+            "options": {"state-dir": str(tmp_path / "tinker"), "lora-rank": 32, "batch-size": 4, "kl-coef": 0.0},
         },
         "storage": {
             "artifact-repository": str(tmp_path / "artifacts.git"),

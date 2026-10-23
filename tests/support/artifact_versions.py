@@ -143,7 +143,6 @@ def dispatcher(tmp_path, *, save_interval: int = 1, experiment_tracker=None):
     value = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(runtime),
-            batch_size=1,
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
