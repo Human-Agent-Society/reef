@@ -498,12 +498,11 @@ class TrainingPublication:
     The enclosing training coordinator must serialize these operations with
     training and shutdown. A single shared ``phase`` also lets its training and
     checkpoint operations report progress through the same health endpoint.
-    No tensor data passes through this object. A missing marker path supports
-    legacy coordinators that never execute durable training jobs.
+    No tensor data passes through this object.
     """
 
     def __init__(
-        self, store: TrainingJobStore | None, publisher: WeightPublisher, state: TrainingJobState | None = None
+        self, store: TrainingJobStore, publisher: WeightPublisher, state: TrainingJobState | None = None
     ) -> None:
         self._store = store
         self._publisher = publisher
@@ -517,15 +516,10 @@ class TrainingPublication:
     def phase(self, phase: str) -> None:
         self.state.phase = phase
 
-    def _require_store(self) -> TrainingJobStore:
-        if self._store is None:
-            raise RuntimeError("training job checkpoint path is not configured")
-        return self._store
-
     def _job_marker(self, job_id: str) -> dict[str, Any]:
         if not job_id:
             raise ValueError("training_job_id must be non-empty")
-        marker = self._require_store().read()
+        marker = self._store.read()
         if marker is None or marker["job_id"] != job_id:
             raise RuntimeError(f"unknown training job {job_id!r}")
         return marker
@@ -565,13 +559,13 @@ class TrainingPublication:
             # barrier, so a publication that fails from here on replays as a
             # recovery rather than as a fresh checkpoint.
             if not recovering:
-                self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                self._store.transition(marker, "UPDATING_WEIGHTS")
                 engines_declared_uncertain = True
             self.phase = "publishing"
             version = self._publisher.publish(marker, force_full=recovering)
             if not isinstance(version, str) or not version:
                 raise RuntimeError("weight publisher returned an empty runtime load ID")
-            self._require_store().transition(marker, "READY_TO_COMMIT", runtime_load_id=version)
+            self._store.transition(marker, "READY_TO_COMMIT", runtime_load_id=version)
             self.phase = "awaiting_commit"
         except AdapterEvictionFailed:
             self._abort()
@@ -596,7 +590,7 @@ class TrainingPublication:
         replay rebuilds the engines and forces a full publication.
         """
         with suppress(Exception):
-            self._require_store().transition(marker, "UPDATING_WEIGHTS")
+            self._store.transition(marker, "UPDATING_WEIGHTS")
 
     def reject(self, job_id: str) -> Mapping[str, Any]:
         """Durably reject before restoring the incumbent's released resources."""
@@ -605,11 +599,11 @@ class TrainingPublication:
         if status == "REJECTED":
             return marker
         if status == "CHECKPOINT":
-            self._require_store().transition(marker, "REJECTING")
+            self._store.transition(marker, "REJECTING")
         elif status != "REJECTING":
             raise RuntimeError(f"cannot reject training job {job_id!r} from {status}")
         self._publisher.restore_incumbent()
-        self._require_store().transition(marker, "REJECTED")
+        self._store.transition(marker, "REJECTED")
         self.phase = "serving"
         return marker
 
@@ -622,14 +616,14 @@ class TrainingPublication:
         marker = self._job_marker(job_id)
         if marker["status"] == "COMPLETE":
             if marker.get("commit_acknowledged") is not True:
-                self._require_store().write({**marker, "commit_acknowledged": True})
+                self._store.write({**marker, "commit_acknowledged": True})
             return
         if marker["status"] == "READY_TO_COMMIT":
-            marker = self._require_store().transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
+            marker = self._store.transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
         if marker["status"] != "HEAD_COMMITTED":
             raise RuntimeError(f"cannot acknowledge training job {job_id!r} from {marker['status']}")
         self._publisher.resume()
-        self._require_store().transition(marker, "COMPLETE", commit_acknowledged=True)
+        self._store.transition(marker, "COMPLETE", commit_acknowledged=True)
         self.phase = "serving"
 
     @contextmanager
@@ -653,7 +647,7 @@ class TrainingPublication:
                 self._publisher.pause()
                 self.phase = "recovering"
                 if marker is not None and marker["status"] == "CHECKPOINT":
-                    self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                    self._store.transition(marker, "UPDATING_WEIGHTS")
         except BaseException:
             if marker is not None and marker["status"] == "CHECKPOINT":
                 # Startup retires the engines the same way a publication does,
@@ -678,7 +672,7 @@ class TrainingPublication:
                     f"{marker['runtime_load_id']!r} to {runtime_load_id!r}"
                 )
             if marker is not None and status == "UPDATING_WEIGHTS":
-                self._require_store().transition(marker, "READY_TO_COMMIT", runtime_load_id=runtime_load_id)
+                self._store.transition(marker, "READY_TO_COMMIT", runtime_load_id=runtime_load_id)
                 self.phase = "awaiting_commit"
             elif status == "READY_TO_COMMIT":
                 self.phase = "awaiting_commit"
@@ -709,7 +703,7 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         training: TrainingBackend,
         inference: InferenceBackend,
         state: TrainingJobState,
-        store: TrainingJobStore | None,
+        store: TrainingJobStore,
     ) -> None:
         self._store = store
         self.training = training
@@ -839,8 +833,6 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         if marker is not None:
             # Persist intent before any bytes leave the sender. An uncertain
             # partial transfer and process restart must reuse the same target.
-            if self._store is None:
-                raise RuntimeError("training checkpoint path is not configured")
             self._store.write({**marker, "target_runtime_load_id": target})
         return target
 

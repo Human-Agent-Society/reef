@@ -138,7 +138,7 @@ class Coordinator:
             "phase": self.publication.phase,
             "inference_url": self.endpoint,
             "pid": os.getpid(),
-            "training_job": {**marker, "deferred_weight_update": True, "training_job_id": marker["job_id"]},
+            "training_job": {**marker, "training_job_id": marker["job_id"]},
         }
 
     def serving_runtime_load_id(self):

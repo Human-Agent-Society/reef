@@ -2641,9 +2641,9 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
     with pytest.raises(ValueError, match="proposals_dir must be a non-empty path"):
         dataclasses.replace(default, proposals_dir=" ")
     # The backend gets the scenario's own directory; nothing is created until a proposal arrives.
-    trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
-        "demo", SQLiteRecordStore()
-    )
+    trainer = dataclasses.replace(
+        built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime(), binary=str(make_binary(tmp_path))
+    ).build("demo", SQLiteRecordStore())
     inbox = trainer.candidate_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()

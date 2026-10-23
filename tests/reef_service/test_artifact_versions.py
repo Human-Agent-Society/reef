@@ -184,7 +184,6 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     assert adopted.operation == "rollback"
     assert adopted.operation_verified is True
     assert adopted.rollback_target_release_id == target_version
-    assert recovered.committed_training_without_job_id is False
 
 
 @pytest.mark.unit

@@ -754,12 +754,11 @@ def test_the_delete_guard_reads_the_runtime_once(tmp_path: Path, dispatchers: _D
                 return {
                     "ok": False,
                     "phase": "dead",
-                    "training_job": {"deferred_weight_update": True, "status": "IDLE"},
+                    "training_job": {"status": "IDLE"},
                 }
             return {
                 "ok": True,
                 "training_job": {
-                    "deferred_weight_update": True,
                     "status": "RUNNING",
                     "training_job_id": "j",
                     "scenario": "x",
@@ -1371,7 +1370,6 @@ def test_a_harness_only_rollback_keeps_the_proof_that_the_weights_job_was_commit
     scenario.rollback(first_harness)
     # Only the harness changed: the weights job's commit still stands.
     assert scenario.committed_training_job_id == "job-1"
-    assert not scenario.committed_training_without_job_id
 
 
 @pytest.mark.unit
@@ -1695,7 +1693,6 @@ def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path, dispa
     assert _commit_step(scenario, HARNESS) is not None
     assert scenario.scenario_step == 2
     assert scenario.committed_training_job_id == "job-1"
-    assert scenario.committed_training_without_job_id is False
 
     # A rollback after the weights commit is the one thing that unmakes the proof.
     scenario.rollback(base)

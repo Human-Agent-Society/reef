@@ -124,7 +124,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         *,
         batch_processor: TrainingBatchProcessor,
         args: SlimeArguments,
-        save_hf_template: str | None,
+        save_hf_template: str,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
         megatron_save_root: str | None = None,
@@ -170,7 +170,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         )
         self._context = TrainingContext(
             next_rollout_id=start_rollout_id,
-            history=ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None,
+            history=ScenarioHistory(history_path(save_hf_template)) if lora else None,
         )
         if loss_runtime is not None:
             self._algo = loss_runtime
@@ -193,9 +193,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self.switched_arg_names: set[str] = set()
         self.worker_settings = WorkerTrainingSettings(self._algo.loss_family, None)
         self.learning_rate_schedules_path = (
-            None
-            if save_hf_template is None
-            else Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
+            Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
         )
         self.learning_rate_schedules = read_learning_rate_schedules(
             self.learning_rate_schedules_path, next_rollout_id=start_rollout_id
@@ -212,7 +210,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 lora=lora,
                 saves_optimizer=not args.no_save_optim,
             )
-            if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
+            if storage_config is not None and megatron_save_root is not None
             else None
         )
 
@@ -466,8 +464,6 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         includes all earlier rollouts. Thus the file does not name a rollout
         after the checkpoint that a restart loads.
         """
-        if self.learning_rate_schedules_path is None:
-            raise RuntimeError("the Slime bridge keeps learning-rate schedule progress beside --save-hf")
         write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
 
     def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
@@ -581,8 +577,6 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return prepared
 
     def _checkpoint_path(self, rollout_id: int) -> str:
-        if self._save_hf_template is None:
-            raise RuntimeError("slime args.save_hf is not set")
         return self._save_hf_template.format(rollout_id=rollout_id)
 
     def resolve_training_result(self, value: Any) -> Any:
@@ -628,9 +622,9 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
         self._backend.save_job_checkpoint(self)
 
 
-def read_learning_rate_schedules(path: Path | None, *, next_rollout_id: int) -> dict[str, dict[str, Any]]:
+def read_learning_rate_schedules(path: Path, *, next_rollout_id: int) -> dict[str, dict[str, Any]]:
     """Every scenario's schedule progress, refusing progress newer than the checkpoints the workers loaded."""
-    value = None if path is None else read_json(path)
+    value = read_json(path)
     if value is None:
         return {}
     records: dict[str, dict[str, Any]] = {}

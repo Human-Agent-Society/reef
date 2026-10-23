@@ -202,7 +202,7 @@ def test_failed_component_shutdown_requires_process_retirement(resource_runtime,
     assert resource_runtime.events[-2:] == ["retire-processes", "disconnect"]
 
 
-def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job():
+def test_training_worker_loss_fails_operations_health_without_waiting_for_another_job(tmp_path):
     from reef.runtime.executor.failure import ExecutorFailedError
     from reef.runtime.executor.uniproc import UniProcExecutor
     from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -217,7 +217,10 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
 
     group = TrainingGroup()
     operations = SlimeTrainingBackend(
-        group, batch_processor=SimpleNamespace(), args=SlimeArguments(global_batch_size=1), save_hf_template=None
+        group,
+        batch_processor=SimpleNamespace(),
+        args=SlimeArguments(global_batch_size=1),
+        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
     )
     try:
         operations.start()
