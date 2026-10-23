@@ -26,7 +26,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -283,23 +283,6 @@ class TaskPlayer:
     def play(self, task_path: Path) -> TaskPlay:
         """Play one task directory and report its episode when the verifier scored it."""
         return asyncio.run(self.play_async(task_path))
-
-    def play_concurrently(self, task_paths: Iterable[Path], *, concurrency: int) -> tuple[TaskPlay, ...]:
-        """Play task directories with up to ``concurrency`` episodes in flight; results in the given order."""
-        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
-            raise TaskPlayError("concurrency must be a positive integer")
-        paths = [Path(path) for path in task_paths]
-
-        async def play_many() -> tuple[TaskPlay, ...]:
-            slots = asyncio.Semaphore(concurrency)
-
-            async def one(path: Path) -> TaskPlay:
-                async with slots:
-                    return await self.play_async(path)
-
-            return tuple(await asyncio.gather(*(one(path) for path in paths)))
-
-        return asyncio.run(play_many())
 
     async def play_async(self, task_path: Path) -> TaskPlay:
         task_path = Path(task_path)

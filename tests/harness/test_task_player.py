@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import threading
@@ -18,6 +19,7 @@ from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
     TaskLab,
+    TaskPlay,
     TaskPlayer,
     TaskPlayError,
     bound_agent,
@@ -325,14 +327,17 @@ def test_a_measurement_run_keeps_its_episodes_out_of_the_training_data(reef: Sta
 def test_concurrent_plays_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")]
     lab = StandInLab({"reward": 1.0})
-    plays = player(reef, tmp_path, lab).play_concurrently(paths, concurrency=2)
+    playing = player(reef, tmp_path, lab)
+
+    async def play_all() -> tuple[TaskPlay, ...]:
+        return tuple(await asyncio.gather(*(playing.play_async(path) for path in paths)))
+
+    plays = asyncio.run(play_all())
     assert [play.name for play in plays] == ["t1", "t2", "t3"] and all(play.is_reported for play in plays)
     assert len({play.episode_id for play in plays}) == 3 and len(reef.reports) == 3
     ports = {call["agent"]["kwargs"]["api_base"] for call in lab.calls}
     assert len(ports) == 3, "every episode talks to its own proxy, so its receipts are its own"
     assert sorted(receipt for play in plays for receipt in play.receipts) == [f"rec-{n}" for n in range(1, 7)]
-    with pytest.raises(TaskPlayError, match="concurrency must be a positive integer"):
-        player(reef, tmp_path, lab).play_concurrently(paths, concurrency=0)
 
 
 def test_two_plays_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
