@@ -16,8 +16,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
   then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check or play.
 
-Jobs run one after another on a private thread; closing the service stops the harbor runs a job has in
-flight, so ``reef serve`` leaves no container behind. Everything here is stateless beyond the tasks
+Jobs run at the same time on one job worker; a play waits only for the service's episode slots, so a proposal
+or a check never waits behind a play. Closing the service stops the harbor runs a job has in flight, so
+``reef serve`` leaves no container behind. Everything here is stateless beyond the tasks
 root: a restarted service serves the same root.
 """
 
@@ -28,7 +29,6 @@ import hashlib
 import importlib.util
 import json
 import logging
-import queue
 import shutil
 import subprocess
 import sys
@@ -36,12 +36,13 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from aiohttp import web
 from reef_client.client import ReefClientError
 
+from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.tasks import HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
@@ -76,7 +77,6 @@ from reef.record2task.generator.wire import (
 
 logger = logging.getLogger(__name__)
 
-CLOSE_JOIN_S = 10.0
 DOCKER_PROBE_TIMEOUT_S = 5.0
 
 
@@ -154,8 +154,11 @@ def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]
     )
 
 
-# reef serve kills the generator 30 s after its term; the harbor grace and the join must both fit in that window.
+# reef serve kills the generator 30 s after its term; the harbor grace and the worker's close must both fit in that
+# window.
 CLOSE_GRACE_S = 10.0
+#: The most jobs that run or wait at the same time.
+MAX_JOBS_IN_FLIGHT = 256
 
 
 # ------------------------------------------------------------------ the work
@@ -183,7 +186,7 @@ class TaskPlays(ABC):
     """Who plays a written task for one arm: the served model through a Harbor agent and the task player."""
 
     @abstractmethod
-    def play(
+    async def play(
         self,
         task_path: Path,
         *,
@@ -198,7 +201,10 @@ class TaskPlays(ABC):
 
 
 class ReefTaskPlays(TaskPlays):
-    """A task player per call, its episodes tagged with the arm."""
+    """A task player per call, its episodes tagged with the arm; at most ``concurrency`` episodes of all calls in flight.
+
+    The service's job worker runs every play on its one event loop, so the episode slots are shared by all plays.
+    """
 
     def __init__(
         self,
@@ -215,9 +221,9 @@ class ReefTaskPlays(TaskPlays):
         self.token = token
         self.agent = agent
         self.agent_host = agent_host
-        self.concurrency = concurrency
+        self.episode_slots = asyncio.Semaphore(concurrency)
 
-    def play(
+    async def play(
         self,
         task_path: Path,
         *,
@@ -245,7 +251,12 @@ class ReefTaskPlays(TaskPlays):
             # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
             verifier_timeout_reward=0.0,
         )
-        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
+
+        async def episode() -> TaskPlay:
+            async with self.episode_slots:
+                return await player.play_async(task_path)
+
+        return tuple(await asyncio.gather(*(episode() for _ in range(plays))))
 
 
 # ------------------------------------------------------------------ the jobs
@@ -263,7 +274,7 @@ class Job(ABC):
         self.error = ""
 
     @abstractmethod
-    def run(self) -> dict[str, object]: ...
+    async def run(self) -> dict[str, object]: ...
 
     def document(self) -> dict[str, object]:
         return {"id": self.id, "kind": self.kind, "state": self.state, "result": self.result, "error": self.error}
@@ -294,9 +305,13 @@ class ProposalJob(Job):
         self.index = index
         self.tags = dict(tags)
 
-    def run(self) -> dict[str, object]:
-        answer = self.designer.answer(
-            designer_messages(self.request), scenario=self.scenario, model=self.model, tags=self.tags
+    async def run(self) -> dict[str, object]:
+        answer = await asyncio.to_thread(
+            self.designer.answer,
+            designer_messages(self.request),
+            scenario=self.scenario,
+            model=self.model,
+            tags=self.tags,
         )
         try:
             reply = parse_harbor_reply(answer.text)
@@ -333,8 +348,8 @@ class CheckJob(Job):
         self.checks = checks
         self.task_path = task_path
 
-    def run(self) -> dict[str, object]:
-        return oracle_document(self.checks.oracle(self.task_path))
+    async def run(self) -> dict[str, object]:
+        return oracle_document(await asyncio.to_thread(self.checks.oracle, self.task_path))
 
 
 class PlayJob(Job):
@@ -364,8 +379,8 @@ class PlayJob(Job):
         self.extra_instruction_paths = extra_instruction_paths
         self.tags = dict(tags)
 
-    def run(self) -> dict[str, object]:
-        played = self.plays.play(
+    async def run(self) -> dict[str, object]:
+        played = await self.plays.play(
             self.task_path,
             scenario=self.scenario,
             model=self.model,
@@ -378,58 +393,66 @@ class PlayJob(Job):
         return {"plays": [play_document(play) for play in played]}
 
 
-class JobRunner:
-    """Runs jobs one after another on a private thread; closing stops the harbor runs in flight, then the thread."""
+@dataclass(frozen=True)
+class JobTicket(SupportsReceipt):
+    """A job on the job worker.
+
+    Values: ``receipt`` is the ID of a job that ``JobRunner`` holds.
+    Purpose: ``JobRunner.submit`` makes it; the worker hands it to ``JobRunner.run``, which runs the job it names.
+    """
+
+
+class JobRunner(BackgroundJobRunner):
+    """Runs the service's jobs at the same time on one job worker; closing stops the harbor runs in flight, then the worker.
+
+    A job is queued, running, then done or failed. ``get`` reads a job's state by its ID, and marks a job that the
+    worker gave up, such as one cancelled at close, as failed.
+    """
 
     def __init__(self, runs: HarborRuns | None = None) -> None:
         self.runs = runs if runs is not None else HarborRuns()
-        self._queue: queue.SimpleQueue[Job | None] = queue.SimpleQueue()
-        self._jobs: dict[str, Job] = {}
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-        self._closed = False
+        self.jobs: dict[str, Job] = {}
+        self.lock = threading.Lock()
+        # A play waits for episode slots, not for job slots; the limit only bounds what one client can queue.
+        self.worker = BackgroundJobWorker(self, thread_name="generator-jobs", concurrency=MAX_JOBS_IN_FLIGHT)
 
     def submit(self, job: Job) -> Job:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("the job runner is closed")
-            self._jobs[job.id] = job
-            if self._thread is None:
-                self._thread = threading.Thread(target=self._run, name="generator-jobs", daemon=True)
-                self._thread.start()
-        self._queue.put(job)
+        with self.lock:
+            self.jobs[job.id] = job
+        if not self.worker.submit(JobTicket(job.id)):
+            with self.lock:
+                self.jobs.pop(job.id)
+            raise RuntimeError("the job runner is closed")
         return job
 
     def get(self, job_id: str) -> Job | None:
-        with self._lock:
-            return self._jobs.get(job_id)
+        for result in self.worker.poll():
+            if isinstance(result, Failed):
+                with self.lock:
+                    given_up = self.jobs[result.receipt]
+                if given_up.state in ("queued", "running"):
+                    given_up.error = "the job stopped before it finished"
+                    given_up.state = "failed"
+        with self.lock:
+            return self.jobs.get(job_id)
 
     def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            thread = self._thread
         self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
-        if thread is None:
-            return
-        self._queue.put(None)
-        thread.join(timeout=CLOSE_JOIN_S)
+        self.worker.close()
 
-    def _run(self) -> None:
-        while True:
-            job = self._queue.get()
-            if job is None:
-                return
-            job.state = "running"
-            try:
-                job.result = job.run()
-            except Exception as exc:  # the job's own failure is its result; the runner goes on
-                logger.exception("%s job %s failed", job.kind, job.id)
-                job.error = f"{type(exc).__name__}: {exc}"[:1000]
-                job.state = "failed"
-            else:
-                job.state = "done"
+    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
+        with self.lock:
+            work = self.jobs[job.receipt]
+        work.state = "running"
+        try:
+            work.result = await work.run()
+        except Exception as exc:  # the job's own failure is its result; the other jobs go on
+            logger.exception("%s job %s failed", work.kind, work.id)
+            work.error = f"{type(exc).__name__}: {exc}"[:1000]
+            work.state = "failed"
+        else:
+            work.state = "done"
+        return job
 
 
 # --------------------------------------------------------------- the service
