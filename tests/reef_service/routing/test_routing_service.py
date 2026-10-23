@@ -11,6 +11,7 @@ import asyncio
 import json
 import math
 import time
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -462,12 +463,59 @@ def test_routed_service_requires_authentication_and_its_preview_settings(tmp_pat
     try:
         with pytest.raises(ValueError, match="token"):
             create_app(dispatcher, routing=adapter, preview=preview)
+        with pytest.raises(ValueError, match="token"):
+            create_app(dispatcher, tokens=iter(["", ""]), routing=adapter, preview=preview)
         with pytest.raises(ValueError, match="preview settings"):
             create_app(dispatcher, tokens=SERVICE_TOKEN, routing=adapter)
         with pytest.raises(ValueError, match="routing manifest"):
             create_app(dispatcher, tokens=SERVICE_TOKEN, preview=preview)
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("routed", "make_tokens"),
+    [
+        (True, lambda: [SERVICE_TOKEN]),
+        (True, lambda: iter([SERVICE_TOKEN])),
+        (True, lambda: (token for token in [SERVICE_TOKEN])),
+        (False, lambda: (token for token in [SERVICE_TOKEN])),
+    ],
+)
+def test_a_one_pass_token_iterable_keeps_authentication_on(
+    tmp_path: Path, routed: bool, make_tokens: Callable[[], Iterable[str]]
+) -> None:
+    async def run() -> None:
+        async def upstream(request: web.Request) -> web.Response:
+            return web.json_response({"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}]})
+
+        async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
+            url = str(provider.make_url("")).rstrip("/")
+            adapter = routing_adapter(tmp_path, url)
+            dispatcher = routing_dispatcher(tmp_path)
+            try:
+                async with running_router(adapter.snapshot) as router:
+                    if routed:
+                        app = create_app(dispatcher, tokens=make_tokens(), routing=adapter, preview=router.settings)
+                    else:
+                        app = create_app(dispatcher, tokens=make_tokens(), inference_handler=HttpInferenceHandler(url))
+                    async with TestClient(TestServer(app)) as client:
+                        chat = {"model": "student", "messages": [{"role": "user", "content": "hi"}]}
+                        report = {"score": 1, "references": []}
+                        for credential in ({}, {"Authorization": "Bearer wrong-token"}):
+                            headers = {"x-reef-scenario": "coding", **credential}
+                            for path, body in (("/v1/chat/completions", chat), ("/reef/report", report)):
+                                assert (await client.post(path, headers=headers, json=body)).status == 401
+                        response = await client.post("/v1/chat/completions", headers=routing_headers(), json=chat)
+                        assert response.status == 200, await response.text()
+                        report["references"] = [response.headers["x-reef-agent-record-id"]]
+                        accepted = await client.post("/reef/report", headers=routing_headers(), json=report)
+                        assert accepted.status == 200, await accepted.text()
+            finally:
+                dispatcher.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit

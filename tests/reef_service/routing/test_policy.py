@@ -14,10 +14,11 @@ import json
 import stat
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -35,13 +36,22 @@ from tests.reef_service.routing.routing_fakes import (
 )
 
 from reef.service.app import CONTROL_APPLICATION, create_app
-from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController, RoutingDeploymentError
-from reef.service.deploy.routing.policy import PolicyStateStore, RouterManagementClient, document_etag
+from reef.service.deploy.routing.deployment_controller import (
+    RoutingDeploymentController,
+    RoutingDeploymentError,
+    RoutingReadinessTimeout,
+)
+from reef.service.deploy.routing.policy import (
+    PolicyStateStore,
+    RouterManagementClient,
+    RouterPolicyError,
+    document_etag,
+)
 from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
-from reef.service.lifecycle import LifecycleSettings
+from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
 
 pytestmark = pytest.mark.unit
@@ -102,7 +112,7 @@ class RouterConfigServer:
     Like ``config_activation.go``, the status is ``active`` exactly when the
     active runtime hash equals the generated one. ``mode`` scripts the next
     PUT (``ok``, ``other_writer``, ``lost_unknown``, ``pending``, ``stop``,
-    ``failed``, ``hash_mismatch`` or ``lost``); ``next_mode`` then replaces it.
+    ``stop_late``, ``failed``, ``hash_mismatch`` or ``lost``); ``next_mode`` then replaces it.
     """
 
     def __init__(self, document: str) -> None:
@@ -123,6 +133,13 @@ class RouterConfigServer:
         #: This many ``/ready`` requests lose their reply; another writer may store a document at the first.
         self.lost_ready_replies = 0
         self.writer_at_lost_ready: str | None = None
+        #: ``"headers"``: every reply arrives one byte every 0.02 seconds from its status line; ``"body"``: only its
+        #: body does.
+        self.trickle: str | None = None
+        #: Each authorized request as ``"<method> <path>"``, in arrival order.
+        self.requests: list[str] = []
+        #: When set, each ``/ready`` asks the controller to stop before it answers.
+        self.stop_at_ready = False
         self.controller: RoutingDeploymentController | None = None
         state = self
 
@@ -134,16 +151,25 @@ class RouterConfigServer:
 
             def reply(self, status: int, body: dict[str, object], tag: str | None = None) -> None:
                 encoded = json.dumps(body).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(encoded)))
-                if tag is not None:
-                    self.send_header("ETag", tag)
-                self.end_headers()
-                self.wfile.write(encoded)
+                head = (
+                    f"HTTP/1.0 {status} {self.responses[status][0]}\r\nContent-Type: application/json\r\n"
+                    f"Content-Length: {len(encoded)}\r\n" + ("" if tag is None else f"ETag: {tag}\r\n") + "\r\n"
+                ).encode()
+                if state.trickle is None:
+                    self.wfile.write(head + encoded)
+                    return
+                fast, slow = (head, encoded) if state.trickle == "body" else (b"", head + encoded)
+                # Each byte arrives well within a socket timeout; the whole reply takes seconds.
+                with contextlib.suppress(OSError):
+                    self.wfile.write(fast)
+                    for byte in slow:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.02)
 
             def authorized(self) -> bool:
                 if self.headers.get("Authorization") == "Bearer " + MANAGEMENT_TOKEN:
+                    state.requests.append(f"{self.command} {self.path}")
                     return True
                 self.reply(401, {"error": "unauthorized"})
                 return False
@@ -178,6 +204,8 @@ class RouterConfigServer:
                         },
                     )
                 elif self.path == "/ready":
+                    if state.stop_at_ready and state.controller is not None:
+                        state.controller.request_stop()
                     if state.lost_ready_replies > 0:
                         state.lost_ready_replies -= 1
                         if state.writer_at_lost_ready is not None:
@@ -212,11 +240,14 @@ class RouterConfigServer:
                     return
                 state.document = document
                 state.generated = runtime(document)
-                if mode in {"pending", "stop"}:
+                if mode in {"pending", "stop", "stop_late"}:
                     state.pending_reads = 3 if mode == "pending" else 10**6
                     state.activation_status = "pending"
-                    if mode == "stop" and state.controller is not None:
+                    if mode != "pending" and state.controller is not None:
                         state.controller.request_stop()
+                    if mode == "stop_late":
+                        # This reply, and every later one, outlasts the observation phase.
+                        state.trickle = "body"
                     self.reply(
                         202, {"status": "pending", "etag": etag(document), "generated_runtime_hash": state.generated}
                     )
@@ -467,6 +498,71 @@ def test_an_unknown_writer_is_refused_while_readiness_replies_are_lost(case: Pol
     assert case.router.puts == [candidate] and case.router.document == "written: elsewhere\n"
 
 
+@pytest.mark.parametrize("trickle", ["headers", "body"])
+def test_a_trickling_management_reply_ends_at_its_deadline(case: PolicyCase, trickle: str) -> None:
+    management = case.controller.management
+    assert management is not None
+    case.router.trickle = trickle
+    started = time.monotonic()
+    with pytest.raises(RouterPolicyError):
+        management.runtime_hashes(deadline=started + 0.2)
+    assert time.monotonic() - started < 0.6
+    # Without a phase deadline, the client's own one-second timeout bounds the whole exchange.
+    started = time.monotonic()
+    with pytest.raises(RouterPolicyError):
+        management.runtime_hashes()
+    assert time.monotonic() - started < 1.5
+
+
+@pytest.mark.parametrize("slow_step", ["encode", "decode"])
+def test_time_spent_encoding_or_decoding_counts_against_the_call_deadline(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch, slow_step: str
+) -> None:
+    import reef.service.deploy.routing.policy as policy_module
+
+    management = case.controller.management
+    assert management is not None
+
+    def delayed(function: Callable[..., object]) -> Callable[..., object]:
+        def slow(*arguments: object, **options: object) -> object:
+            time.sleep(0.1)
+            return function(*arguments, **options)
+
+        return slow
+
+    # Only the client's own JSON step is slowed, not the test server's.
+    codec: dict[str, Callable[..., object]] = {"dumps": json.dumps, "loads": json.loads}
+    step = "dumps" if slow_step == "encode" else "loads"
+    codec[step] = delayed(codec[step])
+    monkeypatch.setattr(policy_module, "json", SimpleNamespace(**codec))
+    current = case.router.document
+    candidate = current + "# candidate\n"
+    with pytest.raises(RouterPolicyError, match="not sent" if slow_step == "encode" else "after its deadline"):
+        management.replace(candidate, etag(current), deadline=time.monotonic() + 0.05)
+    # A PUT encoded past its deadline is never sent. One whose reply is decoded too late was still applied.
+    assert case.router.puts == ([] if slow_step == "encode" else [candidate])
+
+
+def test_a_trickling_router_holds_neither_a_reopening_nor_an_update_past_its_phase(case: PolicyCase) -> None:
+    management = case.controller.management
+    assert management is not None
+    case.router.trickle = "body"
+    case.actions.clear()
+    case.controller.ready_deadline = time.monotonic() + 0.3
+    started = time.monotonic()
+    with pytest.raises(RoutingReadinessTimeout):
+        case.controller.wait_ready(initial=False)
+    assert time.monotonic() - started < 1 and "control:open" not in case.actions
+    case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=0.3)
+    current = case.router.document
+    candidate = current + "# candidate\n"
+    started = time.monotonic()
+    assert case.controller.replace_router_document(management, candidate, etag(current), etag(candidate)) == "timeout"
+    assert time.monotonic() - started < 1
+    # The PUT was sent once and applied although its reply never arrived: a timeout does not prove it failed.
+    assert case.router.puts == [candidate] and case.router.document == candidate
+
+
 def test_a_writer_during_the_rollback_plan_is_never_overwritten(case: PolicyCase) -> None:
     case.router.normalize = True
     write_source(case.source, keyword="escalate")
@@ -571,6 +667,28 @@ def test_stop_during_activation_takes_priority_over_opening(case: PolicyCase) ->
     assert "control:open" not in case.actions and "control:activate" not in case.actions
 
 
+@pytest.mark.parametrize("stop_at", ["expiring_put", "final_ready"])
+def test_stop_during_the_last_activation_call_ends_the_update_without_more_router_calls(
+    case: PolicyCase, stop_at: str
+) -> None:
+    write_source(case.source, keyword="escalate")
+    if stop_at == "expiring_put":
+        # Stop arrives during the PUT, whose reply then outlasts the whole two-second observation phase. The
+        # client's own timeout is longer, so the PUT uses up the phase.
+        assert case.controller.management is not None
+        case.controller.management = replace(case.controller.management, timeout_seconds=5)
+        case.router.mode = "stop_late"
+    else:
+        case.router.stop_at_ready = True
+    with pytest.raises(InterruptedError):
+        reload(case)
+    last_call = "PUT /api/v1/config" if stop_at == "expiring_put" else "GET /ready"
+    assert case.router.requests[-1] == last_call and len(case.router.puts) == 1
+    assert "control:activate" not in case.actions and "control:open" not in case.actions
+    # The uncertain update stays in the journal for the next start to inspect.
+    assert "pending" in case.state()
+
+
 @pytest.mark.parametrize("source", ["candidate", "invalid"])
 def test_owner_restart_after_an_interrupted_update_recovers_the_committed_policy(
     case: PolicyCase, source: str
@@ -649,9 +767,8 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
         old_hash, new_hash = "4" * 64, "5" * 64
         async with TestServer(provider_app) as provider, contextlib.AsyncExitStack() as stack:
             url = str(provider.make_url("")).rstrip("/")
-            old = RoutingAdapter.from_manifest(
-                write_source(tmp_path / "old.json", url=url), router_config_hash=old_hash, environ={}
-            )
+            old_path = write_source(tmp_path / "old.json", url=url)
+            old = RoutingAdapter.from_manifest(old_path, router_config_hash=old_hash, environ={})
             new_path = write_source(tmp_path / "new.json", keyword="escalate", rule="escalated", url=url)
             new_version = RoutingSnapshot.load(new_path).version
             catalog_path = write_source(tmp_path / "catalog.json", url=url, revision="r2")
@@ -706,6 +823,24 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
                     TestClient(TestServer(app)) as client,
                     TestClient(TestServer(app[CONTROL_APPLICATION])) as lifecycle,
                 ):
+                    # A report that starts while the new child is still closed does not hold its first activation.
+                    report_released = asyncio.Event()
+                    held_report = asyncio.create_task(app[REQUEST_ACCEPTANCE].writes.run(report_released.wait()))
+                    await asyncio.sleep(0)
+                    try:
+                        republish = {
+                            "manifest_path": str(old_path),
+                            "snapshot_version": old.snapshot.version,
+                            "router_config_hash": old_hash,
+                            "expected_snapshot_version": old.snapshot.version,
+                        }
+                        assert await control(lifecycle, "activate", **republish) == 200
+                        state = await (await lifecycle.get("/reef/lifecycle", headers=control_headers)).json()
+                        assert state["accepting"] is False
+                        assert (state["pending_writes"], state["drain_pending_writes"]) == (1, 0)
+                    finally:
+                        report_released.set()
+                        await held_report
                     assert await control(lifecycle, "open") == 200
                     response = await client.post(
                         "/v1/chat/completions", headers=routing_headers(), json=routed("reef_teacher_required", False)

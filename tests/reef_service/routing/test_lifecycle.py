@@ -411,6 +411,44 @@ def test_drain_tracks_preclose_writes_and_late_inference_finalization_but_not_ne
     asyncio.run(run())
 
 
+def test_a_new_child_drains_earlier_writes_but_not_reports_that_start_while_it_waits() -> None:
+    async def run() -> None:
+        writes = PendingWrites()
+        earlier, inference, new_report = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def blocked(event: asyncio.Event) -> None:
+            await event.wait()
+
+        before_construction = asyncio.create_task(writes.run(blocked(earlier)))
+        await asyncio.sleep(0)
+        acceptance = RequestAcceptance(settings(), writes)
+        context = INFERENCE_FINALIZATION.set(True)
+        finalizing = asyncio.create_task(writes.run(blocked(inference)))
+        INFERENCE_FINALIZATION.reset(context)
+        late_report = asyncio.create_task(writes.run(blocked(new_report)))
+        await asyncio.sleep(0)
+        try:
+            assert acceptance.status()["drain_pending_writes"] == 2
+            with pytest.raises(web.HTTPConflict):
+                acceptance.control(command("open"))
+            earlier.set()
+            inference.set()
+            await asyncio.gather(before_construction, finalizing)
+            # Only the report that started after construction is left, and it does not hold the first opening.
+            assert (acceptance.status()["pending_writes"], acceptance.status()["drain_pending_writes"]) == (1, 0)
+            acceptance.control(command("open"))
+            assert acceptance.accepting
+            acceptance.control(command("stop", 1))
+            assert acceptance.status()["drain_pending_writes"] == 1
+        finally:
+            earlier.set()
+            inference.set()
+            new_report.set()
+            await asyncio.gather(before_construction, finalizing, late_report)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("stream", [False, True])
 def test_root_is_counted_until_response_eof(stream: bool) -> None:
     async def run() -> None:

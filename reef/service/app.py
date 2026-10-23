@@ -148,8 +148,10 @@ def create_app(
     no verified router runtime; its owner publishes one and opens admission
     through the control application stored under ``CONTROL_APPLICATION``.
     """
+    # Read ``tokens`` once: an iterator is empty after one pass, and no tokens would turn authentication off.
+    accepted_tokens = normalize_tokens(tokens)
     if routing is not None:
-        if not normalize_tokens(tokens):
+        if not accepted_tokens:
             raise ValueError("routing requires a service token")
         if type(dispatcher.recipe) is not Recipe or dispatcher.recipe.training_runtime is not None:
             raise ValueError("routing requires the base record-only Recipe")
@@ -171,7 +173,10 @@ def create_app(
         dispatcher, retry_policy=inference_retry_policy, routing=routing, writes=writes, preview=preview_client
     )
     app = web.Application(
-        middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors],
+        middlewares=[
+            create_authentication_middleware(accepted_tokens, evaluation_tokens=evaluation_tokens),
+            translate_errors,
+        ],
         client_max_size=MAX_REQUEST_BYTES,
     )
     app[REQUEST_SERVICE_KEY] = request_service

@@ -380,8 +380,9 @@ class FakeManagement(RouterManagementClient):
     Only three reads are faked, in memory. ``config_etag`` returns ``etag`` and ``runtime_hashes`` the two
     runtime hashes and ``activation_status``; with ``available`` False both raise ``RouterPolicyError``.
     ``ready`` logs ``router:ready``, requests the stop of ``stop_on_ready`` if set, and returns
-    ``available and is_ready``, so an unavailable router is not ready rather than an error. The inherited
-    ``call``, ``plan`` and ``replace`` are the real client's, aimed at port 1.
+    ``available and is_ready``, so an unavailable router is not ready rather than an error. All three accept
+    and ignore ``deadline``. The inherited ``call``, ``plan`` and ``replace`` are the real client's, aimed at
+    port 1.
     """
 
     def __init__(self, actions: list[str], document: Path) -> None:
@@ -395,12 +396,12 @@ class FakeManagement(RouterManagementClient):
         self.available = True
         self.stop_on_ready: RoutingDeploymentController | None = None
 
-    def config_etag(self) -> str:
+    def config_etag(self, *, deadline: float | None = None) -> str:
         if not self.available:
             raise RouterPolicyError("router unavailable")
         return self.etag
 
-    def runtime_hashes(self) -> dict[str, object]:
+    def runtime_hashes(self, *, deadline: float | None = None) -> dict[str, object]:
         if not self.available:
             raise RouterPolicyError("router unavailable")
         return {
@@ -409,7 +410,7 @@ class FakeManagement(RouterManagementClient):
             "activation_status": self.activation_status,
         }
 
-    def ready(self) -> bool:
+    def ready(self, *, deadline: float | None = None) -> bool:
         self.actions.append("router:ready")
         if self.stop_on_ready is not None:
             self.stop_on_ready.request_stop()

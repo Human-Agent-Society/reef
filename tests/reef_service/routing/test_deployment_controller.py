@@ -6,8 +6,12 @@ are in-process fakes that record the controller's calls.
 
 from __future__ import annotations
 
+import errno
+import io
 import json
+import logging
 import socket
+import sys
 import tempfile
 import time
 from dataclasses import replace
@@ -461,6 +465,72 @@ def test_reconnect_readiness_keeps_the_configured_deadline(
     assert case.controller.restart_count == 0
 
 
+@pytest.mark.parametrize("outcome", ["finished", "unfinished_request", "unfinished_write", "stopped"])
+def test_a_late_open_reply_is_drained_again_before_the_next_recovery_removes_sr(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    import reef.service.deploy.routing.deployment_controller as controller_module
+
+    opened(case)
+    clock = SteppingClock()
+    monkeypatch.setattr(controller_module, "time", clock)
+    # Long enough for several status reads before the forced close; the stepping clock makes it instant.
+    case.controller.policy = replace(case.controller.policy, drain_timeout_seconds=1)
+    original_request, original_remove = case.control.request, case.runtime.remove
+    accepting = [True]
+    late_open = [True]
+    #: At each SR removal: whether admission was open, and REEF's admitted requests and pending record writes.
+    removals: list[tuple[bool, int, int]] = []
+
+    def request(
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, object]:
+        if action is None and not late_open[0] and outcome != "unfinished_request":
+            if case.control.active_requests:
+                # The request admitted after the late OPEN finishes; its record write starts and is pending.
+                case.control.active_requests, case.control.pending_writes = 0, 1
+                if outcome == "stopped":
+                    case.controller.request_stop()
+            elif case.control.pending_writes and outcome != "unfinished_write":
+                # On a later status read, the record write has finished too.
+                case.control.pending_writes = 0
+        status = original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
+        if cancel_active and outcome == "unfinished_request":
+            # Even the forced close cannot finish it.
+            case.control.active_requests = 1
+        if action is not None:
+            accepting[0] = action == "open"
+        if action == "open" and late_open[0]:
+            # REEF opened before the deadline, admitted a request, and the reply reached the owner too late.
+            late_open[0] = False
+            case.control.active_requests = 1
+            clock.now = (deadline or clock.now) + 0.001
+            raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
+        return status
+
+    def remove(ownership: DeploymentOwnership, stop_timeout_seconds: float) -> None:
+        removals.append((accepting[0], case.control.active_requests, case.control.pending_writes))
+        original_remove(ownership, stop_timeout_seconds)
+
+    monkeypatch.setattr(case.control, "request", request)
+    monkeypatch.setattr(case.runtime, "remove", remove)
+    if outcome.startswith("unfinished"):
+        # The finalization deadline passes with work left, which prohibits another removal.
+        with pytest.raises(RoutingDeploymentError, match="recovery prohibited"):
+            case.controller.recover("router-failure")
+    else:
+        case.controller.recover("router-failure")
+    # The first attempt removes SR while REEF is closed and idle; after the late OPEN, only a drained REEF may.
+    expected = [(False, 0, 0), (False, 0, 0)] if outcome == "finished" else [(False, 0, 0)]
+    assert removals == expected
+    final_state = {"finished": "ready", "stopped": "stopping"}.get(outcome, "finalizing")
+    assert case.controller.state == final_state
+
+
 def test_child_control_loss_does_not_restart_sr(case: ControllerCase) -> None:
     opened(case)
     case.control.available = False
@@ -549,6 +619,73 @@ def test_a_periodic_status_timeout_does_not_hide_a_router_failure(
         case.runtime.inventory = case.runtime.healthy_inventory("unhealthy")
         case.controller.tick()
         assert case.controller.restart_count == 1 and case.controller.state == "ready"
+
+
+@pytest.mark.parametrize("failure", ["open", "write", "chmod", "stderr", "every_sink", "closed_logger"])
+def test_a_diagnostic_write_failure_leaves_a_healthy_deployment_serving(
+    case: ControllerCase, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    import reef.service.deploy.routing.deployment_controller as controller_module
+
+    opened(case)
+    diagnostic = case.controller.directory / "lifecycle-events.jsonl"
+    original_open, original_chmod = Path.open, Path.chmod
+
+    class FullFile(io.StringIO):
+        """The event file on a full disk: it opens, and every write fails."""
+
+        def write(self, text: str) -> int:
+            raise OSError(errno.ENOSPC, "no space left for diagnostics")
+
+    class BrokenStream:
+        """A standard error whose every write fails, as after its reader exited."""
+
+        def write(self, text: str) -> int:
+            raise OSError(errno.EPIPE, "standard error is broken")
+
+        def flush(self) -> None:
+            raise OSError(errno.EPIPE, "standard error is broken")
+
+    def path_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path == diagnostic and failure == "open":
+            raise OSError(errno.ENOSPC, "no space left for diagnostics")
+        if path == diagnostic and failure in {"write", "every_sink", "closed_logger"}:
+            return FullFile()
+        return original_open(path, *args, **kwargs)
+
+    def path_chmod(path: Path, mode: int, **kwargs: object) -> None:
+        if path == diagnostic and failure == "chmod":
+            raise OSError(errno.EPERM, "diagnostics are read-only")
+        original_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "open", path_open)
+    monkeypatch.setattr(Path, "chmod", path_chmod)
+    if failure == "stderr":
+        monkeypatch.setattr(sys, "stderr", BrokenStream())
+    if failure in {"every_sink", "closed_logger"}:
+        # The fallback handler is unavailable too, and logging's own error output uses closed stderr.
+        closed = io.StringIO()
+        closed.close()
+        handler: logging.Handler
+        if failure == "every_sink":
+            handler = logging.FileHandler(tmp_path / "missing-directory" / "reef.log", delay=True)
+        else:
+            handler = logging.StreamHandler(closed)
+        monkeypatch.setattr(controller_module.logger, "handlers", [handler])
+        monkeypatch.setattr(controller_module.logger, "propagate", False)
+        monkeypatch.setattr(logging, "raiseExceptions", True)
+        monkeypatch.setattr(sys, "stderr", closed)
+        assert controller_module.logger.isEnabledFor(logging.WARNING)
+    time_out_status_reads(case, monkeypatch, 1)
+    case.controller.next_probe = case.controller.next_inspect = 0
+    case.controller.tick()
+    # A reload this case cannot render is rejected; the serving policy stays.
+    case.controller.request_reload()
+    case.controller.tick()
+    assert case.controller.state == "ready" and not case.controller.reload_requested
+    # The router and container checks after the timed-out status read still ran; nothing closed or restarted.
+    assert case.actions.count("router:ready") == 1 and "inspect" in case.actions
+    assert not {"control:close", "control:stop", "remove", "start"} & set(case.actions)
 
 
 def test_generation_mismatch_never_opens(case: ControllerCase) -> None:

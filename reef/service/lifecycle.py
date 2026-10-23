@@ -260,14 +260,18 @@ class RoutingPublisher(ABC):
 class RequestAcceptance:
     """The admission state of one managed REEF child on one event loop.
 
-    State: it starts closed, with ``accepting`` and ``stopping`` false, ``control_revision == -1``, and
-    ``last_action`` and ``drain_sequence`` None. ``stopping`` is terminal and implies not ``accepting``.
+    State: it starts closed, with ``accepting`` and ``stopping`` false, ``control_revision == -1``,
+    ``last_action`` None, and ``drain_sequence`` the write sequence at construction. ``stopping`` is terminal
+    and implies not ``accepting``.
     ``control_revision`` is -1 exactly when ``last_action`` is None. Otherwise it is the revision of the last
     applied command, and ``last_action`` is that command's ``(action, cancel_active, snapshot_version,
     router_config_hash, open_deadline)``. Missing ``cancel_active`` defaults to False, and missing snapshot
     and hash fields default to empty strings. ``open_deadline`` is 0.0 outside ``open``.
-    ``accepting`` implies ``drain_sequence`` is None. After a close, ``drain_sequence`` is the write sequence
-    at the first close and limits which writes the drain waits for. ``active`` holds the root task of each
+    ``drain_sequence`` is the drain's write cutoff. Construction captures ``writes.sequence``, ``open`` clears
+    it to None, the next ``close`` or ``stop`` captures the current ``writes.sequence``, and later ones keep
+    it, so ``accepting`` implies it is None. The drain waits for every inference write and for other writes
+    up to the cutoff, so a report that starts while admission is closed does not extend it. Once
+    ``stopping``, the status counts every write. ``active`` holds the root task of each
     admitted request. Middleware removes it when response handling ends. A finished task may remain until
     removal. ``forced_requests`` (≥ 0) counts cancellation requests from commands with ``cancel_active=True``
     or from owner loss.
@@ -288,7 +292,8 @@ class RequestAcceptance:
         self.publisher: RoutingPublisher | None = None
         self.active: set[asyncio.Task[object]] = set()
         self.forced_requests = 0
-        self.drain_sequence: int | None = None
+        # A new child is closed: its drain boundary is set now, not at its first close command.
+        self.drain_sequence: int | None = writes.sequence
 
     def check(self) -> None:
         if not self.accepting or self.stopping:

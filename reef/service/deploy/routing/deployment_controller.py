@@ -11,7 +11,9 @@ verified hash is published again whenever it differs from the child's.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import secrets
 import stat
@@ -53,6 +55,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
+logger = logging.getLogger(__name__)
 #: Consecutive failed router readiness checks before the router counts as failed.
 READINESS_FAILURE_LIMIT = 3
 #: aiohttp moves a deadline of five seconds or more up to the next whole second of loop time.
@@ -149,11 +152,22 @@ class RoutingDeploymentController:
         if state not in {"policy_rejected", "policy_unchanged", "status_timeout"}:
             self.state = state
         data = {"monotonic_seconds": time.monotonic(), "state": state, "restarts": self.restart_count, **details}
+        line = json.dumps(data, sort_keys=True)
+        # The event file and stderr are diagnostics. Failing to write them must not stop a healthy deployment.
         if self.ownership is not None:
-            with (self.directory / "lifecycle-events.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(data, sort_keys=True) + "\n")
-            (self.directory / "lifecycle-events.jsonl").chmod(0o600)
-        print("[reef-routing] " + json.dumps(data, sort_keys=True), file=sys.stderr, flush=True)
+            path = self.directory / "lifecycle-events.jsonl"
+            try:
+                with path.open("a", encoding="utf-8") as stream:
+                    stream.write(line + "\n")
+                path.chmod(0o600)
+            except OSError as exc:
+                # The fallback can also fail to open its file or write to a closed stream.
+                with contextlib.suppress(OSError, ValueError):
+                    logger.warning("routing lifecycle event %s was not written to %s: %s", state, path, exc)
+        # A broken stderr raises OSError and a closed one ValueError. Nothing reports either; the event file
+        # keeps the line.
+        with contextlib.suppress(OSError, ValueError):
+            print("[reef-routing] " + line, file=sys.stderr, flush=True)
 
     def render(self, source: Path, output: Path, ownership: DeploymentOwnership) -> RoutingSnapshot:
         return generate(
@@ -328,7 +342,7 @@ class RoutingDeploymentController:
                 if status.get("drain_pending_writes") != 0:
                     raise RoutingControlError("request records are still finalizing")
                 # Every open, including startup, rollback and container recovery, checks the router runtime.
-                runtime_hash = self.check_router_policy()
+                runtime_hash = self.check_router_policy(deadline)
                 if status.get("router_config_hash") != runtime_hash:
                     control.request(
                         "activate",
@@ -561,13 +575,14 @@ class RoutingDeploymentController:
             )
         return source
 
-    def check_router_policy(self) -> str:
+    def check_router_policy(self, deadline: float | None = None) -> str:
         """Confirm the router runs the committed policy, and return its verified runtime hash.
 
         The source ETag alone is not enough: the runtime hash, the router's
         ``active`` status and its readiness must match too. A generation's first
         check records its own committed pair, which ends crash recovery. A pending
-        update whose candidate is not running is resolved as not applied.
+        update whose candidate is not running is resolved as not applied. Each
+        management call ends before ``deadline``, the caller's phase end, if given.
 
         Raises:
             RoutingControlError: Retryable while activation or readiness is in
@@ -578,9 +593,9 @@ class RoutingDeploymentController:
             raise RoutingDeploymentError("router management is unavailable")
         ownership, _ = self.require_clients()
         try:
-            router_etag = management.config_etag()
-            hashes = management.runtime_hashes()
-            ready = management.ready()
+            router_etag = management.config_etag(deadline=deadline)
+            hashes = management.runtime_hashes(deadline=deadline)
+            ready = management.ready(deadline=deadline)
         except RouterPolicyError as exc:
             raise RoutingControlError("router management API is not ready") from exc
         generated, active = hashes.get("generated_runtime_hash"), hashes.get("active_runtime_hash")
@@ -681,6 +696,9 @@ class RoutingDeploymentController:
             # Journal before the router mutation, so a crash at any point finds the committed pair.
             self.policy_store.write({"committed": committed, "pending": pending})
             outcome = self.replace_router_document(management, document, current_etag, candidate_etag)
+            if self.stop_requested:
+                # Stop came during the last call. The pending journal stays, so the next start inspects the update.
+                raise InterruptedError("routing stop arrived during the policy update")
             if outcome == "active":
                 runtime_hash = management.runtime_hashes().get("active_runtime_hash")
                 if not isinstance(runtime_hash, str) or not runtime_hash:
@@ -724,26 +742,29 @@ class RoutingDeploymentController:
     def replace_router_document(
         self, management: RouterManagementClient, document: str, current_etag: str, candidate_etag: str
     ) -> str:
-        """PUT the candidate once, then inspect: ``active``, ``rejected`` (unchanged), ``failed`` or ``timeout``."""
+        """PUT the candidate once, then inspect: ``active``, ``rejected`` (unchanged), ``failed`` or ``timeout``.
+
+        The PUT and every inspection share one deadline, ``policy.ready_timeout_seconds`` from the PUT.
+        """
         if self.stop_requested:
             raise InterruptedError("routing stop arrived before the policy update")
+        deadline = time.monotonic() + self.policy.ready_timeout_seconds
         status: int | None
         try:
-            status, body = management.replace(document, current_etag)
+            status, body = management.replace(document, current_etag, deadline=deadline)
         except RouterPolicyError:
-            # The reply was lost; the router may or may not have applied it. Inspect, never replay.
+            # The reply was lost or late; the router may or may not have applied it. Inspect, never replay.
             status, body = None, {}
         if status == 412:
             raise RoutingDeploymentError("another writer changed the router configuration during the update")
         expected = body.get("generated_runtime_hash")
         expected_hash = expected if isinstance(expected, str) and expected else None
-        deadline = time.monotonic() + self.policy.ready_timeout_seconds
         while time.monotonic() < deadline:
             if self.stop_requested:
                 raise InterruptedError("routing stop arrived during the policy update")
             try:
-                etag = management.config_etag()
-                hashes = management.runtime_hashes()
+                etag = management.config_etag(deadline=deadline)
+                hashes = management.runtime_hashes(deadline=deadline)
             except RouterPolicyError:
                 time.sleep(0.1)
                 continue
@@ -763,7 +784,7 @@ class RoutingDeploymentController:
                     and active == generated
                 ):
                     try:
-                        ready = management.ready()
+                        ready = management.ready(deadline=deadline)
                     except RouterPolicyError:
                         # A lost readiness reply is read again on the next pass, after the writer check; the PUT
                         # is never sent again.
@@ -830,8 +851,12 @@ class RoutingDeploymentController:
         self.event("unready", reason=reason)
         if self.policy.restart_policy != "bounded":
             raise RoutingDeploymentError("routing dependency failed; fail_stop policy")
-        self.drain(recovery=True)
         while not self.stop_requested:
+            # Drain before every removal. An OPEN whose reply came too late may have reopened admission during
+            # the last attempt, so a request admitted since then must finish, or be cancelled, first.
+            self.drain(recovery=True)
+            if self.stop_requested:
+                break
             if self.restart_count >= self.policy.max_restarts:
                 raise RoutingDeploymentError("routing restart budget exhausted")
             self.restart_count += 1
