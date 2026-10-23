@@ -14,6 +14,23 @@ the loop, configuration, four paper results, search curves, and resume behavior.
 | `ahc058` | C++20 | Official tester, 150 public cases | Maximum mean raw score |
 | `trimul` | Python/Triton | H100, 18 correctness tests and seven timing cases | Minimum latency |
 
+Four CPU-only [FrontierCS 2](https://github.com/FrontierCS/FrontierCS-2) tasks
+use the same harness. A candidate is the complete text of the task's one
+editable file, and the task's own verifier scores it on the development suite.
+
+| `GUIDANCE_TASK` | Candidate | Evaluator | Archive ranking |
+|---|---|---|---|
+| `join_tree_rewriting` | Python `rewrite_policy.py` | 20 train queries | Maximum FrontierCS 2 train score |
+| `approximate_mips_query_stopping` | C++ `alg.cpp` | 12 train workloads | Maximum FrontierCS 2 train score |
+| `lejepa_world_model` | Python `losses.py` | 3 train runs | Maximum FrontierCS 2 train score |
+| `polar_express` | Python `polar_express.py` | 12 train matrices | Maximum FrontierCS 2 train score |
+
+`serve-frontiercs2.yaml` runs them at the paper's search budget with a
+16,384-token sequence limit for their longer statements. The final verifier
+scores the best candidate once on the task's held-out suite and records whether
+it beats the human reference. The [judge guide](judges/README.md#frontiercs-2)
+covers preparation, verifier images, and the two stub tasks.
+
 ## Run
 
 Use Linux, Docker, and the supported Reef GPU environment. From the repository root:
@@ -41,6 +58,16 @@ export GUIDANCE_EXECUTOR=local
 export GUIDANCE_EXECUTOR_URL=http://127.0.0.1:8000/v1
 ./run.sh
 ```
+
+For any other OpenAI-compatible endpoint, set `GUIDANCE_EXECUTOR=openai` with
+`GUIDANCE_EXECUTOR_URL`, `GUIDANCE_EXECUTOR_MODEL` and the name of its key
+variable in `GUIDANCE_EXECUTOR_API_KEY_ENV`. When the key rotates, also set
+`GUIDANCE_EXECUTOR_API_KEY_FILE` to a dotenv file that holds it; the client
+reads the file again before each request.
+
+On a host with Apptainer but no Docker, set `GUIDANCE_DRIVER=run_local.py`.
+It runs the same trajectory without a Harbor trial and asks the judge for the
+final score itself, writing `final.json` to the state directory.
 
 For GLM-5.2, set `GUIDANCE_EXECUTOR=openrouter` and provide
 `OPENROUTER_API_KEY` through your environment. The script reads the key only

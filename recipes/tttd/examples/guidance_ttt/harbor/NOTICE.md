@@ -11,3 +11,9 @@
 - Lasso: SimpleTES at `47d3413da1d85dc24341219d47452d2601e56a57` (AGPL-3.0).
   Preparation downloads the original bootstrap and evaluator separately.
   The task contract documents their input/output format and correctness conditions.
+- FrontierCS 2 (`join_tree_rewriting`, `approximate_mips_query_stopping`,
+  `lejepa_world_model`, `polar_express`): FrontierCS 2 at
+  `e989e8c6826585a336fb999db1b87fa327073c2d` (CC BY 4.0). Each `instruction.md`
+  carries the task's research statement unchanged after a candidate-format
+  section. Preparation checks out the task repositories, and the judge runs the
+  task's published verifier image.

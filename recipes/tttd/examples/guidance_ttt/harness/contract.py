@@ -8,7 +8,9 @@ itself.
 
 The problem statement comes from the Harbor task's ``instruction.md``. The
 remaining strings come from the task's ``contract.json``, so adding a task
-means adding a Harbor task directory, not editing the harness.
+means adding a Harbor task directory, not editing the harness. A task whose
+candidate is one file of a larger repository also passes the code around that
+file as ``execution_context``, which only the executor reads.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ class TaskContract:
     raw_score_label: str
     score_direction: str = "max"
     judge_problem_id: str = "0"
+    execution_context: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -50,15 +53,16 @@ class TaskContract:
             raise ValueError(f"score_direction must be one of {SCORE_DIRECTIONS}")
 
     @classmethod
-    def load(cls, path: str | Path, *, problem_prompt: str) -> TaskContract:
+    def load(cls, path: str | Path, *, problem_prompt: str, execution_context: str = "") -> TaskContract:
         """Read a Harbor task's ``contract.json`` and bind its instruction."""
         payload: Any = json.loads(Path(path).read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"expected a JSON object in {path}")
-        unknown = set(payload) - {field for field in cls.__dataclass_fields__ if field != "problem_prompt"}
+        bound = {"problem_prompt", "execution_context"}
+        unknown = set(payload) - {field for field in cls.__dataclass_fields__ if field not in bound}
         if unknown:
             raise ValueError(f"unknown task contract fields in {path}: {sorted(unknown)}")
-        return cls(problem_prompt=problem_prompt, **payload)
+        return cls(problem_prompt=problem_prompt, execution_context=execution_context, **payload)
 
 
 __all__ = ["SCORE_DIRECTIONS", "TaskContract"]

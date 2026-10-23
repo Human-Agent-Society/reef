@@ -110,6 +110,34 @@ Its response contains `report.all_correct`, `report.score_us`,
 `report.test_count`, `report.benchmark_count`, and `report.benchmarks`.
 The adapter rejects missing, non-finite, or incompatible measurements.
 
+## FrontierCS 2
+
+Four CPU-only FrontierCS 2 tasks use one adapter: `join_tree_rewriting`,
+`approximate_mips_query_stopping`, `lejepa_world_model` and `polar_express`.
+A candidate is the complete text of the task's one editable file, listed in
+`frontiercs2_tasks.json`. The adapter writes the task's patch and runs the
+task's own verifier image in `train` mode on the development suite:
+
+```bash
+python prepare.py join_tree_rewriting   # pins FrontierCS 2 under work/FrontierCS-2
+apptainer pull work/sif/join_tree_rewriting.sif \
+  docker://joyemang33/fcs2-task-verifier-join_tree_rewriting@<digest from config/task-catalog.json>
+python judges/frontiercs2_server.py \
+  --problems work/FrontierCS-2/tasks/frontier-cs-2.0-demo/problems --images work/sif \
+  --tasks join_tree_rewriting --workers 32 --port 8082
+```
+
+Each worker runs one verifier on its own CPU set of the task's
+`verifier.cpu_millis`, under the task's evaluation timeout. The verifier
+returns the score and development metrics that a FrontierCS 2 agent receives;
+the message carries them to the next guidance. A candidate is valid when its
+score is positive. The pid `<task>:eval` runs the held-out final suite and adds
+the private `beats_reference` verdict; only the final verifier uses it.
+
+`lejepa_world_model` and `polar_express` ship their file as a stub that scores
+zero. `bootstrap_frontiercs2.py` asks the frozen executor once for a simple
+working version and keeps the first one the judge accepts.
+
 ## Check one bootstrap
 
 After the judge starts, run:
