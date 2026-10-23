@@ -37,14 +37,18 @@ class Group:
         self.executor.shutdown()
 
 
-def service_and_resources(monkeypatch, *, critic=False, release_error=False, timeout=None):
+def service_and_resources(monkeypatch, *, critic=False, release_error=False, timeout=None, inference="sglang"):
     events = []
     actor = Group("actor", events, release_error=release_error)
     critic_group = Group("critic", events) if critic else None
     args = SimpleNamespace()
     preparation = object()
     service = training.SlimeTrainingService(
-        args, preparation=preparation, loss_family_config="recipe-settings", train_rpc_timeout_s=timeout
+        args,
+        preparation=preparation,
+        loss_family_config="recipe-settings",
+        inference_backend=inference,
+        train_rpc_timeout_s=timeout,
     )
     resources = SlimeDeploymentResources(args, ray_address="unused", namespace="test")
     resources.placement_groups = {"actor": "actor-pg", "critic": "critic-pg"}
@@ -107,6 +111,25 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     monkeypatch.setattr(training, "create_training_backend", create)
     assert service.backend() is service.backend()
     assert captured == [(service.args, service.preparation, "recipe-settings")]
+    service.close()
+
+
+def test_training_without_inference_reads_the_worker_layout_at_start(monkeypatch):
+    service, resources, events = service_and_resources(monkeypatch, critic=True, inference=None)
+    service.start(resources)
+    # The batch split needs each worker's parallel layout; no transport will attach to provide it.
+    assert events == [("allocate",), ("attach", "actor", None), ("attach", "critic", None)]
+    captured = []
+
+    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s):
+        assert actor.train_parallel_config == {"attached": True}
+        assert critic.train_parallel_config == {"attached": True}
+        captured.append(args)
+        return object()
+
+    monkeypatch.setattr(training, "create_training_backend", create)
+    assert service.backend() is service.backend()
+    assert captured == [service.args]
     service.close()
 
 

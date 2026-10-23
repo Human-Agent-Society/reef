@@ -85,6 +85,12 @@ class SlimeTrainingService(TrainingService):
             rollout_manager=None,
             train_rpc_timeout_s=self.train_rpc_timeout_s,
         )
+        if self._weight_transfer_protocol is None:
+            # No transport will attach: read the workers' parallel layout, which
+            # the batch split needs, without connecting them to any receiver.
+            for group in (self._actor_group, self._critic_group):
+                if group is not None:
+                    group.set_rollout_manager(None)
         # Ongoing observation belongs to the backend in the coordinator
         # process. Watching these driver-side handles would report intentional
         # release_train retirement as a deployment failure after serialization.
