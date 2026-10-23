@@ -102,6 +102,51 @@ def test_external_batch_and_step_size_hooks_are_idempotent(monkeypatch: pytest.M
 
 
 @pytest.mark.unit
+def test_finalize_grads_hook_empties_the_cache_only_when_memory_is_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    finalized: list[tuple[object, ...]] = []
+    model = _stub_module(
+        monkeypatch,
+        "slime.backends.megatron_utils.model",
+        finalize_model_grads=lambda *args: finalized.append(args) or "finalized",
+    )
+    cleared: list[bool] = []
+    memory_utils = importlib.import_module("slime.utils.memory_utils")
+    monkeypatch.setattr(memory_utils, "clear_memory", lambda: cleared.append(True))
+    free = {"bytes": 10 * 1024**3}
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (free["bytes"], 80 * 1024**3))
+
+    worker_hooks._install_finalize_grads_memory_relief()
+    wrapped = model.finalize_model_grads
+    worker_hooks._install_finalize_grads_memory_relief()
+    assert model.finalize_model_grads is wrapped
+
+    assert model.finalize_model_grads("model", 4) == "finalized"
+    assert cleared == []
+    free["bytes"] = 2 * 1024**3
+    assert model.finalize_model_grads("model", 4) == "finalized"
+    assert cleared == [True]
+    assert finalized == [("model", 4), ("model", 4)]
+
+
+@pytest.mark.unit
+def test_finalize_grads_hook_leaves_a_slime_with_the_guard_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def original(*_args):
+        return "finalized"
+
+    model = _stub_module(
+        monkeypatch,
+        "slime.backends.megatron_utils.model",
+        finalize_model_grads=original,
+        _finalize_model_grads=original,
+    )
+
+    worker_hooks._install_finalize_grads_memory_relief()
+
+    assert model.finalize_model_grads is original
+
+
+@pytest.mark.unit
 def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[object] = []
     logging_utils = _stub_module(

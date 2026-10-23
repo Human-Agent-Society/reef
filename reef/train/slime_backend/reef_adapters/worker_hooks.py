@@ -115,6 +115,7 @@ def initialize_megatron_objective(args) -> None:
     resolve_objective_paths(args)
     _install_external_batch_keys(args)
     _install_step_batch_size()
+    _install_finalize_grads_memory_relief()
     _install_metric_capture()
     _install_rollout_logging()
     _install_critic_metrics(args)
@@ -160,6 +161,43 @@ def _install_step_batch_size() -> None:
     marked_loss_function._reef_step_batch_size = True
     loss.loss_function = loss_function
     model.loss_function = loss_function
+
+
+#: Free device memory below which the cache is emptied before the step's final
+#: gradient collective, as Slime does from THUDM/slime@2f4280e3 on.
+FINALIZE_GRADS_MIN_FREE_BYTES = 3 * 1024**3
+
+
+def _install_finalize_grads_memory_relief() -> None:
+    """Empty the CUDA cache before the gradient collective when device memory is low.
+
+    NCCL creates some gradient communicators only after the last backward, and
+    their allocations bypass PyTorch's cache reclamation. With colocated
+    offload the process groups are rebuilt every step, so the allocation
+    recurs. Slime dropped its guard in 796d1e48 (THUDM/slime#1701: training
+    slows from the second step on) and restored it in 2f4280e3. The pinned
+    Slime predates the fix; drop this hook once the pin includes it.
+    """
+    from slime.backends.megatron_utils import model
+
+    if hasattr(model, "_finalize_model_grads"):
+        return  # this Slime has the guard
+    current = model.finalize_model_grads
+    if getattr(current, "_reef_memory_relief", False):
+        return
+
+    def finalize_model_grads(*call_args, **kwargs):
+        import torch
+        from slime.utils.memory_utils import clear_memory
+
+        free, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
+        if free < FINALIZE_GRADS_MIN_FREE_BYTES:
+            clear_memory()
+        return current(*call_args, **kwargs)
+
+    marked: Any = finalize_model_grads
+    marked._reef_memory_relief = True
+    model.finalize_model_grads = finalize_model_grads
 
 
 def _install_metric_capture() -> None:
