@@ -181,8 +181,8 @@ Add these native flags to ``training.options`` (without leading ``--``),
 and size the engine's adapter table for the scenarios you will train, plus
 one slot for the revision being published. The training thread takes turns
 between scenarios; each keeps its own adapter and optimizer state, and a restart
-recovers every one of them. ``/reef/status`` lists each scenario with its
-``adapter_runtime_load_id``.
+recovers each scenario from its own last checkpoint. ``/reef/status`` lists each
+scenario with its ``adapter_runtime_load_id``.
 
 An adapter the scenario did not train, such as one from an offline SFT run,
 is admitted the same way. It enters the release chain only if
