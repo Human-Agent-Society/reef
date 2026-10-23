@@ -209,6 +209,14 @@ class TaskPlay:
     def is_reported(self) -> bool:
         return bool(self.report_agent_record_ids)
 
+    @property
+    def is_infrastructure_failure(self) -> bool:
+        """Whether the episode could not run: the sandbox, the agent or the verifier failed before it scored.
+
+        That is a failure of the infrastructure, not of the solver.
+        """
+        return self.reward is None and bool(self.error)
+
     def as_line(self) -> dict[str, object]:
         """The JSON line the command prints for this task."""
         return {
