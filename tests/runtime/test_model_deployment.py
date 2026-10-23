@@ -593,3 +593,84 @@ def test_coordinator_is_placed_on_the_trainers_node(monkeypatch):
     with pytest.raises(RuntimeError, match="stop after capture"):
         ModelDeployment(plan).start()
     assert configs[1].node_id is None
+
+
+def test_training_only_deployment_runs_the_coordinator_without_inference():
+    from dataclasses import replace
+
+    from reef.runtime.interfaces import TrainingContext, TrainingCoordinationConfig
+
+    plan, events = plan_for()
+    plan.training.weight_transfer_protocols = ()
+    plan.training.config = TrainingCoordinationConfig(save_hf_template=None)
+    plan.training.context = TrainingContext()
+
+    class Operations(TrainingBackend):
+        config = plan.training.config
+        context = plan.training.context
+
+        def start(self):
+            events.append("operations-start")
+
+        def check_health(self):
+            pass
+
+        def initialize_version(self, runtime_load_id):
+            events.append("operations-version")
+
+        def close(self):
+            events.append("operations-close")
+
+        def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
+            raise AssertionError("unexpected prepare_training_step in this fixture")
+
+        def prepare(self, payload, *, job_id, scenario_step, prior_marker):
+            raise AssertionError("unexpected prepare in this fixture")
+
+        def prepare_weights(self, runtime_load_id, *, force_full):
+            raise AssertionError("a training-only deployment sends no weights")
+
+        def send_weights(self, runtime_load_id, *, force_full):
+            raise AssertionError("a training-only deployment sends no weights")
+
+        def activate_scenario(self, scenario):
+            raise AssertionError("unexpected activate_scenario in this fixture")
+
+        def send_adapter(self, scenario, name):
+            raise AssertionError("unexpected send_adapter in this fixture")
+
+    plan.training.backend = lambda: Operations()
+    plan = replace(plan, inference=None, coordinator=CoordinatorConfig(backend="uni"))
+    deployment = ModelDeployment(plan)
+    deployment.start()
+    assert deployment.weight_transfer_session is None
+    deployment.poll()
+    deployment.close()
+    assert not any(event.startswith(("inference", "transfer")) for event in events)
+    assert events == [
+        "allocate",
+        "training-start",
+        "training-health",
+        "operations-start",
+        "operations-version",
+        "operations-close",
+        "training-close",
+        "release",
+    ]
+
+
+def test_assembler_selects_no_inference_for_a_training_only_deployment(monkeypatch):
+    existing, events = plan_for()
+    existing.training.weight_transfer_protocols = ()
+
+    def unexpected(name, config):
+        pytest.fail("a training-only deployment must not construct an inference service")
+
+    monkeypatch.setattr(training_driver, "inference_service_for", unexpected)
+    plan = training_driver.assemble_model_plan(
+        {"reef": {"inference_num_gpus": 0}},
+        TrainingDeploymentPlan(existing.resources, existing.training, coordinator=CoordinatorConfig(backend="uni")),
+    )
+    assert plan.inference is None
+    plan.health.poll()
+    assert events == ["training-poll"]

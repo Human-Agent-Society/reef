@@ -192,6 +192,55 @@ not stored in ``training.options``. Router bind settings use ``router-ip`` and
 ``router-port``; other supported router flags retain their native ``router-*``
 names. The standalone engine launcher does not include a router.
 
+Train without inference engines
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``inference.num-gpus: 0`` selects a training-only Slime deployment. Use it for
+supervised fine-tuning on data that does not come from the served model, such
+as uploaded trajectories (``POST /reef/trajectories``) or imported records
+(``POST /reef/records``). The trainer takes every GPU that
+``training.options.actor-*`` names. Reef starts no SGLang or vLLM engine.
+
+.. code:: yaml
+
+   inference:
+     model-path: /models/Qwen3-8B   # the weights to train; nothing serves them
+     num-gpus: 0
+   training:
+     backend: slime
+     options:
+       actor-num-nodes: "1"
+       actor-num-gpus-per-node: "8"
+       save-interval: "42"
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+A training step in this mode works as follows:
+
+- The trainer stays on its GPUs between steps. Reef does not offload or
+  reload it, because no other model shares the GPUs.
+- Each step commits a scenario version with its records, metrics and runtime
+  load ID, as with engines. No weights leave the trainer: the version names the
+  weights that the trainer holds.
+- The step after each ``save-interval`` versions saves the Megatron
+  checkpoint and the HF export, and Reef publishes that version as a durable
+  artifact. See `Set the checkpoint cadence
+  <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
+- A restart continues from the last saved checkpoint, as with engines.
+
+The deployment serves no inference. ``/v1/chat/completions``,
+``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+trained version, serve its published checkpoint from a separate deployment.
+
+``reef serve`` refuses settings that need engines or the served model:
+``inference.backend``, ``inference.tensor-parallel-size``,
+``inference.options``, ``inference.remote``, ``inference.handler-factory``,
+``inference.handler-config``, ``training.colocate``, a ``teacher`` engine, an
+``evaluation`` section, a ``generator`` section, and a composite recipe. The
+Slime driver also refuses LoRA (``megatron-lora-rank``),
+``offload-train``, and a loss family that reads rollout log probs, such as
+the on-policy distillation, SAO and TTT-Discover families. Only the Slime backend
+supports this mode.
+
 In Slime-integrated inference, and for the local SGLang engines that the
 Tinker backend starts, each engine probes free ports on its host at startup.
 A probe reserves nothing, so another process, such as another stack on the

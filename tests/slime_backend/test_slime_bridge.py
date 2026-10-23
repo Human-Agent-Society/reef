@@ -1579,7 +1579,9 @@ def test_a_restart_without_a_saved_optimizer_does_not_load_one(
     [
         ({"debug_train_only": True}, "debug-train-only"),
         ({"debug_rollout_only": True}, "debug-rollout-only"),
-        ({"rollout_num_gpus": 0}, "rollout-num-gpus"),
+        ({"rollout_num_gpus": -1}, "rollout-num-gpus"),
+        # Zero engines trains only; it cannot colocate with engines it does not have.
+        ({"rollout_num_gpus": 0, "colocate": True, "offload_train": True, "offload_rollout": True}, "--colocate"),
     ],
 )
 def test_training_preflight_rejects_configuration_without_local_inference(

@@ -30,7 +30,7 @@ from reef.runtime.deployment import ModelDeploymentPlan, ModelPlanSource
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import selected_weight_training
 from reef.service.deploy.training import training_deployment_for
-from reef.train.deployment import TrainingDeploymentPlan
+from reef.train.deployment import TrainingDeploymentPlan, train_only
 
 READY_MARKER = "reef-training-ready"
 DEFAULT_READY_FILE = "/tmp/reef-training.ready"
@@ -77,19 +77,30 @@ class ConfiguredModelPlanSource(ModelPlanSource):
 
 
 def assemble_model_plan(config: Mapping[str, Any], training: TrainingDeploymentPlan) -> ModelDeploymentPlan:
-    """Select inference independently and validate the pair before allocation."""
+    """Select inference independently and validate the pair before allocation.
+
+    A training-only deployment (``inference.num-gpus: 0``) has no inference component.
+    """
     reef = config.get("reef", {})
-    if reef.get("inference_remote"):
+    inference: InferenceService | None
+    if train_only(reef):
+        inference = None
+    elif reef.get("inference_remote"):
         # The engines that inference.backend names run on a remote component.
-        inference: InferenceService = remote_inference.create_inference(training.inference_config)
+        inference = remote_inference.create_inference(training.inference_config)
     else:
         inference = inference_service_for(reef.get("inference_backend"), training.inference_config)
+    health = None
+    if training.monitor_components:
+        health = (
+            ComponentHealth(training.training) if inference is None else ComponentHealth(inference, training.training)
+        )
     plan = ModelDeploymentPlan(
         resources=training.resources,
         training=training.training,
         inference=inference,
         coordinator=training.coordinator,
-        health=ComponentHealth(inference, training.training) if training.monitor_components else None,
+        health=health,
     )
     plan.validate()
     return plan

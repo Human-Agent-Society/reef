@@ -8,11 +8,12 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.inference.remote.config import RemoteInferenceSettings
+from reef.recipe.base import WeightTrainingRecipe
+from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.train.deployment import TrainingDeployment
-
+from reef.train.deployment import TrainingDeployment, train_only, validate_train_only
 
 # Built-ins are references, so discovery does not import execution dependencies.
 _BUILTINS = {
@@ -58,6 +59,22 @@ def local_model_required(config: dict[str, Any]) -> bool:
     return training_deployment_for(backend).requires_local_model
 
 
+def validate_train_only_recipe(reference: str) -> None:
+    """Refuse a composite recipe in a training-only deployment.
+
+    Such a deployment serves no requests. Its training data is uploaded
+    trajectories (``POST /reef/trajectories``) and imported records
+    (``POST /reef/records``). The other components of a composite recipe call
+    the served model, so the recipe must be a weight-training recipe itself.
+    """
+    recipe = recipe_class_for(reference)
+    if recipe is None or not issubclass(recipe, WeightTrainingRecipe):
+        raise DeployConfigError(
+            f"inference.num-gpus: 0 requires a weight-training recipe; {reference!r} has components that "
+            "call the served model"
+        )
+
+
 def assemble_training_services(config: dict[str, Any]) -> None:
     """Validate common inputs; integrations own process topology and connections."""
     settings = service_config_from_mapping(config)
@@ -66,6 +83,11 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         raise DeployConfigError("selected training backend does not support a teacher engine")
     if settings.inference_remote and not backend.supports_remote_inference:
         raise DeployConfigError("selected training backend does not support remote engines (inference.remote)")
+    if train_only(asdict(settings)):
+        if not backend.supports_train_only:
+            raise DeployConfigError("selected training backend does not support inference.num-gpus: 0")
+        validate_train_only(asdict(settings))
+        validate_train_only_recipe(settings.recipe)
     model = config_value(config, "reef", "model_path")
     if not isinstance(model, str) or not model:
         raise DeployConfigError("weight training requires --inference.model-path")

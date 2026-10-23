@@ -381,3 +381,53 @@ def test_colocated_sender_prepares_before_receiver_memory_is_restored(tmp_path):
         "inference.kv",
     ]
     assert inference.paused
+
+
+def test_training_only_coordinator_commits_each_step_without_engines(tmp_path):
+    events = []
+    training = Trainer(tmp_path, None, events)
+    coordinator = TrainingCoordinator(training, None)
+    health = coordinator.health()
+    assert health["ok"] and health["phase"] == "serving"
+    assert health["inference_url"] is None
+    startup = coordinator.serving_runtime_load_id()
+    published = []
+    for scenario_step in (0, 1):
+        result = coordinator.execute_training_job(
+            {
+                "scenario_step": scenario_step,
+                "parent_runtime_load_id": coordinator.serving_runtime_load_id(),
+                "samples": [scenario_step],
+            }
+        )
+        published.append(coordinator.update_serving_weights(result.training_job_id).runtime_load_id)
+        assert read_marker(marker_path(training.config.save_hf_template))["status"] == "READY_TO_COMMIT"
+        coordinator.acknowledge_training_commit(result.training_job_id)
+        assert read_marker(marker_path(training.config.save_hf_template))["status"] == "COMPLETE"
+    # Each step publishes a new identity, and no weights leave the trainer.
+    assert published == ["inc:2", "inc:3"] and startup == "inc:1"
+    assert coordinator.serving_runtime_load_id() == "inc:3"
+    assert events == ["training.monitor", *["training.train", "training.checkpoint"] * 2]
+    assert coordinator.health()["completed_train_steps"] == 2
+
+
+def test_training_only_restart_keeps_the_pending_identity_and_commit_gate(tmp_path):
+    events = []
+    training = Trainer(tmp_path, None, events)
+    coordinator = TrainingCoordinator(training, None)
+    result = coordinator.execute_training_job({"scenario_step": 0, "parent_runtime_load_id": "inc:1"})
+    published = coordinator.update_serving_weights(result.training_job_id).runtime_load_id
+    replacement = TrainingCoordinator(training, None)
+    assert replacement.serving_runtime_load_id() == published
+    assert replacement.health()["phase"] == "awaiting_commit"
+    replacement.acknowledge_training_commit(result.training_job_id)
+    assert read_marker(marker_path(training.config.save_hf_template))["status"] == "COMPLETE"
+    assert not any(isinstance(event, tuple) for event in events)
+
+
+@pytest.mark.parametrize("policy", [{"colocate": True}, {"lora": True}])
+def test_training_only_coordinator_refuses_colocation_and_lora(tmp_path, policy):
+    training = Trainer(tmp_path, None, [])
+    training._config = TrainingCoordinationConfig(str(tmp_path / "step-{rollout_id}"), **policy)
+    with pytest.raises(ValueError, match="without inference engines"):
+        TrainingCoordinator(training, None)

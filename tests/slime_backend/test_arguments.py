@@ -252,3 +252,52 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
     with pytest.raises(ValueError, match="critic_save_interval"):
         prepare_checkpoint_storage(args, RetentionConfig())
     assert not (tmp_path / "megatron").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "requires_rollout_logprobs", "refusal"),
+    [
+        ({}, False, None),
+        ({"colocate": True, "offload_train": True, "offload_rollout": True}, False, "--colocate"),
+        ({"offload_train": True}, False, "--offload-train"),
+        ({"megatron_lora_rank": 32}, False, "not LoRA"),
+        ({}, True, "rollout log probs"),
+    ],
+)
+def test_a_bridge_without_inference_engines_trains_resident_full_weights(
+    overrides, requires_rollout_logprobs, refusal
+) -> None:
+    from reef.train.slime_backend.algorithm import SlimeAlgorithm
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    class Family(SlimeAlgorithm):
+        loss_family = "family"
+        loss_type = "sft_loss"
+
+        def validate_specific_args(self, args, source):
+            return None
+
+    Family.requires_rollout_logprobs = requires_rollout_logprobs
+    values = {
+        "compute_advantages_and_returns": False,
+        "num_rollout": 1,
+        "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
+        "save": "/tmp/megatron",
+        "debug_train_only": False,
+        "debug_rollout_only": False,
+        "rollout_num_gpus": 0,
+        "rollout_external": False,
+        "colocate": False,
+        "offload_train": False,
+        "offload_rollout": False,
+        "megatron_lora_rank": 0,
+        "keep_lora_base_resident": False,
+        "save_interval": 42,
+        **overrides,
+    }
+    if refusal is None:
+        validate_bridge_args(SlimeArguments(**values), Family())
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            validate_bridge_args(SlimeArguments(**values), Family())

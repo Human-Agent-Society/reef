@@ -17,6 +17,8 @@ from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpu
         (ModelGpuLayout(4, 2, colocate=True), 4, [0, 1, 2, 3], [0, 1, 2, 3]),
         (ModelGpuLayout(2, 0, external_inference=True), 2, [0, 1], []),
         (ModelGpuLayout(0, 2), 2, [], [0, 1]),
+        # Training only: every GPU trains and the inference slice is empty.
+        (ModelGpuLayout(8, 0), 8, list(range(8)), []),
     ],
 )
 def test_layout_slices_one_reservation_for_both_components(layout, total, training, inference):
@@ -36,7 +38,9 @@ def test_layout_rejects_impossible_shapes():
     with pytest.raises(ValueError, match="hosted trainer"):
         ModelGpuLayout(0, 2, colocate=True)
     with pytest.raises(ValueError, match="inference GPUs"):
-        ModelGpuLayout(2, 0)
+        ModelGpuLayout(2, -1)
+    with pytest.raises(ValueError, match="cannot colocate"):
+        ModelGpuLayout(2, 0, colocate=True)
     with pytest.raises(ValueError, match="do not match"):
         ModelGpuReservation(GpuBundles(None, [0], [0]), ModelGpuLayout(2, 2))
 

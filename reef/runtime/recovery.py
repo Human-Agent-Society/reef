@@ -27,7 +27,13 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import Any, Literal
 
-from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
+from reef.runtime.interfaces import (
+    InferenceBackend,
+    MarkerStatus,
+    ScenarioHistoryStore,
+    TrainingJobResult,
+    TrainingJobStore,
+)
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 
 logger = logging.getLogger(__name__)
@@ -743,22 +749,25 @@ class TrainingRecovery:
         self.publication = publication
         self.publisher = publisher
 
-    def restore(self, marker: dict[str, Any] | None) -> str:
+    def restore(self, marker: dict[str, Any] | None) -> str | None:
         if marker is not None:
             context = self.publisher.context
             context.next_rollout_id = max(context.next_rollout_id, marker["rollout_id"] + 1)
         with self.publication.recovery(marker):
             return self.restore_serving(marker)
 
-    def restore_serving(self, marker: dict[str, Any] | None) -> str:
+    def restore_serving(self, marker: dict[str, Any] | None) -> str | None:
         """Reconstruct backend state inside Reef's startup recovery barrier.
 
-        Returns the inference URL the engines answer on.
+        Returns the inference URL the engines answer on, or None for a
+        deployment without engines. Such a deployment observes no engine
+        versions; it republishes the checkpoint's identity like one with engines.
         """
         publisher = self.publisher
         status = self._settle_engines(marker)
-        inference_url = publisher.inference.inference_url()
-        versions = self._observed_versions(status)
+        inference = publisher.inference
+        inference_url = None if inference is None else inference.inference_url()
+        versions = [] if inference is None else self._observed_versions(inference, status)
         if publisher.history is not None:
             publisher.restore_scenario_adapters(marker)
         self._restore_version(marker, status, versions)
@@ -769,7 +778,7 @@ class TrainingRecovery:
         """Bring the engines to a known state; returns the marker status after settlement."""
         publisher = self.publisher
         status = None if marker is None else str(marker["status"])
-        if status == "UPDATING_WEIGHTS":
+        if status == "UPDATING_WEIGHTS" and publisher.inference is not None:
             # The previous fan-out may have updated only some engines. Recover
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
@@ -785,8 +794,9 @@ class TrainingRecovery:
             publisher.pause_generation(reconcile=True)
         return status
 
-    def _observed_versions(self, status: str | None) -> list[str]:
-        versions = list(self.publisher.inference.runtime_load_ids())
+    @staticmethod
+    def _observed_versions(inference: InferenceBackend, status: str | None) -> list[str]:
+        versions = list(inference.runtime_load_ids())
         # An interrupted fan-out legitimately leaves the engines split; every
         # other startup needs them to agree before anything is published.
         if not versions or (status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
@@ -828,7 +838,10 @@ class TrainingRecovery:
                 publisher.memory_handoff.onload_kv()
             publisher.initialize_version()
         elif marker is not None and status == "REJECTED":
-            publisher.runtime_load_id = str(marker.get("parent_runtime_load_id") or versions[0])
+            # Without engines nothing observed a version; the incumbent identity stays.
+            publisher.runtime_load_id = str(
+                marker.get("parent_runtime_load_id") or (versions[0] if versions else publisher.runtime_load_id)
+            )
             publisher.initialize_version()
         elif config.save_hf_template is None:
             publisher.initialize_version()

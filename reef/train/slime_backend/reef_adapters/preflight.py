@@ -43,15 +43,19 @@ def validate_bridge_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> N
         raise ValueError("the Reef bridge requires --save-hf with a {rollout_id} path template")
     validate_advantage_computation(args, spec)
     if args.debug_train_only:
-        raise ValueError("the Reef bridge requires a live inference router; remove --debug-train-only")
+        raise ValueError(
+            "the Reef bridge does not use --debug-train-only; train without inference engines with inference.num-gpus: 0"
+        )
     if args.debug_rollout_only:
         raise ValueError("the Reef bridge has no internal rollout loop; remove --debug-rollout-only")
     rollout_num_gpus = args.rollout_num_gpus
-    if not args.rollout_external and (
+    colocate = bool(args.colocate)
+    if not args.rollout_external and rollout_num_gpus == 0 and not isinstance(rollout_num_gpus, bool):
+        validate_train_only_args(args, spec)
+    elif not args.rollout_external and (
         not isinstance(rollout_num_gpus, int) or isinstance(rollout_num_gpus, bool) or rollout_num_gpus <= 0
     ):
-        raise ValueError("the Reef bridge requires a positive --rollout-num-gpus for its local inference router")
-    colocate = bool(args.colocate)
+        raise ValueError("the Reef bridge requires a non-negative integer --rollout-num-gpus")
     if colocate and (not args.offload_train or not args.offload_rollout):
         raise ValueError("the Reef bridge requires --offload-train and --offload-rollout with --colocate")
     if args.offload_rollout and not colocate:
@@ -77,6 +81,30 @@ def validate_bridge_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> N
         # LoRA starts each scenario again from its last saved adapter. Thus LoRA needs a save after each job.
         if args.megatron_lora_rank > 0:
             raise ValueError("--save-interval above 1 requires full-weight training, not LoRA")
+
+
+def validate_train_only_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
+    """Reject what a training-only bridge (``--rollout-num-gpus 0``, no external engines) cannot run.
+
+    Such a bridge has no engines: it cannot colocate with them, publish LoRA
+    adapters to them, or train a loss family that reads their log probs. No
+    other model shares the GPUs, so the actors never offload.
+    """
+    if args.colocate:
+        raise ValueError("training without inference engines (--rollout-num-gpus 0) cannot run with --colocate")
+    if args.offload_train:
+        # Nothing else uses the GPUs, so the actors stay resident between steps.
+        raise ValueError(
+            "training without inference engines (--rollout-num-gpus 0) keeps the actors resident; "
+            "remove --offload-train"
+        )
+    if args.megatron_lora_rank > 0:
+        raise ValueError("training without inference engines (--rollout-num-gpus 0) trains full weights, not LoRA")
+    if spec is not None and spec.requires_rollout_logprobs:
+        raise ValueError(
+            f"loss family {spec.loss_family!r} reads the inference engines' rollout log probs; "
+            "it cannot train without inference engines (--rollout-num-gpus 0)"
+        )
 
 
 def configure_megatron_runtime(args: SlimeArguments) -> None:

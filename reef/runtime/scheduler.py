@@ -488,9 +488,16 @@ _FAILED_PHASES = frozenset({"training_failed", "checkpoint_failed", "weight_sync
 
 
 class TrainingCoordinator:
-    """Serialize backend jobs and their publication behind Reef's commit barrier."""
+    """Serialize backend jobs and their publication behind Reef's commit barrier.
 
-    def __init__(self, training: TrainingBackend, inference: InferenceBackend, *, owns_training: bool = True) -> None:
+    ``inference`` is None for a training-only deployment: each publication then
+    assigns the trained weights their runtime load ID without a transfer, and
+    ``health`` reports no inference URL.
+    """
+
+    def __init__(
+        self, training: TrainingBackend, inference: InferenceBackend | None, *, owns_training: bool = True
+    ) -> None:
         self._training = training
         self._owns_training = owns_training
         self._context = training.context

@@ -65,7 +65,7 @@ def test_native_training_options_reach_slime(tmp_path, monkeypatch, managed):
 
 
 @pytest.mark.parametrize(
-    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
+    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external", "train-only"]
 )
 @pytest.mark.parametrize(
     "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
@@ -84,7 +84,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         fp16=False,
         use_rollout_routing_replay=False,
         megatron_lora_rank=0,
-        rollout_num_gpus=4,
+        rollout_num_gpus=0 if mode == "train-only" else 4,
         rollout_num_gpus_per_engine=2,
         num_gpus_per_node=4,
         actor_num_nodes=1,
@@ -124,16 +124,19 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
         pytest.fail("plan construction must not connect or allocate resources")
 
     monkeypatch.setattr(ray, "init", unexpected)
-    training = driver.create_training_plan({"reef": timeout_config}, loss_family="loss")
+    reef = {**timeout_config, **({"inference_num_gpus": 0} if mode == "train-only" else {})}
+    training = driver.create_training_plan({"reef": reef}, loss_family="loss")
     configured_timeout = timeout_config.get("train_timeout_s")
     expected_timeout = 14400 if configured_timeout is None else configured_timeout
     assert training.training.train_rpc_timeout_s == expected_timeout
     assert not hasattr(training, "inference")
-    plan = assemble_model_plan({}, training)
+    plan = assemble_model_plan({"reef": reef}, training)
     plan.validate()
-    assert plan.inference is not None
+    # A training-only deployment has no inference component and sends no weights.
+    assert (plan.inference is None) == (mode == "train-only")
     assert plan.resources.allocate_models
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert plan.training.weight_transfer_protocols
+    assert bool(plan.training.weight_transfer_protocols) == (mode != "train-only")
+    assert plan.coordinator is not None

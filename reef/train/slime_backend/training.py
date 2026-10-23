@@ -22,13 +22,16 @@ from reef.train.slime_backend.reef_adapters.bridge import (
 from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
-
 #: The receiver control protocol Slime's updaters attach to, per inference backend.
 WEIGHT_TRANSFER_PROTOCOLS = {"sglang": "slime-sglang-control-v2", "vllm": "reef-vllm-control-v1"}
 
 
 class SlimeTrainingService(TrainingService):
-    """Own actor/critic workers and a sender attachment, never the coordinator."""
+    """Own actor/critic workers and a sender attachment, never the coordinator.
+
+    ``inference_backend`` None is a training-only deployment: the workers send
+    no weights, so they declare no transfer protocol and need no attachment.
+    """
 
     def __init__(
         self,
@@ -36,14 +39,16 @@ class SlimeTrainingService(TrainingService):
         *,
         preparation: BridgePreparation,
         loss_family_config: object | None,
-        inference_backend: str = "sglang",
+        inference_backend: str | None = "sglang",
         train_rpc_timeout_s: float | None = None,
     ) -> None:
-        if inference_backend not in WEIGHT_TRANSFER_PROTOCOLS:
+        if inference_backend is not None and inference_backend not in WEIGHT_TRANSFER_PROTOCOLS:
             raise ValueError(
                 f"Slime weight transfer has no receiver protocol for inference backend {inference_backend!r}"
             )
-        self._weight_transfer_protocol = WEIGHT_TRANSFER_PROTOCOLS[inference_backend]
+        self._weight_transfer_protocol = (
+            None if inference_backend is None else WEIGHT_TRANSFER_PROTOCOLS[inference_backend]
+        )
         if train_rpc_timeout_s is None:
             train_rpc_timeout_s = DEFAULT_TRAIN_RPC_TIMEOUT_S
         elif (
@@ -66,7 +71,7 @@ class SlimeTrainingService(TrainingService):
 
     @property
     def weight_transfer_protocols(self) -> tuple[str, ...]:
-        return (self._weight_transfer_protocol,)
+        return () if self._weight_transfer_protocol is None else (self._weight_transfer_protocol,)
 
     def start(self, resources: DeploymentResources) -> None:
         if self._started or self._closed:
@@ -88,7 +93,11 @@ class SlimeTrainingService(TrainingService):
         """Attach the existing native sender protocol after workers are initialized."""
         if self._actor_group is None or self._closed:
             raise RuntimeError("start training workers before attaching their weight transport")
-        if not isinstance(session, NativeWeightTransferSession) or session.protocol != self._weight_transfer_protocol:
+        if (
+            not isinstance(session, NativeWeightTransferSession)
+            or self._weight_transfer_protocol is None
+            or session.protocol != self._weight_transfer_protocol
+        ):
             raise ValueError("Slime training received an incompatible weight transfer protocol")
         if self._session_id is not None:
             if self._session_id == session.session_id:
@@ -106,7 +115,8 @@ class SlimeTrainingService(TrainingService):
         self._session_id = session.session_id
 
     def backend(self) -> TrainingBackend:
-        if self._actor_group is None or self._session_id is None or self._closed:
+        attached = self._session_id is not None or self._weight_transfer_protocol is None
+        if self._actor_group is None or not attached or self._closed:
             raise RuntimeError("training backend requires initialized workers and attached weight transport")
         if self._backend is None:
             self._backend = create_training_backend(

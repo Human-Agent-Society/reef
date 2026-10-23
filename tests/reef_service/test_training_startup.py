@@ -85,7 +85,17 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"inference.url": "http://localhost:8000"}, "connection from the bridge"),
         ({"inference.options.tp-size": "2"}, "managed by Reef"),
         ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
-        ({"inference.num-gpus": "0"}, "must be positive"),
+        ({"inference.num-gpus": "-1"}, "must be positive"),
+        ({"inference.num-gpus": "0", "training.colocate": "true"}, "remove training.colocate"),
+        (
+            {"inference.num-gpus": "0", "inference.tensor-parallel-size": "2", "inference.options.dtype": "bf16"},
+            "remove inference.tensor-parallel-size, inference.options",
+        ),
+        ({"inference.num-gpus": "0", "teacher.model-path": "/models/teacher"}, "remove teacher.model-path"),
+        (
+            {"inference.num-gpus": "0", "recipe.implementation": "reef.recipe.composite:CompositeRecipe"},
+            "weight-training recipe",
+        ),
         ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
         ({"inference.num-gpus": "1.5"}, "valid int"),
         ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
@@ -467,3 +477,28 @@ def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags
     assert "--rollout-num-gpus=1" in argv
     assert "--rollout-num-gpus-per-engine=1" in argv
     assert not any(argument.startswith("--sglang-") for argument in argv)
+
+
+def test_training_only_deployment_launches_no_engines_and_follows_the_coordinator(tmp_path):
+    from dataclasses import asdict
+
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.train.slime_backend.launch import SlimeDeployment, driver_arguments
+
+    raw = training_config()
+    raw["recipe"]["implementation"] = "reef.recipe.sft.recipe:SFTRecipe"
+    raw["inference"]["num-gpus"] = 0
+    raw["training"]["options"] = {"lr": 0.000005, "save-interval": "42"}
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    reef = config["reef"]
+    assert reef["inference_num_gpus"] == 0
+    assert reef["colocate"] is False
+    assert "inference_backend" not in reef
+    argv = driver_arguments(config)
+    assert "--rollout-num-gpus=0" in argv
+    assert not any(
+        argument.startswith(("--colocate", "--offload", "--sglang-", "--rollout-num-gpus-per-engine"))
+        for argument in argv
+    )
+    settings = asdict(service_config_from_mapping({**config, "reef": {**reef, "ray_address": "auto"}}))
+    assert SlimeDeployment().runtime_config(settings)["inference_runtime"] == "train_only"

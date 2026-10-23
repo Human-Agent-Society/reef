@@ -20,6 +20,7 @@ from reef.train.deployment import (
     inference_handler_factory_for,
     prepare_inference_config,
     require_ray_roles,
+    train_only,
 )
 
 
@@ -76,6 +77,9 @@ def driver_arguments(config: Mapping[str, Any], *, loss_family: str = "") -> lis
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
+    if train_only(reef):
+        # No engines, no colocation: Slime launches no SGLang engine and the actors stay resident.
+        return [*arguments, *native_arguments({"rollout-num-gpus": 0})]
     options = {
         "rollout-num-gpus": reef["inference_num_gpus"],
         "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
@@ -186,6 +190,7 @@ class SlimeDeployment(TrainingDeployment):
     """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
 
     supports_teacher_engine = True
+    supports_train_only = True
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -246,7 +251,8 @@ class SlimeDeployment(TrainingDeployment):
             raise ValueError("reef.train_timeout_s must be positive when set")
         runtime_config: dict[str, Any] = {
             "type": "slime_training",
-            "inference_runtime": settings["inference_backend"] or "sglang",
+            # A training-only deployment follows the coordinator's versions without engines.
+            "inference_runtime": "train_only" if train_only(settings) else settings["inference_backend"] or "sglang",
             "inference_url": inference_url or None,
             "actor_name": settings["ray_actor_name"],
             "namespace": settings["ray_namespace"],

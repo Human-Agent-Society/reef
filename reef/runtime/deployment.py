@@ -243,8 +243,11 @@ class CoordinatorConfig:
 class ModelDeploymentPlan:
     """Configured components; constructing a plan must not allocate resources.
 
-    A missing inference component explicitly selects a combined compatibility
-    lifecycle. It is never a fallback after a separate component fails to start.
+    A missing inference component is an explicit choice, never a fallback after
+    a separate component fails to start. With a coordinator it is a
+    training-only deployment: the coordinator commits training jobs and serves
+    no requests. Without one it selects the combined compatibility lifecycle.
+    Either way the trainer sends no weights.
     """
 
     resources: DeploymentResources
@@ -254,8 +257,6 @@ class ModelDeploymentPlan:
     coordinator: CoordinatorConfig | None = None
 
     def validate(self) -> None:
-        if self.coordinator is not None and self.inference is None:
-            raise ValueError("a Reef coordinator requires separate training and inference components")
         if self.inference is None:
             sent = self.training.weight_transfer_protocols
             if sent:
@@ -305,9 +306,9 @@ class ModelDeployment:
             self.plan.resources.start()
             connection = self._start_inference()
             self._start_training()
-            if connection is not None:
-                self._start_coordinator(connection)
-                self.plan.inference.check_health()  # type: ignore[union-attr]
+            self._start_coordinator(connection)
+            if self.plan.inference is not None:
+                self.plan.inference.check_health()
         except BaseException:
             try:
                 self.close()
@@ -344,11 +345,14 @@ class ModelDeployment:
             self.plan.training.attach_weight_transport(self.weight_transfer_session)
         self.plan.training.check_health()
 
-    def _start_coordinator(self, connection: InferenceConnection) -> None:
+    def _start_coordinator(self, connection: InferenceConnection | None) -> None:
+        """Start the coordinator; a training-only deployment gives it no inference backend."""
         config = self.plan.coordinator
-        inference = self.plan.inference
-        if config is None or inference is None:
+        if config is None:
             return
+        training_backend = self.plan.training.backend()
+        inference = self.plan.inference
+        inference_backend = None if inference is None or connection is None else inference.backend(connection)
         # The coordinator verifies the checkpoints the trainer writes, so on a
         # multi-node cluster it runs on the trainer's node; node-local
         # checkpoint storage is invisible from anywhere else.
@@ -358,7 +362,7 @@ class ModelDeployment:
                 workers=(
                     WorkerSpec(
                         TrainingCoordinator,
-                        args=(self.plan.training.backend(), inference.backend(connection)),
+                        args=(training_backend, inference_backend),
                         kwargs={"owns_training": True},
                     ),
                 ),
@@ -523,6 +527,7 @@ _BUILTIN_FACTORIES = {
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
     "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",
+    "train_only": "reef.inference.train_only:TrainOnlyRuntimeFactory",
     "vllm": "reef.inference.vllm.runtime:VLLMRuntimeFactory",
 }
 

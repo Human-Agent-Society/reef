@@ -39,6 +39,12 @@ or ``/v1/messages``; all three take the provider's own request body.
 
 **The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
 
+**503 this deployment trains without inference engines.** The deployment sets
+``inference.num-gpus: 0``, so it starts no engines and serves no requests.
+This is expected. Serve a published checkpoint from a separate deployment, or
+give the deployment inference GPUs. See `Train without inference engines
+<../reference/configuration.rst#train-without-inference-engines>`__.
+
 **503 inference retry deadline exceeded (300s).** Buffered inference exhausted
 ``inference.retry-timeout-s``. It follows ``inference.timeout-s`` when not set
 separately, and both default to 300 seconds. If one valid generation can take

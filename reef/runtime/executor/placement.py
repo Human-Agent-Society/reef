@@ -41,7 +41,12 @@ class GpuBundles(NamedTuple):
 
 @dataclass(frozen=True)
 class ModelGpuLayout:
-    """How many GPUs one deployment reserves and where inference's share starts."""
+    """How many GPUs one deployment reserves and where inference's share starts.
+
+    Zero inference GPUs without external engines is a training-only
+    deployment: it needs training GPUs and cannot colocate, and its inference
+    slice is empty.
+    """
 
     training_gpus: int
     inference_gpus: int
@@ -58,10 +63,12 @@ class ModelGpuLayout:
             isinstance(self.inference_gpus, bool)
             or not isinstance(self.inference_gpus, int)
             or self.inference_gpus < 0
-            or (self.inference_gpus == 0 and not self.external_inference)
         ):
+            raise ValueError("a model deployment needs a non-negative number of inference GPUs")
+        if self.inference_gpus == 0 and not self.external_inference and (self.training_gpus == 0 or self.colocate):
             raise ValueError(
-                "a model deployment needs a positive number of inference GPUs unless engines are external"
+                "a model deployment without inference GPUs or external engines trains only: "
+                "it needs training GPUs and cannot colocate"
             )
 
     @property

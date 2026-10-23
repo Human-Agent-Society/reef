@@ -81,6 +81,7 @@ What to review
 .. config::
 
    inference.model-path | a local HF model directory or a repo id, downloaded on start
+   inference.num-gpus | inference GPUs; ``0`` trains on every GPU without engines and serves no requests (`Train without inference engines <../reference/configuration.rst#train-without-inference-engines>`__)
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
    reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
