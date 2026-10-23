@@ -100,6 +100,21 @@ training:
     # term to the loss, as the slime reference does. Set `loss_options.kl_coef`
     # to set that term separately.
     kl_coef: 0.05
+    loss_options:
+      # Center and scale the distillation gap over each training job, then
+      # bound it to +-5, as the OPD recipe does. The raw gap of the hinted
+      # teacher changes its mean and scale from batch to batch. The raw-gap
+      # bound diff_clip would change the statistics, so it is off.
+      diff_clip: null
+      opd_advantage_clip: 5.0
+      # The normalized gap has unit scale; the raw gap had a standard
+      # deviation of about 0.35. With w_opd 1.0, one step from the base made
+      # the policy announce the file read in prose instead of calling the
+      # tool. A stream at 0.4 still lost the tool call in half of its
+      # sessions after one step. At 0.3 a step from the base passed 8 of 16
+      # held-out replies, against 6 of 16 with the raw gap, and opened with
+      # the tool call.
+      w_opd: 0.3
 
 recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
@@ -202,3 +217,9 @@ evaluation:
     # restart the first candidate sets it. The floor holds in any case: without
     # it, a 0.125 candidate was selected right after a restart.
     min_reply_rate: 0.75
+    # The probe of each conversation cut after the user's request: the
+    # policy must open with a tool call that reads the homework. The probe
+    # samples 32 openings as serving does; the base model calls the tool in
+    # all of them, and a step that loses it in half of the sessions scores
+    # far below this floor.
+    min_first_turn_tool_rate: 0.9

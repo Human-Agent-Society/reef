@@ -203,8 +203,13 @@ class MLXRuntime(TrainingRuntime):
             self._pending_optimizer = None
         logger.info("rejected mlx candidate %s", candidate.candidate_id)
 
-    def probe_candidate(self, candidate_id: str, prompts: Sequence[Sequence[int]], *, max_tokens: int) -> list[str]:
-        """Generate greedily from a staged candidate's weights, then restore the served weights.
+    def probe_candidate(
+        self, candidate_id: str, prompts: Sequence[Sequence[int]], *, max_tokens: int, sampled: bool = False
+    ) -> list[str]:
+        """Generate from a staged candidate's weights, then restore the served weights.
+
+        Generation is greedy, or with ``sampled`` it uses the sampling that
+        serving uses: the configured temperature, top-p and top-k.
 
         A candidate evaluator uses this before Reef decides to publish the
         candidate. Requests wait for the whole probe, so none is answered by
@@ -218,7 +223,10 @@ class MLXRuntime(TrainingRuntime):
             served = engine.adapter_snapshot()
             engine.apply_adapter(snapshot)
             try:
-                return [engine.generate(prompt, max_tokens=max_tokens, temperature=0.0).text for prompt in prompts]
+                temperature = None if sampled else 0.0
+                return [
+                    engine.generate(prompt, max_tokens=max_tokens, temperature=temperature).text for prompt in prompts
+                ]
             finally:
                 engine.apply_adapter(served)
 

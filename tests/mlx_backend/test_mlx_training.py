@@ -16,7 +16,13 @@ pytest.importorskip("mlx_lm", reason="the MLX trainer needs the optional mlx ext
 from mlx_lm import load
 from mlx_lm.tuner import linear_to_lora_layers
 
-from recipes.openclawrl.mlx import DistillationRow, OpenClawRLMLXSettings, OpenClawRLTokenLoss, TeacherCandidate
+from recipes.openclawrl.mlx import (
+    DistillationRow,
+    OPDNormalization,
+    OpenClawRLMLXSettings,
+    OpenClawRLTokenLoss,
+    TeacherCandidate,
+)
 from recipes.tttd.mlx import ImportanceSamplingSurrogate
 from reef.train.mlx_backend.config import MLXEngineConfig
 from reef.train.mlx_backend.training import MLXTrainer, ModelParts, ResponseTokens, TrainingRow
@@ -122,7 +128,7 @@ def test_chunking_adds_no_meaningful_error_in_float16(
     assert worst_relative_deviation(reference, chunked) <= max(whole_error * 1.5, 1e-3)
 
 
-def openclawrl_gradients(parts: ModelParts, **options):
+def openclawrl_gradients(parts: ModelParts, normalization: OPDNormalization | None = None, **options):
     mx.random.seed(1)
     response, k, prompt = 40, 5, 8
     tokens = tuple(int(token) for token in mx.random.randint(0, 1000, (prompt + response,)).tolist())
@@ -139,13 +145,19 @@ def openclawrl_gradients(parts: ModelParts, **options):
     settings = OpenClawRLMLXSettings(w_rl=1.0, w_opd=1.0, diff_clip=None, kl_coef=0.05)
     row_trainer = trainer(parts, **options)
     packed = row_trainer.pack([row.policy])
-    loss, gradients = row_trainer.gradients(packed, OpenClawRLTokenLoss(packed, row, teacher, reference, settings))
+    objective = OpenClawRLTokenLoss(packed, row, teacher, reference, settings, normalization)
+    loss, gradients = row_trainer.gradients(packed, objective)
     return loss, {name: value.astype(mx.float32) for name, value in gradients.items()}
 
 
-def test_chunked_openclawrl_gradients_match_the_whole_response_in_float32(parts32: ModelParts) -> None:
-    reference_loss, reference = openclawrl_gradients(parts32)
-    chunked_loss, chunked = openclawrl_gradients(parts32, log_probs_chunk_size=16)
+@pytest.mark.parametrize(
+    "normalization", [None, OPDNormalization(center=-0.4, scale=0.3, clip=5.0)], ids=["raw-gap", "normalized"]
+)
+def test_chunked_openclawrl_gradients_match_the_whole_response_in_float32(
+    parts32: ModelParts, normalization: OPDNormalization | None
+) -> None:
+    reference_loss, reference = openclawrl_gradients(parts32, normalization)
+    chunked_loss, chunked = openclawrl_gradients(parts32, normalization, log_probs_chunk_size=16)
 
     assert abs(reference_loss - chunked_loss) / abs(reference_loss) < 1e-3
     assert worst_relative_deviation(reference, chunked) < 1e-3

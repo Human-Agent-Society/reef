@@ -26,6 +26,9 @@ LOG_RATIO_CLIP = 20.0
 #: Stands for minus infinity in masked reductions; finite, so no NaN reaches a gradient.
 NEGATIVE_LARGE = -1.0e30
 
+#: Keeps the scale of a near-constant gap finite, as in the OPD recipe's normalization.
+OPD_NORMALIZATION_EPSILON = 1e-8
+
 HINT_SELECTIONS = ("shortest", "sequence_optimal")
 
 
@@ -44,6 +47,66 @@ def masked_softmax(values: mx.array, mask: mx.array) -> mx.array:
     """Softmax over the true positions of ``mask``; off-mask entries are 0."""
     out = mx.exp(values - masked_lse(values, mask))
     return mx.where(mask, out, mx.zeros_like(out))
+
+
+@dataclass(frozen=True)
+class OPDNormalization:
+    """The job's center and scale of the distillation gap, and the bound on the normalized gap."""
+
+    center: float
+    scale: float
+    clip: float
+
+
+@dataclass(frozen=True)
+class OPDGapStatistics:
+    """The per-token distillation gap over the masked tokens of one job, measured before the step.
+
+    The gap of a token is ``sum_v w_v (log t(v) - log p_rollout(v))`` over the
+    policy's candidates ``v``, with ``w`` the softmax of the rollout log
+    probabilities over them. ``clip_fraction`` is the fraction of candidate
+    entries that the active clip bounds.
+    """
+
+    mean: float
+    std: float
+    tokens: int
+    clip_fraction: float
+
+
+def opd_gap_statistics(
+    captured: Sequence[mx.array],
+    teacher: Sequence[mx.array],
+    masks: Sequence[mx.array],
+    *,
+    diff_clip: float | None,
+    advantage_clip: float | None,
+) -> OPDGapStatistics:
+    """The job's gap statistics; ``advantage_clip`` counts entries outside it after normalization."""
+    token_gaps, token_masks, entry_gaps, entry_masks = [], [], [], []
+    for rollout, teacher_values, mask in zip(captured, teacher, masks, strict=True):
+        rollout = rollout.astype(mx.float32)
+        gap = teacher_values.astype(mx.float32) - rollout
+        weight = mx.softmax(rollout, axis=-1)
+        token_gaps.append(mx.sum(weight * gap, axis=-1))
+        token_masks.append(mask.astype(mx.float32))
+        entry_gaps.append(gap.reshape(-1))
+        entry_masks.append(mx.broadcast_to(mask[:, None], gap.shape).astype(mx.float32).reshape(-1))
+    gaps, counted_tokens = mx.concatenate(token_gaps), mx.concatenate(token_masks)
+    tokens = int(mx.sum(counted_tokens).item())
+    if tokens == 0:
+        return OPDGapStatistics(0.0, 1.0, 0, 0.0)
+    mean = mx.sum(gaps * counted_tokens) / tokens
+    std = mx.sqrt(mx.sum((gaps - mean) ** 2 * counted_tokens) / tokens + OPD_NORMALIZATION_EPSILON)
+    entries, counted = mx.concatenate(entry_gaps), mx.concatenate(entry_masks)
+    if advantage_clip is not None:
+        outside = mx.abs((entries - mean) / std) > advantage_clip
+    elif diff_clip is not None:
+        outside = mx.abs(entries) > diff_clip
+    else:
+        outside = mx.zeros(entries.shape, dtype=mx.bool_)
+    clip_fraction = mx.sum(outside.astype(mx.float32) * counted) / mx.sum(counted)
+    return OPDGapStatistics(float(mean.item()), float(std.item()), tokens, float(clip_fraction.item()))
 
 
 def policy_loss(ppo_kl: mx.array, advantages: mx.array, eps_lo: float, eps_hi: float) -> tuple[mx.array, mx.array]:
@@ -78,6 +141,7 @@ def opd_one_sample(
     eps_lo: float,
     eps_hi: float,
     diff_clip: float | None,
+    normalization: OPDNormalization | None = None,
 ) -> OPDResult:
     """The top-K distillation surrogate for one sample's response tokens.
 
@@ -91,7 +155,9 @@ def opd_one_sample(
     3. ``ell_old`` is this forward pass, detached: one optimizer step per
        rollout, so the ratio starts at 1.
     4. The weight is a softmax of ``ell_old`` over ``S_t``.
-    5. The advantage is the clipped teacher-minus-old gap, weighted.
+    5. The advantage is the clipped teacher-minus-old gap, weighted. With
+       ``normalization``, the gap is teacher minus rollout instead, centered
+       and scaled by the job's statistics, then clipped.
     6. A PPO surrogate on the log ratio.
     7. A sum over ``S_t``; the weight already normalizes within the set.
     """
@@ -119,9 +185,15 @@ def opd_one_sample(
     weight = mx.stop_gradient(masked_softmax(old, subset_mask))
 
     # 5)
-    diff = mx.stop_gradient(teacher_aligned - old)
-    if diff_clip is not None:
-        diff = mx.clip(diff, -diff_clip, diff_clip)
+    if normalization is None:
+        diff = mx.stop_gradient(teacher_aligned - old)
+        if diff_clip is not None:
+            diff = mx.clip(diff, -diff_clip, diff_clip)
+    else:
+        gap = teacher_aligned - student_captured_log_probs.astype(mx.float32)
+        diff = mx.stop_gradient(
+            mx.clip((gap - normalization.center) / normalization.scale, -normalization.clip, normalization.clip)
+        )
     advantages = mx.stop_gradient(diff * weight)
 
     # 6)
@@ -225,6 +297,10 @@ class OpenClawRLMLXSettings(MLXLossSettings):
     eps_lo: float = config_option(0.2, help="Lower clip range of both surrogates.")
     eps_hi: float = config_option(0.28, help="Upper clip range of both surrogates.")
     diff_clip: float | None = config_option(1.0, help="Bound on the teacher-minus-policy gap; null leaves it open.")
+    opd_advantage_clip: float | None = config_option(
+        None,
+        help="Normalize the distillation gap over the job and bound it to this value; null keeps the raw gap.",
+    )
     hint_selection: str = config_option(
         "sequence_optimal", help="Which hint the teacher uses: shortest or sequence_optimal."
     )
@@ -245,6 +321,12 @@ class OpenClawRLMLXSettings(MLXLossSettings):
             raise ValueError("openclawrl needs a non-zero w_rl or w_opd")
         if self.diff_clip is not None and (not math.isfinite(self.diff_clip) or self.diff_clip <= 0):
             raise ValueError("openclawrl diff_clip must be finite and positive, or null")
+        if self.opd_advantage_clip is not None:
+            if not math.isfinite(self.opd_advantage_clip) or self.opd_advantage_clip <= 0:
+                raise ValueError("openclawrl opd_advantage_clip must be finite and positive, or null")
+            if self.diff_clip is not None:
+                # A raw bound before the normalization would change the statistics it normalizes by.
+                raise ValueError("openclawrl opd_advantage_clip normalizes the raw gap; set diff_clip to null")
         if self.hint_selection not in HINT_SELECTIONS:
             raise ValueError(f"openclawrl hint_selection must be one of: {', '.join(HINT_SELECTIONS)}")
         if self.native_k <= 0:
@@ -279,8 +361,10 @@ class OpenClawRLTokenLoss(TokenObjective):
         teacher_log_probs: mx.array,
         reference_log_probs: mx.array | None,
         settings: OpenClawRLMLXSettings,
+        normalization: OPDNormalization | None,
     ) -> None:
         self._sampled = packed.targets[0]
+        self._normalization = normalization
         self._mask = mx.array([float(value) for value in row.policy.loss_mask])
         self._student_indices = mx.array([list(candidates) for candidates in row.topk_indices])
         self._student_captured = mx.array([list(values) for values in row.topk_log_probs])
@@ -317,6 +401,7 @@ class OpenClawRLTokenLoss(TokenObjective):
                 eps_lo=settings.eps_lo,
                 eps_hi=settings.eps_hi,
                 diff_clip=settings.diff_clip,
+                normalization=self._normalization,
             )
             total = total + settings.w_opd * mx.sum(result.per_token_pg * mask)
         if self._reference_log_probs is not None:
@@ -335,7 +420,18 @@ class OpenClawRLMLXStep(MLXLossStep):
         self.settings = settings
 
     def train(self, trainer: MLXTrainer) -> dict[str, float | int]:
-        result = trainer.optimizer_step(self.passes(trainer))
+        scored = [self.score(trainer, row) for row in self.rows]
+        statistics = opd_gap_statistics(
+            [mx.array([list(values) for values in row.topk_log_probs]) for row in self.rows],
+            [teacher for teacher, _ in scored],
+            [mx.array([float(value) for value in row.policy.loss_mask]) for row in self.rows],
+            diff_clip=self.settings.diff_clip,
+            advantage_clip=self.settings.opd_advantage_clip,
+        )
+        normalization = None
+        if self.settings.opd_advantage_clip is not None:
+            normalization = OPDNormalization(statistics.mean, statistics.std, self.settings.opd_advantage_clip)
+        result = trainer.optimizer_step(self.passes(trainer, scored, normalization))
         return {
             **result,
             "rows": len(self.rows),
@@ -343,34 +439,43 @@ class OpenClawRLMLXStep(MLXLossStep):
             "w_rl": self.settings.w_rl,
             "w_opd": self.settings.w_opd,
             "kl_coef": self.settings.kl_coef,
+            "opd_gap_mean": statistics.mean,
+            "opd_gap_std": statistics.std,
+            "opd_clip_fraction": statistics.clip_fraction,
         }
 
-    def passes(self, trainer: MLXTrainer) -> Iterator[tuple[PackedRows, TokenObjective]]:
-        """One pass per row, after the frozen base scored the row's teacher sequences."""
-        settings = self.settings
-        for row in self.rows:
+    def passes(
+        self,
+        trainer: MLXTrainer,
+        scored: Sequence[tuple[mx.array, mx.array | None]],
+        normalization: OPDNormalization | None,
+    ) -> Iterator[tuple[PackedRows, TokenObjective]]:
+        """One pass per row, with the teacher and reference log probabilities scored before the step."""
+        for row, (teacher_log_probs, reference) in zip(self.rows, scored, strict=True):
             packed = trainer.pack([row.policy])
-            response_length = row.policy.response_length
-            student_indices = mx.array([list(candidates) for candidates in row.topk_indices])
-            with trainer.base_model():
-                at_student = []
-                native = []
-                for candidate in row.candidates:
-                    logits = trainer.response_logits(trainer.pack([ResponseTokens(candidate.tokens, response_length)]))
-                    log_probs = logits[0] - mx.logsumexp(logits[0], axis=-1, keepdims=True)
-                    at_student.append(mx.take_along_axis(log_probs, student_indices, axis=-1))
-                    native.append(
-                        mx.argpartition(-log_probs, kth=settings.native_k - 1, axis=-1)[:, : settings.native_k]
-                    )
-                    mx.eval(at_student[-1], native[-1])
-                reference = None
-                if settings.kl_coef:
-                    reference = mx.stop_gradient(
-                        sampled_log_probs(trainer.response_logits(packed)[0], packed.targets[0])
-                    )
-                    mx.eval(reference)
-            teacher_log_probs = at_student[select_hint(native, student_indices, settings.hint_selection)]
-            yield packed, OpenClawRLTokenLoss(packed, row, teacher_log_probs, reference, settings)
+            yield packed, OpenClawRLTokenLoss(packed, row, teacher_log_probs, reference, self.settings, normalization)
+
+    def score(self, trainer: MLXTrainer, row: DistillationRow) -> tuple[mx.array, mx.array | None]:
+        """Score one row with the frozen base: the teacher at the policy's candidates, and the reference at the
+        sampled tokens when the KL term is on."""
+        settings = self.settings
+        packed = trainer.pack([row.policy])
+        response_length = row.policy.response_length
+        student_indices = mx.array([list(candidates) for candidates in row.topk_indices])
+        with trainer.base_model():
+            at_student = []
+            native = []
+            for candidate in row.candidates:
+                logits = trainer.response_logits(trainer.pack([ResponseTokens(candidate.tokens, response_length)]))
+                log_probs = logits[0] - mx.logsumexp(logits[0], axis=-1, keepdims=True)
+                at_student.append(mx.take_along_axis(log_probs, student_indices, axis=-1))
+                native.append(mx.argpartition(-log_probs, kth=settings.native_k - 1, axis=-1)[:, : settings.native_k])
+                mx.eval(at_student[-1], native[-1])
+            reference = None
+            if settings.kl_coef:
+                reference = mx.stop_gradient(sampled_log_probs(trainer.response_logits(packed)[0], packed.targets[0]))
+                mx.eval(reference)
+        return at_student[select_hint(native, student_indices, settings.hint_selection)], reference
 
 
 class OpenClawRLMLXLoss(MLXLoss):

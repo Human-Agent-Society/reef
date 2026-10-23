@@ -61,6 +61,15 @@ reply_clean_rate`` makes the regression check use it instead of
       config:
         regression_metric: reply_clean_rate
         regression_margin: 0.07  # with 16 conversations, accepts a drop of one answer
+
+A policy can also stop calling tools where the harness needs one: it writes
+that it will read the file and ends its turn. The reply probe starts after the
+file was read, so it cannot see this. ``min_first_turn_tool_rate`` adds a probe
+of each conversation cut after the user's request. It samples two openings
+per conversation as serving does, because greedy decoding hides a policy that
+calls the tool on only some samples. ``evaluate`` reports
+``first_turn_tool_rate``, the fraction of these openings that contain a tool
+call, and ``decide`` refuses a candidate below the floor before any other check.
 """
 
 from __future__ import annotations
@@ -89,6 +98,12 @@ EVALUATOR_VERSION = "2"
 CLEAN_RATE_METRIC = "clean_rate"
 REPLY_RATE_METRIC = "reply_rate"
 REPLY_CLEAN_RATE_METRIC = "reply_clean_rate"
+FIRST_TURN_TOOL_RATE_METRIC = "first_turn_tool_rate"
+#: Enough tokens for a short preamble and the start of a tool call.
+FIRST_TURN_MAX_TOKENS = 96
+#: Sampled openings per conversation. Greedy decoding hides a policy that
+#: calls the tool only on some samples, as serving draws them.
+FIRST_TURN_SAMPLES = 2
 REGRESSION_METRICS = (CLEAN_RATE_METRIC, REPLY_CLEAN_RATE_METRIC)
 
 # Fixed GSM8K problems with gold answers; a run probes the first ``probe_size``.
@@ -165,6 +180,11 @@ class OpenClawRLCandidateEvaluationSettings(PluginSettings):
     min_reply_rate: float = config_option(
         0.0, help="The lowest reply_rate a selected candidate may have, whatever the best selected one was."
     )
+    min_first_turn_tool_rate: float = config_option(
+        0.0,
+        help="The lowest first_turn_tool_rate a selected candidate may have: the fraction of reply-probe "
+        "conversations, cut after the user's request, that the candidate opens with a tool call.",
+    )
 
     def __post_init__(self) -> None:
         if not 1 <= self.probe_size <= len(PROBE_PROBLEMS):
@@ -181,6 +201,8 @@ class OpenClawRLCandidateEvaluationSettings(PluginSettings):
             raise ValueError(f"reply_margin must be non-negative, got {self.reply_margin}")
         if not 0 <= self.min_reply_rate <= 1:
             raise ValueError(f"min_reply_rate must be between 0 and 1, got {self.min_reply_rate}")
+        if not 0 <= self.min_first_turn_tool_rate <= 1:
+            raise ValueError(f"min_first_turn_tool_rate must be between 0 and 1, got {self.min_first_turn_tool_rate}")
 
 
 def load_reply_probe(path: pathlib.Path) -> tuple[list[dict[str, Any]], list[list[dict[str, Any]]], list[str]]:
@@ -203,6 +225,14 @@ def load_reply_probe(path: pathlib.Path) -> tuple[list[dict[str, Any]], list[lis
     if not isinstance(answers, list) or (answers and len(answers) != len(conversations)):
         raise PluginConfigError(f"reply_probe_file {str(path)!r}: 'answers' must give one answer per conversation")
     return tools, conversations, [str(answer) for answer in answers]
+
+
+def first_user_index(messages: list[dict[str, Any]]) -> int:
+    """The index of the first user message; a probe conversation must have one."""
+    for index, message in enumerate(messages):
+        if message.get("role") == "user":
+            return index
+    raise PluginConfigError("a reply-probe conversation has no user message")
 
 
 def visible_reply(generated: str) -> str:
@@ -241,6 +271,8 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
         self.reply_max_tokens = settings.reply_max_tokens
         self.reply_margin = settings.reply_margin
         self.min_reply_rate = settings.min_reply_rate
+        self.min_first_turn_tool_rate = settings.min_first_turn_tool_rate
+        self.first_turn_prompts: list[list[int]] = []
         #: The best reply_rate of a selected candidate; ``None`` until the first.
         self.best_reply_rate: float | None = None
         self.reply_prompts: list[list[int]] = []
@@ -252,6 +284,12 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
             )
             self.reply_prompts = [runtime.engine.render_prompt(messages, tools=tools) for messages in conversations]
             self.reply_opens_reasoning = [runtime.engine.opens_reasoning(prompt) for prompt in self.reply_prompts]
+            if settings.min_first_turn_tool_rate > 0:
+                # Each conversation up to the user's request, where the harness reads the homework with a tool.
+                first_turns = [messages[: first_user_index(messages) + 1] for messages in conversations]
+                self.first_turn_prompts = [
+                    runtime.engine.render_prompt(messages, tools=tools) for messages in first_turns
+                ]
         if settings.regression_metric == REPLY_CLEAN_RATE_METRIC and not self.reply_answers:
             raise PluginConfigError(
                 f"regression_metric {REPLY_CLEAN_RATE_METRIC} needs a reply_probe_file with 'answers'"
@@ -284,6 +322,15 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
                 "reply_count": reply_count,
                 "reply_probe_count": len(answers),
             }
+            if self.first_turn_prompts:
+                openings = self.runtime.probe_candidate(
+                    candidate.candidate_id,
+                    [prompt for prompt in self.first_turn_prompts for _ in range(FIRST_TURN_SAMPLES)],
+                    max_tokens=FIRST_TURN_MAX_TOKENS,
+                    sampled=True,
+                )
+                tool_count = sum(1 for opening in openings if "<tool_call>" in visible_reply(opening))
+                reply_metrics[FIRST_TURN_TOOL_RATE_METRIC] = tool_count / len(openings)
             if self.reply_answers:
                 # The student's acceptance criterion on a first reply in the
                 # harness context: the correct answer, the work shown, no style marker.
@@ -315,6 +362,23 @@ class OpenClawRLCandidateEvaluation(RegressionCheckMixin, ConfiguredEvaluationPl
         """Refuse a candidate whose ``reply_rate`` regressed, then apply the ``regression_metric`` check."""
         if not self.reply_prompts:
             return super().decide(candidate, evaluation)
+        if self.first_turn_prompts:
+            tool_rate = float(evaluation.metrics[FIRST_TURN_TOOL_RATE_METRIC])
+            if tool_rate < self.min_first_turn_tool_rate:
+                return SelectionDecision(
+                    selected=False,
+                    policy="regression-check",
+                    reason=(
+                        f"{FIRST_TURN_TOOL_RATE_METRIC} {tool_rate:g} is below min_first_turn_tool_rate "
+                        f"{self.min_first_turn_tool_rate:g}; holding the last selected weights"
+                    ),
+                    evaluation=evaluation,
+                    metrics={
+                        "metric": FIRST_TURN_TOOL_RATE_METRIC,
+                        "value": tool_rate,
+                        "floor": self.min_first_turn_tool_rate,
+                    },
+                )
         reply_rate = float(evaluation.metrics[REPLY_RATE_METRIC])
         # The best selected rate lives in this process; the floor also holds after a restart.
         if reply_rate < self.min_reply_rate:
