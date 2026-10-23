@@ -117,14 +117,10 @@ class StepScheduling:
     processor hands the objective one batch; the runtime may run several
     optimizer steps over it. The *rollout* is the unit that is never split
     across steps — a comparison set by default, or one sample with
-    ``unit="sample"``.
-
-    ``batch_size`` is rollouts per optimizer step:
-
-    * ``"configured"`` — the backend's own setting (Slime ``--global-batch-size``);
-    * ``"actual"`` — every rollout in the batch, i.e. one step per batch;
-    * an ``int`` — an explicit step size, so a batch of 1024 rollouts with
-      ``batch_size=64`` trains sixteen steps.
+    ``unit="sample"``. The backend's batch size (Slime
+    ``--global-batch-size``, Tinker ``batch_size``) is the rollouts in one
+    step. The pipeline fills a batch to at least that many samples, so under
+    ``unit="comparison_set"`` a batch can hold fewer rollouts than one step.
 
     ``epochs`` repeats the whole batch that many passes; every pass is its own
     run of steps, and the reference / old-policy log-probs are computed once
@@ -143,7 +139,6 @@ class StepScheduling:
     """
 
     unit: Literal["comparison_set", "sample"] = "comparison_set"
-    batch_size: Literal["configured", "actual"] | int = "configured"
     epochs: int = 1
     shuffle: bool = False
     remainder: Literal["partial", "drop", "error"] = "partial"
@@ -151,22 +146,12 @@ class StepScheduling:
     def __post_init__(self) -> None:
         if self.unit not in ("comparison_set", "sample"):
             raise ValueError(f"StepScheduling.unit must be 'comparison_set' or 'sample', got {self.unit!r}")
-        if isinstance(self.batch_size, bool) or (
-            not isinstance(self.batch_size, int) and self.batch_size not in ("configured", "actual")
-        ):
-            raise ValueError(
-                f"StepScheduling.batch_size must be 'configured', 'actual' or a positive int, got {self.batch_size!r}"
-            )
-        if isinstance(self.batch_size, int) and self.batch_size <= 0:
-            raise ValueError(f"StepScheduling.batch_size must be positive, got {self.batch_size}")
         if isinstance(self.epochs, bool) or not isinstance(self.epochs, int) or self.epochs <= 0:
             raise ValueError(f"StepScheduling.epochs must be a positive int, got {self.epochs!r}")
         if not isinstance(self.shuffle, bool):
             raise ValueError(f"StepScheduling.shuffle must be a bool, got {self.shuffle!r}")
         if self.remainder not in ("partial", "drop", "error"):
             raise ValueError(f"StepScheduling.remainder must be 'partial', 'drop' or 'error', got {self.remainder!r}")
-        if self.remainder == "drop" and not isinstance(self.batch_size, int):
-            raise ValueError("StepScheduling.remainder='drop' requires an explicit integer batch_size")
 
 
 def trajectories(batch: TrainingBatch) -> tuple[TrajectoryItem, ...]:

@@ -26,13 +26,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.plugins import NoSettings
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import Task2Batch
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
@@ -115,10 +114,11 @@ class CoralTasks(ReportTasks):
 
 
 class CoralBatches(Task2Batch):
-    """One CORAL sibling group, one batch: the siblings of one parent are one relative-reward group.
+    """Complete CORAL sibling groups, one batch: the siblings of one parent are one relative-reward group.
 
     The record stage decides when a group is complete (``group_size`` in
-    ``pipeline.record2record.config``). This stage takes no config.
+    ``pipeline.record2record.config``). A batch takes whole groups until it
+    holds the backend's batch size. Config: ``buffer_size``.
     """
 
     @classmethod
@@ -131,32 +131,29 @@ class CoralBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
-
-    def __init__(self, context: PipelineContext) -> None:
-        # One batch is one sibling group.
-        super().__init__(context, 1)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        parents = {item.metadata["coral"]["group"] for item in items}
-        if len(parents) != 1:
-            raise RuntimeError("CoralBatches batches exactly one sibling group per step")
-        parent = next(iter(parents))
         batch = TrainingBatch(batch_id, items)
-        group = trajectories(batch)
-        rewards = tuple(trajectory_reward(sample) for sample in group)
-        if all(reward == rewards[0] for reward in rewards[1:]):
-            # Constant-reward group: keep it for a well-defined zero-gradient
-            # step rather than starving the barrier (mirrors TTTD's fallback).
-            logger.info("CORAL group %s has constant reward %s", parent, rewards[0])
-        self.experiment_logger.log(
-            {
-                "parent": parent,
-                "siblings": len(group),
-                "reward_min": min(rewards),
-                "reward_max": max(rewards),
-            },
-            namespace="coral",
+        groups: dict[str, list[TrajectoryItem]] = {}
+        for sample in trajectories(batch):
+            groups.setdefault(str(sample.metadata["coral"]["group"]), []).append(sample)
+        for parent, group in groups.items():
+            rewards = tuple(trajectory_reward(sample) for sample in group)
+            if all(reward == rewards[0] for reward in rewards[1:]):
+                # Constant-reward group: keep it for a well-defined zero-gradient
+                # step rather than starving the barrier (mirrors TTTD's fallback).
+                logger.info("CORAL group %s has constant reward %s", parent, rewards[0])
+            self.experiment_logger.log(
+                {
+                    "parent": parent,
+                    "siblings": len(group),
+                    "reward_min": min(rewards),
+                    "reward_max": max(rewards),
+                },
+                namespace="coral",
+            )
+        return replace(
+            batch,
+            items=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(batch)),
         )
-        return replace(batch, items=tuple(replace(item, group_id=str(parent)) for item in group))

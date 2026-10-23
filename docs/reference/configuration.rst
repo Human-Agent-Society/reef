@@ -749,7 +749,7 @@ user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor batches as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
 instruction, the units an automatic batch would take next, up to
-``pipeline.task2batch.config.batch_size`` and possibly none: scored traces, or
+``evolution.batch_size`` traces and possibly none: scored traces, or
 unscored records when the ``pipeline`` section names the inference stages. The processor defines
 what an instruction batch carries, independently of its automatic batching
 policy.
@@ -775,9 +775,9 @@ Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent batches; a reserved batch completes under
 its original mode. Mode changes are not persisted: a service restart uses the
 recipe's configured mode again, while a scenario reload after a failed step
-keeps the selected mode. In ``manual`` the reported-feedback processor holds
-at most four batches of units and releases the oldest beyond that with a
-warning, at the switch to ``manual`` and as reports arrive.
+keeps the selected mode. In every mode the held record sets keep at most
+``pipeline.task2batch.config.buffer_size`` samples. As records arrive, the
+pipeline releases the oldest sets beyond that limit and logs one warning.
 
 .. config::
 
@@ -830,9 +830,6 @@ model. Harness-evolution presets also carry ``recipe.config.evolution``:
          propose: methods.mine:MyProposer
          evaluate: methods.mine:MyScorer
          tasks: ["..."]
-   pipeline:
-     task2batch:
-       config:
          batch_size: 1
    inference:
      upstream-model: qwen3-8b
@@ -895,7 +892,7 @@ backend, and the weight component's stage config lives under its ``config.pipeli
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2batch: {config: {batch_size: 8}}}
+             pipeline: {task2batch: {config: {buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:
@@ -961,20 +958,20 @@ For Ray services, ``resources`` supplies actor launch options such as
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The batch size goes in the deployment's top-level ``pipeline`` section; the
-rest goes under ``recipe.config.evolution``. `Evolve your harness
+These keys go under ``recipe.config.evolution``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
 
 .. config::
 
-   pipeline.task2batch.config.batch_size | 1 | traces per mutation attempt
+   evolution.batch_size | 1 | traces in one evolve step; a step starts when this many traces are held
 
 The default stages batch every valid scored report as a trace, including
 successful outcomes. To batch recorded traffic alone, every ``batch_size``
 requests with unscored samples, set
 ``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
 ``pipeline.record2task.module: reef.train.cordis_backend.processor:InferenceTasks``.
-Reef refuses ``batch_size`` and ``batch_policy`` under ``recipe.config``.
+Reef refuses ``batch_size`` and ``batch_policy`` directly under
+``recipe.config``.
 
 .. config::
 
@@ -1062,7 +1059,7 @@ Read by the weight-training stack. See `Evolve your model
    training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.config.global_batch_size | samples in one optimizer step. Must equal ``pipeline.task2batch.config.batch_size``.
+   training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. It is also the batch size of the training pipeline: a batch forms when this many samples are held. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy
@@ -1132,6 +1129,22 @@ A stage without a key is the recipe's class with no config. Each recipe's page
 lists the keys of its stages. Keys are written as the stage reads them; a
 hyphen spelling is also accepted.
 
+The batch size is not a stage key. The training backend owns it, and it
+counts samples: Slime's ``--global-batch-size``
+(``training.config.global_batch_size`` in the examples), Tinker's
+``batch_size``, or ``evolution.batch_size`` for harness evolution. A batch
+takes whole record sets until it holds at least the batch size, so it can
+hold more. Slime and Tinker then cut the batch into optimizer steps of the
+batch size; the recipe's ``StepScheduling.remainder`` decides what happens to
+a shorter last step.
+
+Every built-in task-to-batch stage reads ``buffer_size``. A recipe's page
+lists the other keys of its stage.
+
+.. config::
+
+   pipeline.task2batch.config.buffer_size | four times the batch size | the most samples that wait for a batch; at least the batch size. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
 parses the stage's ``config``. An unknown key or a value out of range fails
@@ -1177,9 +1190,6 @@ the training arm's reports only.
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
              state_dir: ${REEF_STATE_DIR}/generations
-     task2batch:
-       config:
-         tasks_per_step: 2
 
 ``GeneratedTaskRecord2Record`` groups the training plays by task and requests
 the rounds:
@@ -1219,11 +1229,9 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskBatches`` batches complete task groups:
-
-.. config::
-
-   pipeline.task2batch.config.tasks_per_step | 4 | complete task groups in one batch
+``GeneratedTaskBatches`` batches complete task groups. A batch takes whole
+groups, in arrival order, until it holds Tinker's batch size
+(``training.options.batch-size``) of episodes. Its only key is ``buffer_size``.
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
@@ -1429,6 +1437,9 @@ The following names are relative to ``operations/``:
      - Computed-feedback records waiting for more traffic or a judgment.
    * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
      - Computed-feedback candidates outside or inside the reserved batch.
+   * - ``processor/ready_samples``, ``processor/batch_size``, ``processor/buffer_size``
+     - Samples that a batch can take now, samples that an automatic batch
+       needs, and the most samples that the held record sets keep.
    * - ``processor/buffered_requests``
      - Explicit training instructions already buffered by the processor.
    * - ``training/reserved_batches``

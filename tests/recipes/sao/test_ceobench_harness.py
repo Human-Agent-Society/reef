@@ -1135,7 +1135,10 @@ def test_task_pins_the_upstream_commit_and_ships_no_credentials() -> None:
     serve = (EXAMPLE_DIR / "serve.yaml").read_text(encoding="utf-8")
     deployment = yaml.safe_load(serve)
     assert deployment["recipe"]["implementation"] == "recipes.sao.recipe:SAORecipe"
-    assert deployment["pipeline"]["task2batch"]["config"]["batch_size"] == 8
+    # About a week of decision turns per step; the driver's batch sizes read the one value.
+    assert deployment["training"]["config"]["global_batch_size"] == 8
+    options = deployment["training"]["options"]
+    assert options["global-batch-size"] == options["rollout-batch-size"] == "${training.config.global_batch_size}"
 
 
 @pytest.mark.unit

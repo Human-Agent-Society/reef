@@ -648,8 +648,8 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
             "tasks": ["check one", "check two"],
             "seed": list(SEED),
             "gepa": block,
+            "batch_size": 1,
         },
-        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
     }
 
 

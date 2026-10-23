@@ -9,11 +9,11 @@ from reef.core.batches import TrainDataItem, TrainingBatch
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2task import Record2Task
-from reef.task2batch.base import BatchSettings, Task2Batch
+from reef.task2batch.base import BufferSettings, Task2Batch
 
 
 class DistillBatches(Task2Batch):
-    """Batch tasks as they come, ``batch_size`` record sets to a batch."""
+    """Batch the tasks as they come, in batch order."""
 
     @classmethod
     def from_config(
@@ -25,7 +25,7 @@ class DistillBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)

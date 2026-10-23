@@ -27,6 +27,8 @@ training:
     lora-rank: 32
     learning-rate: 0.00004
     kl-coef: 0.1
+    # One optimizer step over the whole grid: groups_per_step x rollouts_per_group samples.
+    batch-size: 4
 storage:
   artifact-repository: ${REEF_TINKER_STATE_DIR}/artifacts.git
   artifact-work-dir: ${REEF_TINKER_STATE_DIR}/artifact-work

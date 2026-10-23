@@ -334,9 +334,10 @@ The response is ``{"scenario": "my-agent", "trajectory_ids":
 after training. The same ID with a different trajectory returns 409. An
 invalid upload returns 400 and saves nothing.
 
-Each uploaded trajectory counts as one batch unit toward the recipe's
-``batch_size``. A batch takes uploaded trajectories first, in upload order,
-and then the units of recorded traffic. Thus a large upload can delay the
+Each uploaded trajectory counts as one sample toward the backend's batch
+size. It does not count toward the pipeline's ``buffer_size``, so Reef never
+releases it to make room. A batch takes uploaded trajectories first, in
+upload order, and then the units of recorded traffic. Thus a large upload can delay the
 training of live traffic. The delay continues until the batches use all of
 the upload. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.
@@ -386,7 +387,7 @@ runs instructions only and never batches on traffic; harness evolution
 runs an instruction alone, without samples. ``hybrid`` batches on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units an automatic batch would take next, up to
-``pipeline.task2batch.config.batch_size`` and possibly none, ride beside it
+``evolution.batch_size`` traces and possibly none, ride beside it
 as the batch's samples (scored traces, or unscored records when the
 ``pipeline`` section names the inference stages), so the proposer reads the
 request next to them; with none queued the step batches as ``auto`` does.
@@ -1194,6 +1195,9 @@ its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
 a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
 or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
 not be read. ``batch_ready`` says whether the processor has a batch waiting.
+``processor`` includes ``ready_samples``, the samples of the held record sets
+and uploaded trajectories; ``batch_size``, the samples an automatic batch
+needs; and ``buffer_size``, the most samples the held record sets keep.
 A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
 ``training_mode``, ``processor`` status and ``last_committed_step``. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from

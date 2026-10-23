@@ -45,12 +45,20 @@ CONNECTION_CONFIG_KEYS = (
 #: Inference runtime options the coordinator runtime sets itself; ``inference_runtime_options`` cannot name them.
 RESERVED_INFERENCE_OPTIONS = frozenset({*CONNECTION_CONFIG_KEYS, "type", "control"})
 #: Keys the config path forwards verbatim to :func:`connect_ray_runtime`.
-RAY_CONFIG_KEYS = ("actor_name", "namespace", "ray_address", "train_timeout_s", *CONNECTION_CONFIG_KEYS[1:])
+RAY_CONFIG_KEYS = (
+    "actor_name",
+    "namespace",
+    "ray_address",
+    "train_timeout_s",
+    "batch_size",
+    *CONNECTION_CONFIG_KEYS[1:],
+)
 
 
 def connect_executor_runtimes(
     *,
     train_group_handle: CoordinatorClient,
+    batch_size: int,
     inference: InferenceRuntime | None = None,
     inference_url: str | None = None,
     model_path: str = "",
@@ -58,10 +66,13 @@ def connect_executor_runtimes(
     inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
-    """Assemble independent components over the existing deployment connection."""
+    """Assemble independent components over the existing deployment connection.
+
+    ``batch_size`` is the samples in one training step, from the training options.
+    """
     if inference is not None and inference_url is not None:
         raise ValueError("pass inference or inference_url, not both")
-    training = ExecutorTrainingRuntime(train_group_handle)
+    training = ExecutorTrainingRuntime(train_group_handle, batch_size=batch_size)
     if inference is None:
         inference = ExecutorInferenceRuntime(
             control=train_group_handle,
@@ -76,6 +87,7 @@ def connect_executor_runtimes(
 
 def connect_ray_runtime(
     *,
+    batch_size: int = 1,
     inference_url: str | None = None,
     actor_name: str = DEFAULT_ACTOR_NAME,
     namespace: str = DEFAULT_NAMESPACE,
@@ -91,6 +103,7 @@ def connect_ray_runtime(
     Reef and the backend run as separate services in one Ray cluster.
     ``namespace`` must match the namespace used when the backend actor was
     created. ``inference_url`` defaults to the address the actor reports.
+    ``batch_size`` is the samples in one training step.
     """
     return connect_executor_runtimes(
         train_group_handle=connect_ray_coordinator(
@@ -100,6 +113,7 @@ def connect_ray_runtime(
             train_timeout_s=train_timeout_s,
             inference_timeout_s=inference_timeout_s,
         ),
+        batch_size=batch_size,
         inference_url=inference_url,
         model_path=model_path,
         inference_timeout_s=inference_timeout_s,
@@ -184,6 +198,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             )
             return connect_executor_runtimes(
                 train_group_handle=handle,
+                batch_size=config.get("batch_size", 1),
                 model_path=model_path,
                 **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
             )
@@ -264,6 +279,7 @@ class CoordinatorRuntimeFactory(RuntimeFactory):
                 inference_timeout_s=config.get("inference_timeout_s", 300.0),
                 train_timeout_s=config.get("train_timeout_s"),
             ),
+            batch_size=config.get("batch_size", 1),
         )
         try:
             inference = registry.build(

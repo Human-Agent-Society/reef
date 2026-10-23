@@ -10,7 +10,7 @@
 # finished week's turns are reported together with the week's credit: its
 # change in company value (cash plus the subscription run-rate over the weeks
 # left) and the discounted changes of the weeks after it, scaled against the
-# weeks before (harness/report.py). batch_size 8 trains about a week of decision turns per step
+# weeks before (harness/report.py). A global batch size of 8 trains about a week of decision turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
 # max_staleness admits the turns of a week that earlier steps have aged.
 #
@@ -70,10 +70,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 64
-pipeline:
-  task2batch:
-    config:
-      batch_size: 8                    # MUST equal training.config.global_batch_size
 training:
   backend: slime
   ready-timeout: 900

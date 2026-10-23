@@ -1,9 +1,12 @@
-"""The task-to-batch contract: the tasks of the selected batch units become one batch.
+"""The task-to-batch contract: a buffer of samples, and the samples of the selected batch units become one batch.
 
-The training pipeline (:class:`~reef.train.pipeline.TrainingPipeline`) selects
-the batch units of the next batch from the record-to-record stage, takes the
-tasks that the record-to-task stage made from them, and gives the tasks to a
-recipe's ``Task2Batch``. A task is a ``TrainDataItem``.
+The tasks of a record set enter the stage as samples when the record-to-task
+stage makes them. The buffer holds the samples of the record sets that wait
+for a batch, at most ``buffer_size``. When the trainer asks the training
+pipeline (:class:`~reef.train.pipeline.TrainingPipeline`) for a batch of its
+batch size, the pipeline selects whole batch units from the record-to-record
+stage and gives their samples to a recipe's ``Task2Batch``. A task is a
+``TrainDataItem``.
 """
 
 from __future__ import annotations
@@ -24,20 +27,35 @@ from reef.record2task import Record2Task
 
 
 @dataclass(frozen=True)
-class BatchSettings(PluginSettings):
-    """The config of a task-to-batch stage that batches ``batch_size`` batch units."""
+class BufferSettings(PluginSettings):
+    """The config of a task-to-batch stage: the size of its sample buffer.
 
-    batch_size: int = config_option(1, help="The batch units in one batch.")
+    Values: ``buffer_size`` is None or a positive int.
+    Purpose: a stage's ``from_config`` parses it from
+    ``pipeline.task2batch.config`` and gives ``buffer_size`` to
+    ``Task2Batch.__init__``. None there means the trainer's default, four
+    batches. A stage settings class that has more keys extends it.
+    """
+
+    buffer_size: int | None = config_option(
+        None, help="The most samples the buffer holds; at least the batch size. Omitted holds four batches."
+    )
 
     def __post_init__(self) -> None:
-        if self.batch_size <= 0:
-            raise ValueError("batch_size must be positive")
+        if self.buffer_size is not None and self.buffer_size <= 0:
+            raise ValueError("buffer_size must be positive")
 
 
 class Task2Batch(ABC, Plugin):
-    """The task-to-batch stage: shape the tasks of the selected batch units into one batch.
+    """The task-to-batch stage: bound the sample buffer, and shape the samples of the selected batch units into one batch.
 
-    A recipe implements ``make_batch``. The class attributes declare what the
+    Values: ``buffer_size`` is None or a positive int: the configured size, or
+    else ``context.default_buffer_size``; None holds every sample.
+    ``max_batch_samples`` is None or a positive int, the most samples one batch
+    may hold; None sets no limit. The pipeline keeps at most ``buffer_size``
+    samples of held record sets, and the trainer refuses a batch size below
+    ``buffer_size`` or above ``max_batch_samples``. A recipe implements
+    ``make_batch``. The class attributes declare what the
     pipeline and the trainer need to know about the recipe's batches.
     ``make_batch`` runs on the trainer thread without network or model calls.
     A deployment names a stage class in ``pipeline.task2batch`` and gives its
@@ -56,11 +74,13 @@ class Task2Batch(ABC, Plugin):
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
 
-    def __init__(self, context: PipelineContext, batch_size: int) -> None:
+    def __init__(self, context: PipelineContext, buffer_size: int | None) -> None:
         self.context = context
         self.scenario = context.scenario
-        #: The number of batch units in one batch.
-        self.batch_size = batch_size
+        #: The most samples that the buffer holds; None holds every sample.
+        self.buffer_size = context.default_buffer_size if buffer_size is None else buffer_size
+        #: The most samples one batch may hold; None sets no limit. A stage whose batch is one fixed unit sets it.
+        self.max_batch_samples: int | None = None
 
     @classmethod
     def from_config(
@@ -116,7 +136,7 @@ class NoBatches(Task2Batch):
         return cls(context)
 
     def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, 1)
+        super().__init__(context, None)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         raise RuntimeError(f"scenario {self.scenario!r} trains no weights and never produces a training batch")

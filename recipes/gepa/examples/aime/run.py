@@ -9,7 +9,7 @@ One round is one GEPA step: pull the served tree, run the next epoch-shuffled
 minibatch of three training problems as Pi episodes against it with a model
 binding pointed back at this service, report each score against the request
 that episode recorded, and wait. The third report closes the batch
-(``pipeline.task2batch.config.batch_size: 3``), which is what schedules the step where the method
+(``evolution.batch_size: 3``), which is what schedules the step where the method
 proposes, evaluates on the 45 validation problems, and publishes on a strict
 mean improvement. Rounds stop at ``--budget`` metric calls; then the seed and
 the served compositions are each scored on the sealed 150-problem test split

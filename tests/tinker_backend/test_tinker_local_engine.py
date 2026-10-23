@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.runtime.test_executor_runtime import Coordinator
 
+from reef.inference.http import InferenceProxyRuntime
+from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.runtime.interfaces import (
@@ -173,7 +176,7 @@ class Stack:
             TrainingBatch("b", (item(version, sample=step),)),
             TrainingMethod(objective.name, schedule),
             {},
-            StepScheduling(unit="sample", batch_size="actual"),
+            StepScheduling(unit="sample"),
         )
         return {**prepared.payload, "scenario": "math", "scenario_step": step, "parent_runtime_load_id": version}
 
@@ -270,7 +273,9 @@ def _local_engine_config(tmp_path):
 
 def test_local_engine_topology_runs_the_model_driver_and_connects_through_the_coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("TINKER_API_KEY", "test-key")
-    config, _ = resolve_deployment_config(_local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
+    raw = _local_engine_config(tmp_path)
+    raw["training"]["options"]["batch-size"] = 8
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["tinker-driver", "reef"]
     assert config["services"][0]["command"][-1] == "reef.service.training_driver"
     assert config["execution"]["rollout"] == "ray"
@@ -282,7 +287,18 @@ def test_local_engine_topology_runs_the_model_driver_and_connects_through_the_co
         {**settings.__dict__, "ray_address": "ray://head:10001"}
     )
     assert runtime["type"] == "coordinator_training" and runtime["inference_runtime"] == "sglang"
+    assert runtime["batch_size"] == 8
     assert "test-key" not in yaml.safe_dump(config)
+    # The training runtime built from that config batches by the Tinker batch size.
+    monkeypatch.setattr("reef.service.runtime.connect_ray_coordinator", lambda **kwargs: Coordinator())
+    handler = InferenceProxyRuntime(base_url="http://router").inference_handler
+    monkeypatch.setattr(SGLangInferenceHandler, "from_config", classmethod(lambda cls, *args, **kwargs: handler))
+    training, inference = RuntimeRegistry().build(runtime, model_path="model", environ={})
+    try:
+        assert training.batch_size == 8
+    finally:
+        inference.shutdown()
+        training.shutdown()
 
 
 def test_local_engine_topology_rejects_conflicting_inputs_before_starting(tmp_path, monkeypatch):

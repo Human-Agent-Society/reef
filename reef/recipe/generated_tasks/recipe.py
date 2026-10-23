@@ -20,10 +20,11 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     contract. Its stages are ``GeneratedTaskRecord2Record``,
     ``GeneratedTaskTasks``, and ``GeneratedTaskBatches``; the deployment's
     ``pipeline`` section gives their config: the rounds, the task
-    generator, and the generator service in ``record2task``, the task groups
-    and the source sessions in ``record2record``, and the batch size in
-    ``task2batch``. Without that section, no round runs and the recipe trains
-    on the training arm's reports only.
+    generator, and the generator service in ``record2task``, and the task
+    groups and the source sessions in ``record2record``. A batch takes whole
+    task groups until it holds the backend's batch size of episodes. Without
+    that section, no round runs and the recipe trains on the training arm's
+    reports only.
 
     Enabled rounds save each task and its train/eval split in the scenario's task store before play.
     Eval tasks stay in the store without plays or training feedback.
@@ -38,9 +39,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective=TaskGroupObjective.name, scheduling=StepScheduling(unit="sample", batch_size="actual")
-        )
+        return WeightTrainingSpec(objective=TaskGroupObjective.name, scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

@@ -101,7 +101,7 @@ def test_recipe_has_one_objective_binding_and_derives_its_loss_family():
 def test_recipe_owns_the_step_schedule_and_the_objective_rejects_unsupported_epochs():
     # The schedule is recipe configuration, not part of the objective's signal.
     assert "scheduling" not in StepSignal.__dataclass_fields__
-    two_passes = StepScheduling(unit="sample", batch_size="actual", epochs=2)
+    two_passes = StepScheduling(unit="sample", epochs=2)
     assert WeightTrainingSpec(objective="sao", scheduling=two_passes).scheduling is two_passes
 
     # An objective only says what its loss tolerates: SAO's clipped ratio
@@ -111,12 +111,12 @@ def test_recipe_owns_the_step_schedule_and_the_objective_rejects_unsupported_epo
     assert TttdObjective.supports_multiple_epochs is False
     with pytest.raises(ValueError, match=r"'tttd' does not support StepScheduling\(epochs=2\)"):
         TttdObjective().validate_scheduling(two_passes)
-    TttdObjective().validate_scheduling(StepScheduling(unit="sample", batch_size=2, shuffle=True))
+    TttdObjective().validate_scheduling(StepScheduling(unit="sample", shuffle=True))
 
     # Both backends check the schedule before touching the batch.
     batch = TrainingBatch("two-groups", ())
     with pytest.raises(ValueError, match="does not support StepScheduling"):
-        prepare_slime_step(batch, TrainingMethod("tttd"), {"steps": 0}, two_passes)
+        prepare_slime_step(batch, TrainingMethod("tttd"), {"steps": 0}, two_passes, step_size=1)
     with pytest.raises(ValueError, match="does not support StepScheduling"):
         prepare_tinker_step(batch, TrainingMethod("tttd"), {"steps": 0}, two_passes, batch_size=1, kl_coef=0.0)
 
@@ -128,7 +128,7 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
     try:
         state = {"steps": 7}
         batch = TrainingBatch("empty", ())
-        slime = prepare_slime_step(batch, TrainingMethod(objective.name), state, StepScheduling())
+        slime = prepare_slime_step(batch, TrainingMethod(objective.name), state, StepScheduling(), step_size=1)
         tinker = prepare_tinker_step(
             batch, TrainingMethod(objective.name), state, StepScheduling(), batch_size=1, kl_coef=0.0
         )
@@ -144,7 +144,7 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
 def test_group_advantages_are_shared_across_backends_before_optimizer_partitioning():
     # One sample per optimizer step: every group is split across steps, yet
     # its advantages come from the whole group because prepare ran first.
-    one_sample_steps = StepScheduling(unit="sample", batch_size=1)
+    one_sample_steps = StepScheduling(unit="sample")
     rewards = (0.0, 2.0, 3.0, 1.0)
     batch = TrainingBatch(
         "two-groups",
@@ -159,7 +159,7 @@ def test_group_advantages_are_shared_across_backends_before_optimizer_partitioni
         for group in (rewards[:2], rewards[2:])
         for advantage in TttdObjective.adaptive_entropic_advantages(list(group))[0]
     )
-    slime = prepare_slime_step(batch, TrainingMethod("tttd"), state, one_sample_steps)
+    slime = prepare_slime_step(batch, TrainingMethod("tttd"), state, one_sample_steps, step_size=1)
     tinker = prepare_tinker_step(batch, TrainingMethod("tttd"), state, one_sample_steps, batch_size=1, kl_coef=0.0)
     assert slime.payload["loss"] == tinker.payload["loss"] == "tttd"
     assert slime.payload["advantages"] == pytest.approx(expected)

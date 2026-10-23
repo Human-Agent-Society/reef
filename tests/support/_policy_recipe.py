@@ -27,7 +27,6 @@ class TestPolicyRecipe(WeightTrainingRecipe):
     __test__ = False
 
     _: KW_ONLY
-    batch_size: int = 1
     min_score: float = float("-inf")
     name: str = "test_policy"
 
@@ -54,14 +53,10 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
     ) -> Trainer:
-        if experiment_logger is not None:
-            experiment_logger.log({"batch_size": self.batch_size}, namespace="recipe")
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: threshold_pipeline(
-                context, batch_size=self.batch_size, accept_multi_turn=True
-            ),
+            pipeline_factory=lambda context: threshold_pipeline(context, accept_multi_turn=True),
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
                 FixedTrainingMethodSelector(TrainingMethod("sft")),

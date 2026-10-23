@@ -98,7 +98,7 @@ class _TwoTrainerRecipe(Recipe):
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component in self.hybrid_components:
-            return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+            return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, None))
         return threshold_pipeline(context)
 
     def build_trainers(

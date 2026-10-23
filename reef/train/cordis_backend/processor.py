@@ -76,7 +76,7 @@ class TraceBatches(DistillBatches):
     """Batch trace tasks unmodified; the backends consume them without more processing.
 
     In ``hybrid`` a queued instruction batches with the traces that an
-    automatic batch would take next, up to ``batch_size``, so the proposer
+    automatic batch would take next, up to ``evolution.batch_size``, so the proposer
     reads the request beside them; in ``manual`` it runs alone.
     """
 

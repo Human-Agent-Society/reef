@@ -170,6 +170,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
             "ray_address": ray_address,
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
+            "batch_size": tinker_settings(settings["training_backend_options"] or {}).batch_size,
         }
         if settings["inference_remote"]:
             runtime_config["inference_runtime"] = "remote"

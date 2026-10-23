@@ -631,4 +631,5 @@ class WeightTrainingRecipe(Recipe):
             training_mode=self.training_mode,
             max_staleness=self.max_staleness,
             task_storage=task_storage,
+            batch_size=self.training_runtime.batch_size,
         )

@@ -219,7 +219,7 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
     operations = SlimeTrainingBackend(
         group,
         batch_processor=SimpleNamespace(),
-        args=SlimeArguments(),
+        args=SlimeArguments(global_batch_size=1),
         save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
     )
     try:

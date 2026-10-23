@@ -126,7 +126,7 @@ point deployments configured with different recipes at the same repository.
    recipe:
      implementation: recipes.sao.recipe:SAORecipe
      config:
-       batch-size: 1
+       training_mode: auto
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
 Reefine ships in Reef, and other learning methods are imported only when selected. The ``recipes/`` tree in

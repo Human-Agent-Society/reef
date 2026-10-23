@@ -45,7 +45,7 @@ Configuration
 Select ``recipes.opd.recipe:OPDRecipe``. ``max_staleness`` in
 ``recipe.config`` defaults to zero: wait for each published update before
 sampling the next batch. The stage settings go in the deployment's top-level
-``pipeline`` section:
+``pipeline`` section. The batch size is Slime's ``--global-batch-size``:
 
 .. code:: yaml
 
@@ -53,13 +53,13 @@ sampling the next batch. The stage settings go in the deployment's top-level
      record2task:
        config:
          max_teacher_tokens: 8192
-     task2batch:
-       config:
-         batch_size: 32
+   training:
+     config:
+       global_batch_size: 32
 
 .. config::
 
-   pipeline.task2batch.config.batch_size | 1 | responses in one optimizer step.
+   training.config.global_batch_size | responses in one batch and in one optimizer step. Sample this many responses before you wait for publication, so that one batch is one step.
    pipeline.record2task.config.max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is skipped and counted in ``teacher_overflow_reports``. 0 disables the check.
 
 The Slime options belong in ``training.options``:
@@ -75,8 +75,9 @@ The Slime options belong in ``training.options``:
    opd-advantage-clip | 0 | symmetric bound on the teacher/student log-prob difference used in the sampled reverse-KL gradient. 0 disables clipping.
 
 Also set ``loss-type: custom_loss``, ``use-rollout-logprobs: true`` and
-``disable-compute-advantages-and-returns: true``. The family rejects multiple
-optimizer updates per batch. The shared backend's other divergences and
+``disable-compute-advantages-and-returns: true``. Each report is one sample,
+so a batch holds exactly ``--global-batch-size`` samples and trains one
+optimizer update. The shared backend's other divergences and
 representations are reachable through the inherited ``opd-*`` flags; changing
 them changes the method.
 

@@ -23,6 +23,24 @@ from reef.train.deployment import (
 )
 
 
+def global_batch_size(options: Mapping[str, Any]) -> int:
+    """Read ``--global-batch-size`` from normalized, resolved Slime ``options``: the samples in one training step.
+
+    Reef's trainer batches by it, so the option must be explicit, even when
+    Slime could derive it from ``--num-steps-per-rollout``. The value is a
+    positive int or its decimal string.
+    """
+    value = options.get("global-batch-size")
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise DeployConfigError(
+            f"training.options.global-batch-size must be a positive integer, the samples in one training step; "
+            f"got {value!r}"
+        )
+    return value
+
+
 def driver_environment(environ: Mapping[str, str]) -> dict[str, str]:
     """Set the CUDA/NCCL defaults used by the shipped Slime deployments."""
     return {
@@ -199,6 +217,8 @@ class SlimeDeployment(TrainingDeployment):
         require_ray_roles(config, "training", "rollout", backend="Slime")
         options = normalize_native_options(settings["training_backend_options"])
         native_arguments(options, reserved={"ready-file"})
+        # Refuse a missing batch size at deploy time; the HTTP service reads it again, resolved.
+        global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
         if settings["inference_backend"] == "vllm":
             require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)
@@ -253,6 +273,7 @@ class SlimeDeployment(TrainingDeployment):
             "ray_address": ray_address,
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
+            "batch_size": global_batch_size(normalize_native_options(settings["training_backend_options"])),
         }
         inference_handler_factory = inference_handler_factory_for(settings["inference_handler_factory"])
         if inference_handler_factory is not None:

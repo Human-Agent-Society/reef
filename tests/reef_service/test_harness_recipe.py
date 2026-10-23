@@ -20,7 +20,7 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.plugins import PluginReference
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -1449,7 +1449,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     monkeypatch.syspath_prepend(str(tmp_path))
     proxy = InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
 
-    def config(data: dict | None = None, pipeline: dict | None = None) -> dict:
+    def config(data: dict | None = None, pipeline: dict | None = None, **evolution: object) -> dict:
         settings = {
             "data": data or {},
             "evolution": {
@@ -1457,6 +1457,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
                 "evaluate": "demo_pipeline_stages:Evaluate",
                 "tasks": ["task one"],
                 "binary": str(make_binary(tmp_path)),
+                **evolution,
             },
         }
         if pipeline is not None:
@@ -1469,8 +1470,9 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
             pipeline={
                 "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
                 "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
-                "task2batch": {"config": {"batch_size": 2}},
-            }
+                "task2batch": {"config": {"buffer_size": 6}},
+            },
+            batch_size=2,
         ),
         runtime=proxy,
     )
@@ -1478,23 +1480,37 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     assert type(trainer.pipeline.record2record).__name__ == "InferenceRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "InferenceTasks"
     assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    assert trainer.pipeline.task2batch.batch_size == 2
+    # evolution.batch_size is the trainer's batch size, which it batches by.
+    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (2, 6)
 
     reported = CordisRecipe.from_environment({}, config=config(), runtime=proxy)
     trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "ReportRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "TraceTasks"
     assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    assert trainer.pipeline.task2batch.batch_size == 1
+    # The default buffer holds four batches.
+    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (1, 4)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         CordisRecipe.from_environment({}, config=config({"batch_size": 2}))
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment({}, config=config({"batch_policy": "records"}))
+    for batch_size in (0, -1, True, "2"):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.batch_size must be an integer of at least 1"):
+            CordisRecipe.from_environment({}, config=config(batch_size=batch_size), runtime=proxy)
     # A bad stage config fails when the scenario's pipeline builds.
-    with pytest.raises(RecipeConfigError, match="batch_size must be positive"):
+    for stage_config, message in (
+        ({"batch_size": 2}, "unknown config fields: batch_size"),
+        ({"buffer_size": 0}, "buffer_size must be positive"),
+    ):
+        with pytest.raises(RecipeConfigError, match=message):
+            CordisRecipe.from_environment(
+                {}, config=config(pipeline={"task2batch": {"config": stage_config}}, batch_size=2), runtime=proxy
+            ).build("demo", SQLiteRecordStore())
+    # The trainer refuses a buffer that cannot hold one batch.
+    with pytest.raises(PluginConfigError, match="buffer_size 1 is smaller than the batch size 2"):
         CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2batch": {"config": {"batch_size": 0}}}), runtime=proxy
+            {}, config=config(pipeline={"task2batch": {"config": {"buffer_size": 1}}}, batch_size=2), runtime=proxy
         ).build("demo", SQLiteRecordStore())
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment(

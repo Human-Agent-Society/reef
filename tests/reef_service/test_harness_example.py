@@ -884,8 +884,8 @@ def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
-    assert set(result) == {"recipe", "pipeline", "inference"}
-    assert result["pipeline"] == {"task2batch": {"config": {"batch_size": 1}}}
+    assert set(result) == {"recipe", "inference"}
+    assert result["recipe"]["config"]["evolution"]["batch_size"] == 1
 
 
 def _write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
@@ -897,7 +897,6 @@ def _write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
                     "implementation": config["implementation"],
                     "config": {**config["data"], "evolution": evolution},
                 },
-                "pipeline": config["pipeline"],
                 "execution": config["execution"],
             }
         )
@@ -931,7 +930,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkey
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
@@ -1131,7 +1130,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
     assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
-    assert (built.stages().task2batch.config, built.training_mode) == ({"batch_size": 1}, "auto")
+    assert (built.batch_size, built.training_mode) == (1, "auto")
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",
@@ -1190,8 +1189,8 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
     assert trainer.pipeline.training_mode == "hybrid"
-    # Each report is one batch: the deployment's pipeline section sets batch_size 1.
-    assert trainer.pipeline.task2batch.batch_size == 1
+    # Each report is one batch: the deployment sets evolution.batch_size 1.
+    assert trainer.batch_size == 1
     trainer.close()
     records.close()
 

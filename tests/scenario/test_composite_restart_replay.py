@@ -81,7 +81,7 @@ def _weight_job_before_the_restart(root: Path, *, published: bool) -> dict:
 
 def _restarted(root: Path) -> tuple[_MarkerCoordinator, RuntimeScheduler]:
     coordinator = _MarkerCoordinator(MemoryTrainingBackend(root))
-    return coordinator, RuntimeScheduler(ExecutorTrainingRuntime(coordinator), WeightReceiver())
+    return coordinator, RuntimeScheduler(ExecutorTrainingRuntime(coordinator, batch_size=1), WeightReceiver())
 
 
 @pytest.mark.unit

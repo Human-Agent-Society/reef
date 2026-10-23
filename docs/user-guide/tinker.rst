@@ -55,9 +55,14 @@ Reef schedules. They share nothing in process: each candidate's artifact
 carries a ``tinker-checkpoint.json`` manifest naming its remote training
 state and sampler, the inference side serves the sampler an artifact names,
 and the training side branches from the checkpoint Reef last committed,
-which ``state-dir`` remembers across restarts. Backend-neutral step scheduling retains comparison sets, explicit
-batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
-``training.options.batch-size`` supplies the configured optimizer batch size.
+which ``state-dir`` remembers across restarts.
+
+``training.options.batch-size`` (default 1) is the batch size: the samples in
+one optimizer step. The training pipeline makes a batch when it holds this
+many samples. A batch takes whole record sets, so it can hold more; Reef then
+cuts it into optimizer steps of the batch size. Backend-neutral step
+scheduling retains comparison sets, shuffling, epochs, and
+partial/drop/error remainder policies for the last step.
 
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``
@@ -153,7 +158,7 @@ starts the SGLang engines with LoRA serving enabled (``max-lora-rank`` from
 ``max-loaded-adapters``, ``lora-target-modules`` defaulting to ``all``), and
 runs Reef's training coordinator with Tinker as its training backend. The
 trainer reserves no GPU. Each scenario trains its own adapter: a training job
-runs one optimizer step on Tinker from the scenario's published checkpoint,
+runs the batch's optimizer steps on Tinker from the scenario's published checkpoint,
 downloads the result and converts it with ``tinker-cookbook`` into a PEFT
 adapter directory under the job's checkpoint, and publication has Reef ask
 every engine to load that directory under the adapter name it records for

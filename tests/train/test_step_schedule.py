@@ -12,13 +12,9 @@ from reef.train.algos.schedule import materialize_schedule, schedule_seed
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"batch_size": 0}, "must be positive"),
-        ({"batch_size": True}, "'configured', 'actual' or a positive int"),
-        ({"batch_size": "all"}, "'configured', 'actual' or a positive int"),
         ({"epochs": 0}, "epochs must be a positive int"),
         ({"shuffle": 1}, "shuffle must be a bool"),
         ({"remainder": "pad"}, "remainder must be"),
-        ({"remainder": "drop"}, "requires an explicit integer batch_size"),
         ({"unit": "group"}, "unit must be"),
     ],
 )
@@ -28,19 +24,15 @@ def test_step_scheduling_validates_fields(kwargs, message) -> None:
 
 
 @pytest.mark.unit
-def test_configured_schedule_is_identity() -> None:
-    schedule = materialize_schedule([0, 0, 1, 2], StepScheduling())
-
-    assert schedule.row_indices == (0, 1, 2, 3)
-    assert schedule.rollout_ids == (0, 0, 1, 2)
-    assert schedule.step_sizes is None
-    assert schedule.optimizer_steps is None
-    assert schedule.rollouts_per_epoch == 3
+@pytest.mark.parametrize("step_size", [0, True, "4"])
+def test_step_size_must_be_a_positive_int(step_size) -> None:
+    with pytest.raises(ValueError, match="step_size must be a positive int"):
+        materialize_schedule([0, 1], StepScheduling(), step_size=step_size)
 
 
 @pytest.mark.unit
-def test_actual_schedule_fixes_one_step_per_epoch() -> None:
-    schedule = materialize_schedule([0, 0, 1], StepScheduling(batch_size="actual", epochs=2))
+def test_step_size_of_the_whole_batch_trains_one_step_per_epoch() -> None:
+    schedule = materialize_schedule([0, 0, 1], StepScheduling(epochs=2), step_size=2)
 
     assert schedule.step_sizes == (2, 2)
     assert schedule.optimizer_steps == 2
@@ -49,8 +41,26 @@ def test_actual_schedule_fixes_one_step_per_epoch() -> None:
 
 
 @pytest.mark.unit
-def test_explicit_batch_size_counts_rollouts_not_rows() -> None:
-    schedule = materialize_schedule([0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], StepScheduling(batch_size=2))
+def test_step_size_larger_than_the_batch_trains_one_partial_step() -> None:
+    schedule = materialize_schedule([0, 0, 1, 2], StepScheduling(), step_size=8)
+
+    assert schedule.row_indices == (0, 1, 2, 3)
+    assert schedule.step_sizes == (3,)
+    assert schedule.optimizer_steps == 1
+    assert schedule.rollouts_per_epoch == 3
+
+
+@pytest.mark.unit
+def test_step_size_larger_than_the_batch_has_no_complete_step_to_keep() -> None:
+    with pytest.raises(ValueError, match="do not form complete optimizer steps of 8"):
+        materialize_schedule([0, 1, 2], StepScheduling(remainder="error"), step_size=8)
+    with pytest.raises(ValueError, match="do not form one complete optimizer step of 8"):
+        materialize_schedule([0, 1, 2], StepScheduling(remainder="drop"), step_size=8)
+
+
+@pytest.mark.unit
+def test_step_size_counts_rollouts_not_rows() -> None:
+    schedule = materialize_schedule([0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3], StepScheduling(), step_size=2)
 
     assert schedule.step_sizes == (2, 2)
     assert schedule.dropped_rollouts == 0
@@ -58,7 +68,7 @@ def test_explicit_batch_size_counts_rollouts_not_rows() -> None:
 
 @pytest.mark.unit
 def test_remainder_drop_keeps_leading_full_steps() -> None:
-    schedule = materialize_schedule([5, 5, 7, 9, 11, 13], StepScheduling(batch_size=2, remainder="drop"))
+    schedule = materialize_schedule([5, 5, 7, 9, 11, 13], StepScheduling(remainder="drop"), step_size=2)
 
     assert schedule.row_indices == (0, 1, 2, 3, 4)
     assert schedule.rollout_ids == (0, 0, 1, 2, 3)
@@ -68,7 +78,7 @@ def test_remainder_drop_keeps_leading_full_steps() -> None:
 
 @pytest.mark.unit
 def test_remainder_partial_is_default_and_ends_every_epoch_with_a_smaller_step() -> None:
-    schedule = materialize_schedule([5, 5, 7, 9, 11, 13], StepScheduling(batch_size=2, epochs=2))
+    schedule = materialize_schedule([5, 5, 7, 9, 11, 13], StepScheduling(epochs=2), step_size=2)
 
     assert schedule.dropped_rollouts == 0
     assert schedule.step_sizes == (2, 2, 1, 2, 2, 1)
@@ -81,16 +91,16 @@ def test_remainder_partial_is_default_and_ends_every_epoch_with_a_smaller_step()
 @pytest.mark.unit
 def test_remainder_error_refuses_a_tail() -> None:
     with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
-        materialize_schedule([0, 1, 2], StepScheduling(batch_size=2, remainder="error"))
+        materialize_schedule([0, 1, 2], StepScheduling(remainder="error"), step_size=2)
 
 
 @pytest.mark.unit
 def test_shuffle_varies_by_epoch_and_seed_but_not_between_calls() -> None:
     ids = list(range(32))
-    scheduling = StepScheduling(batch_size=8, epochs=2, shuffle=True)
-    first = materialize_schedule(ids, scheduling, seed=schedule_seed("batch-a"))
-    again = materialize_schedule(ids, scheduling, seed=schedule_seed("batch-a"))
-    other = materialize_schedule(ids, scheduling, seed=schedule_seed("batch-b"))
+    scheduling = StepScheduling(epochs=2, shuffle=True)
+    first = materialize_schedule(ids, scheduling, step_size=8, seed=schedule_seed("batch-a"))
+    again = materialize_schedule(ids, scheduling, step_size=8, seed=schedule_seed("batch-a"))
+    other = materialize_schedule(ids, scheduling, step_size=8, seed=schedule_seed("batch-b"))
 
     assert first == again
     assert first.row_indices != other.row_indices
@@ -104,4 +114,4 @@ def test_shuffle_varies_by_epoch_and_seed_but_not_between_calls() -> None:
 @pytest.mark.unit
 def test_empty_batch_is_rejected() -> None:
     with pytest.raises(ValueError, match="empty batch"):
-        materialize_schedule([], StepScheduling())
+        materialize_schedule([], StepScheduling(), step_size=1)

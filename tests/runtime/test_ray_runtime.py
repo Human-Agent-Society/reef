@@ -65,7 +65,7 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return slime_prepare_step(batch, objective, algorithm_state, scheduling)
+        return slime_prepare_step(batch, objective, algorithm_state, scheduling, step_size=1)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         del payload
@@ -440,7 +440,7 @@ def test_ray_runtime_rejects_empty_serving_runtime_load_id() -> None:
 
 @pytest.mark.unit
 def test_slime_backend_preparation_emits_framework_agnostic_rows() -> None:
-    prepared = slime_prepare_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling())
+    prepared = slime_prepare_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -475,7 +475,7 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fi
         ),
     )
 
-    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -512,7 +512,7 @@ def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> 
         ),
     )
 
-    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -1263,7 +1263,7 @@ def test_ray_runtime_producing_versions_follow_the_step_schedule() -> None:
         grouped_policy_batch(versions=("engine:0", "engine:1")),
         TrainingMethod("tests.runtime.test_ray_runtime:TwoEpochObjective"),
         {},
-        StepScheduling(unit="sample", batch_size="actual", epochs=2),
+        StepScheduling(unit="sample", epochs=2),
         0,
     )
 
