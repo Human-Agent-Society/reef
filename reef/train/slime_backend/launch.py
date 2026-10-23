@@ -14,6 +14,7 @@ from reef.runtime.executor.arguments import native_arguments, normalize_native_o
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.deployment import (
     INFERENCE_RESERVED_OPTIONS,
+    NO_INFERENCE_BACKEND,
     TrainingDeployment,
     TrainingDeploymentPlan,
     driver_service,
@@ -94,6 +95,9 @@ def driver_arguments(config: Mapping[str, Any], *, loss_family: str = "") -> lis
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
+    if reef.get("inference_backend") == NO_INFERENCE_BACKEND:
+        # No local engine and no colocation: the workers stay on their GPUs between steps.
+        return [*arguments, *native_arguments({"rollout-num-gpus": 0})]
     options = {
         "rollout-num-gpus": reef["inference_num_gpus"],
         "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
@@ -212,8 +216,8 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError(
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
-        if settings["inference_backend"] not in (None, "sglang", "vllm"):
-            raise DeployConfigError("Slime weight transfer requires inference.backend: sglang or vllm")
+        if settings["inference_backend"] not in (None, "sglang", "vllm", NO_INFERENCE_BACKEND):
+            raise DeployConfigError("Slime weight transfer requires inference.backend: sglang, vllm or none")
 
         require_ray_roles(config, "training", "rollout", backend="Slime")
         options = normalize_native_options(settings["training_backend_options"])

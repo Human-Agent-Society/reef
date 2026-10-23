@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from reef.inference.null import NULL_INFERENCE_URL, NullInferenceBackend, ServedVersionRecord
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.runtime.interfaces import (
     InferenceBackend,
     InferenceMemoryHandoffBackend,
@@ -381,3 +383,47 @@ def test_colocated_sender_prepares_before_receiver_memory_is_restored(tmp_path):
         "inference.kv",
     ]
     assert inference.paused
+
+
+class NoTransferTrainer(Trainer):
+    """A trainer whose ``reef-no-weight-transfer-v1`` session sends no weights: it records each version instead."""
+
+    def send_weights(self, runtime_load_id, *, force_full):
+        self.events.append(("training.send", force_full))
+        self.receiver.rpc(0, "set_runtime_load_id", args=(runtime_load_id,))
+        return runtime_load_id
+
+
+def test_null_inference_commits_each_step_and_restarts_through_the_regular_recovery(tmp_path):
+    events = []
+    record = UniProcExecutor.from_workers([ServedVersionRecord()])
+    training = NoTransferTrainer(tmp_path, record, events)
+    coordinator = TrainingCoordinator(training, NullInferenceBackend(record))
+    health = coordinator.health()
+    assert (health["ok"], health["phase"], health["inference_url"]) == (True, "serving", NULL_INFERENCE_URL)
+    published = [coordinator.serving_runtime_load_id()]
+    for scenario_step in (0, 1):
+        result = coordinator.execute_training_job(
+            {"scenario_step": scenario_step, "parent_runtime_load_id": published[-1], "samples": [scenario_step]}
+        )
+        published.append(coordinator.update_serving_weights(result.training_job_id).runtime_load_id)
+        assert coordinator.health()["phase"] == "awaiting_commit"
+        coordinator.acknowledge_training_commit(result.training_job_id)
+        assert read_marker(marker_path(training.config.save_hf_template))["commit_acknowledged"] is True
+    # Startup and each step publish a new identity through the regular publication path.
+    assert published == ["inc:1", "inc:2", "inc:3"]
+    assert record.rpc(0, "get_runtime_load_ids") == ["inc:3"]
+    assert coordinator.health()["completed_train_steps"] == 2
+
+    # A restarted deployment starts a new record, which knows no version until recovery republishes the commit.
+    result = coordinator.execute_training_job({"scenario_step": 2, "parent_runtime_load_id": "inc:3", "samples": [2]})
+    pending = coordinator.update_serving_weights(result.training_job_id).runtime_load_id
+    replacement_record = UniProcExecutor.from_workers([ServedVersionRecord()])
+    training.receiver = replacement_record
+    replacement = TrainingCoordinator(training, NullInferenceBackend(replacement_record))
+    assert replacement.serving_runtime_load_id() == pending == "inc:4"
+    assert replacement_record.rpc(0, "get_runtime_load_ids") == ["inc:4"]
+    assert replacement.health()["phase"] == "awaiting_commit"
+    replacement.acknowledge_training_commit(result.training_job_id)
+    assert read_marker(marker_path(training.config.save_hf_template))["commit_acknowledged"] is True
+    assert replacement.health()["phase"] == "serving"

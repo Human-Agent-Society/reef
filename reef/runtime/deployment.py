@@ -146,6 +146,11 @@ class NativeWeightTransferSession(WeightTransferSession):
 
 #: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
 WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
+#: The transfer in which no weights leave the trainer: each version names the weights the trainer holds.
+#: Its session is native. The receiver's rank 0 records one runtime load ID: the trainer calls
+#: ``set_runtime_load_id(runtime_load_id)`` on it in place of a send, and the receiver's backend reports
+#: the recorded ID. Only a receiver that runs no engine, such as ``inference.backend: none``, accepts it.
+NO_WEIGHT_TRANSFER_PROTOCOL = "reef-no-weight-transfer-v1"
 
 
 class InferenceService(DeploymentHealth):
@@ -518,6 +523,7 @@ _BUILTIN_FACTORIES = {
     "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "none": "reef.inference.null:NullRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
