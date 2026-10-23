@@ -12,12 +12,13 @@ from enum import Enum
 from typing import Any, Self
 
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType, inference_aborted
+from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
 from reef.record2record.staleness import canonical_runtime_load_id, stale_units
+from reef.runtime.interfaces import inference_aborted
 
 
 class TaskStatus(Enum):

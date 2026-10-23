@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
-from reef.core.records_types import AgentRecord, RequestType, inference_aborted
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
@@ -28,7 +28,7 @@ from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
+from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of

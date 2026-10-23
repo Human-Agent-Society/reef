@@ -23,40 +23,6 @@ class RequestType(str, Enum):
     TRAIN = "train"
 
 
-#: Delivery diagnostic retained by older records that stripped the abort finish reason.
-INFERENCE_ABORT_ERROR = "upstream engine aborted the generation"
-
-
-def inference_aborted(response: Mapping[str, object]) -> bool:
-    """Whether a native, provider, or stored response reports an engine abort.
-
-    Read finish reasons without requiring training tensors. Older stored
-    Anthropic aborts kept only the stream-delivery error after stripping tensors.
-    """
-    delivery = response.get("stream_delivery")
-    if isinstance(delivery, Mapping) and delivery.get("error") == INFERENCE_ABORT_ERROR:
-        return True
-
-    def aborted(value: object) -> bool:
-        return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
-
-    meta = response.get("meta_info")
-    if aborted(response.get("finish_reason")) or (isinstance(meta, Mapping) and aborted(meta.get("finish_reason"))):
-        return True
-    training = response.get("training")
-    if isinstance(training, Mapping) and aborted(training.get("finish_reason")):
-        return True
-    choices = response.get("choices")
-    return isinstance(choices, list) and any(
-        isinstance(choice, Mapping)
-        and (
-            aborted(choice.get("finish_reason"))
-            or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
-        )
-        for choice in choices
-    )
-
-
 def parse_references(payload: Mapping[str, Any]) -> tuple[str, ...]:
     value = payload.get("references", ())
     if not isinstance(value, (list, tuple)) or any(not isinstance(reference, str) for reference in value):

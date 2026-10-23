@@ -7,8 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.core.records_types import INFERENCE_ABORT_ERROR, inference_aborted
-from reef.runtime.interfaces import MULTIMODAL_ROUTES, InferenceHandler
+from reef.runtime.interfaces import INFERENCE_ABORT_ERROR, MULTIMODAL_ROUTES, InferenceHandler, inference_aborted
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (

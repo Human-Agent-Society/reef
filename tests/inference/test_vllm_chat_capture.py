@@ -11,8 +11,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact, LiveWeightArtifactRef
-from reef.core.records_types import inference_aborted
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
+from reef.runtime.interfaces import inference_aborted
 
 
 class FakeTokenizer:
