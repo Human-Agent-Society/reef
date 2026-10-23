@@ -17,6 +17,8 @@ from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
 from reef.core.trajectories import has_image_content
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
+from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.composite import CompositeRecipe
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
 
@@ -42,23 +44,45 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
-def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str, AgentRecord]) -> AgentRecord | None:
+def validate_inference_content(
+    recipe: Recipe,
+    current: Scenario,
+    payload: Mapping[str, Any],
+    *,
+    agent_record_id: str | None = None,
+) -> None:
+    """Reject image content when a weight-training component cannot use it.
+
+    Recorded requests and imported inference records share this check. Model
+    overrides are applied before reading the recipe's image capability.
+    Non-weight recipes keep their existing behavior. ``agent_record_id``
+    identifies an imported record; None identifies a request.
+    """
+    if not has_image_content(payload):
+        return
+    recipe = recipe.with_model_config(current.model_config)
+    components = recipe.components.values() if isinstance(recipe, CompositeRecipe) else (recipe,)
+    if any(isinstance(component, WeightTrainingRecipe) and not component.supports_images for component in components):
+        raise ImageContentNotSupported(current.name, agent_record_id=agent_record_id)
+
+
+def validate_record(
+    current: Scenario, item: AgentRecord, preceding: Mapping[str, AgentRecord], *, recipe: Recipe
+) -> AgentRecord | None:
     """Check ``item`` before it is appended; return the stored record when ``item`` repeats one.
 
     ``preceding`` holds the records earlier in the same import batch, which a
     report may reference before they are stored.
     """
     try:
-        # Reef does not store an image that it will not train on. An identical retry of a record stored
-        # before this check still gets its receipt.
-        if (
-            item.request_type is RequestType.INFERENCE
-            and current.refuses_image_content
-            and has_image_content(item.payload)
-        ):
-            if (existing := current.records.existing_receipt(item)) is not None:
-                return existing
-            raise ImageContentNotSupported(item.scenario, agent_record_id=item.agent_record_id)
+        if item.request_type is RequestType.INFERENCE:
+            try:
+                validate_inference_content(recipe, current, item.payload, agent_record_id=item.agent_record_id)
+            except ImageContentNotSupported:
+                # An identical retry of a record stored before this check still gets its receipt.
+                if (existing := current.records.existing_receipt(item)) is not None:
+                    return existing
+                raise
         if item.request_type is RequestType.TRAIN:
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
@@ -108,9 +132,9 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     return None
 
 
-def append_record(current: Scenario, item: AgentRecord) -> tuple[AgentRecord, bool]:
+def append_record(current: Scenario, item: AgentRecord, *, recipe: Recipe) -> tuple[AgentRecord, bool]:
     """Validate and append one record; return the stored record and whether it is new."""
-    if (existing := validate_record(current, item, {})) is not None:
+    if (existing := validate_record(current, item, {}, recipe=recipe)) is not None:
         current.operations.increment("ingest/duplicates_total")
         return existing, False
     try:
@@ -123,11 +147,13 @@ def append_record(current: Scenario, item: AgentRecord) -> tuple[AgentRecord, bo
     return appended.item, appended.inserted
 
 
-def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tuple[AgentRecord, ...], bool]:
+def append_records(
+    current: Scenario, items: Sequence[AgentRecord], *, recipe: Recipe
+) -> tuple[tuple[AgentRecord, ...], bool]:
     """Validate an ordered import batch and append it; return the stored records and whether any is new."""
     preceding: dict[str, AgentRecord] = {}
     for item in items:
-        validate_record(current, item, preceding)
+        validate_record(current, item, preceding, recipe=recipe)
         preceding[item.agent_record_id] = item
     try:
         with current.operations.measure("ingest/write"):

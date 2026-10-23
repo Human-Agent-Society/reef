@@ -14,9 +14,13 @@ from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from recipes.sao.recipe import SAORecipe
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.errors import ImageContentNotSupported
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.ingest import validate_inference_content
 from reef.recipe import Recipe
+from reef.recipe.composite import CompositeRecipe
+from reef.recipe.sft import SFTRecipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2task import ReportTasks
 from reef.runtime.interfaces import InferenceHandler
@@ -406,7 +410,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
 
 def image_refusing_recipe():
     """A weight-training recipe without image support: it refuses image content by the ``WeightTrainingRecipe``
-    rule, through the scenario factory and binding."""
+    rule, at inference data validation."""
     return SAORecipe(**runtime_bindings(StubTrainingRuntime()))
 
 
@@ -490,7 +494,7 @@ def deeply_nested_image(depth):
         "openai-deeply-nested",
     ),
 )
-def test_a_recorded_image_request_is_refused_when_the_recipe_refuses_image_content(tmp_path, endpoint, body):
+def test_a_recorded_image_request_is_refused_without_image_support(tmp_path, endpoint, body):
     dispatcher = dispatcher_for(tmp_path, image_refusing_recipe())
     handler = EchoHandler()
 
@@ -620,7 +624,7 @@ def image_record_payloads():
 
 @pytest.mark.parametrize("shape", ("messages", "training-request-messages", "deeply-nested", "anthropic-document"))
 @pytest.mark.parametrize("bulk", (False, True))
-def test_an_image_record_is_refused_and_not_stored_when_the_recipe_refuses_image_content(tmp_path, bulk, shape):
+def test_an_image_record_is_refused_and_not_stored_without_image_support(tmp_path, bulk, shape):
     dispatcher = dispatcher_for(tmp_path, image_refusing_recipe())
     payload = image_record_payloads()[shape]
 
@@ -689,5 +693,73 @@ def test_an_identical_retry_of_a_stored_image_record_keeps_its_receipt(tmp_path,
 
     try:
         asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+class ImageSAORecipe(SAORecipe):
+    """SAO with image support declared for admission tests; these tests build no training samples."""
+
+    @property
+    def supports_images(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    ("recipe_type", "expected_status"),
+    [(Recipe, 200), (SAORecipe, 400), (ImageSAORecipe, 200)],
+)
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("route", ["/v1/chat/completions", "/reef/records", "/reef/records/batch"])
+def test_image_admission_uses_weight_component_capabilities(
+    tmp_path: Path, recipe_type: type[Recipe], expected_status: int, composite: bool, route: str
+) -> None:
+    if recipe_type is Recipe:
+        recipe = Recipe()
+    else:
+        recipe = recipe_type(**runtime_bindings(StubTrainingRuntime()))
+    if composite:
+        recipe = CompositeRecipe(
+            components={"primary": recipe, "records": Recipe()},
+            runtime=recipe.runtime,
+            training_runtime=recipe.training_runtime,
+        )
+    dispatcher = dispatcher_for(tmp_path, recipe)
+    handler = RuntimeLoadEchoHandler()
+    payload = image_record_payloads()["messages"]
+
+    async def run() -> None:
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
+        ) as client:
+            if route == "/v1/chat/completions":
+                body = {"model": "example-model", "messages": payload["messages"]}
+            elif route == "/reef/records":
+                body = imported("with-image", payload)
+            else:
+                body = {"records": [imported("with-image", payload)]}
+            response = await client.post(route, headers=HEADERS, json=body)
+            assert response.status == expected_status, await response.text()
+            records = dispatcher.get_or_create_scenario("s").records.replay("s")
+            if expected_status == 200:
+                assert len(records) == 1
+                assert records[0].payload["messages"] == payload["messages"]
+            else:
+                assert records == ()
+            assert handler.calls == int(route == "/v1/chat/completions" and expected_status == 200)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_sft_image_validation_does_not_need_to_build_training_samples(tmp_path: Path) -> None:
+    recipe = SFTRecipe(**runtime_bindings(StubTrainingRuntime()))
+    dispatcher = dispatcher_for(tmp_path, Recipe())
+    try:
+        current = dispatcher.get_or_create_scenario("s")
+        with pytest.raises(ImageContentNotSupported, match="scenario 's'"):
+            validate_inference_content(recipe, current, image_record_payloads()["messages"])
     finally:
         dispatcher.close()

@@ -101,15 +101,6 @@ class Scenario:
         return self._binding.report_type
 
     @property
-    def refuses_image_content(self) -> bool:
-        """Whether recorded requests and records with image content are refused.
-
-        The value is the binding's ``refuses_image_content``, which is the
-        recipe's ``Recipe.refuses_image_content``.
-        """
-        return self._binding.refuses_image_content
-
-    @property
     def inference_handler(self) -> InferenceHandler | None:
         runtime = self.model_config.runtime
         return runtime.inference_handler if runtime is not None else self._binding.inference_handler

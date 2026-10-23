@@ -135,8 +135,7 @@ class CompositeRecipe(Recipe):
     the components under ``components``.
     ``ScenarioFactory`` builds one trainer per component and one release
     surface for all of them. Each property that combines the components, such
-    as ``report_type`` or ``refuses_image_content``, is defined from the
-    values of the components.
+    as ``report_type``, is defined from the values of the components.
     """
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
@@ -270,16 +269,6 @@ class CompositeRecipe(Recipe):
         refuses only a report no component would take.
         """
         return self.report_contract
-
-    @property
-    def refuses_image_content(self) -> bool:
-        """``True`` if and only if a component refuses image content.
-
-        By the default rule, only a ``WeightTrainingRecipe`` component refuses,
-        and ``__post_init__`` allows at most one. So the value is the value of
-        that component, or ``False`` without one.
-        """
-        return any(recipe.refuses_image_content for recipe in self.components.values())
 
     @cached_property
     def report_contract(self) -> type[ReportBase] | None:

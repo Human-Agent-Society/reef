@@ -403,7 +403,7 @@ class Dispatcher(ScenarioLifecycle):
             )
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
-            stored, inserted = ingest.append_record(current, item)
+            stored, inserted = ingest.append_record(current, item, recipe=self.recipe)
             if inserted:
                 self.process_accepted_records(current)
             return stored
@@ -421,7 +421,7 @@ class Dispatcher(ScenarioLifecycle):
             current = self.get_or_create_scenario(scenario, release_id=release_id)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
-            stored, inserted = ingest.append_records(current, items)
+            stored, inserted = ingest.append_records(current, items, recipe=self.recipe)
             if inserted:
                 self.process_accepted_records(current)
             return stored

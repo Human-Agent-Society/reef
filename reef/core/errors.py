@@ -42,14 +42,12 @@ class ImageContentNotSupported(ReefError, ValueError):
     ``None``. Its only state is its message. The message names the
     scenario, and the record, or "the request" when ``agent_record_id`` is
     ``None``.
-    Purpose: ``RequestService._prepare_request`` raises it, with no record
-    ID, for a recorded request (not an evaluation call), after the request
-    hooks change it. ``validate_record`` raises it, with the record ID, for
-    an inference record that is not an identical retry of a stored one. Each
-    does so when the scenario refuses image content and
-    ``has_image_content`` is true. The service returns HTTP 400 with its
-    message. It is also a ``ValueError``, so record
-    ingest counts it in ``ingest/rejected_request_total``.
+    Purpose: ``validate_inference_content`` raises it when image content
+    reaches a weight-training recipe without image support. Recorded requests
+    are checked after request hooks; record ingress preserves identical
+    retries of stored records. The service returns HTTP 400 with the message.
+    It is also a ``ValueError``, so record ingress counts refusals in
+    ``ingest/rejected_request_total``.
     """
 
     def __init__(self, scenario: str, *, agent_record_id: str | None = None) -> None:

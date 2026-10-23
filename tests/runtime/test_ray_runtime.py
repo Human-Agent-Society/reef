@@ -15,6 +15,7 @@ from tests.support.runtime_stubs import ExecutorRuntimeFixture
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
 from reef.observability.operations import OperationMetrics
+from reef.recipe import Recipe
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.connection import RayCoordinatorClient, RayRuntimeError, RemoteRayCoordinatorClient
 from reef.runtime.interfaces import (
@@ -1056,7 +1057,6 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         repository = None
         surface = create_weight_surface()
         inference_handler = None
-        refuses_image_content = False
 
         def __init__(self) -> None:
             self.runtime = runtime.inference_runtime
@@ -1072,6 +1072,8 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
             return self.ref
 
     class Dispatcher:
+        recipe = Recipe()
+
         def __init__(self, scenario) -> None:
             self.current = scenario
 
@@ -1154,7 +1156,6 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         repository = None
         surface = create_weight_surface()
         inference_handler = None
-        refuses_image_content = False
 
         @staticmethod
         def current_artifact_ref():
@@ -1165,6 +1166,8 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             self.training_runtime = runtime.training_runtime
 
     class Dispatcher:
+        recipe = Recipe()
+
         @staticmethod
         def get_or_create_scenario(*args, **kwargs):
             del args, kwargs

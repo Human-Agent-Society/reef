@@ -235,7 +235,7 @@ class Recipe:
         """Whether the samples that this recipe builds may carry image content. The default is ``False``.
 
         This is a runtime capability, not a dataclass field or recipe
-        configuration. :attr:`refuses_image_content` of this recipe reads it.
+        configuration. Inference data validation reads it for weight-training recipes.
         A ``CompositeRecipe`` builds no samples itself: the values of its
         components apply, and its own value is not read.
 
@@ -247,24 +247,6 @@ class Recipe:
         records stop training with that error.
         """
         return False
-
-    @property
-    def refuses_image_content(self) -> bool:
-        """Whether Reef refuses recorded inference requests and records with image content for this recipe.
-
-        Value: ``True`` if and only if the recipe trains model weights through
-        a part that does not support images. For a recipe without components,
-        the part is the recipe itself:
-        ``isinstance(self, WeightTrainingRecipe) and not self.supports_images``.
-        A ``CompositeRecipe`` refuses if and only if a component refuses.
-        When the value is ``True``, the request check and the record check
-        refuse a recorded request or an inference record in which
-        ``has_image_content`` finds an image, so Reef stores none of them.
-        Shapes that it does not read are not refused (see
-        ``has_image_content``). A recipe that does not train weights keeps
-        the images in its records.
-        """
-        return isinstance(self, WeightTrainingRecipe) and not self.supports_images
 
     def build(
         self,

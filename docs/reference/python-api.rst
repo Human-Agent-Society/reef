@@ -227,10 +227,11 @@ recipe with no harness tree; ``CordisRecipe`` names ``evolution.adapter``).
 The scenario list names it for every scenario.
 
 A recipe may also declare ``supports_images``, whether it trains on image
-content (``False`` by default). A recipe that trains weights (a
-``WeightTrainingRecipe``, or a composite with such a component) and does not
-support images refuses image content: Reef answers HTTP 400 to a recorded
-inference request or an inference record in which
+content (``False`` by default). Inference data validation checks this
+capability on each ``WeightTrainingRecipe``, including components of a
+composite. If any weight-training component does not support images,
+Reef answers HTTP 400 to a recorded inference request or an inference
+record in which
 ``reef.core.trajectories.has_image_content`` finds an image, and stores
 neither. The request check reads the request after the scenario's request
 hooks change it. ``has_image_content`` reads the content parts of type
