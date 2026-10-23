@@ -51,7 +51,7 @@ from reef.record2task import JudgedTasks, Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.distill import DistillTasks
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2batch import BatchSettings, DistillBatches, Task2Batch
+from reef.task2batch import BufferSettings, DistillBatches, Task2Batch
 from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
@@ -138,7 +138,8 @@ class StreamRun:
     """One stream's trainer, its record store, and what its commits recorded.
 
     ``spec`` names the three stage classes, as a recipe does; ``pipeline`` is
-    the deployment's ``pipeline`` section over it.
+    the deployment's ``pipeline`` section over it. ``batch_size`` is the
+    trainer's samples in one step.
     """
 
     spec: PipelineSpec
@@ -146,6 +147,7 @@ class StreamRun:
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
     max_staleness: int = 0
+    batch_size: int = 1
     serving_runtime_load_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
@@ -161,6 +163,7 @@ class StreamRun:
             report_type=self.report_type,
             training_mode=self.training_mode,
             max_staleness=self.max_staleness,
+            batch_size=self.batch_size,
         )
 
     def reload(self, trainer: Trainer) -> Trainer:
@@ -321,7 +324,7 @@ class SlotBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
@@ -450,7 +453,7 @@ class ToyBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
@@ -484,7 +487,7 @@ def turn(record_id: str, *, version: str, completes: str | None = None, track: b
 
 
 def ungrouped_stream() -> StreamRun:
-    return StreamRun(THRESHOLD_STAGES, stage_configs(task2batch={"batch_size": 2}))
+    return StreamRun(THRESHOLD_STAGES, batch_size=2)
 
 
 def ungrouped_steps() -> list[Step]:
@@ -728,20 +731,17 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
         record2record={"groups_per_step": 1, "rollouts_per_group": 2},
         record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 18432},
     )
-    distill = stage_configs(
-        record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 30}, task2batch={"batch_size": 1}
-    )
-    generated = stage_configs(record2record={"plays_per_task": 2}, task2batch={"tasks_per_step": 2})
-    computed = stage_configs(task2batch={"batch_size": 2})
+    distill = stage_configs(record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 30})
+    generated = stage_configs(record2record={"plays_per_task": 2})
     return {
         "ungrouped": (ungrouped_stream(), ungrouped_steps()),
         "ungrouped_reload": (ungrouped_stream(), [*ungrouped_steps()[:5], RELOAD, *ungrouped_steps()[5:]]),
         "slots_and_discards": (
-            StreamRun(SLOT_GROUP_STAGES, stage_configs(task2batch={"batch_size": 1})),
+            StreamRun(SLOT_GROUP_STAGES),
             slot_steps(),
         ),
         "ordered_groups": (
-            StreamRun(ORDERED_MIX_STAGES, stage_configs(task2batch={"batch_size": 3})),
+            StreamRun(ORDERED_MIX_STAGES, batch_size=3),
             ordered_steps(),
         ),
         "tttd": (
@@ -752,17 +752,17 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(CoralRecipe.pipeline_spec(), stage_configs(record2record={"group_size": 2})),
             coral_steps(),
         ),
-        "generated_tasks": (StreamRun(GeneratedTaskRecipe.pipeline_spec(), generated), task_steps()),
+        "generated_tasks": (StreamRun(GeneratedTaskRecipe.pipeline_spec(), generated, batch_size=4), task_steps()),
         "distill_overflow": (StreamRun(DISTILL_STAGES, distill, TeacherContextReport), distill_steps()),
         "sdpo": (StreamRun(SDPORecipe.pipeline_spec(), sdpo, SDPOReport), sdpo_steps()),
-        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, computed), computed_steps()),
-        "computed_window": (StreamRun(TOY_COMPUTED_STAGES, computed, max_staleness=1), computed_steps()),
+        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, batch_size=2), computed_steps()),
+        "computed_window": (StreamRun(TOY_COMPUTED_STAGES, max_staleness=1, batch_size=2), computed_steps()),
         "cordis_manual_cap": (
-            StreamRun(TRACE_STAGES, stage_configs(task2batch={"batch_size": 1}), training_mode="manual"),
+            StreamRun(TRACE_STAGES, training_mode="manual"),
             cordis_steps(True),
         ),
         "cordis_hybrid": (
-            StreamRun(TRACE_STAGES, stage_configs(task2batch={"batch_size": 2}), training_mode="hybrid"),
+            StreamRun(TRACE_STAGES, training_mode="hybrid", batch_size=2),
             cordis_steps(True),
         ),
     }

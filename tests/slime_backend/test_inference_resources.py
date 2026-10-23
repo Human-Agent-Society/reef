@@ -217,7 +217,7 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
 
     group = TrainingGroup()
     operations = SlimeTrainingBackend(
-        group, batch_processor=SimpleNamespace(), args=SlimeArguments(), save_hf_template=None
+        group, batch_processor=SimpleNamespace(), args=SlimeArguments(global_batch_size=1), save_hf_template=None
     )
     try:
         operations.start()

@@ -81,6 +81,7 @@ def test_declared_environment_fallbacks_are_reported(tmp_path):
     raw = {
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
         "inference": {"model-path": "/models/demo"},
+        "training": {"options": {"global-batch-size": 1}},
     }
     resolved, _ = resolve_deployment_config(raw, None, tmp_path / "stack.yaml")
     lines = startup_report(raw, resolved, {}, environ={"REEF_MAX_STALENESS": "4"}, from_file=True)

@@ -66,7 +66,6 @@ def test_example_pipeline_section_builds_the_coral_stages():
     assert isinstance(pipeline.record2task, CoralTasks)
     assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
     assert isinstance(pipeline.task2batch, CoralBatches)
-    assert pipeline.batch_size == 1
 
 
 def test_default_group_size_is_four():
@@ -85,7 +84,7 @@ def test_group_size_in_the_recipe_config_is_refused(key):
     ("pipeline", "message"),
     [
         ({"record2record": {"config": {"group_size": 1}}}, "at least two"),
-        ({"task2batch": {"config": {"group_size": 2}}}, "CoralBatches takes no config"),
+        ({"task2batch": {"config": {"group_size": 2}}}, "CoralBatches: unknown config fields: group_size"),
         ({"record2task": {"config": {"group_size": 2}}}, "group_size"),
     ],
 )

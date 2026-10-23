@@ -23,9 +23,9 @@ RECIPE = "recipes.sao.recipe:SAORecipe"
 def training_config():
     return {
         "recipe": {"implementation": RECIPE},
-        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
+        "pipeline": {"task2batch": {"config": {"buffer_size": 4}}},
         "inference": {"model-path": "/models/demo"},
-        "training": {"options": {"lr": 0.000001, "use-critic": True}},
+        "training": {"options": {"lr": 0.000001, "use-critic": True, "global-batch-size": 4}},
     }
 
 
@@ -40,9 +40,10 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     overrides = {
         "recipe.implementation": RECIPE,
         "inference.model-path": "/models/demo",
-        "pipeline.task2batch.config.batch_size": "2",
+        "pipeline.task2batch.config.buffer_size": "8",
         "training.options.lr": "0.000002",
         "training.options.use-critic": "true",
+        "training.options.global-batch-size": "4",
         "training.ray-namespace": "custom",
         "training.ray-actor-name": "bridge-custom",
         "training.ready-timeout": "45",
@@ -51,10 +52,11 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
-        assert config["pipeline"] == {"task2batch": {"config": {"batch_size": 2}}}
+        assert config["pipeline"] == {"task2batch": {"config": {"buffer_size": 8}}}
         assert reef["training_backend_options"] == {
             "lr": "0.000002",
             "use-critic": True,
+            "global-batch-size": "4",
             "hf-checkpoint": "${reef.model_path}",
         }
         assert reef["training_backend"] == "slime"
@@ -190,6 +192,7 @@ def test_cli_only_training_resolves_public_config_references(tmp_path):
             "training.config.checkpoint_dir": "work/checkpoints",
             "training.options.hf-checkpoint": "${inference.model-path}",
             "training.options.save": "${training.config.checkpoint_dir}/megatron",
+            "training.options.global-batch-size": "4",
         },
         tmp_path / "cli",
     )
@@ -235,17 +238,19 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
                 RECIPE,
                 "--inference.model-path",
                 "org/model",
-                "--pipeline.task2batch.config.batch_size",
-                "2",
+                "--pipeline.task2batch.config.buffer_size",
+                "8",
                 "--training.options.use-critic",
                 "true",
+                "--training.options.global-batch-size",
+                "4",
             ]
         )
     assert result.value.code == 0
     assert downloads == ["org/model"]
     reef = configs[0]["reef"]
     assert reef["model_path"] == "/downloaded/snapshot"
-    assert configs[0]["pipeline"] == {"task2batch": {"config": {"batch_size": 2}}}
+    assert configs[0]["pipeline"] == {"task2batch": {"config": {"buffer_size": 8}}}
     assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
     assert not paths[0].exists()
     assert not (tmp_path / "reef.yaml").exists()
@@ -409,6 +414,33 @@ def test_native_placement_flags_are_rejected_in_training_options(tmp_path):
         DeployConfigError, match=r"training\.options\.colocate places the model; use training\.colocate"
     ):
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
+@pytest.mark.parametrize("batch_size", [None, 0, "0", "1.5", "two", True])
+def test_slime_deployment_refuses_a_global_batch_size_that_is_not_a_positive_integer(tmp_path, batch_size):
+    raw = training_config()
+    if batch_size is None:
+        raw["training"]["options"].pop("global-batch-size")
+    else:
+        raw["training"]["options"]["global-batch-size"] = batch_size
+    with pytest.raises(DeployConfigError, match=r"training\.options\.global-batch-size must be a positive integer"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
+def test_slime_runtime_config_carries_the_resolved_global_batch_size(tmp_path):
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.service.deploy.training import training_deployment_for
+
+    raw = training_config()
+    raw["training"]["config"] = {"global_batch_size": 8}
+    # Slime may derive the global batch size from --num-steps-per-rollout; Reef still reads the explicit value.
+    raw["training"]["options"].update(
+        {"global-batch-size": "${training.config.global_batch_size}", "num-steps-per-rollout": 1}
+    )
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(config)
+    runtime = training_deployment_for("slime").runtime_config({**settings.__dict__, "ray_address": "auto"})
+    assert runtime["batch_size"] == 8
 
 
 def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):

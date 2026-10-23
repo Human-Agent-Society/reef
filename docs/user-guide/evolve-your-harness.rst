@@ -226,16 +226,15 @@ Trigger of step
 ``auto`` mode
 ^^^^^^^^^^^^^
 
-In ``auto`` mode, the deployment's top-level ``pipeline`` section decides
-when Reef starts a step:
+In ``auto`` mode, two settings decide when Reef starts a step:
 
-- ``pipeline.task2batch.config.batch_size`` (default 1): when this number of
-  units is collected, Reef starts a step.
+- ``recipe.config.evolution.batch_size`` (default 1): when this number of
+  traces is collected, Reef starts a step.
 - The ``pipeline.record2record`` and ``pipeline.record2task`` stages decide
-  what counts as one unit toward ``batch_size``.
+  what counts as one trace toward ``batch_size``.
 
 The recipe's default stages count reports. Every valid scored report with
-at least one unique inference reference counts as one unit, including
+at least one unique inference reference counts as one trace, including
 successful outcomes. A report over one receipt batches as that exchange. A
 report over several receipts batches as one trajectory sample that carries
 every referenced exchange in order. ``reef-pi report`` sends this kind of
@@ -244,19 +243,25 @@ as separate reports instead). Reports that reference inferences trained in
 earlier batches are dropped.
 
 To count recorded inference traffic instead, name the inference stages.
-Every inference then counts as one unit. No report is necessary: recorded
+Every inference then counts as one trace. No report is necessary: recorded
 traffic alone batches, unscored, for methods that judge for themselves.
 
 .. code-block:: yaml
 
+   recipe:
+     config:
+       evolution:
+         batch_size: 4
    pipeline:
      record2record:
        module: reef.record2record:InferenceRecord2Record
      record2task:
        module: reef.train.cordis_backend.processor:InferenceTasks
-     task2batch:
-       config:
-         batch_size: 4
+
+Reef holds the traces that wait for a step in a buffer. The buffer keeps at
+most ``pipeline.task2batch.config.buffer_size`` traces (default four times
+``batch_size``). When more traces arrive, Reef releases the oldest ones. This
+limit applies in every mode.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -270,23 +275,23 @@ queued request first, one per step. See `manual training API
 e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
-The ``pipeline`` stages trigger no evolution in this mode, but units are
-still collected while training requests run. However, these units are never
+The ``pipeline`` stages trigger no evolution in this mode, but traces are
+still collected while training requests run. However, these traces are never
 used in evolution until ``data.training_mode`` is switched to ``auto`` or
-``hybrid``. The held reports are capped at four times ``batch_size``, and
-the oldest are released once the batch passes that.
+``hybrid``. The buffer limit still applies: Reef releases the oldest traces
+beyond ``buffer_size``.
 
 ``hybrid`` mode
 ^^^^^^^^^^^^^^^
 
-In ``hybrid`` mode, either condition starts a step: ``batch_size`` units
+In ``hybrid`` mode, either condition starts a step: ``batch_size`` traces
 collected by the ``pipeline`` stages, or a training request received.
 
 When both conditions are met, the training request takes precedence for the
 next step. Reef builds one step that uses both, whether or not
 ``batch_size`` is met. The proposer then
-receives the training request and the units that an automatic batch would
-take next. It gets up to ``batch_size`` units, or none, and uses both
+receives the training request and the traces that an automatic batch would
+take next. It gets up to ``batch_size`` traces, or none, and uses both
 to make a mutation.
 
 Propose: mutation to the harness tree
@@ -633,7 +638,7 @@ its committed outputs are a full local run on ollama with no GPU.
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
 graded, and every result is reported against its receipt. Every valid scored
-report batches, a passing one included, and ``batch_size: 1`` makes each
+report batches, a passing one included, and ``evolution.batch_size: 1`` makes each
 report its own batch, so every report this run submits triggers one evolve
 step. In this example the served model is its own proposer, and it answers
 with one skill mutation.

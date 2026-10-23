@@ -1,10 +1,9 @@
 """Materialize a :class:`StepScheduling` into a concrete row order.
 
-Backend-neutral: the input is one rollout id per batch row, the output is the
-row order the backend should train in, the rollout id of every emitted row,
-and the rollouts-per-step layout when the scheduling fixes one. A backend
-turns the row order into its own wire rows; Slime's ``_build_payload`` is the
-one caller today.
+Backend-neutral: the input is one rollout id per batch row and the backend's
+step size, the output is the row order the backend should train in, the
+rollout id of every emitted row, and the rollouts-per-step layout. A backend
+turns the row order into its own wire rows.
 """
 
 from __future__ import annotations
@@ -25,27 +24,27 @@ class MaterializedSchedule:
     ``row_indices[i]`` is the source row of emitted row ``i``; ``rollout_ids[i]``
     its step-grouping id, distinct per epoch so every epoch's copy of a rollout
     is scheduled on its own. ``step_sizes`` is the rollout count of every
-    optimizer step in order (a partial tail step is simply smaller), or
-    ``None`` when the backend's configured step size applies.
+    optimizer step in order (a partial tail step is simply smaller); it is not
+    empty, and ``sum(step_sizes) == epochs * rollouts_per_epoch``.
+    ``dropped_rollouts`` is the tail that ``remainder="drop"`` left out of
+    each epoch.
     """
 
     row_indices: tuple[int, ...]
     rollout_ids: tuple[int, ...]
-    step_sizes: tuple[int, ...] | None
+    step_sizes: tuple[int, ...]
     epochs: int
     rollouts_per_epoch: int
     dropped_rollouts: int
 
     @property
-    def optimizer_steps(self) -> int | None:
-        """Steps the schedule fixes, or ``None`` when the backend decides."""
-        return None if self.step_sizes is None else len(self.step_sizes)
+    def optimizer_steps(self) -> int:
+        """The optimizer steps of the schedule, over every epoch."""
+        return len(self.step_sizes)
 
     @property
     def tail_rollouts(self) -> int:
         """Rollouts in the partial final step of each epoch, 0 when every step is full."""
-        if not self.step_sizes:
-            return 0
         return self.step_sizes[-1] if self.step_sizes[-1] != self.step_sizes[0] else 0
 
 
@@ -64,14 +63,19 @@ def materialize_schedule(
     rollout_ids: Sequence[int],
     scheduling: StepScheduling,
     *,
+    step_size: int,
     seed: int = 0,
 ) -> MaterializedSchedule:
     """Expand ``scheduling`` over one batch whose rows carry ``rollout_ids``.
 
-    Rows sharing a rollout id stay contiguous and in their source order.
-    Rollouts keep first-occurrence order unless ``scheduling.shuffle``; epochs
-    are laid out back to back.
+    ``step_size`` is the backend's rollouts per optimizer step. A batch with
+    fewer rollouts trains them as one partial step under
+    ``remainder="partial"``. Rows sharing a rollout id stay contiguous and in
+    their source order. Rollouts keep first-occurrence order unless
+    ``scheduling.shuffle``; epochs are laid out back to back.
     """
+    if isinstance(step_size, bool) or not isinstance(step_size, int) or step_size <= 0:
+        raise ValueError(f"step_size must be a positive int, got {step_size!r}")
     groups: dict[int, list[int]] = {}
     for row, rollout_id in enumerate(rollout_ids):
         groups.setdefault(rollout_id, []).append(row)
@@ -80,34 +84,24 @@ def materialize_schedule(
     if total == 0:
         raise ValueError("cannot schedule an empty batch")
 
-    if scheduling.batch_size == "configured":
-        step_size: int | None = None
-    elif scheduling.batch_size == "actual":
-        step_size = total
-    else:
-        step_size = scheduling.batch_size
-        if step_size > total:
-            raise ValueError(f"StepScheduling.batch_size={step_size} exceeds the {total} rollouts in the batch")
-
     dropped = 0
     tail = 0
-    if step_size is not None and total % step_size:
+    if total % step_size:
         if scheduling.remainder == "error":
             raise ValueError(
                 f"{total} rollouts do not form complete optimizer steps of {step_size}; "
-                "size the processor batch as a multiple, or set StepScheduling(remainder='partial'|'drop')"
+                "set the backend's batch size to a divisor, or set StepScheduling(remainder='partial'|'drop')"
             )
         if scheduling.remainder == "drop":
             dropped = total % step_size
+            if dropped == total:
+                raise ValueError(f"{total} rollouts do not form one complete optimizer step of {step_size}")
             ordered_groups = ordered_groups[: total - dropped]
         else:
             tail = total % step_size
     kept = len(ordered_groups)
-    if step_size is None:
-        step_sizes: tuple[int, ...] | None = None
-    else:
-        epoch_steps = [step_size] * (kept // step_size) + ([tail] if tail else [])
-        step_sizes = tuple(epoch_steps * scheduling.epochs)
+    epoch_steps = [step_size] * (kept // step_size) + ([tail] if tail else [])
+    step_sizes = tuple(epoch_steps * scheduling.epochs)
 
     row_indices: list[int] = []
     emitted_ids: list[int] = []

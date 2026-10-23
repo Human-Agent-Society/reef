@@ -15,6 +15,7 @@ class SlimeArguments(Namespace):
     fp16: bool
     use_rollout_routing_replay: bool
     num_rollout: int
+    global_batch_size: int
     save_hf: str
     save: str
     compute_advantages_and_returns: bool

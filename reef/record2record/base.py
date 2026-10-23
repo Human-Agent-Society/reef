@@ -29,6 +29,19 @@ class TaskStatus(Enum):
     SKIPPED = "skipped"
 
 
+class UnitDropReason(Enum):
+    """Why an unreserved unit ends without training.
+
+    Values are BUFFER_LIMIT (the sample buffer exceeded its limit) and STALE
+    (the unit failed the serving-version check). The pipeline and record
+    stage pass these values to ``drop_held_unit`` so stages can distinguish
+    capacity eviction from obsolete training data. Neither value confirms training.
+    """
+
+    BUFFER_LIMIT = "buffer_limit"
+    STALE = "stale"
+
+
 class Record2Record(ABC, Plugin):
     """Turn records into record sets for one pipeline, and decide which batch units train and in what order.
 
@@ -118,7 +131,7 @@ class Record2Record(ABC, Plugin):
         return formed
 
     def context_changed(self, context: PipelineContext) -> None:
-        """The pipeline's context changed: its training mode, held-unit limit, or admitted report type."""
+        """The pipeline's context changed: its training mode or admitted report type."""
         return
 
     def settle(
@@ -181,10 +194,14 @@ class Record2Record(ABC, Plugin):
         for unit in stale_units(
             self.pool.units(), self.producing_runtime_load_ids, self.served_runtime_load_ids, max_staleness
         ):
-            self.drop_held_unit(unit)
+            self.drop_held_unit(unit, reason=UnitDropReason.STALE)
 
-    def drop_held_unit(self, unit: RecordSetUnit) -> None:
-        """End a held unit that can no longer train. A stage that holds groups overrides it."""
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
+        """End an unreserved unit without training for the given reason.
+
+        A stage that holds groups overrides this operation to end the whole
+        group. The reason does not change the default record cleanup.
+        """
         self.pool.remove(unit.unit_id)
         for record_set in unit.record_sets():
             self.reject(record_set)

@@ -49,11 +49,7 @@ from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.batches import (
-    WORKER_SWITCH_KEY,
-    TrainingBatchProcessor,
-    optimizer_step_sizes,
-)
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
     configure_rollout_runtime,
@@ -285,7 +281,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 raise RuntimeError(
                     "a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups"
                 )
-            optimizer_steps = len(optimizer_step_sizes(rollout_data, self.args.global_batch_size))
+            optimizer_steps = len(rollout_data["external_step_sizes"])
         context: Any = nullcontext(None)
         # A job that saves no checkpoint does not admit storage. Thus it does not delete an older checkpoint.
         if self._storage is not None and writes_checkpoint:
@@ -561,7 +557,12 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic; refuse a method the workers cannot train."""
         prepared = prepare_slime_step(
-            batch, method, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
+            batch,
+            method,
+            algorithm_state,
+            scheduling,
+            step_size=self.args.global_batch_size,
+            sampler_topk=self._score_centering is not None,
         )
         if prepared.payload is not None:
             self.algorithm_for_loss_family(prepared.payload["loss"]).validate_payload(prepared.payload)

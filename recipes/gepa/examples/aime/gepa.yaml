@@ -15,6 +15,9 @@ recipe:
   config:
     evolution:
       adapter: pi
+      # The third report closes the minibatch. Both correct and incorrect
+      # transcripts contribute to reflection.
+      batch_size: 3
       # The harness binary the evaluation episodes run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # The task side, in the harness/ package: evaluate is the quickstart's
@@ -95,12 +98,6 @@ recipe:
                 });
               }
 
-# The third report closes the minibatch. Both correct and incorrect
-# transcripts contribute to reflection.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 3
 inference:
   upstream-model: ${REEF_MODEL}
 

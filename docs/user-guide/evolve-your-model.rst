@@ -84,16 +84,18 @@ What to review
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
    reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   training.config.global_batch_size | samples in one optimizer step
+   training.config.global_batch_size | samples in one optimizer step; also when a batch forms
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
    training.colocate | share the inference GPUs with training instead of reserving separate ones
    training.options | GPU layout, optimizer, sequence length, loss settings
 
 Three things to get right:
 
-1. **Batch sizes must agree.** A recipe's ``batch_size`` must equal
-   ``training.config.global_batch_size``. A mismatch leaves a partial optimizer batch
-   or makes the driver reject the update.
+1. **Set the batch size in one place.** ``training.config.global_batch_size``
+   is Slime's ``--global-batch-size``. Reef makes a batch when it holds this
+   many samples, and Slime trains it in optimizer steps of this size. The
+   ``pipeline`` section has no batch size; a ``batch_size`` key there fails
+   as an unknown key when a scenario builds its pipeline.
 2. **The recipe and the loss flags must describe the same objective.** The driver
    checks this at startup. Each recipe page names its loss family, and
    `Loss families <../developer-guide/loss-families.rst#family-to-driver-flags>`__
@@ -133,7 +135,7 @@ Watch it learn
 
 Send inference through Reef and report feedback per response, exactly as in
 `Quickstart <../getting-started/quickstart.rst>`__. When the recipe has enough eligible records
-it builds a batch, asks Slime for an optimizer step, checkpoints the result,
+it builds a batch, asks Slime to train on it, checkpoints the result,
 publishes it to the engine, and records a new version.
 
 .. code:: bash
@@ -145,7 +147,7 @@ publishes it to the engine, and records a new version.
    # {"scenario": "...", "releases": [{"operation": "training", "current": true, ...}, ...]}
 
 You are training when a new ``training`` entry appears, which happens once
-``batch_size`` eligible records have arrived. Later requests use the current
+``global_batch_size`` eligible samples have arrived. Later requests use the current
 version without a restart. Each saved checkpoint becomes a durable version.
 With a ``save-interval`` above 1, the versions between two saves live only in
 engine memory, and a restart falls back to the last checkpoint.

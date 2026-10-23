@@ -77,6 +77,10 @@ class TinkerTrainingRuntime(TrainingRuntime):
             raise
 
     @property
+    def batch_size(self) -> int:
+        return self._config.batch_size
+
+    @property
     def incumbent(self) -> TinkerCheckpoint:
         with self._lock:
             return self._incumbent

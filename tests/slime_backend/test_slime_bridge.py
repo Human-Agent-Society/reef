@@ -111,6 +111,7 @@ def _payload(
         "rollout_ids": [0, 0, 1],
         "loss": loss,
         "method": TrainingMethod(loss).to_dict(),
+        "external_step_sizes": [2],
     }
     if advantages != "default":
         data["advantages"] = advantages
@@ -137,6 +138,7 @@ def test_to_slime_rollout_data_converts_non_empty_payload_and_preserves_groups()
             "loss": "pg",
             "method": TrainingMethod("pg").to_dict(),
             "advantages": [0.25, -0.25],
+            "external_step_sizes": [1],
         }
     )
 
@@ -169,6 +171,7 @@ def test_to_slime_rollout_data_aggregates_rollout_mask_sums() -> None:
         "loss": "pg",
         "method": TrainingMethod("pg").to_dict(),
         "advantages": [0.25, -0.25, 0.0],
+        "external_step_sizes": [2],
     }
 
     converted = to_slime_rollout_data(payload)
@@ -266,14 +269,14 @@ def test_slime_preparation_emits_stable_rollout_ids_for_comparison_sets() -> Non
         ),
     )
 
-    payload = _build_payload(batch, "pg", (0.1, -0.1, 0.0), StepScheduling())
+    payload = _build_payload(batch, "pg", (0.1, -0.1, 0.0), StepScheduling(), step_size=2)
 
     assert payload["rollout_ids"] == [0, 0, 1]
     assert len(payload["rollout_ids"]) == len(payload["samples"]) == 3
 
 
 @pytest.mark.unit
-def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> None:
+def test_slime_preparation_honors_sample_scheduling_and_the_step_size() -> None:
     batch = TrainingBatch(
         "batch",
         tuple(
@@ -294,12 +297,12 @@ def test_slime_preparation_honors_sample_scheduling_and_actual_batch_size() -> N
         batch,
         "tttd",
         (0.1, -0.1),
-        StepScheduling(unit="sample", batch_size="actual"),
+        StepScheduling(unit="sample"),
+        step_size=2,
     )
 
     assert payload["rollout_ids"] == [0, 1]
     assert payload["external_step_sizes"] == [2]
-    assert "external_remainder" not in payload
 
 
 @pytest.mark.unit
@@ -312,7 +315,7 @@ def test_slime_preparation_assigns_distinct_stable_ids_to_policy_samples() -> No
         ),
     )
 
-    payload = _build_payload(batch, "sft", None, StepScheduling())
+    payload = _build_payload(batch, "sft", None, StepScheduling(), step_size=2)
 
     assert payload["rollout_ids"] == [0, 1]
 
@@ -329,7 +332,7 @@ def test_assembled_multi_turn_sample_uses_existing_slime_payload_path() -> None:
         turn_count=2,
     )
     assert sample.training.get("turn_count", 1) > 1
-    payload = _build_payload(TrainingBatch("batch", (sample,)), "sft", None, StepScheduling())
+    payload = _build_payload(TrainingBatch("batch", (sample,)), "sft", None, StepScheduling(), step_size=1)
 
     assert payload["samples"] == [["harbor-report", [10, 20, 11, 21], [1, 0, 1], [-0.1, 0.0, -0.2], 0.75]]
     converted = to_slime_rollout_data(payload)
@@ -515,6 +518,7 @@ def _sao_durable_actor(
     payload = {
         "samples": rows,
         "rollout_ids": list(range(len(rows))),
+        "external_step_sizes": [len(rows)],
         "loss": "sao",
         "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 0,
@@ -553,6 +557,7 @@ def _loss_family_durable_actor(
     payload = {
         "samples": [_row("source-0")],
         "rollout_ids": [0],
+        "external_step_sizes": [1],
         "loss": loss_family,
         "method": TrainingMethod(loss_family).to_dict(),
         "scenario_step": 0,
@@ -583,6 +588,7 @@ def _loss_family_durable_actor(
 def bridge_args(**overrides) -> SlimeArguments:
     values = {
         "num_rollout": 1,
+        "global_batch_size": 1,
         "keep_lora_base_resident": False,
         "megatron_lora_rank": 0,
         "use_critic": False,
@@ -743,8 +749,8 @@ def test_bridge_checkpoint_requires_save_template() -> None:
         _execute_and_update_weights(actor, payload)
 
 
-# The identity of the fixture payload: its rows and training method, not its scenario step or parent version.
-JOB_ID = "f27ecc3d74ba88c709f775871c96881f1953897c2337f57d93e2b63f835be9d7"
+# The identity of the fixture payload: its rows, step layout, and training method, not its scenario step or parent version.
+JOB_ID = "441226100b484e95fc156af9e2015e89a379f958cd9f633179892b31c0615a51"
 
 
 @pytest.mark.unit
@@ -891,6 +897,7 @@ def test_bridge_preserves_mixed_token_runtime_load_ids(tmp_path) -> None:
             )
         ],
         "rollout_ids": [0],
+        "external_step_sizes": [1],
         "loss": "sft",
         "method": TrainingMethod("sft").to_dict(),
         "scenario_step": 0,
@@ -1242,6 +1249,7 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
             ]
         ],
         "rollout_ids": [0],
+        "external_step_sizes": [1],
         "loss": "sao",
         "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 1,
@@ -1718,10 +1726,10 @@ def _grouped_batch(groups: int, size: int, batch_id: str = "batch") -> TrainingB
 
 
 @pytest.mark.unit
-def test_slime_preparation_explicit_batch_size_cuts_one_batch_into_steps() -> None:
+def test_slime_preparation_step_size_cuts_one_batch_into_steps() -> None:
     batch = _grouped_batch(groups=4, size=2)
 
-    payload = _build_payload(batch, "pg", tuple(range(8)), StepScheduling(batch_size=2))
+    payload = _build_payload(batch, "pg", tuple(range(8)), StepScheduling(), step_size=2)
 
     assert payload["rollout_ids"] == [0, 0, 1, 1, 2, 2, 3, 3]
     assert payload["external_step_sizes"] == [2, 2]
@@ -1734,7 +1742,7 @@ def test_slime_preparation_explicit_batch_size_cuts_one_batch_into_steps() -> No
 def test_slime_preparation_epochs_repeat_rollouts_with_distinct_ids() -> None:
     batch = _grouped_batch(groups=2, size=2)
 
-    payload = _build_payload(batch, "pg", (1.0, 2.0, 3.0, 4.0), StepScheduling(batch_size=1, epochs=3))
+    payload = _build_payload(batch, "pg", (1.0, 2.0, 3.0, 4.0), StepScheduling(epochs=3), step_size=1)
 
     assert [row[0] for row in payload["samples"]] == ["g0-s0", "g0-s1", "g1-s0", "g1-s1"] * 3
     assert payload["rollout_ids"] == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
@@ -1744,10 +1752,10 @@ def test_slime_preparation_epochs_repeat_rollouts_with_distinct_ids() -> None:
 
 @pytest.mark.unit
 def test_slime_preparation_shuffle_is_deterministic_per_batch_and_keeps_groups_contiguous() -> None:
-    scheduling = StepScheduling(batch_size=2, epochs=2, shuffle=True)
-    first = _build_payload(_grouped_batch(8, 2, "b-1"), "pg", tuple(range(16)), scheduling)
-    again = _build_payload(_grouped_batch(8, 2, "b-1"), "pg", tuple(range(16)), scheduling)
-    other = _build_payload(_grouped_batch(8, 2, "b-2"), "pg", tuple(range(16)), scheduling)
+    scheduling = StepScheduling(epochs=2, shuffle=True)
+    first = _build_payload(_grouped_batch(8, 2, "b-1"), "pg", tuple(range(16)), scheduling, step_size=2)
+    again = _build_payload(_grouped_batch(8, 2, "b-1"), "pg", tuple(range(16)), scheduling, step_size=2)
+    other = _build_payload(_grouped_batch(8, 2, "b-2"), "pg", tuple(range(16)), scheduling, step_size=2)
 
     assert first == again
     # The order follows the rows, not the batch number a reload starts again: a retry replays the same job.
@@ -1755,7 +1763,7 @@ def test_slime_preparation_shuffle_is_deterministic_per_batch_and_keeps_groups_c
     names = [row[0] for row in first["samples"]]
     assert names != [
         row[0]
-        for row in _build_payload(_grouped_batch(8, 2, "b-1"), "pg", None, StepScheduling(batch_size=2, epochs=2))[
+        for row in _build_payload(_grouped_batch(8, 2, "b-1"), "pg", None, StepScheduling(epochs=2), step_size=2)[
             "samples"
         ]
     ]
@@ -1777,22 +1785,22 @@ def test_slime_preparation_remainder_policy() -> None:
     batch = _grouped_batch(groups=5, size=1)
 
     with pytest.raises(ValueError, match="5 rollouts do not form complete optimizer steps of 2"):
-        _build_payload(batch, "pg", tuple(range(5)), StepScheduling(batch_size=2, remainder="error"))
-    with pytest.raises(ValueError, match="exceeds the 5 rollouts"):
-        _build_payload(batch, "pg", tuple(range(5)), StepScheduling(batch_size=8))
+        _build_payload(batch, "pg", tuple(range(5)), StepScheduling(remainder="error"), step_size=2)
+    # A step size over the batch's rollouts trains them as one partial step.
+    assert _build_payload(batch, "pg", tuple(range(5)), StepScheduling(), step_size=8)["external_step_sizes"] == [5]
 
-    dropped = _build_payload(batch, "pg", tuple(range(5)), StepScheduling(batch_size=2, remainder="drop"))
+    dropped = _build_payload(batch, "pg", tuple(range(5)), StepScheduling(remainder="drop"), step_size=2)
     assert [row[0] for row in dropped["samples"]] == ["g0-s0", "g1-s0", "g2-s0", "g3-s0"]
     assert dropped["advantages"] == [0, 1, 2, 3]
     assert dropped["external_step_sizes"] == [2, 2]
 
-    partial = _build_payload(batch, "pg", tuple(range(5)), StepScheduling(batch_size=2, epochs=2))
+    partial = _build_payload(batch, "pg", tuple(range(5)), StepScheduling(epochs=2), step_size=2)
     assert len(partial["samples"]) == 10
     assert partial["external_step_sizes"] == [2, 2, 1, 2, 2, 1]
 
 
 @pytest.mark.unit
-def test_slime_preparation_actual_batch_size_applies_to_policy_batches() -> None:
+def test_slime_preparation_step_size_applies_to_policy_batches() -> None:
     batch = TrainingBatch(
         "batch",
         (
@@ -1801,20 +1809,9 @@ def test_slime_preparation_actual_batch_size_applies_to_policy_batches() -> None
         ),
     )
 
-    payload = _build_payload(batch, "sft", None, StepScheduling(batch_size="actual"))
+    payload = _build_payload(batch, "sft", None, StepScheduling(), step_size=2)
 
     assert payload["external_step_sizes"] == [2]
-
-
-@pytest.mark.unit
-def test_slime_preparation_configured_batch_size_forwards_remainder_policy() -> None:
-    batch = _grouped_batch(groups=2, size=1)
-
-    assert _build_payload(batch, "pg", (0.0, 1.0), StepScheduling())["external_remainder"] == "partial"
-    payload = _build_payload(batch, "pg", (0.0, 1.0), StepScheduling(remainder="error"))
-    assert payload["external_remainder"] == "error"
-    assert "external_step_sizes" not in payload
-    assert to_slime_rollout_data(payload)["external_remainder"] == "error"
 
 
 @pytest.mark.unit
@@ -1832,10 +1829,9 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
         to_slime_rollout_data({**payload, "external_step_sizes": [3]})
     with pytest.raises(ValueError, match="positive integers"):
         to_slime_rollout_data({**payload, "external_step_sizes": [4, 0]})
-    with pytest.raises(ValueError, match="only when external_step_sizes is absent"):
-        to_slime_rollout_data({**payload, "external_step_sizes": [4], "external_remainder": "partial"})
-    with pytest.raises(ValueError, match="external_remainder must be"):
-        to_slime_rollout_data({**payload, "external_remainder": "drop"})
+    # Reef always fixes the step layout; a payload without one is refused.
+    with pytest.raises(ValueError, match="positive integers"):
+        to_slime_rollout_data(payload)
 
 
 @pytest.mark.unit
@@ -1854,7 +1850,11 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
 
     result = preparation.prepare_slime_step(
-        _grouped_batch(8, 1), TrainingMethod("any"), {}, StepScheduling(batch_size=3, epochs=2, remainder="drop")
+        _grouped_batch(8, 1),
+        TrainingMethod("any"),
+        {},
+        StepScheduling(epochs=2, remainder="drop"),
+        step_size=3,
     )
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
@@ -1997,7 +1997,7 @@ def test_slime_runtime_explains_timeout_without_committing_or_replaying(tmp_path
     executor = UniProcExecutor.from_workers([actor])
     client = ExecutorCoordinatorClient(executor, timeout_s=43200)
     monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: client)
-    runtime = SlimeTrainingRuntime(train_timeout_s=43200)
+    runtime = SlimeTrainingRuntime(train_timeout_s=43200, batch_size=1)
     try:
         with pytest.raises(TimeoutError, match=r"training\.timeout-s") as error:
             runtime.execute_training_job(payload)

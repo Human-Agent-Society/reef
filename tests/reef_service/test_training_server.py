@@ -15,6 +15,7 @@ from tests.support.runtime_stubs import StubTrainingRuntime
 
 
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext
+from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.deploy.service_config import ServiceConfig
@@ -84,6 +85,7 @@ def _settings(**overrides) -> ServiceConfig:
         "ray_actor_name": "reef-train-bridge",
         "inference_url": "http://ray-head:30000",
         "model_path": "/models/demo",
+        "training_backend_options": {"global-batch-size": 4},
         "inference_timeout_s": 30.0,
         "inference_handler_factory": None,
         "inference_handler_config": {},
@@ -295,6 +297,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         "model_path": "/models/demo",
         "inference_timeout_s": 30.0,
         "train_timeout_s": None,
+        "batch_size": 4,
     }
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
@@ -390,16 +393,36 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     dispatcher = deploy.build_dispatcher(
         _settings(
             recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"task2batch": {"config": {"batch_size": 4}}},
+            pipeline_settings={"task2batch": {"config": {"buffer_size": 4}}},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
         connector=lambda **kwargs: stub_runtimes(),
     )
     recipe = dispatcher.recipe
-    captured["batch_size"] = recipe.stages().task2batch.config["batch_size"]
+    captured["buffer_size"] = recipe.build_pipeline(PipelineContext("s")).buffer_size
 
-    assert captured == {"batch_size": 4}
+    assert captured == {"buffer_size": 4}
+
+
+@pytest.mark.unit
+def test_a_task2batch_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) -> None:
+    # The training backend owns the batch size; the stage config has no batch_size key and no fallback.
+    monkeypatch.setattr(
+        GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda scenario: object()
+    )
+    dispatcher = deploy.build_dispatcher(
+        _settings(
+            recipe=OPENCLAWRL_RECIPE,
+            pipeline_settings={"task2batch": {"config": {"batch_size": 4}}},
+            agent_record_dir=str(tmp_path / "agent-record"),
+        ),
+        environ={},
+        connector=lambda **kwargs: stub_runtimes(),
+    )
+    # Stage configs are checked when a scenario builds its pipeline.
+    with pytest.raises(RecipeConfigError, match="unknown config fields: batch_size"):
+        dispatcher.recipe.build_pipeline(PipelineContext("s"))
 
 
 @pytest.mark.unit

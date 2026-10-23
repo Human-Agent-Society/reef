@@ -199,7 +199,9 @@ sampling settings, and the reduced 2 x 2 grid for one step. Point the harness at
 it with `TTTD_STACK=serve-tinker.yaml`, export `TINKER_API_KEY` and
 `TTTD_STATE_DIR`, start `python -m reef serve -c serve-tinker.yaml` and run
 `run.py` as `run.sh` does. Raise `rollouts_per_group` before reading anything
-into the update; Tinker's `batch-size` follows `groups_per_step`.
+into the update. Tinker's `batch-size` is the rollouts in one optimizer step.
+It must not exceed the grid's rollouts; equal to the grid, it trains one step
+per grid.
 
 `work/erdos_min_overlap/` holds this problem's checkpoints, artifacts,
 scenario records, and PUCT state; a second problem needs its own directory so

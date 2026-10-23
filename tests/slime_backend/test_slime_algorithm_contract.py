@@ -144,7 +144,13 @@ def test_sft_spec_refuses_advantages_instead_of_silently_dropping_them() -> None
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     sample = ["a", [10, 11, 12], [1, 1], [], 0.5]
-    payload = {"samples": [sample], "rollout_ids": [0], "loss": "sft", "advantages": [0.5]}
+    payload = {
+        "samples": [sample],
+        "rollout_ids": [0],
+        "external_step_sizes": [1],
+        "loss": "sft",
+        "advantages": [0.5],
+    }
 
     # A reward-weighted-SFT author must hear that sft trains unweighted and
     # where the weighted objective lives, not train silently unweighted.

@@ -118,11 +118,7 @@ class CoralRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="tttd",
-            # Sibling groups train as one optimizer step, as TTTD's grid does.
-            scheduling=StepScheduling(unit="sample", batch_size="actual"),
-        )
+        return WeightTrainingSpec(objective="tttd", scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

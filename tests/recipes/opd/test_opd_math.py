@@ -2,11 +2,14 @@
 
 import json
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
 from recipes.opd.examples.math.prepare import OPENTHOUGHTS3_DUPLICATE_IDS, select_prompts
 from recipes.opd.examples.math.run import Campaign, boxed_answer
+
+EXAMPLE_CONFIG = Path(__file__).resolve().parents[3] / "recipes" / "opd" / "examples" / "math" / "serve.yaml"
 
 
 @pytest.mark.parametrize(
@@ -26,12 +29,10 @@ def test_only_final_boxed_integer_is_scored(response, expected) -> None:
 
 def test_driver_rejects_batch_mismatch_before_creating_output(tmp_path) -> None:
     config = tmp_path / "serve.yaml"
-    config.write_text(
-        "pipeline:\n  task2batch:\n    config:\n      batch_size: 32\ntraining:\n  config:\n    global_batch_size: 32\n"
-    )
+    config.write_text("training:\n  config:\n    global_batch_size: 32\n")
     output = tmp_path / "results"
     args = Namespace(config=config, steps=1, prompts_per_step=512, samples_per_prompt=4, output=output)
-    with pytest.raises(ValueError, match="pipeline's batch_size"):
+    with pytest.raises(ValueError, match="must equal the global batch size"):
         Campaign(args)
     assert not output.exists()
 
@@ -155,8 +156,7 @@ class CampaignService:
 def campaign_args(tmp_path):
     config = tmp_path / "serve.yaml"
     config.write_text(
-        "pipeline:\n  task2batch:\n    config:\n      batch_size: 2\ntraining:\n  config:\n    global_batch_size: 2\n"
-        "inference:\n  options:\n    context-length: 16\n"
+        "training:\n  config:\n    global_batch_size: 2\ninference:\n  options:\n    context-length: 16\n"
     )
     train_data = tmp_path / "train.jsonl"
     train_data.write_text("\n".join(json.dumps({"id": f"t{i}", "prompt": "Training problem"}) for i in range(2)))
@@ -183,6 +183,14 @@ def campaign_args(tmp_path):
         resume=False,
         baseline_eval=None,
     )
+
+
+def test_the_shipped_stack_takes_run_sh_batches_of_64_prompts_by_four_samples(campaign_args) -> None:
+    # run.sh drives 64 prompts by four samples per update; the global batch size must hold all of them.
+    campaign_args.config = EXAMPLE_CONFIG
+    campaign_args.prompts_per_step, campaign_args.samples_per_prompt = 64, 4
+    Campaign(campaign_args)
+    assert (campaign_args.output / "config.json").is_file()
 
 
 @pytest.mark.parametrize("failure", ["report-1", "report-2", "verify-1", "eval-1"])

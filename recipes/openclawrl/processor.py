@@ -28,8 +28,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record
 from reef.record2task import JudgedTasks, Record2Task
 from reef.record2task.samples import make_policy_trajectory
-from reef.task2batch import Task2Batch
-from reef.task2batch.base import BatchSettings
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, policy_row_violation
 
 logger = logging.getLogger(__name__)
@@ -89,12 +88,9 @@ class OpenClawRLTasks(JudgedTasks):
 
 
 @dataclass(frozen=True)
-class OpenClawRLBatchSettings(BatchSettings):
-    """The config of ``OpenClawRLBatches``."""
+class OpenClawRLBatchSettings(BufferSettings):
+    """The config of ``OpenClawRLBatches``: the buffer and the PRM record file."""
 
-    batch_size: int = config_option(
-        16, help="The judged turns in one batch. Must equal the Slime driver's --global-batch-size."
-    )
     # Upstream's OPENCLAW_PRM_RECORD_FILE.
     prm_record_file: str = config_option(
         "", help="The file that gets one JSON line for each batch: the judged population. Empty disables it."
@@ -112,7 +108,7 @@ class OpenClawRLBatches(Task2Batch):
     def __init__(
         self, context: PipelineContext, settings: OpenClawRLBatchSettings, record2record: OpenClawRLRecord2Record
     ) -> None:
-        super().__init__(context, settings.batch_size)
+        super().__init__(context, settings.buffer_size)
         # What the judge actually saw goes to the PRM record file, one line
         # per batch. Upstream persists this per turn; without it a batch mean
         # is the only visible number. A file, not a log line: reef configures

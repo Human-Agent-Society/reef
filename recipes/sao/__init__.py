@@ -11,10 +11,10 @@
 """
 
 from recipes.sao.objective import SaoObjective
-from recipes.sao.processor import SAOBatches, SAOBatchSettings, SAOTasks
+from recipes.sao.processor import SAOBatches, SAOTasks
 from recipes.sao.recipe import SAORecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sao", "recipes.sao.slime:SaoAlgorithm")
 
-__all__ = ["SAOBatchSettings", "SAOBatches", "SAORecipe", "SAOTasks", "SaoObjective"]
+__all__ = ["SAOBatches", "SAORecipe", "SAOTasks", "SaoObjective"]

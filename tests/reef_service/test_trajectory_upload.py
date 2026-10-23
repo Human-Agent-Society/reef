@@ -86,12 +86,14 @@ class UploadRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: TrainingPipeline(context, task2batch=self.batch_stage(context, 2)),
+            pipeline_factory=lambda context: TrainingPipeline(context, task2batch=self.batch_stage(context, None)),
             candidate_backend=CountingBackend(self.batches),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            # An uploaded trajectory is one sample, so two uploads make one batch.
+            batch_size=2,
         )
 
 

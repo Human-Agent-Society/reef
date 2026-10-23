@@ -31,6 +31,10 @@ class CheckpointTrainer(TrainingRuntime):
         self.calls = []
 
     @property
+    def batch_size(self):
+        return 1
+
+    @property
     def concurrent_training_scenarios(self):
         return self.concurrent
 
