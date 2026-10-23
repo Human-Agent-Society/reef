@@ -163,16 +163,24 @@ def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(
 
 
 class ExportingGroup:
-    """An actor group whose export writes what Slime's HF writer writes: config, index and shards."""
+    """An actor group whose export writes what Slime's writers write: a full checkpoint, or the active adapter."""
 
     def __init__(self, shards=("model-00001-of-00001.safetensors",), written=None):
         self.shards = shards
         self.written = shards if written is None else written
         self.exports = []
+        self.active = None
+
+    def activate_scenario(self, scenario):
+        self.active = scenario
 
     def export_weight_files(self, directory):
-        self.exports.append(directory)
+        self.exports.append((self.active, directory))
         directory.mkdir(parents=True)
+        if self.active is not None:
+            for name in ("adapter_config.json", "reef-adapter.json", "adapter_model.safetensors"):
+                (directory / name).write_text(self.active)
+            return
         (directory / "config.json").write_text("{}")
         index = {"weight_map": {f"layer.{number}": shard for number, shard in enumerate(self.shards)}}
         (directory / "model.safetensors.index.json").write_text(json.dumps(index))
@@ -180,11 +188,11 @@ class ExportingGroup:
             (directory / shard).write_bytes(b"weights")
 
 
-def exporting_backend(group, root):
+def exporting_backend(group, root, *, lora=False):
     from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
 
     return SlimeTrainingBackend(
-        group, batch_processor=None, args=SimpleNamespace(), save_hf_template=None, weight_files_root=root
+        group, batch_processor=None, args=SimpleNamespace(), save_hf_template=None, lora=lora, weight_files_root=root
     )
 
 
@@ -196,10 +204,22 @@ def test_backend_exports_full_weights_once_per_publication_and_keeps_only_the_la
     second = backend.weight_files(None, "inc:2")
     assert second.path == tmp_path / "weight-files" / "inc-2"
     assert [path.name for path in (tmp_path / "weight-files").iterdir()] == ["inc-2"]
-    assert group.exports == [first.path, second.path]
-    with pytest.raises(RuntimeError, match="only full weights"):
+    assert group.exports == [(None, first.path), (None, second.path)]
+    with pytest.raises(RuntimeError, match="got scenario 'math' with lora=False"):
         backend.weight_files("math", "inc:3")
     assert exporting_backend(group, None).weight_files(None, "inc:3") is None
+
+
+def test_lora_backend_exports_the_named_scenarios_adapter(tmp_path):
+    group = ExportingGroup()
+    backend = exporting_backend(group, tmp_path / "weight-files", lora=True)
+    math = backend.weight_files("math", "inc:1")
+    assert math == WeightFiles(tmp_path / "weight-files" / "inc-1", "adapter")
+    code = backend.weight_files("code", "inc:1")
+    assert (code.path / "adapter_config.json").read_text() == "code"
+    assert group.exports == [("math", math.path), ("code", code.path)]
+    with pytest.raises(RuntimeError, match="got scenario None with lora=True"):
+        backend.weight_files(None, "inc:2")
 
 
 def test_backend_refuses_an_export_whose_shards_are_on_another_node(tmp_path):

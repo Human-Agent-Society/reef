@@ -222,13 +222,11 @@ class SlimeDeployment(TrainingDeployment):
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
         remote = bool(settings["inference_remote"])
         if remote:
-            # Remote engines receive full Hugging Face weights as files; no native transfer reaches them.
+            # Remote engines receive weights as files; no native transfer reaches them.
             if settings["colocate"]:
                 raise DeployConfigError("training.colocate shares GPUs with the engines; remote engines run elsewhere")
-            if int(options.get("megatron-lora-rank", 0) or 0) > 0:
-                raise DeployConfigError(
-                    "Slime publishes only full weights to remote engines; remove training.options.megatron-lora-rank"
-                )
+            if settings["inference_backend"] == "vllm" and int(options.get("megatron-lora-rank", 0) or 0) > 0:
+                raise DeployConfigError("inference.backend: vllm does not publish LoRA adapters yet; use full weights")
         elif settings["inference_backend"] == "vllm":
             require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)

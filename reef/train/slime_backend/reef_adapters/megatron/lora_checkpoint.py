@@ -27,7 +27,7 @@ def save_lora_adapter_to_path(
     output_dir: str | Path,
     adapter_tensors,
     *,
-    scenario_step: int,
+    scenario_step: int | None,
     scenario: str | None = None,
 ) -> None:
     """Gather a replicated/sharded Bridge export and write one PEFT adapter.
@@ -38,7 +38,8 @@ def save_lora_adapter_to_path(
 
     The directory is a Hugging Face PEFT adapter plus Reef's training
     metadata, so it loads with plain ``transformers`` + ``peft`` and still
-    records which training step wrote it.
+    records which training step wrote it. ``scenario_step`` is None for an
+    export that is not a training checkpoint, such as a file publication.
     """
 
     local_tensors: list[tuple[str, torch.Tensor]] = [(name, _cpu_tensor(tensor)) for name, tensor in adapter_tensors]
@@ -107,7 +108,7 @@ def _write_adapter_checkpoint(
     path: Path,
     tensors: dict[str, torch.Tensor],
     *,
-    scenario_step: int,
+    scenario_step: int | None,
     scenario: str | None = None,
 ) -> None:
     from safetensors.torch import save_file

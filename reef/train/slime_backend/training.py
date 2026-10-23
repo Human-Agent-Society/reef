@@ -69,12 +69,11 @@ class SlimeTrainingService(TrainingService):
 
     @property
     def weight_transfer_protocols(self) -> tuple[str, ...]:
-        """The native transfer first, then full-weight files for a receiver that the workers cannot reach.
+        """The native transfer first, then weight files for a receiver that the workers cannot reach.
 
-        LoRA training sends only natively: Slime does not export per-scenario adapters as files.
+        As files, full-weight training delivers Hugging Face checkpoints and
+        LoRA training delivers each scenario's PEFT adapter.
         """
-        if self.preparation.lora:
-            return (self._weight_transfer_protocol,)
         return (self._weight_transfer_protocol, WEIGHT_FILES_PROTOCOL)
 
     def start(self, resources: DeploymentResources) -> None:

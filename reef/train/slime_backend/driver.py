@@ -220,8 +220,8 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
     remote = reef.get("inference_remote")
     inference_input: dict[str, Any]
     if remote:
-        if prepared.lora or getattr(args, "colocate", False):
-            raise RuntimeError("Slime publishes only full weights to remote engines, without colocated training")
+        if getattr(args, "colocate", False):
+            raise RuntimeError("remote engines run elsewhere and cannot share GPUs with colocated training")
         inference_input = {
             "remote": dict(remote),
             "engine": inference_backend,

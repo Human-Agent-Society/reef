@@ -298,14 +298,21 @@ The Tinker backend still produces SGLang engine options and keeps
 
 With an ``inference.remote`` section, Slime's engines run on a remote inference
 component, and Slime reserves only its training GPUs. Each publication exports
-the actor's current weights as a Hugging Face checkpoint under ``weight-files``,
-beside the HF and Megatron checkpoint directories. The coordinator uploads the
-export to the component, which reloads it in place of the served weights; the
-next publication replaces the export. Every training node writes its own
-shards, so multi-node training needs that directory on shared storage; a
-publication whose export lacks a shard on rank 0's node fails. A full-weight
-publication moves the whole model each time, for example about 16 GB for an 8B
-bf16 model. LoRA and ``training.colocate`` are refused with remote engines.
+the actor's current weights under ``weight-files``, beside the HF and Megatron
+checkpoint directories. The coordinator uploads the export to the component,
+and the next publication replaces the export.
+
+- Full-weight training exports a Hugging Face checkpoint. The component reloads
+  it in place of the served weights. A publication moves the whole model each
+  time, for example about 16 GB for an 8B bf16 model.
+- LoRA training (``training.options.megatron-lora-rank``) exports the
+  scenario's PEFT adapter. The component loads it as a new adapter beside the
+  base model. Only ``inference.backend: sglang`` serves LoRA adapters.
+
+Every training node writes its own shards of a full-weight export, so
+multi-node training needs ``weight-files`` on shared storage. A publication
+whose export lacks a file on rank 0's node fails. ``training.colocate`` is
+refused with remote engines.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -1048,9 +1055,9 @@ names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 ``reef serve`` refuses the section unless the training backend supports remote
-engines. Tinker publishes its adapters; Slime publishes full weights and
-refuses LoRA and ``training.colocate`` with remote engines. The section tells
-Reef how to reach the component:
+engines. Tinker publishes its adapters. Slime publishes full weights, or
+per-scenario adapters with LoRA, and refuses ``training.colocate`` with remote
+engines. The section tells Reef how to reach the component:
 
 .. config::
 

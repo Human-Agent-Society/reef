@@ -180,5 +180,10 @@ def test_plan_with_remote_engines_reserves_training_gpus_only_and_sends_the_file
     assert plan.weight_transfer_protocol(plan.inference) == WEIGHT_FILES_PROTOCOL
 
     lora_driver = patch_driver(monkeypatch, plan_args("lora"), lora=True)
-    with pytest.raises(RuntimeError, match="only full weights to remote engines"):
-        lora_driver.create_training_plan({"reef": reef}, loss_family="loss")
+    lora_plan = assemble_model_plan(
+        {"reef": reef}, lora_driver.create_training_plan({"reef": reef}, loss_family="loss")
+    )
+    assert lora_plan.weight_transfer_protocol(lora_plan.inference) == WEIGHT_FILES_PROTOCOL
+    colocated_driver = patch_driver(monkeypatch, plan_args("colocate"), lora=False)
+    with pytest.raises(RuntimeError, match="colocated training"):
+        colocated_driver.create_training_plan({"reef": reef}, loss_family="loss")
