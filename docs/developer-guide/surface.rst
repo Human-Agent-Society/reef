@@ -131,8 +131,12 @@ runtime activates newly trained weights inside its own durable job
 transaction; the surface does not repeat that step.
 
 **Per-scenario adapters.** When a runtime trains one LoRA adapter per
-scenario, ``create_weight_surface(scenario=...)`` puts that scenario's frozen
-adapter revision on every request. ``reef.surface.adapter`` holds only the
+scenario, ``create_weight_surface(scenario=..., runtime=...)`` puts that
+scenario's adapter revision on every request. A live release names its frozen
+revision. A durable release names the revision the runtime serves for the
+scenario, as a full-weight durable release takes its version from the
+runtime: a restart publishes each scenario's checkpoint under a new runtime
+load ID. ``reef.surface.adapter`` holds only the
 naming contract (``adapter_name(scenario, runtime_load_id)`` and its inverse), so a
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the training bridge owns one

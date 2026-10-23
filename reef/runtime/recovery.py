@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
-from reef.surface.adapter import adapter_name, parse_adapter_name
+from reef.surface.adapter import adapter_name
 
 logger = logging.getLogger(__name__)
 
@@ -301,7 +301,7 @@ class FileTrainingJobStore(TrainingJobStore):
 # -- Scenario history ---------------------------------------------------------
 
 SCENARIO_HISTORY_FILENAME = "reef_scenarios.json"
-HISTORY_FORMAT = 2
+HISTORY_FORMAT = 1
 
 
 def history_path(hf_template: str) -> Path:
@@ -310,21 +310,11 @@ def history_path(hf_template: str) -> Path:
 
 
 def _new_history_entry() -> dict[str, Any]:
-    return {"publications": [], "adapter": None, "checkpoint_adapter": None, "rollout_id": None, "steps": 0}
+    return {"publications": [], "adapter": None, "rollout_id": None, "steps": 0}
 
 
 class ScenarioHistory(ScenarioHistoryStore):
-    """Publication history and latest checkpoint per training scenario.
-
-    Each entry holds the runtime load IDs the scenario published, in order
-    (``publications``); the adapter name the engines serve for it
-    (``adapter``); the adapter name that its last saved job published
-    (``checkpoint_adapter``); the rollout of its last checkpoint
-    (``rollout_id``); and its count of checkpoints (``steps``). The
-    trainer persists a scenario's adapter state only with a checkpoint, so
-    a restart serves ``checkpoint_adapter``. With ``--save-interval`` above 1,
-    ``adapter`` can be newer until the restart.
-    """
+    """Publication history and latest checkpoint per training scenario."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -346,10 +336,9 @@ class ScenarioHistory(ScenarioHistoryStore):
         return None if entry is None else dict(entry)
 
     def adapter(self, scenario: str) -> str | None:
-        return self._adapter_field(scenario, "adapter")
-
-    def checkpoint_adapter(self, scenario: str) -> str | None:
-        return self._adapter_field(scenario, "checkpoint_adapter")
+        entry = self._entries.get(scenario)
+        adapter = None if entry is None else entry.get("adapter")
+        return adapter if isinstance(adapter, str) and adapter else None
 
     def last_publication(self, scenario: str) -> str | None:
         entry = self._entries.get(scenario)
@@ -371,58 +360,31 @@ class ScenarioHistory(ScenarioHistoryStore):
         entry["steps"] = int(entry.get("steps", 0)) + 1
         self._write()
 
-    def record_publication(self, scenario: str, runtime_load_id: str, adapter: str, *, checkpointed: bool) -> None:
+    def record_publication(self, scenario: str, runtime_load_id: str, adapter: str) -> None:
         entry = self._entries.setdefault(scenario, _new_history_entry())
         if not entry["publications"] or entry["publications"][-1] != runtime_load_id:
             entry["publications"].append(runtime_load_id)
         entry["adapter"] = adapter
-        if checkpointed:
-            entry["checkpoint_adapter"] = adapter
-        self._write()
-
-    def serve_checkpoint_adapters(self) -> None:
-        """Record that a restart serves each scenario's checkpoint adapter.
-
-        A scenario without a checkpoint serves no adapter. The versions it
-        published after its checkpoint do not train again.
-        """
-        for scenario, entry in sorted(self._entries.items()):
-            if entry["adapter"] != entry["checkpoint_adapter"]:
-                logger.warning(
-                    "scenario %r saved no checkpoint after adapter %r; the restart serves it instead of %r",
-                    scenario,
-                    entry["checkpoint_adapter"],
-                    entry["adapter"],
-                )
-                entry["adapter"] = entry["checkpoint_adapter"]
         self._write()
 
     def status(self) -> dict[str, dict[str, Any]]:
-        """Per scenario: the served adapter and its runtime load ID, the publication count and the checkpoint."""
-        status: dict[str, dict[str, Any]] = {}
-        for scenario, entry in sorted(self._entries.items()):
-            adapter = self.adapter(scenario)
-            status[scenario] = {
-                "runtime_load_id": None if adapter is None else parse_adapter_name(adapter)[1],
-                "adapter": adapter,
+        return {
+            scenario: {
+                "runtime_load_id": self.last_publication(scenario),
+                "adapter": self.adapter(scenario),
                 "publications": len(entry["publications"]),
                 "rollout_id": entry.get("rollout_id"),
                 "steps": entry.get("steps", 0),
             }
-        return status
-
-    def _adapter_field(self, scenario: str, field_name: str) -> str | None:
-        entry = self._entries.get(scenario)
-        adapter = None if entry is None else entry.get(field_name)
-        return adapter if isinstance(adapter, str) and adapter else None
+            for scenario, entry in sorted(self._entries.items())
+        }
 
     def _write(self) -> None:
         write_json(self._path, {"format": HISTORY_FORMAT, "scenarios": self._entries})
 
 
 def _parse_history(value: Mapping[str, Any], path: Path) -> dict[str, dict[str, Any]]:
-    history_format = value.get("format")
-    if history_format not in (1, HISTORY_FORMAT):
+    if value.get("format") != HISTORY_FORMAT:
         raise RuntimeError(f"invalid scenario history: {path}")
     scenarios = value.get("scenarios")
     if not isinstance(scenarios, Mapping):
@@ -434,14 +396,9 @@ def _parse_history(value: Mapping[str, Any], path: Path) -> dict[str, dict[str, 
         publications = entry.get("publications", [])
         if not isinstance(publications, list) or not all(isinstance(item, str) for item in publications):
             raise RuntimeError(f"invalid scenario history publications: {path}")
-        # Format 1 has no checkpoint adapter. Its writers saved a checkpoint
-        # before each publication: the Slime bridge refused LoRA with
-        # --save-interval above 1, and Tinker saves each job.
-        checkpoint_adapter = entry.get("adapter") if history_format == 1 else entry.get("checkpoint_adapter")
         entries[scenario] = {
             "publications": list(publications),
             "adapter": entry.get("adapter"),
-            "checkpoint_adapter": checkpoint_adapter,
             "rollout_id": entry.get("rollout_id"),
             "steps": int(entry.get("steps", 0)),
         }
@@ -801,9 +758,7 @@ class TrainingRecovery:
         inference_url = publisher.inference.inference_url()
         versions = self._observed_versions(status)
         if publisher.history is not None:
-            # The trainer persists a scenario's adapter only with a checkpoint, so the restart serves that one.
-            publisher.history.serve_checkpoint_adapters()
-            publisher.restore_scenario_adapters(marker)
+            publisher.republish_scenario_checkpoints(marker)
         self._restore_version(marker, status, versions)
         self.publication.finish_recovery(marker, publisher.runtime_load_id)
         return inference_url
@@ -850,11 +805,11 @@ class TrainingRecovery:
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot inference. Publish actor weights before construction returns
             # so the first Reef inference uses the actual training version. A
-            # LoRA bridge without a marker has nothing to publish: the frozen
-            # base inference booted from is exactly what every fresh adapter
-            # computes, and the history replay above restored trained ones.
-            # The Slime preflight also deletes the marker of a job that saved
-            # no checkpoint.
+            # LoRA bridge without a marker has nothing more to publish: the
+            # frozen base inference booted from is exactly what every fresh
+            # adapter computes, and the republication above restored trained
+            # ones. The Slime preflight also deletes the marker of a job that
+            # saved no checkpoint.
             scenario = publisher.marker_scenario(marker)
             publisher.runtime_load_id = publisher.update_serving(
                 # A fresh sender may only capture a delta baseline unless a
@@ -864,14 +819,10 @@ class TrainingRecovery:
                 scenario=scenario,
                 runtime_load_id=recovered_runtime_load_id or publisher.publication_target(marker),
             )
-            if marker is not None and scenario is not None:
-                # The marker's job is the scenario's newest job, and its slot snapshot holds that job.
-                publisher.require_history().record_publication(
-                    scenario,
-                    publisher.runtime_load_id,
-                    adapter_name(scenario, publisher.runtime_load_id),
-                    checkpointed=marker["checkpoint_path"] is not None,
-                )
+            if scenario is not None:
+                # Serving reads the scenario's adapter version from the history.
+                version = publisher.runtime_load_id
+                publisher.require_history().record_publication(scenario, version, adapter_name(scenario, version))
         elif config.lora and marker is None:
             # Nothing to publish, but the engines still need Reef's canonical
             # version token (they boot with a backend default), and colocated

@@ -1200,12 +1200,7 @@ class ScenarioHistoryStore(ABC):
     def entry(self, scenario: str) -> Mapping[str, Any] | None: ...
 
     @abstractmethod
-    def adapter(self, scenario: str) -> str | None:
-        """The adapter name the engines serve for ``scenario``, or None when they serve none."""
-
-    @abstractmethod
-    def checkpoint_adapter(self, scenario: str) -> str | None:
-        """The adapter name that the last saved job of ``scenario`` published, or None before such a job."""
+    def adapter(self, scenario: str) -> str | None: ...
 
     @abstractmethod
     def last_publication(self, scenario: str) -> str | None: ...
@@ -1217,12 +1212,7 @@ class ScenarioHistoryStore(ABC):
     def record_checkpoint(self, scenario: str, rollout_id: int) -> None: ...
 
     @abstractmethod
-    def record_publication(self, scenario: str, runtime_load_id: str, adapter: str, *, checkpointed: bool) -> None:
-        """Record that the engines serve ``adapter``; ``checkpointed`` when the publishing job saved a checkpoint."""
-
-    @abstractmethod
-    def serve_checkpoint_adapters(self) -> None:
-        """Record that each scenario serves its checkpoint adapter again, as after a restart."""
+    def record_publication(self, scenario: str, runtime_load_id: str, adapter: str) -> None: ...
 
     @abstractmethod
     def status(self) -> dict[str, dict[str, Any]]: ...

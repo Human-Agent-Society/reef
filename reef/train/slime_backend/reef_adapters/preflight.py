@@ -228,8 +228,7 @@ def clear_unsaved_marker(
     The preflight deletes the marker and does not restore an older marker.
     Reef committed versions after ``T``, and an older marker would use their
     runtime load IDs again. Without a marker, the start publishes the
-    weights of ``T`` with a new runtime load ID. A LoRA start serves the
-    adapter of each scenario's last save.
+    weights of each scenario's last save with a new runtime load ID.
 
     The preflight deletes the marker only if these conditions are true:
 
@@ -264,19 +263,11 @@ def clear_unsaved_marker(
             f"The checkpoints under {storage.root} do not show the saved rollout that the workers load. "
             "Restore that directory from a copy."
         )
-    if megatron_lora_rank > 0:
-        continuation = (
-            "Each scenario continues from its own last checkpoint. "
-            "The jobs of a scenario after its last checkpoint do not train again. "
-        )
-    else:
-        continuation = (
-            f"Training continues from the checkpoint of rollout {tracker_iteration}. "
-            f"The jobs after rollout {tracker_iteration} do not train again. "
-        )
     print(
         f"[reef] training job {unsaved['job_id']} (rollout {unsaved['rollout_id']}) saved no checkpoint. "
-        f"{continuation}Deleted marker: {json.dumps(dict(marker), sort_keys=True)}",
+        f"The weights of each scenario continue from their last checkpoint, at rollout {tracker_iteration} or before. "
+        "The jobs of a scenario after its last checkpoint do not train again. "
+        f"Deleted marker: {json.dumps(dict(marker), sort_keys=True)}",
         file=sys.stderr,
         flush=True,
     )

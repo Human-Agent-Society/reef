@@ -706,20 +706,9 @@ def write_unsaved(storage: CheckpointStorage, running: bool) -> dict:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("running", [False, True])
-@pytest.mark.parametrize(
-    ("megatron_lora_rank", "continuation"),
-    [
-        (0, "Training continues from the checkpoint of rollout 0. The jobs after rollout 0 do not train again."),
-        (
-            8,
-            "Each scenario continues from its own last checkpoint. "
-            "The jobs of a scenario after its last checkpoint do not train again.",
-        ),
-    ],
-    ids=["full-weight", "per-scenario-lora"],
-)
+@pytest.mark.parametrize("megatron_lora_rank", [0, 8], ids=["full-weight", "per-scenario-lora"])
 def test_preflight_deletes_the_marker_of_a_job_without_a_checkpoint(
-    tmp_path: Path, capsys, running: bool, megatron_lora_rank: int, continuation: str
+    tmp_path: Path, capsys, running: bool, megatron_lora_rank: int
 ) -> None:
     storage = _storage(tmp_path)
     _complete(storage, 0)
@@ -728,7 +717,11 @@ def test_preflight_deletes_the_marker_of_a_job_without_a_checkpoint(
     prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) is None
-    assert f"job job-1 (rollout 1) saved no checkpoint. {continuation}" in capsys.readouterr().err
+    assert (
+        "job job-1 (rollout 1) saved no checkpoint. "
+        "The weights of each scenario continue from their last checkpoint, at rollout 0 or before. "
+        "The jobs of a scenario after its last checkpoint do not train again."
+    ) in capsys.readouterr().err
 
 
 @pytest.mark.unit
