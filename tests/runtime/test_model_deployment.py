@@ -383,13 +383,16 @@ def test_rebuild_assigns_a_new_weight_transfer_session():
     assert sessions[0] != sessions[1]
 
 
-def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
+def test_reef_coordinator_closes_backend_operations_before_local_cleanup(tmp_path):
     from dataclasses import replace
 
     from reef.runtime.interfaces import TrainingContext, TrainingCoordinationConfig
 
     plan, events = plan_for()
-    plan.training.config = TrainingCoordinationConfig(save_hf_template=None)
+    # A LoRA deployment without a job has nothing to publish at startup.
+    plan.training.config = TrainingCoordinationConfig(
+        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"), lora=True
+    )
     plan.training.context = TrainingContext()
 
     # The native operations may recreate workers inside the coordinator.

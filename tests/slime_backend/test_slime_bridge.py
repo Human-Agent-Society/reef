@@ -614,13 +614,13 @@ def bridge_args(**overrides) -> SlimeArguments:
 
 
 @pytest.mark.unit
-def test_bridge_health_reports_start_rollout_id() -> None:
+def test_bridge_health_reports_start_rollout_id(tmp_path) -> None:
     group = _FakeGroup()
     actor = build_slime_coordinator(
         group,
         _FakeRolloutManager(["packed"]),
         batch_processor=_FakeRolloutManager(["packed"]),
-        save_hf_template=None,
+        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
         start_rollout_id=3,
     )
 
@@ -630,10 +630,13 @@ def test_bridge_health_reports_start_rollout_id() -> None:
 
 
 @pytest.mark.unit
-def test_bridge_reports_the_serving_runtime_load_id() -> None:
+def test_bridge_reports_the_serving_runtime_load_id(tmp_path) -> None:
     group = _FakeGroup()
     actor = build_slime_coordinator(
-        group, _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
+        group,
+        _FakeRolloutManager([]),
+        batch_processor=_FakeRolloutManager([]),
+        save_hf_template=str(tmp_path / "checkpoint-{rollout_id}"),
     )
 
     assert actor.serving_runtime_load_id() == "v1"
@@ -735,18 +738,6 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
     assert timeline[-1] == "continue_generation"
     assert actor.health()["phase"] == "serving"
-
-
-@pytest.mark.unit
-def test_bridge_checkpoint_requires_save_template() -> None:
-    actor = build_slime_coordinator(
-        _FakeGroup(), _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
-    )
-    payload = _payload(loss="sft")
-    payload.update(scenario_step=0, parent_runtime_load_id="v1")
-
-    with pytest.raises(RuntimeError, match="checkpoint path"):
-        _execute_and_update_weights(actor, payload)
 
 
 # The identity of the fixture payload: its rows, step layout, and training method, not its scenario step or parent version.

@@ -33,6 +33,8 @@ def inference_config(
         env["REEF_INFERENCE_HOST"] = env.pop("SLIME_HOST_IP")
     colocate = bool(getattr(args, "colocate", False))
     if backend == "vllm":
+        # SGLang's variables configure no vLLM engine.
+        env = {name: value for name, value in env.items() if not name.startswith("SGLANG_")}
         return vllm_inference_config(args, inference_options or {}, env=env, colocate=colocate)
     # Colocated engines retract already, because their KV allocation must
     # leave the GPU during training. A disjoint engine preserves in-flight KV

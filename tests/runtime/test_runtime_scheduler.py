@@ -15,7 +15,6 @@ from reef.runtime.interfaces import (
     PreparedTrainingStep,
     StaleCandidate,
     TrainingRuntime,
-    TrainingRuntimeError,
 )
 from reef.runtime.scheduler import RuntimeScheduler
 from reef.train.algos import StepScheduling
@@ -263,46 +262,26 @@ def test_attaching_to_an_unacknowledged_update_starts_with_closed_admission(stat
     assert inference.current_runtime_load_id() == "engine:1"
 
 
-def test_a_settled_job_an_earlier_release_left_without_its_step_is_left_alone():
-    """An acknowledged job an earlier release recorded without ``scenario_step`` has nothing to finish; a job still
-    out must name its step."""
-    training = CheckpointTrainer()
-    inference = WeightReceiver()
-    scheduler = RuntimeScheduler(training, inference)
-    training.journal.update(status="COMPLETE", training_job_id="job-1", commit_acknowledged=True)
-    training.journal.pop("scenario_step", None)
-    scheduler.recover_pending_step(3)
-    assert inference.calls == []
-    training.journal.update(commit_acknowledged=False)
-    with pytest.raises(TrainingRuntimeError, match="missing its durable identity"):
-        scheduler.recover_pending_step(3)
-
-
 @pytest.mark.parametrize(
-    "status,committed_step,job_id,legacy,finished",
+    "status,committed_step,job_id,finished",
     [
-        ("READY_TO_COMMIT", 0, "job-1", False, False),
-        ("READY_TO_COMMIT", 3, None, False, False),
-        ("READY_TO_COMMIT", 3, "job-1", False, True),
-        ("HEAD_COMMITTED", 3, "different-job", False, False),
-        ("COMPLETE", 1, None, True, True),
-        ("COMPLETE", 2, None, True, False),
-        ("COMPLETE", 1, None, False, False),
-        ("READY_TO_COMMIT", 1, None, True, False),
-        ("COMPLETE", 1, "different-job", True, False),
+        ("READY_TO_COMMIT", 0, "job-1", False),
+        ("READY_TO_COMMIT", 3, None, False),
+        ("READY_TO_COMMIT", 3, "job-1", True),
+        ("HEAD_COMMITTED", 3, "different-job", False),
+        ("COMPLETE", 1, None, False),
+        ("COMPLETE", 1, "different-job", False),
     ],
 )
-def test_recovery_requires_job_identity_or_exact_legacy_training_commit(
-    status: str, committed_step: int, job_id: str | None, legacy: bool, finished: bool
+def test_recovery_requires_the_commit_of_the_pending_job(
+    status: str, committed_step: int, job_id: str | None, finished: bool
 ) -> None:
     training = CheckpointTrainer()
     staged_journal(training, state=status)
     inference = WeightReceiver()
     inference.loaded = "engine:1"
     scheduler = RuntimeScheduler(training, inference)
-    scheduler.recover_pending_step(
-        committed_step, committed_training_job_id=job_id, committed_training_without_job_id=legacy
-    )
+    scheduler.recover_pending_step(committed_step, committed_training_job_id=job_id)
     assert inference.inference_admission_status["open"] is finished
     assert inference.calls == ([("acknowledge", "job-1")] if finished else [])
     assert training.calls == []

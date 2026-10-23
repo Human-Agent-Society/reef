@@ -913,7 +913,7 @@ class PreparedTrainingJob(ABC):
 class TrainingCoordinationConfig:
     """Deployment policy interpreted only by Reef's coordinator."""
 
-    save_hf_template: str | None
+    save_hf_template: str
     colocate: bool = False
     lora: bool = False
     adapter_capacity: int | None = None
