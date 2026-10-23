@@ -28,35 +28,7 @@ from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class Scenario:
-    """Own the serving and training state of one scenario.
-
-    Values: ``name`` is a str; ``binding`` is a ``ScenarioBinding``;
-    ``repository`` is a ``Repository``; and ``store`` is a ``ScenarioStore``.
-    ``trainers`` is a non-empty, ordered tuple of ``ComponentTrainer`` values
-    with distinct component names. Each name belongs to ``binding.surface``;
-    an empty surface instead requires exactly one trainer named ``records``.
-    At most one trainer uses a dispatched backend. Construction checks these
-    conditions through ``validate_component_trainers``.
-
-    ``model_config`` is a ``ModelConfig`` (a fresh default when omitted).
-    ``scenario_step`` is a non-negative int, excluding bool. ``process_id``
-    is a str or None; an empty or omitted ID generates a release-chain ID.
-    ``recovered_head_record`` is a ``CommitRecord`` or None, used to restore
-    commit status for a non-durable store. ``experiment_observer`` is a
-    ``CommitExperimentObserver`` or None. Construction checks these domains;
-    durable stores additionally require a repository with staged commits.
-    The caller supplies storage, trainers and recovery state for this name.
-
-    Purpose: ``ScenarioFactory`` constructs the aggregate; the dispatcher
-    and service read its capabilities and run its operations. Binding
-    properties return the bound capabilities, with model runtime overrides
-    as documented on each property. The release chain owns artifact heads;
-    the committer owns the step and serializes commits, rollback and recovery.
-    ``operations`` records request metrics; ``release_queries`` reads the
-    same committed releases. ``close`` changes the initially open lifecycle
-    to closed and closes trainers and storage; repeated closes do nothing.
-    After close, callers may inspect state but must not submit new work.
-    """
+    """Scenario aggregate owning one runtime binding, one release chain, and one trainer per component."""
 
     def __init__(
         self,
@@ -72,24 +44,6 @@ class Scenario:
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
-        if not isinstance(name, str):
-            raise TypeError("name must be a str")
-        if not isinstance(binding, ScenarioBinding):
-            raise TypeError("binding must be a ScenarioBinding")
-        if not isinstance(repository, Repository):
-            raise TypeError("repository must be a Repository")
-        if not isinstance(store, ScenarioStore):
-            raise TypeError("store must be a ScenarioStore")
-        if model_config is not None and not isinstance(model_config, ModelConfig):
-            raise TypeError("model_config must be a ModelConfig or None")
-        if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-            raise ValueError("scenario_step must be a non-negative int, excluding bool")
-        if process_id is not None and not isinstance(process_id, str):
-            raise TypeError("process_id must be a str or None")
-        if recovered_head_record is not None and not isinstance(recovered_head_record, CommitRecord):
-            raise TypeError("recovered_head_record must be a CommitRecord or None")
-        if experiment_observer is not None and not isinstance(experiment_observer, CommitExperimentObserver):
-            raise TypeError("experiment_observer must be a CommitExperimentObserver or None")
         self.operations = OperationMetrics(
             ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
             counters=(
@@ -388,8 +342,6 @@ def validate_component_trainers(
 ) -> tuple[ComponentTrainer, ...]:
     """Check that the trainers match the surface: each names a component it serves, and a surface serving
     no component has exactly one trainer, bound to ``records``."""
-    if not isinstance(trainers, tuple):
-        raise TypeError("trainers must be a tuple of ComponentTrainer values")
     if not trainers or any(not isinstance(component_trainer, ComponentTrainer) for component_trainer in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
     names = [component_trainer.component for component_trainer in trainers]

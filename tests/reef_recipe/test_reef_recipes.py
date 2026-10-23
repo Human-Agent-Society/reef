@@ -491,18 +491,3 @@ def test_only_a_weight_training_recipe_without_image_support_refuses_image_conte
     assert weights.refuses_image_content is True
     assert SFTRecipe(**runtime_bindings(StubTrainingRuntime())).refuses_image_content is True
     assert ImageSAORecipe(**runtime_bindings(StubTrainingRuntime())).refuses_image_content is False
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("name", 1),
-        ("runtime", object()),
-        ("training_runtime", object()),
-        ("pipeline_stages", "x"),
-        ("training_mode", None),
-    ],
-)
-def test_recipe_rejects_invalid_field_domains(field, value) -> None:
-    with pytest.raises(TypeError, match=field):
-        Recipe(**{field: value})

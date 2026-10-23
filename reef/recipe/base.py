@@ -92,18 +92,6 @@ class Recipe:
     batches. Specialized recipes are frozen dataclasses over this base: they
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
-
-    Values: ``name`` is a str; ``runtime`` is an ``InferenceRuntime`` or
-    ``None``; ``training_runtime`` is a ``TrainingRuntime`` or ``None``;
-    ``pipeline_stages`` is a ``PipelineConfig`` or ``None``; and
-    ``training_mode`` is ``"auto"``, ``"manual"`` or ``"hybrid"``.
-    Construction checks these domains. ``None`` for ``pipeline_stages``
-    selects the classes of :meth:`pipeline_spec` with no configuration;
-    construction raises ``RecipeConfigError`` if those classes cannot load.
-    Subclasses add fields and conditions without removing these conditions.
-    Purpose: ``build_recipe`` makes the deployment's recipe from its config.
-    ``ScenarioFactory`` reads it to make the surface, the trainers and the
-    binding of each scenario.
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -118,18 +106,8 @@ class Recipe:
     pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.training_mode, str):
-            raise TypeError("training_mode must be a str")
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
-        if not isinstance(self.name, str):
-            raise TypeError("name must be a str")
-        if self.runtime is not None and not isinstance(self.runtime, InferenceRuntime):
-            raise TypeError("runtime must be an InferenceRuntime or None")
-        if self.training_runtime is not None and not isinstance(self.training_runtime, TrainingRuntime):
-            raise TypeError("training_runtime must be a TrainingRuntime or None")
-        if self.pipeline_stages is not None and not isinstance(self.pipeline_stages, PipelineConfig):
-            raise TypeError("pipeline_stages must be a PipelineConfig or None")
         # The stages' classes fail the deployment here, not the first scenario.
         self.stages()
 

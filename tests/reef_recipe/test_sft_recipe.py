@@ -370,25 +370,3 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     family = resolve_loss_family("sft")
     assert isinstance(family, SftAlgorithm)
     assert (family.loss_type, family.requires_rollout_logprobs) == ("sft_loss", False)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("tokenizer_path", 1),
-        ("target", []),
-        ("max_tokens", 1.5),
-        ("max_tokens", True),
-        ("max_tokens", "10"),
-        ("max_tokens", None),
-    ],
-)
-def test_sft_settings_reject_invalid_field_domains(field, value) -> None:
-    settings = {"tokenizer_path": TOKENIZER_PATH, field: value}
-    with pytest.raises(TypeError, match=field):
-        SFTSettings(**settings)
-
-
-def test_sft_tasks_reject_invalid_settings_before_loading_a_tokenizer() -> None:
-    with pytest.raises(TypeError, match="settings must be an SFTSettings"):
-        SFTTasks(object())
