@@ -230,3 +230,28 @@ def test_training_worker_loss_fails_operations_health_without_waiting_for_anothe
             operations.check_health()
     finally:
         group.executor.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("rollout_num_gpus", "rollout_external", "expected"),
+    [
+        (4, False, ModelGpuLayout(8, 4)),
+        (0, True, ModelGpuLayout(8, 0, external_inference=True)),
+        # inference.backend: none starts no engine; every model GPU trains.
+        (0, False, ModelGpuLayout(8, 0, external_inference=True)),
+    ],
+)
+def test_the_reservation_holds_only_the_gpus_of_local_engines(rollout_num_gpus, rollout_external, expected):
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+    layout = resources.model_gpu_layout(
+        SlimeArguments(
+            actor_num_nodes=1,
+            actor_num_gpus_per_node=8,
+            rollout_num_gpus=rollout_num_gpus,
+            rollout_external=rollout_external,
+            colocate=False,
+        )
+    )
+    assert layout == expected
+    assert layout.total == 8 + rollout_num_gpus

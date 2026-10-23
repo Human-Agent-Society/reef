@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 import ray
 
+from reef.inference.null import NullInferenceService
+from reef.runtime.deployment import NO_WEIGHT_TRANSFER_PROTOCOL
 from reef.train.slime_backend.driver import _job_runtime_env
 
 
@@ -74,7 +76,7 @@ def plan_args(mode):
         fp16=False,
         use_rollout_routing_replay=False,
         megatron_lora_rank=0,
-        rollout_num_gpus=4,
+        rollout_num_gpus=0 if mode == "no-inference" else 4,
         rollout_num_gpus_per_engine=2,
         num_gpus_per_node=4,
         actor_num_nodes=1,
@@ -126,7 +128,7 @@ def patch_driver(monkeypatch, args, *, lora):
 
 
 @pytest.mark.parametrize(
-    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
+    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external", "no-inference"]
 )
 @pytest.mark.parametrize(
     "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
@@ -135,14 +137,16 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     from reef.service.training_driver import assemble_model_plan
 
     driver = patch_driver(monkeypatch, plan_args(mode), lora="lora" in mode)
-    training = driver.create_training_plan({"reef": timeout_config}, loss_family="loss")
+    reef = {**timeout_config, **({"inference_backend": "none"} if mode == "no-inference" else {})}
+    training = driver.create_training_plan({"reef": reef}, loss_family="loss")
     configured_timeout = timeout_config.get("train_timeout_s")
     expected_timeout = 14400 if configured_timeout is None else configured_timeout
     assert training.training.train_rpc_timeout_s == expected_timeout
     assert not hasattr(training, "inference")
-    plan = assemble_model_plan({}, training)
+    plan = assemble_model_plan({"reef": reef}, training)
     plan.validate()
-    assert plan.inference is not None
+    assert isinstance(plan.inference, NullInferenceService) == (mode == "no-inference")
+    assert plan.training.weight_transfer_protocols[-1] == NO_WEIGHT_TRANSFER_PROTOCOL
     assert plan.resources.allocate_models
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}

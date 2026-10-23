@@ -25,7 +25,7 @@ from typing import Any
 
 from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA
 from reef.core.batches import StepScheduling, TrainingBatch
-from reef.runtime.executor import resolve
+from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
@@ -115,7 +115,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
     This adapter has no inference control object and never reads or advances
     Reef's publication marker. Its context contains only scheduling values.
-    ``args`` are the arguments the workers started with.
+    ``args`` are the arguments the workers started with. ``version_receiver``
+    is the receiver of a ``reef-no-weight-transfer-v1`` session, or None for a
+    native one. With it, no weights leave the workers: preparing a send does
+    nothing, and a send records the runtime load ID in the receiver.
     """
 
     def __init__(
@@ -145,9 +148,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_runtime: SlimeAlgorithm | None = None,
         score_centering: ScoreCenteringSettings | None = None,
         train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+        version_receiver: Executor | None = None,
         weight_files_root: Path | None = None,
     ) -> None:
         self.train_rpc_timeout_s = train_rpc_timeout_s
+        self.version_receiver = version_receiver
         #: Set for a file session: each publication exports the actor's weights here.
         self.weight_files_root = weight_files_root
         self._worker_failure: ExecutorFailure | None = None
@@ -513,9 +518,17 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return WeightFiles(directory, "full")
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
+        if self.version_receiver is not None:
+            return
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
 
     def send_weights(self, runtime_load_id: str, *, force_full: bool) -> str:
+        if self.version_receiver is not None:
+            # The workers keep their weights; the version names what they hold.
+            self.version_receiver.rpc(
+                0, "set_runtime_load_id", args=(runtime_load_id,), timeout=self.train_rpc_timeout_s
+            )
+            return runtime_load_id
         self._group.send_prepared_weights(runtime_load_id, force_full=force_full)
         return self.current_runtime_load_id()
 
@@ -681,6 +694,7 @@ def create_training_backend(
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
     train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+    version_receiver: Executor | None = None,
     delivers_weight_files: bool = False,
 ) -> SlimeTrainingBackend:
     """Build a training-only adapter around already-started Slime workers.
@@ -714,6 +728,7 @@ def create_training_backend(
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),
         train_rpc_timeout_s=train_rpc_timeout_s,
+        version_receiver=version_receiver,
         weight_files_root=(
             Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent / WEIGHT_FILES_DIRNAME
             if delivers_weight_files

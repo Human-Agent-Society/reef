@@ -85,7 +85,13 @@ class Generator(ABC):
     ) -> str: ...
 
     @abstractmethod
-    async def write_task(self, task: HarborTask) -> WrittenTask: ...
+    async def write_task(self, task: HarborTask) -> WrittenTask:
+        """Stage the task under the tasks root and return where it is.
+
+        Writing the same task again returns the staged copy with ``created`` False, so a play that a stop
+        interrupted can stage and play again. Raises ``TaskNameConflict`` when a different task holds the name,
+        and ``DuplicateTask`` when the same content is staged under another name.
+        """
 
     @abstractmethod
     async def delete_task(self, name: str) -> None: ...

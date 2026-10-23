@@ -14,16 +14,17 @@ Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 The catalog below groups recipes by the **task type** they serve and by
 **what they evolve**, model weights or the agent harness. Weight recipes need
 the GPU training stack, while harness recipes need only a model endpoint.
-Reefine ships with `reef-infra` and every other recipe here is a cookbook
-package. [Basic](#basic) is the record-only starting stack and stays outside
-the catalog, and [beta recipes](#beta-recipes) join it once they publish
-learning results. The root [README](../README.md#-recipes-and-examples) and the
+Reefine and [SFT](../docs/user-guide/recipes/sft.rst) ship with `reef-infra`,
+and every other recipe here is a cookbook package. [Basic](#basic) is the
+record-only starting stack and stays outside the catalog, and
+[beta recipes](#beta-recipes) join it once they publish learning results. The
+root [README](../README.md#-recipes-and-examples) and the
 [recipes guide](../docs/user-guide/recipes.rst) show the same catalog.
 
-## Scientific discovery
+## Open-ended discovery
 
-One hard problem with a measurable objective, where the recipe makes repeated
-attempts and trains on those attempts at test time.
+One hard problem with a measurable objective and no known answer, where the
+recipe makes repeated attempts and trains on those attempts at test time.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
@@ -41,16 +42,18 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-## Continual learning on a task stream
+## Offline tasks with a known answer
 
-A stream of independent tasks that a verifier scores one by one, so the recipe
-learns from each score before the next task arrives.
+Independent tasks from a fixed set, each with a reference answer. The recipe
+samples a batch through Reef, trains on it, and serves the next batch from
+the update.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
 | SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/imo_answerbench/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
 | SDFT | model weights | [`recipes/sdft/`](sdft/) | [SDFT](../docs/user-guide/recipes/sdft.rst) | [SDFT on a skill stream](sdft/examples/skill_stream/README.md) |
 | SDPO | model weights | [`recipes/sdpo/`](sdpo/) | [SDPO](../docs/user-guide/recipes/sdpo.rst) | [SDPO on SciKnowEval Chemistry](sdpo/examples/sciknoweval/README.md) |
+| OPD | model weights | [`recipes/opd/`](opd/) | [OPD](../docs/user-guide/recipes/opd.rst) | [OPD on mathematical reasoning](opd/examples/math/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
 | Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 
@@ -89,10 +92,10 @@ improvements and commits the population with Reef's serving state. See the
 [Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
 [results](meta_harness/RESULTS.md), and selected harness.
 
-## Learning from usage
+## Online learning from usage
 
-Real interaction where no one reports a score or the feedback arrives late, so
-the recipe reads the signal out of the traffic it already serves.
+Sessions with a user, where the interaction itself is the signal, so the
+recipe reads it out of the traffic it already serves.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|

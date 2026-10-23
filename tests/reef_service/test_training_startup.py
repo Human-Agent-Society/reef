@@ -88,6 +88,21 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"inference.options.tp-size": "2"}, "managed by Reef"),
         ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
         ({"inference.num-gpus": "0"}, "must be positive"),
+        ({"inference.backend": "none", "training.colocate": "true"}, "remove training.colocate"),
+        ({"inference.backend": "none", "inference.num-gpus": "8"}, "remove inference.num-gpus"),
+        (
+            {"inference.backend": "none", "inference.tensor-parallel-size": "2", "inference.options.dtype": "bf16"},
+            "remove inference.tensor-parallel-size, inference.options",
+        ),
+        (
+            {
+                "inference.backend": "none",
+                "inference.handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+            },
+            "remove inference.handler-factory",
+        ),
+        ({"inference.backend": "none", "teacher.model-path": "/models/teacher"}, "remove teacher.model-path"),
+        ({"inference.backend": "none", "training.options.rollout-num-gpus": "1"}, "configures inference"),
         ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
         ({"inference.num-gpus": "1.5"}, "valid int"),
         ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
@@ -142,7 +157,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             },
             "one engine per stack",
         ),
-        ({"inference.backend": "tinker-engine"}, "sglang or vllm"),
+        ({"inference.backend": "tinker-engine"}, "sglang, vllm or none"),
     ],
 )
 def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, monkeypatch, capsys, override, match):
@@ -499,6 +514,51 @@ def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags
     assert "--rollout-num-gpus=1" in argv
     assert "--rollout-num-gpus-per-engine=1" in argv
     assert not any(argument.startswith("--sglang-") for argument in argv)
+
+
+def test_a_deployment_without_an_inference_engine_trains_on_every_gpu(tmp_path):
+    from dataclasses import asdict
+
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.train.slime_backend.launch import SlimeDeployment, driver_arguments
+
+    overrides = {
+        "recipe.implementation": "reef.recipe.sft.recipe:SFTRecipe",
+        "inference.model-path": "/models/demo",
+        "inference.backend": "none",
+        "training.options.actor-num-gpus-per-node": "8",
+        "training.options.save-interval": "42",
+    }
+    config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
+    reef = config["reef"]
+    assert (reef["inference_backend"], reef["inference_num_gpus"], reef["colocate"]) == ("none", 0, False)
+    assert reef["inference_options"] == {}
+    argv = driver_arguments(config)
+    assert "--rollout-num-gpus=0" in argv
+    assert "--actor-num-gpus-per-node=8" in argv
+    assert not any(
+        argument.startswith(("--colocate", "--offload", "--sglang-", "--router-", "--rollout-num-gpus-per-engine"))
+        for argument in argv
+    )
+    settings = asdict(service_config_from_mapping({**config, "reef": {**reef, "ray_address": "auto"}}))
+    assert SlimeDeployment().runtime_config(settings)["inference_runtime"] == "none"
+
+
+def test_a_deployment_without_an_inference_engine_refuses_a_composite_recipe(tmp_path):
+    raw = {
+        "recipe": {
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "config": {
+                "components": {
+                    "weights": {"implementation": "reef.recipe.sft.recipe:SFTRecipe"},
+                    "records": {"implementation": "recipe"},
+                }
+            },
+        },
+        "inference": {"model-path": "/models/demo", "backend": "none"},
+    }
+    with pytest.raises(DeployConfigError, match="cannot serve a composite recipe"):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
 def test_slime_remote_engines_take_weight_files_without_colocation(tmp_path):

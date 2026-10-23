@@ -488,11 +488,12 @@ Saved tasks roll out as batches. The pipeline runs a second loop:
 
 1. When no rollout batch runs, the pipeline takes up to ``tasks_per_step``
    tasks from the task pool and submits them as one rollout batch.
-2. ``GeneratedTaskBatches`` plays them on its own worker through an
-   ``EpisodeRunner`` (``reef.record2task.generator.runner``), which stages each
-   saved task and plays it ``plays_per_task`` times on the training arm. At
-   most ``episode_capacity`` episodes are queued or running at once; a task
-   with more plays than the capacity plays in several waves. Each episode
+2. ``GeneratedTaskBatches`` plays them all at once on its own worker. It
+   stages each saved task in the generator service (``write_task``) and plays
+   it ``plays_per_task`` times on the training arm. Staging the same task again
+   returns its staged copy, so a play that a stop interrupted can stage and
+   play again. The generator service runs at most ``generator.concurrency``
+   episodes at once, across all plays. Each episode
    carries the labels ``batch`` and ``task_use``. A task's first play saves its
    result. An episode with an error and no reward could not run; when every
    training episode of a task could not run, the task's result is an

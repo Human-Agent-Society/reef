@@ -44,7 +44,6 @@ from reef.record2record import InferenceRecord2Record
 from reef.record2task import NoTasks
 from reef.record2task.generator.client import GeneratorError
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.runner import Episode
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import PlayedResult, TaskStorage
 from reef.train.algos.registry import resolve_objective
@@ -150,8 +149,8 @@ def rolled(p: TrainingPipeline, *tasks: str, plays: int = 2) -> None:
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
-    def episode(reward: float | None, error: str = "") -> Episode:
-        return Episode("e", reward, (), error)
+    def episode(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
     assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
     assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)

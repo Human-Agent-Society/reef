@@ -1578,7 +1578,7 @@ def test_a_restart_without_a_saved_optimizer_does_not_load_one(
     [
         ({"debug_train_only": True}, "debug-train-only"),
         ({"debug_rollout_only": True}, "debug-rollout-only"),
-        ({"rollout_num_gpus": 0}, "rollout-num-gpus"),
+        ({"rollout_num_gpus": -1}, "non-negative integer --rollout-num-gpus"),
     ],
 )
 def test_training_preflight_rejects_configuration_without_local_inference(
@@ -1587,6 +1587,78 @@ def test_training_preflight_rejects_configuration_without_local_inference(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         bridge.prepare_bridge(bridge_args(**overrides))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "loss_family", "message"),
+    [
+        ({}, "sft", None),
+        ({"save_interval": 42}, "sft", None),
+        ({"colocate": True, "offload_train": True, "offload_rollout": True}, "sft", "cannot run with --colocate"),
+        ({"offload_train": True}, "sft", "remove --offload-train"),
+        ({"megatron_lora_rank": 32}, "sft", "full weights, not LoRA"),
+        ({}, "pg", "reads the inference engines' rollout log probs"),
+    ],
+)
+def test_a_bridge_without_engines_trains_resident_full_weights(overrides, loss_family, message) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    args = bridge_args(rollout_num_gpus=0, **overrides)
+    if message is None:
+        validate_bridge_args(args, resolve_loss_family(loss_family))
+    else:
+        with pytest.raises(ValueError, match=message):
+            validate_bridge_args(args, resolve_loss_family(loss_family))
+
+
+@pytest.mark.unit
+def test_a_bridge_without_engines_commits_every_step_and_never_syncs_weights(tmp_path) -> None:
+    from reef.inference.null import NullInferenceBackend, ServedVersionRecord
+    from reef.runtime.executor.uniproc import UniProcExecutor
+
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    group = _DurableGroup(template)
+    manager = _FakeRolloutManager(["packed"])
+
+    def start_deployment() -> tuple[TrainingCoordinator, UniProcExecutor]:
+        # Each deployment starts a new served-version record and the regular coordinator.
+        record = UniProcExecutor.from_workers([ServedVersionRecord()])
+        training = bridge.SlimeTrainingBackend(
+            group,
+            batch_processor=manager,
+            args=SlimeArguments(),
+            save_hf_template=template,
+            checkpoint_interval=2,
+            version_receiver=record,
+        )
+        return TrainingCoordinator(training, NullInferenceBackend(record)), record
+
+    coordinator, record = start_deployment()
+    published = [coordinator.serving_runtime_load_id()]
+    for scenario_step in range(4):
+        payload = _payload(loss="sft")
+        payload.update(
+            scenario_step=scenario_step,
+            parent_runtime_load_id=published[-1],
+            samples=[_row(f"source-{scenario_step}-{index}") for index in range(3)],
+        )
+        result = _execute_and_update_weights(coordinator, payload)
+        assert result.training_job_id is not None
+        coordinator.acknowledge_training_commit(result.training_job_id)
+        published.append(result.runtime_load_id)
+        assert record.rpc(0, "get_runtime_load_ids") == [result.runtime_load_id]
+    # Startup and every step publish a new version; only every second step saves the checkpoint.
+    assert len(set(published)) == 5
+    assert group.save_calls == [(1, True), (3, True)]
+    # No step sends weights, the startup publication and the save steps included.
+    assert (group.update_calls, group.republication_calls) == (0, [])
+
+    replacement, replacement_record = start_deployment()
+    assert replacement.serving_runtime_load_id() == published[-1]
+    assert replacement_record.rpc(0, "get_runtime_load_ids") == [published[-1]]
+    assert replacement.health()["phase"] == "serving"
+    assert (group.update_calls, group.republication_calls) == (0, [])
 
 
 @pytest.mark.unit

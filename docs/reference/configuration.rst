@@ -336,6 +336,55 @@ The HTTP service binds to loopback by default. The ``reef`` section contains
 only declared HTTP settings; model and recipe fields belong to their owning
 sections.
 
+Train without an inference engine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``inference.backend: none`` runs no inference engine. Use it for supervised
+fine-tuning on data that does not come from the served model, such as uploaded
+trajectories (``POST /reef/trajectories``) or imported records
+(``POST /reef/records``). Only the Slime backend supports it. The trainer
+takes every GPU that ``training.options.actor-*`` names:
+
+.. code:: yaml
+
+   inference:
+     model-path: /models/Qwen3-8B   # the weights to train; nothing serves them
+     backend: none
+   training:
+     backend: slime
+     options:
+       actor-num-nodes: "1"
+       actor-num-gpus-per-node: "8"
+       save-interval: "42"
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+A training step in this mode works as follows:
+
+- The trainer stays on its GPUs between steps. Reef does not offload or
+  reload it, because no other model shares the GPUs.
+- Each step commits a scenario version with its records, metrics and runtime
+  load ID, as with an engine. No weights leave the trainer: the version names
+  the weights that the trainer holds.
+- The step after each ``save-interval`` versions saves the Megatron
+  checkpoint and the HF export, and Reef publishes that version as an
+  artifact. See `Set the checkpoint cadence
+  <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
+- A restart continues from the last saved checkpoint, as with an engine.
+
+The deployment serves no inference. ``/v1/chat/completions``,
+``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+trained version, serve its published checkpoint from a separate deployment.
+
+``reef serve`` refuses the settings that configure an engine or call the
+model: ``inference.num-gpus`` (other than 0),
+``inference.tensor-parallel-size``, ``inference.options``, ``inference.url``,
+``inference.remote``, ``inference.handler-factory``,
+``inference.handler-config``, ``training.colocate``, a ``teacher`` engine, an
+``evaluation`` section, a ``generator`` section and a composite recipe. The
+Slime driver also refuses LoRA (``megatron-lora-rank``), ``offload-train`` and
+a loss family that reads rollout log probs, such as the on-policy
+distillation, SAO and TTT-Discover families.
+
 Native backend options
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1258,7 +1307,6 @@ A rollout batch trains on all of its settled groups, whatever Tinker's batch siz
 .. config::
 
    pipeline.task2batch.config.tasks_per_step | 4 | saved tasks of one rollout batch
-   pipeline.task2batch.config.episode_capacity | 0 | episodes of a rollout batch queued or running at once; 0 is ``tasks_per_step`` x ``plays_per_task``
    pipeline.task2batch.config.settle_timeout_seconds | 600 | seconds a batch whose plays ended waits for its reports before its groups settle as they are
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
@@ -1282,7 +1330,8 @@ generated-task stages to consume. The generator writes, checks and plays Harbor 
 generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker.
+place it on the host that has Docker. The generator runs its proposals, checks and plays at the same time.
+``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind a play.
 
 .. config::
 
@@ -1293,7 +1342,7 @@ place it on the host that has Docker.
    generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
-   generator.concurrency | 2 | episodes in flight per play request
+   generator.concurrency | 2 | episodes in flight across all play requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default

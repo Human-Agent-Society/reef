@@ -23,6 +23,9 @@ READY_PROBE = (
     "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-training-ready' else 1)"
 )
 
+#: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
+NO_INFERENCE_BACKEND = "none"
+
 # These alter engine creation or topology outside Reef's inference request.
 # Reject argparse abbreviations as well as full names, even for omitted values.
 INFERENCE_LAUNCH_OPTIONS = frozenset(
@@ -98,6 +101,7 @@ def prepare_inference_config(
     managed topology uses tensor parallel engines, with independent replicas
     when the total GPU budget exceeds the per-engine tensor parallel size.
     LoRA and colocated deployments retain their existing runtime lifecycle.
+    ``inference.backend: none`` takes no inference GPUs and colocates with nothing.
     """
     for name in training_options:
         if (
@@ -112,6 +116,9 @@ def prepare_inference_config(
             )
         if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
             raise DeployConfigError(f"training.options.{name} places the model; use training.colocate instead")
+    if settings["inference_backend"] == NO_INFERENCE_BACKEND:
+        config["reef"].update(inference_num_gpus=0, inference_options={}, colocate=False)
+        return
     parallel_size = settings["tensor_parallel_size"]
     parallel_size = 1 if parallel_size is None else parallel_size
     num_gpus = settings["inference_num_gpus"]

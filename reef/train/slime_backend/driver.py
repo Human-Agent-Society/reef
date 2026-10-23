@@ -19,7 +19,7 @@ from reef.core.config import config_value
 from reef.runtime.deployment import CoordinatorConfig
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.algos.registry import loss_family_refs
-from reef.train.deployment import TrainingDeploymentPlan
+from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeploymentPlan
 from reef.train.slime_backend.launch import driver_arguments
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
@@ -230,6 +230,9 @@ def create_training_plan(config: Mapping[str, Any], *, loss_family: str) -> Trai
                 args, inference_backend, reef.get("inference_options"), model_path=remote["model_path"]
             ),
         }
+    elif inference_backend == NO_INFERENCE_BACKEND:
+        # inference.backend: none starts no engine, so it has no engine input.
+        inference_input = {}
     else:
         inference_input = inference_config(args, inference_backend, reef.get("inference_options"))
     training = SlimeTrainingService(

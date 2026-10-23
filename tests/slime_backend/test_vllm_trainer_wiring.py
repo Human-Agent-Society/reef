@@ -7,10 +7,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.inference.null import NullInferenceService
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.service import SGLangInferenceService
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.service import INFERENCE_PROTOCOL as VLLM_PROTOCOL
 from reef.inference.vllm.service import VLLMInferenceService
-from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, DeploymentResources, ModelDeploymentPlan
+from reef.runtime.deployment import (
+    NO_WEIGHT_TRANSFER_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
+    DeploymentResources,
+    ModelDeploymentPlan,
+)
 from reef.train.slime_backend.inference import inference_config, remote_inference_config
 from reef.train.slime_backend.reef_adapters.bridge import BridgePreparation, RetentionConfig
 from reef.train.slime_backend.training import WEIGHT_TRANSFER_PROTOCOLS, SlimeTrainingService
@@ -116,11 +124,32 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
     def service(preparation=full, **kwargs):
         return SlimeTrainingService(SimpleNamespace(), preparation=preparation, loss_family_config=None, **kwargs)
 
-    assert service().weight_transfer_protocols == (WEIGHT_TRANSFER_PROTOCOLS["sglang"], WEIGHT_FILES_PROTOCOL)
-    assert WEIGHT_TRANSFER_PROTOCOLS["sglang"] == "slime-sglang-control-v2"
-    assert service(lora).weight_transfer_protocols == ("slime-sglang-control-v2", WEIGHT_FILES_PROTOCOL)
+    assert (
+        service().weight_transfer_protocols
+        == (WEIGHT_TRANSFER_PROTOCOLS["sglang"], WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
+        == ("slime-sglang-control-v2", "reef-weight-files-v1", "reef-no-weight-transfer-v1")
+    )
+    assert service(lora).weight_transfer_protocols == (
+        "slime-sglang-control-v2",
+        WEIGHT_FILES_PROTOCOL,
+        NO_WEIGHT_TRANSFER_PROTOCOL,
+    )
     vllm_trainer = service(inference_backend="vllm")
-    assert vllm_trainer.weight_transfer_protocols == (VLLM_PROTOCOL, WEIGHT_FILES_PROTOCOL)
+    assert vllm_trainer.weight_transfer_protocols == (
+        VLLM_PROTOCOL,
+        WEIGHT_FILES_PROTOCOL,
+        NO_WEIGHT_TRANSFER_PROTOCOL,
+    )
+    assert service(inference_backend="none").weight_transfer_protocols == (NO_WEIGHT_TRANSFER_PROTOCOL,)
+    # A receiver with engines keeps its native protocol; only the null receiver selects the no-transfer one.
+    for trainer, receiver, selected in (
+        (service(), SGLangInferenceService(SGLangConfig("model", 1, 1, 1)), WEIGHT_TRANSFER_PROTOCOLS["sglang"]),
+        (vllm_trainer, VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), VLLM_PROTOCOL),
+        (service(), NullInferenceService(), NO_WEIGHT_TRANSFER_PROTOCOL),
+        (service(inference_backend="none"), NullInferenceService(), NO_WEIGHT_TRANSFER_PROTOCOL),
+    ):
+        plan = ModelDeploymentPlan(resources=_Resources(), inference=receiver, training=trainer)
+        assert plan.weight_transfer_protocol(receiver) == selected
     with pytest.raises(ValueError, match="no receiver protocol"):
         service(inference_backend="tinker")
     plan = ModelDeploymentPlan(

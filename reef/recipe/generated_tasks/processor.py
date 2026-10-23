@@ -10,7 +10,7 @@ generation job:
 
 The round's train tasks wait in the record stage's task pool. The pipeline takes up to ``tasks_per_step`` of
 them as one rollout batch, and ``GeneratedTaskBatches`` plays them on its own worker: each task's training
-arm ``plays_per_task`` times, with at most ``episode_capacity`` episodes queued or running. Each episode
+arm ``plays_per_task`` times, through the generator service, which limits the episodes in flight. Each episode
 carries the batch and its task use. The training episodes of one task use form one group, and the batch
 trains on its groups once they settled. A task's first play saves its result; when every train task of a
 generation has a result, the next job sends the generation's results to the generator.
@@ -45,6 +45,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
+from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult
 from reef.record2record import Record2Record, RecordSetUnit, ReportContext
@@ -53,7 +54,6 @@ from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.runner import Episode, EpisodeRunner
 from reef.storage.tasks import (
     GenerationState,
     PlayedResult,
@@ -94,7 +94,16 @@ def reported_task_name(report: AgentRecord) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
-def rewards_of(episodes: tuple[Episode, ...]) -> tuple[float, ...]:
+def reported_arm(report: AgentRecord) -> str | None:
+    """Read the episode's arm label from a task-player report."""
+    metadata = report.payload.get("metadata")
+    episode = metadata.get("episode") if isinstance(metadata, Mapping) else None
+    labels = episode.get("labels") if isinstance(episode, Mapping) else None
+    arm = labels.get("arm") if isinstance(labels, Mapping) else None
+    return arm if isinstance(arm, str) else None
+
+
+def rewards_of(episodes: tuple[TaskPlay, ...]) -> tuple[float, ...]:
     """The rewards of the episodes that ran. An episode that ran without a reward counts as 0."""
     return tuple(
         episode.reward if episode.reward is not None else 0.0
@@ -375,31 +384,6 @@ class DeliveryOutcome(SupportsReceipt):
     error: str
 
 
-class EpisodeCapacity:
-    """At most ``limit`` episodes queued or running at once, across the tasks of one rollout batch.
-
-    A wave waits until all of its episodes fit, so a task with more plays than the limit plays in several
-    waves. Create it on the event loop that uses it.
-    """
-
-    def __init__(self, limit: int) -> None:
-        if limit < 1:
-            raise ValueError("the episode capacity must be positive")
-        self.limit = limit
-        self.admitted = 0
-        self.changed = asyncio.Condition()
-
-    async def admit(self, count: int) -> None:
-        async with self.changed:
-            await self.changed.wait_for(lambda: self.admitted + count <= self.limit)
-            self.admitted += count
-
-    async def release(self, count: int) -> None:
-        async with self.changed:
-            self.admitted -= count
-            self.changed.notify_all()
-
-
 def episode_assembly(scaffold_tolerance: int = DEFAULT_SCAFFOLD_TOLERANCE) -> SampleAssembly:
     """The sample assembly for an agent's episode: many model calls that extend one conversation."""
     return SampleAssembly(
@@ -526,9 +510,6 @@ class TaskBatchSettings(PluginSettings):
     """The config of ``GeneratedTaskBatches``."""
 
     tasks_per_step: int = config_option(DEFAULT_TASKS_PER_STEP, help="The saved tasks of one rollout batch.")
-    episode_capacity: int = config_option(
-        0, help="The episodes of a rollout batch queued or running at once; 0 is tasks_per_step x plays_per_task."
-    )
     settle_timeout_seconds: float = config_option(
         600.0, help="How long a batch whose plays ended waits for its reports before its groups settle as they are."
     )
@@ -536,8 +517,6 @@ class TaskBatchSettings(PluginSettings):
     def __post_init__(self) -> None:
         if self.tasks_per_step <= 0:
             raise ValueError("tasks_per_step must be positive")
-        if self.episode_capacity < 0:
-            raise ValueError("episode_capacity must be non-negative")
         if self.settle_timeout_seconds <= 0:
             raise ValueError("settle_timeout_seconds must be positive")
 
@@ -744,7 +723,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             if context.task_storage is None:
                 raise ValueError("rounds need the task storage of a scenario session")
         self.task_generator = task_generator
-        self.episode_runner = EpisodeRunner(task_player) if task_player is not None else None
+        self.task_player = task_player
         self.worker = worker
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(self, thread_name="generated-task-rounds", concurrency=1)
@@ -995,7 +974,6 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         task: TaskItem,
         *,
         labels: Mapping[str, str],
-        capacity: EpisodeCapacity | None = None,
     ) -> tuple[TaskPlayResult, tuple[str, ...]]:
         """Play one pooled task with ``labels`` on its episodes; save its result in the task store at its first play.
 
@@ -1006,7 +984,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         identity = task.metadata["task"]
         harbor_task = read_harbor_task(task.task_path)
         try:
-            result, reports = await self.played(harbor_task, identity["round"], labels=labels, capacity=capacity)
+            result, reports = await self.played(harbor_task, identity["round"], labels=labels)
         except Exception as exc:
             logger.exception("generated-task %s could not play on scenario %r", identity["name"], self.scenario)
             error = str(exc) or type(exc).__name__
@@ -1029,47 +1007,34 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         generation: int,
         *,
         labels: Mapping[str, str],
-        capacity: EpisodeCapacity | None = None,
     ) -> tuple[TaskPlayResult, tuple[str, ...]]:
-        """Stage one saved task and play its training arm through the episode runner.
+        """Stage one saved task in the generator service and play its training arm there.
 
         Returns the task's result and the reports of its training episodes, none for a task that was not
         played. A task whose training episodes all could not run comes back with the first episode's error
-        as an infrastructure failure. With ``capacity``, the plays run in waves that the capacity admits.
+        as an infrastructure failure. The generator service limits the episodes in flight.
         """
-        if self.episode_runner is None:
+        if self.task_player is None:
             raise RuntimeError("playing a task needs the generator service")
         try:
-            task_path = await self.episode_runner.stage(task)
+            task_path = (await self.task_player.write_task(task)).path
         except (DuplicateTask, TaskNameConflict) as exc:
             return TaskPlayResult(task, error=f"refused: {exc}"), ()
-        labels = {"round": str(generation), **labels}
-        wave_size = self.plays_per_task if capacity is None else capacity.limit
-        training: list[Episode] = []
-        for start in range(0, self.plays_per_task, wave_size):
-            count = min(wave_size, self.plays_per_task - start)
-            if capacity is not None:
-                await capacity.admit(count)
-            try:
-                training.extend(
-                    await self.episode_runner.play(
-                        task_path,
-                        scenario=self.scenario,
-                        arm=TRAINING_ARM,
-                        plays=count,
-                        extra_instruction_files=(),
-                        labels=labels,
-                        model=self.served_model,
-                    )
-                )
-            finally:
-                if capacity is not None:
-                    await capacity.release(count)
+        training = await self.task_player.play(
+            task_path,
+            scenario=self.scenario,
+            arm=TRAINING_ARM,
+            plays=self.plays_per_task,
+            is_reporting=True,
+            extra_instruction_files=(),
+            tags={"round": str(generation), **labels},
+            model=self.served_model,
+        )
         if training and all(episode.is_infrastructure_failure for episode in training):
             error = f"the agent could not play the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
             return TaskPlayResult(task, error=error, infrastructure_failure=True), ()
-        reports = tuple(report_id for episode in training for report_id in episode.report_record_ids)
-        return TaskPlayResult(task, rewards_of(tuple(training))), reports
+        reports = tuple(report_id for episode in training for report_id in episode.report_agent_record_ids)
+        return TaskPlayResult(task, rewards_of(training)), reports
 
     def save_result(self, generation: int, result: PlayedResult) -> None:
         """Save a task's first play result; a result that the store fails to save waits for the next job."""
@@ -1151,9 +1116,9 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
     """Roll saved tasks out as batches, and batch the training groups of each rollout.
 
     The pipeline submits up to ``tasks_per_step`` saved tasks from the task pool as one rollout batch. This
-    stage plays them on its own worker through the record-to-task stage's episode runner. Each episode
-    carries the batch and the task use, and at most ``episode_capacity`` episodes are queued or running at
-    once. A task's first result goes to the task store, and the record-to-task stage sends finished
+    stage plays them all at once on its own worker, through the record-to-task stage and the generator service,
+    which limits the episodes in flight. Each episode carries the batch and the task use. A task's first result
+    goes to the task store, and the record-to-task stage sends finished
     generations' results to the generator. The tasks of groups that trained are marked trained in the store once
     the commit of their training step is durable.
     """
@@ -1194,13 +1159,10 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
         self.record2task = record2task
         self.tasks_per_step = settings.tasks_per_step
         self.settle_timeout_seconds = settings.settle_timeout_seconds
-        self.episode_capacity = settings.episode_capacity or settings.tasks_per_step * record2task.plays_per_task
         self.worker = worker or BackgroundJobWorker(self, thread_name="generated-task-rollouts", concurrency=1)
         self.running_batch: str | None = None
         #: The tasks of the rollout batch that plays.
         self.running_tasks: tuple[TaskItem, ...] = ()
-        #: The capacity of the rollout batch that plays, for status.
-        self.capacity: EpisodeCapacity | None = None
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
@@ -1245,29 +1207,18 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
                 task_names=tuple(task_use.rsplit("/", 1)[1] for task_use in task_uses)
             )
 
-    def status(self) -> Mapping[str, Any]:
-        return {
-            "rollout_capacity": {
-                "episodes": self.episode_capacity,
-                "admitted_episodes": 0 if self.capacity is None else self.capacity.admitted,
-                "running_batch": self.running_batch,
-            }
-        }
-
     def close(self) -> None:
         self.worker.close()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:
-        """Play one rollout batch: its tasks at once, their episodes within the capacity."""
+        """Play one rollout batch: all of its tasks at once."""
         if not isinstance(job, RolloutJob):
             raise TypeError(f"the rollout worker takes RolloutJob, not {type(job).__name__}")
-        capacity = EpisodeCapacity(self.episode_capacity)
-        self.capacity = capacity
 
         async def played(task_use: str, task: TaskItem) -> tuple[str, tuple[str, ...]]:
             labels = {BATCH_LABEL: job.receipt, TASK_USE_LABEL: task_use}
             try:
-                _, reports = await self.record2task.play_and_record(task, labels=labels, capacity=capacity)
+                _, reports = await self.record2task.play_and_record(task, labels=labels)
             except Exception:
                 # The other tasks of the batch play on; this task rolls out again after a restart.
                 logger.exception(
