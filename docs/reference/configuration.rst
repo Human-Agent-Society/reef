@@ -1323,7 +1323,8 @@ generated-task stages to consume. The generator writes, checks and plays Harbor 
 generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker.
+place it on the host that has Docker. The generator runs its proposals, checks and plays at the same time.
+``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind a play.
 
 .. config::
 
@@ -1334,7 +1335,7 @@ place it on the host that has Docker.
    generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
-   generator.concurrency | 2 | episodes in flight per play request
+   generator.concurrency | 2 | episodes in flight across all play requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default

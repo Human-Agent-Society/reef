@@ -72,13 +72,9 @@ def validate_bridge_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> N
             raise ValueError(
                 "--keep-lora-base-resident applies to colocated training; without --colocate nothing is released"
             )
-    if args.save_interval > 1:
-        # --release-train loads the workers from --save before each job. Thus the workers lose the jobs without a checkpoint.
-        if args.release_train:
-            raise ValueError("--save-interval above 1 cannot run with --release-train")
-        # LoRA starts each scenario again from its last saved adapter. Thus LoRA needs a save after each job.
-        if args.megatron_lora_rank > 0:
-            raise ValueError("--save-interval above 1 requires full-weight training, not LoRA")
+    # --release-train loads the workers from --save before each job. Thus the workers lose the jobs without a checkpoint.
+    if args.save_interval > 1 and args.release_train:
+        raise ValueError("--save-interval above 1 cannot run with --release-train")
 
 
 def validate_bridge_args_without_engines(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
@@ -174,7 +170,7 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
     if marker is not None:
         marker = clear_unsaved_marker(storage, marker, args.megatron_lora_rank)
     if marker is not None and marker["status"] == "RUNNING":
-        settled = committed_marker_to_restore(storage, marker, args.megatron_lora_rank)
+        settled = committed_marker_to_restore(storage, marker)
         if settled is None:
             raise RuntimeError(running_job_message(storage, marker, args.megatron_lora_rank))
         print(
@@ -252,16 +248,17 @@ def clear_unsaved_marker(
     With ``--save-interval`` above 1, a job between two saves
     keeps no checkpoint. Its marker, or the copy of its marker in a
     ``RUNNING`` marker, has a null ``checkpoint_path``. The workers load the
-    last saved rollout ``T``.
+    last saved rollout ``T``. With per-scenario LoRA, ``T`` is the newest save
+    of any scenario, and each scenario continues from its own last save.
 
     The preflight deletes the marker and does not restore an older marker.
     Reef committed versions after ``T``, and an older marker would use their
     runtime load IDs again. Without a marker, the start publishes the
-    weights of ``T`` with a new runtime load ID.
+    weights of each scenario's last save with a new runtime load ID.
 
     The preflight deletes the marker only if these conditions are true:
 
-    - The run trains all weights, and ``--load`` is equal to ``--save``.
+    - ``--load`` is equal to ``--save``.
     - The tracker names ``T``, and ``T`` is before the job without a checkpoint.
     - For a ``RUNNING`` marker, ``T`` is before the stopped job, and that job wrote no files.
     - The newest checkpoint record is the record of ``T``.
@@ -274,8 +271,7 @@ def clear_unsaved_marker(
     _, tracker_iteration, _ = tracker_iteration_state(storage)
     records = sorted(storage.records_root.glob("*.json"))
     safe = (
-        megatron_lora_rank == 0
-        and load_resolves_to_save(storage)
+        load_resolves_to_save(storage)
         and tracker_iteration is not None
         and tracker_iteration < unsaved["rollout_id"]
         and (
@@ -295,8 +291,8 @@ def clear_unsaved_marker(
         )
     print(
         f"[reef] training job {unsaved['job_id']} (rollout {unsaved['rollout_id']}) saved no checkpoint. "
-        f"Training continues from the checkpoint of rollout {tracker_iteration}. "
-        f"The jobs after rollout {tracker_iteration} do not train again. "
+        f"The weights of each scenario continue from their last checkpoint, at rollout {tracker_iteration} or before. "
+        "The jobs of a scenario after its last checkpoint do not train again. "
         f"Deleted marker: {json.dumps(dict(marker), sort_keys=True)}",
         file=sys.stderr,
         flush=True,
@@ -306,25 +302,20 @@ def clear_unsaved_marker(
     return None
 
 
-def committed_marker_to_restore(
-    storage: CheckpointStorage, marker: Mapping[str, Any], megatron_lora_rank: int
-) -> dict[str, Any] | None:
+def committed_marker_to_restore(storage: CheckpointStorage, marker: Mapping[str, Any]) -> dict[str, Any] | None:
     """The settled marker a ``RUNNING`` job replaced, when restoring it is safe.
 
-    This is the documented full-weight state: ``--load`` resolves to ``--save``,
-    the tracker names an earlier rollout ``P``, the job left nothing for its
-    own rollout, and the newest checkpoint record is ``P``'s. The marker the
-    job replaced must be kept in the ``RUNNING`` marker, settle ``P``'s job,
-    and carry Reef's commit acknowledgement, which a rejected job never gets.
-    Any other state stays ambiguous.
+    The state is safe when ``--load`` resolves to ``--save``, the tracker names an
+    earlier rollout ``P``, the job left nothing for its own rollout, and the
+    newest checkpoint record is ``P``'s. The marker the job replaced must be
+    kept in the ``RUNNING`` marker, settle ``P``'s job, and carry Reef's
+    commit acknowledgement, which a rejected job never gets. With
+    per-scenario LoRA, the stopped job wrote no adapter snapshot either: the
+    save writes the snapshot after the rollout's Megatron checkpoint. Any
+    other state stays ambiguous.
     """
     committed = marker.get(COMMITTED_MARKER_KEY)
-    if (
-        megatron_lora_rank > 0
-        or not isinstance(committed, Mapping)
-        or not marker_committed(committed)
-        or not load_resolves_to_save(storage)
-    ):
+    if not isinstance(committed, Mapping) or not marker_committed(committed) or not load_resolves_to_save(storage):
         return None
     _, tracker_iteration, _ = tracker_iteration_state(storage)
     previous_rollout = committed.get("rollout_id")

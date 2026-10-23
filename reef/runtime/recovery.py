@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
+from reef.surface.adapter import adapter_name
 
 logger = logging.getLogger(__name__)
 
@@ -757,7 +758,7 @@ class TrainingRecovery:
         inference_url = publisher.inference.inference_url()
         versions = self._observed_versions(status)
         if publisher.history is not None:
-            publisher.restore_scenario_adapters(marker)
+            publisher.republish_scenario_checkpoints(marker)
         self._restore_version(marker, status, versions)
         self.publication.finish_recovery(marker, publisher.runtime_load_id)
         return inference_url
@@ -804,17 +805,24 @@ class TrainingRecovery:
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot inference. Publish actor weights before construction returns
             # so the first Reef inference uses the actual training version. A
-            # LoRA bridge that never trained has nothing to publish: the frozen
-            # base inference booted from is exactly what every fresh adapter
-            # computes, and the history replay above restored trained ones.
+            # LoRA bridge without a marker has nothing more to publish: the
+            # frozen base inference booted from is exactly what every fresh
+            # adapter computes, and the republication above restored trained
+            # ones. The Slime preflight also deletes the marker of a job that
+            # saved no checkpoint.
+            scenario = publisher.marker_scenario(marker)
             publisher.runtime_load_id = publisher.update_serving(
                 # A fresh sender may only capture a delta baseline unless a
                 # real full transfer is requested. Startup must load bytes
                 # and acknowledge Reef's identity on every receiver.
                 force_full=True,
-                scenario=publisher.marker_scenario(marker),
+                scenario=scenario,
                 runtime_load_id=recovered_runtime_load_id or publisher.publication_target(marker),
             )
+            if scenario is not None:
+                # Serving reads the scenario's adapter version from the history.
+                version = publisher.runtime_load_id
+                publisher.require_history().record_publication(scenario, version, adapter_name(scenario, version))
         elif config.lora and marker is None:
             # Nothing to publish, but the engines still need Reef's canonical
             # version token (they boot with a backend default), and colocated

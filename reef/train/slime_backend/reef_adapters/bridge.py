@@ -200,9 +200,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self.learning_rate_schedules_path = (
             Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
         )
+        # The progress of the weights that train next, per scenario; the file keeps the progress of saved weights.
         self.learning_rate_schedules = read_learning_rate_schedules(
             self.learning_rate_schedules_path, next_rollout_id=start_rollout_id
         )
+        self.saved_learning_rate_schedules = dict(self.learning_rate_schedules)
         self._storage = (
             CheckpointStorage(
                 storage_config,
@@ -391,7 +393,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
-        if self.learning_rate_schedules:
+        # The checkpoint saves the weights of this job's scenario only. Another
+        # scenario's progress since its own last save is lost on a restart.
+        schedule = self.learning_rate_schedules.get(checkpoint.scenario or "")
+        if schedule is not None:
+            self.saved_learning_rate_schedules[checkpoint.scenario or ""] = schedule
             self.write_learning_rate_schedules()
 
     def algorithm_for_loss_family(self, loss_family: str) -> SlimeAlgorithm:
@@ -463,13 +469,14 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return None if record is None else LearningRateScheduleState.from_dict(record)
 
     def write_learning_rate_schedules(self) -> None:
-        """Write the schedule progress of a saved checkpoint beside the job marker.
+        """Write the schedule progress of the saved weights beside the job marker.
 
-        Each record names the rollout that trained it. A saved checkpoint
-        includes all earlier rollouts. Thus the file does not name a rollout
-        after the checkpoint that a restart loads.
+        Each record names the rollout that trained it. A scenario's record
+        changes only when a checkpoint saves that scenario's weights, and a
+        saved checkpoint includes the scenario's earlier rollouts. Thus the
+        file does not name a rollout after the checkpoint that a restart loads.
         """
-        write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
+        write_json(self.learning_rate_schedules_path, {"schedules": self.saved_learning_rate_schedules})
 
     def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
         """Export the actor's weights as ``runtime_load_id`` when the session delivers files.

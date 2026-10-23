@@ -924,18 +924,16 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
             self.restore_scenario_adapters(marker)
 
     def restore_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
-        """Re-register every scenario's committed adapter after a restart.
+        """Re-register every scenario's current adapter on replacement engines.
 
-        The Megatron checkpoint restores only the slot's last occupant; the
-        other scenarios come back from their persisted slot snapshots. Each
-        is loaded under the name its last publication recorded, so Reef's
+        The trainer still holds each scenario's newest state, so each adapter
+        is loaded under the name its last publication recorded, and Reef's
         routing for that scenario keeps resolving. The marker's scenario is
-        activated last: the regular startup republication then publishes it
-        under the recovered runtime load ID.
+        activated last, and the job's complete transfer then publishes it.
         """
         history = self.require_history()
         residency = self.require_residency()
-        # A rejected job publishes nothing at startup: its scenario comes back from history like a peer.
+        # A rejected job publishes nothing: its scenario comes back from history like a peer.
         active = marker.get("scenario") if marker is not None and marker.get("status") != "REJECTED" else None
         pending = [
             (scenario, adapter)
@@ -950,5 +948,32 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(scenario, version, self)
+        if active is not None:
+            self.training.activate_scenario(active)
+
+    def republish_scenario_checkpoints(self, marker: Mapping[str, Any] | None) -> None:
+        """Publish every scenario's checkpoint under a new runtime load ID after a restart.
+
+        Each scenario comes back from its persisted slot snapshot, which its
+        last checkpoint wrote, as full-weight training comes back from its
+        checkpoint. The versions it committed after that checkpoint do not
+        train again. Serving routes the scenario's checkpoint release to the
+        new adapter until the scenario's next step publishes. The marker's
+        scenario is activated last: the regular startup republication then
+        publishes it under the recovered runtime load ID.
+        """
+        history = self.require_history()
+        # A rejected job publishes nothing at startup: its scenario comes back from history like a peer.
+        active = marker.get("scenario") if marker is not None and marker.get("status") != "REJECTED" else None
+        scenarios = [scenario for scenario in history.scenarios if scenario != active]
+        if not scenarios and active is None:
+            return
+        self.pause_generation()
+        if self.memory_handoff is not None:
+            self.memory_handoff.onload_weights()
+        for scenario in scenarios:
+            self.training.activate_scenario(scenario)
+            published = self.update_serving(force_full=True, scenario=scenario)
+            history.record_publication(scenario, published, adapter_name(scenario, published))
         if active is not None:
             self.training.activate_scenario(active)
