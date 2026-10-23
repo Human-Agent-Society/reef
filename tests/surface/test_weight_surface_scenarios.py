@@ -28,8 +28,27 @@ def checkpoint(tmp_path: Path, runtime_load_id: str | None) -> Artifact:
     return Artifact.local(root, metadata={} if runtime_load_id is None else {"runtime_load_id": runtime_load_id})
 
 
+class AdapterRuntime(StubTrainingRuntime):
+    """Serves one adapter version per scenario, from ``adapters``, and ``engine`` as the engine version."""
+
+    def __init__(self, adapters: dict[str, str], engine: str = "inc:9") -> None:
+        super().__init__()
+        self.adapters = adapters
+        self.engine = engine
+
+    def serving_runtime_load_id(self):
+        return self.engine
+
+    def serving_adapter_runtime_load_id(self, scenario):
+        return self.adapters.get(scenario)
+
+
+def hooks_for(scenario: str, adapters: dict[str, str]) -> WeightInferenceHooks:
+    return WeightInferenceHooks(scenario=scenario, runtime=AdapterRuntime(adapters).inference)
+
+
 def test_live_requests_route_to_the_scenario_publication() -> None:
-    hooks = WeightInferenceHooks(scenario="math")
+    hooks = hooks_for("math", {"math": "inc:9"})
     out = hooks.prepare_request(live("inc:7"), "/v1/chat/completions", {"messages": []})
     assert out["lora_path"] == adapter_name("math", "inc:7")
     assert out["return_meta_info"] is True
@@ -37,14 +56,23 @@ def test_live_requests_route_to_the_scenario_publication() -> None:
         hooks.prepare_request(live("inc:7"), "/v1/chat/completions", {"lora_path": adapter_name("code", "inc:7")})
 
 
-def test_checkpoint_requests_route_by_recorded_runtime_load_id(tmp_path: Path) -> None:
-    hooks = WeightInferenceHooks(scenario="math")
-    out = hooks.prepare_request(checkpoint(tmp_path, "inc:3"), "/v1/chat/completions", {})
+def test_checkpoint_requests_route_to_the_adapter_the_engine_serves(tmp_path: Path) -> None:
+    # Before a restart, the engine serves the checkpoint under the version that published it.
+    out = hooks_for("math", {"math": "inc:3"}).prepare_request(
+        checkpoint(tmp_path, "inc:3"), "/v1/chat/completions", {}
+    )
     assert out["lora_path"] == adapter_name("math", "inc:3")
+    # A restart publishes it again under a new version.
+    out = hooks_for("math", {"math": "new:1"}).prepare_request(
+        checkpoint(tmp_path, "inc:3"), "/v1/chat/completions", {}
+    )
+    assert out["lora_path"] == adapter_name("math", "new:1")
+    with pytest.raises(ReefError, match="holds no adapter for scenario 'math'"):
+        hooks_for("math", {}).prepare_request(checkpoint(tmp_path, "inc:3"), "/v1/chat/completions", {})
 
 
 def test_unpublished_scenarios_sample_the_base(tmp_path: Path) -> None:
-    hooks = WeightInferenceHooks(scenario="math")
+    hooks = hooks_for("math", {})
     out = hooks.prepare_request(checkpoint(tmp_path, None), "/v1/chat/completions", {"messages": []})
     assert "lora_path" not in out
     with pytest.raises(ReefError, match="published no adapter yet"):
@@ -53,7 +81,7 @@ def test_unpublished_scenarios_sample_the_base(tmp_path: Path) -> None:
 
 def test_shared_and_per_scenario_modes_are_exclusive() -> None:
     with pytest.raises(ValueError, match="either"):
-        WeightInferenceHooks("reef_lora", scenario="math")
+        WeightInferenceHooks("reef_lora", scenario="math", runtime=AdapterRuntime({}).inference)
     assert artifact_runtime_load_id(ArtifactRef("id", "v", None)) is None
 
 
@@ -76,5 +104,22 @@ def test_recovery_checks_the_scenario_adapter_not_the_global_version() -> None:
     # serving falls back to the exact checkpoint instead of routing to a
     # name the engine would reject.
     assert WeightLoader("code").recover(current, checkpoint_ref, runtime) == checkpoint_ref
-    surface = create_weight_surface(scenario="math")
+    surface = create_weight_surface(scenario="math", runtime=runtime)
     assert isinstance(surface.loader, WeightLoader) and isinstance(surface.inference, WeightInferenceHooks)
+
+
+def test_a_restart_serves_the_checkpoint_under_the_version_it_was_published_again(tmp_path: Path) -> None:
+    # The restart published math's checkpoint again as new:1. No committed version names new:1.
+    runtime = AdapterRuntime({"math": "new:1"}).inference
+    loader = WeightLoader("math")
+    saved = checkpoint(tmp_path, "inc:2")
+    live = LiveWeightArtifactRef(
+        content_id="live:x", release_id="live:p:3", parent_release_id=None, runtime_load_id="inc:3"
+    )
+    # A newer live head that saved no checkpoint falls back to the checkpoint; a checkpoint head stays.
+    assert loader.recover(live, saved.ref, runtime) == saved.ref
+    assert loader.recover(saved.ref, saved.ref, runtime) == saved.ref
+    # Requests reach the adapter that holds the checkpoint, and records carry the engine's version.
+    out = WeightInferenceHooks(scenario="math", runtime=runtime).prepare_request(saved, "/v1/chat/completions", {})
+    assert out["lora_path"] == adapter_name("math", "new:1")
+    assert loader.served_runtime_load_id(saved, runtime) == "new:1"

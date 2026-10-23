@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -246,11 +247,20 @@ def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tm
     assert refusing.deleted[-1] == NAMES[0]
 
 
+def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    (item,) = asyncio.run(generator.generate(REQUEST))
+    staged = asyncio.run(service.write_task(item))
+    assert asyncio.run(generator.validate(item)).is_valid
+    assert staged.path.is_dir() and item.name not in service.deleted, "a play may be using the staged copy"
+
+
 def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    asyncio.run(service.write_task(item))
+    asyncio.run(service.write_task(replace(item, name="harbor-copy")))
     assert asyncio.run(generator.validate(item)).errors == ("refused: duplicate of a task already under the root",)
 
 

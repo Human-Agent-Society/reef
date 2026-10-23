@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,12 +18,17 @@ from tests.recipes.sao.test_sao_bridge import (
     _RemoteMethod,
     _sao_row,
 )
+from tests.support.runtime_stubs import StubTrainingRuntime
 from tests.support.slime_coordinator import build_slime_coordinator
 
-from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
-from reef.runtime.recovery import ScenarioHistory, history_path
+from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed
+from reef.runtime.recovery import ScenarioHistory, history_path, marker_path
 from reef.runtime.scheduler import InferenceMemory
+from reef.surface.weights import WeightInferenceHooks, WeightLoader
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
+from reef.train.slime_backend.reef_adapters.training_job.storage import LEARNING_RATE_SCHEDULES_FILENAME
 
 INCARNATION = "inc"
 
@@ -225,6 +231,7 @@ def _actor(
     adapter_capacity: int | None = None,
     colocate: bool = False,
     keep_lora_base_resident: bool = False,
+    checkpoint_interval: int = 1,
 ):
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
     manager = _ColocatedManager(version) if colocate else _Manager(version)
@@ -239,6 +246,7 @@ def _actor(
         adapter_capacity=adapter_capacity,
         colocate=colocate,
         keep_lora_base_resident=keep_lora_base_resident,
+        checkpoint_interval=checkpoint_interval,
         critic_group=_RecordingGroup(template, critic=True),
         loss_family="sao",
     )
@@ -277,12 +285,12 @@ def test_a_restart_after_a_rejected_job_brings_that_scenario_back_from_its_histo
     actor.reject_training_candidate(checkpoint.training_job_id)
     assert actor.health()["training_job"]["status"] == "REJECTED"
 
-    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(2), start_rollout_id=3)
+    # Restarted engines start at inc:10, as a new incarnation would.
+    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(10), start_rollout_id=3)
     after = restarted.health()
-    # Routing still names a's committed adapter, so the engine holds it again.
-    assert after["lora_adapters"]["a"]["adapter"] == scenario_adapter_name("a", "inc:1")
-    assert ("a", scenario_adapter_name("a", "inc:1")) in group2.published
-    assert ("b", scenario_adapter_name("b", "inc:2")) in group2.published
+    # Each scenario comes back from its checkpoint under a new runtime load ID.
+    assert group2.publications == [("a", "inc:11"), ("b", "inc:12")]
+    assert after["lora_adapters"]["a"]["adapter"] == scenario_adapter_name("a", "inc:11")
     assert set(after["adapter_residency"]["scenarios"]) == {"a", "b"}
 
 
@@ -340,33 +348,102 @@ def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray
     _run(actor, _job("c", 0, "inc:2"))
     _run(actor, _job("a", 1, "inc:3"))  # marker: a, published inc:4
 
-    # A new bridge over the same checkpoints (engines restarted at inc:0).
-    restarted_version = _EngineVersion(4)
+    # A new bridge over the same checkpoints; the restarted engines start at inc:10, as a new incarnation would.
     restarted, group, manager, _ = _actor(
-        tmp_path, restarted_version, start_rollout_id=4, colocate=colocate, keep_lora_base_resident=keep_base
+        tmp_path, _EngineVersion(10), start_rollout_id=4, colocate=colocate, keep_lora_base_resident=keep_base
     )
-    # Other scenarios came back under their recorded names; the marker's
-    # scenario was activated last and republished under its recorded version.
-    assert group.published == [
-        ("b", scenario_adapter_name("b", "inc:2")),
-        ("c", scenario_adapter_name("c", "inc:3")),
-    ]
+    # Other scenarios came back from their checkpoints under new runtime load
+    # IDs; the marker's scenario was activated last and republished under its
+    # recorded version.
+    assert group.published == []
     assert group.activations[-1] == "a"
-    assert group.publications == [("a", "inc:4")]
+    assert group.publications == [("b", "inc:11"), ("c", "inc:12"), ("a", "inc:4")]
     assert manager.paused == ["pause", "continue"]
     assert restarted.health()["phase"] == "serving"
     assert restarted.serving_runtime_load_id() == "inc:4"
-    # The residency manager starts from the reloaded set, not from empty.
+    # The residency manager starts from the published set, not from empty.
     residency = restarted.health()["adapter_residency"]
     assert {name: block["current"]["runtime_load_id"] for name, block in residency["scenarios"].items()} == {
         "a": "inc:4",
-        "b": "inc:2",
-        "c": "inc:3",
+        "b": "inc:11",
+        "c": "inc:12",
     }
-    assert residency["counters"]["loads"] == 3 and manager.engine.unloaded == []
+    assert manager.engine.unloaded == []
     # Training resumes with the next global checkpoint index and per-scenario steps.
-    result = _run(restarted, _job("b", 1, "inc:2"))
+    result = _run(restarted, _job("b", 1, "inc:11"))
     assert result.outcome == "complete" and group.train_calls == [(4, "b")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, True)])
+@pytest.mark.parametrize("unsaved_last", [False, True], ids=["saved-marker", "unsaved-marker-deleted"])
+def test_a_restart_serves_each_scenario_from_its_own_last_checkpoint(
+    tmp_path, _local_ray_get, colocate, keep_base, unsaved_last
+) -> None:
+    options = {"checkpoint_interval": 2, "colocate": colocate, "keep_lora_base_resident": keep_base}
+    actor, _, _, template = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))  # a: inc:1, no checkpoint
+    _run(actor, _job("a", 1, "inc:1"))  # a: inc:2, saved at rollout 1
+    _run(actor, _job("a", 2, "inc:2"))  # a: inc:3, no checkpoint
+    _run(actor, _job("b", 0, "inc:3"))  # b: inc:4, no checkpoint
+    _run(actor, _job("b", 1, "inc:4"))  # b: inc:5, saved at rollout 4
+    if unsaved_last:
+        _run(actor, _job("b", 2, "inc:5"))  # b: inc:6, no checkpoint
+        # The Slime preflight deletes the marker of a job without a checkpoint.
+        marker_path(template).unlink()
+    assert sorted(path.name for path in Path(template).parent.glob("checkpoint-*")) == ["checkpoint-1", "checkpoint-4"]
+    assert actor.health()["lora_adapters"]["a"]["runtime_load_id"] == "inc:3"
+
+    # Restarted engines start at inc:100, as a new incarnation would.
+    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(100), start_rollout_id=5, **options)
+    # As full-weight training does, each scenario comes back from its last
+    # checkpoint (its slot snapshot) under a new runtime load ID. a's version
+    # inc:3, which saved no checkpoint, does not come back.
+    if unsaved_last:
+        assert group2.publications == [("a", "inc:101"), ("b", "inc:102")]
+    else:
+        # The marker's job saved, so the startup republishes its scenario under the recorded version.
+        assert group2.publications == [("a", "inc:101"), ("b", "inc:5")]
+    assert restarted.health()["phase"] == "serving"
+    adapters = restarted.health()["lora_adapters"]
+    assert adapters["a"]["runtime_load_id"] == "inc:101"
+
+    # a's committed head inc:3 is live and the engine no longer serves it, so
+    # serving falls back to a's checkpoint, the release that inc:2 published.
+    # Its requests reach the new adapter, and its records carry that version.
+    class Runtime(StubTrainingRuntime):
+        def serving_adapter_runtime_load_id(self, scenario):
+            return restarted.health()["lora_adapters"][scenario]["runtime_load_id"]
+
+    runtime = Runtime().inference
+    saved = Artifact.local(Path(template.format(rollout_id=1)), metadata={"runtime_load_id": "inc:2"})
+    head = LiveWeightArtifactRef("live:a", "live:a:3", saved.ref.release_id, "inc:3")
+    assert WeightLoader("a").recover(head, saved.ref, runtime) == saved.ref
+    request = WeightInferenceHooks(scenario="a", runtime=runtime).prepare_request(saved, "/v1/chat/completions", {})
+    assert request["lora_path"] == scenario_adapter_name("a", "inc:101")
+    assert WeightLoader("a").served_runtime_load_id(saved, runtime) == "inc:101"
+
+    # a's next step trains from its checkpoint and publishes a new live head.
+    result = _run(restarted, _job("a", 3, "inc:101"))
+    assert result.outcome == "complete"
+    assert restarted.health()["lora_adapters"]["a"]["runtime_load_id"] == result.runtime_load_id
+    assert result.runtime_load_id not in {"inc:2", "inc:3", "inc:101"}
+
+
+@pytest.mark.unit
+def test_a_checkpoint_records_the_schedule_progress_of_its_own_scenario_only(tmp_path, _local_ray_get) -> None:
+    warmup = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
+    actor, _, _, template = _actor(tmp_path, _EngineVersion(0), checkpoint_interval=2)
+
+    def scheduled_job(scenario: str, step: int, producing: str) -> dict:
+        return {**_job(scenario, step, producing), "method": TrainingMethod("sao", warmup).to_dict()}
+
+    _run(actor, scheduled_job("a", 0, "inc:0"))  # no checkpoint
+    _run(actor, scheduled_job("b", 0, "inc:1"))  # no checkpoint
+    _run(actor, scheduled_job("b", 1, "inc:2"))  # b saved at rollout 2
+    record = json.loads((Path(template).parent / LEARNING_RATE_SCHEDULES_FILENAME).read_text(encoding="utf-8"))
+    # The checkpoint holds b's adapter only. A restart restores a without its step, so the file omits it.
+    assert record == {"schedules": {"b": {"rollout_id": 2, **LearningRateScheduleState(warmup, 2).to_dict()}}}
 
 
 @pytest.mark.unit
@@ -531,9 +608,8 @@ def test_cold_lora_recovery_waits_for_commit_before_resuming(tmp_path, _local_ra
     checkpoint = actor.execute_training_job(_job("b", 0, "inc:1"))
     published = actor.update_serving_weights(checkpoint.training_job_id)
     # A crash loses all engines after publication, before Reef acknowledges its head.
-    restarted, group, manager, _ = _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
-    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
-    assert group.publications == [("b", "inc:2")]
+    restarted, group, manager, _ = _actor(tmp_path, _EngineVersion(10), start_rollout_id=2, **options)
+    assert group.publications == [("a", "inc:11"), ("b", "inc:2")]
     assert manager.paused == ["pause"]
     assert restarted.serving_runtime_load_id() == published.runtime_load_id
     assert group.train_calls == []
@@ -550,13 +626,13 @@ def test_failed_colocated_adapter_restore_never_resumes_generation(tmp_path, _lo
     _run(actor, _job("b", 0, "inc:1"))
     managers = []
 
-    def fail_restore(group, scenario, name):
+    def fail_restore(group, **kwargs):
         group._check_publication()
         managers.append(group.manager)
         raise RuntimeError("adapter reload failed")
 
-    monkeypatch.setattr(_ColocatedGroup, "publish_adapter", fail_restore)
-    with pytest.raises(AdapterResidencyError, match="adapter reload failed"):
+    monkeypatch.setattr(_ColocatedGroup, "update_weights", fail_restore)
+    with pytest.raises(RuntimeError, match="adapter reload failed"):
         _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
     assert len(managers) == 1
     assert managers[0].generation_paused

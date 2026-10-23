@@ -467,8 +467,12 @@ at a time. In each round it:
 2. Saves the candidates in the scenario's task store, then validates each
    task with the generator.
 3. Publishes each valid task with its train/eval split.
-4. Writes each training task through the generator service and plays it
-   ``plays_per_task`` times on the training arm. It does not play eval tasks.
+4. Stages each training task in the generator service (``write_task``) and
+   plays it ``plays_per_task`` times on the training arm. It does not play eval tasks. Staging the same
+   task again returns its staged copy, so a play that a stop interrupted can
+   stage and play again. An episode with an error and no reward could not run;
+   when every training episode of a task could not run, the task's result
+   names that error.
 5. Sends the results to ``record_results``.
 
 The training plays carry the arm ``plain``, and only reports with that label
@@ -519,7 +523,11 @@ sources join tasks of both splits is rejected. ``GET /reef/status`` shows the
 number of train, eval, rejected, and pending tasks under ``task_store``.
 
 Container operations run in the generator service, ``reef.record2task.generator``.
-The record-to-task stage calls this service over HTTP. The ``generator`` deployment
+The record-to-task stage calls this service over HTTP. The task store is the
+source of each task; the service's tasks root holds staged copies. Staging the
+same task again under its name returns the staged copy, so a play that a stop
+interrupted, or a service that restarted with an empty tasks root, can still
+play a saved task. The ``generator`` deployment
 section configures the service that ``reef serve`` starts.
 See `generator configuration
 <../reference/configuration.rst#the-generator-section>`__ for its settings.
