@@ -123,7 +123,11 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
     )
     assert service(lora).weight_transfer_protocols == ("slime-sglang-control-v2", NO_WEIGHT_TRANSFER_PROTOCOL)
     vllm_trainer = service(inference_backend="vllm")
-    assert vllm_trainer.weight_transfer_protocols == (VLLM_PROTOCOL, WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
+    assert vllm_trainer.weight_transfer_protocols == (
+        VLLM_PROTOCOL,
+        WEIGHT_FILES_PROTOCOL,
+        NO_WEIGHT_TRANSFER_PROTOCOL,
+    )
     assert service(inference_backend="none").weight_transfer_protocols == (NO_WEIGHT_TRANSFER_PROTOCOL,)
     # A receiver with engines keeps its native protocol; only the null receiver selects the no-transfer one.
     for trainer, receiver, selected in (

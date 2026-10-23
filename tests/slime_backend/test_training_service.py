@@ -136,8 +136,8 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
 @pytest.mark.parametrize("inference", ["none", "sglang"])
 def test_the_no_transfer_session_reads_the_worker_layout_and_connects_no_updater(monkeypatch, inference):
     service, resources, events = service_and_resources(monkeypatch, critic=True, inference=inference)
-    native = () if inference == "none" else (PROTOCOL,)
-    assert service.weight_transfer_protocols == (*native, NO_WEIGHT_TRANSFER_PROTOCOL)
+    engine = () if inference == "none" else (PROTOCOL, WEIGHT_FILES_PROTOCOL)
+    assert service.weight_transfer_protocols == (*engine, NO_WEIGHT_TRANSFER_PROTOCOL)
     service.start(resources)
     record = UniProcExecutor.from_workers([object()])
     service.attach_weight_transport(NativeWeightTransferSession(NO_WEIGHT_TRANSFER_PROTOCOL, "session-1", record))
@@ -146,7 +146,15 @@ def test_the_no_transfer_session_reads_the_worker_layout_and_connects_no_updater
     captured = []
 
     def create(
-        args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, version_receiver, delivers_weight_files
+        args,
+        actor,
+        critic,
+        *,
+        preparation,
+        loss_family_config,
+        train_rpc_timeout_s,
+        version_receiver,
+        delivers_weight_files,
     ):
         assert not delivers_weight_files
         assert actor.train_parallel_config == critic.train_parallel_config == {"attached": True}
@@ -187,7 +195,7 @@ def test_native_transport_rejects_reuse_across_receiver_incarnations(monkeypatch
 
 def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(monkeypatch):
     service, resources, events = service_and_resources(monkeypatch, critic=True)
-    assert service.weight_transfer_protocols == (PROTOCOL, WEIGHT_FILES_PROTOCOL)
+    assert service.weight_transfer_protocols == (PROTOCOL, WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
     service.start(resources)
     session = WeightTransferSession(WEIGHT_FILES_PROTOCOL, "first")
     service.attach_weight_transport(session)
@@ -199,7 +207,15 @@ def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(
     captured = []
 
     def create(
-        args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, version_receiver, delivers_weight_files
+        args,
+        actor,
+        critic,
+        *,
+        preparation,
+        loss_family_config,
+        train_rpc_timeout_s,
+        version_receiver,
+        delivers_weight_files,
     ):
         assert version_receiver is None
         captured.append(delivers_weight_files)
