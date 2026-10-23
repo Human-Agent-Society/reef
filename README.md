@@ -269,15 +269,17 @@ evolve**, model weights or the agent harness. Weight recipes need the GPU
 training stack, while harness recipes need only a model endpoint. Each recipe
 below links to its guide and each measured benchmark links to its results
 page, and the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
-adds the code and example for every recipe. Reefine ships with `reef-infra`,
-and the other implementations live in this repository's `recipes/` cookbook,
+adds the code and example for every recipe. Reefine and
+[SFT](https://reefinfra.ai/docs/user-guide/recipes/sft/) ship with `reef-infra`,
+and SFT trains on demonstrations or imported examples for every task type.
+The other implementations live in this repository's `recipes/` cookbook,
 selected by dotted class reference and not shipped in the Reef wheel.
 
 | Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
 |---|---|---|---|---|
-| Scientific discovery | Repeated attempts at one hard problem with a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
-| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [CEO-Bench](recipes/sao/examples/ceobench/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
-| Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [simulated student with GSM8K task stream](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
+| Open-ended discovery | Repeated attempts at one hard problem with a measurable objective and no known answer | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
+| Offline tasks with a known answer | Independent tasks from a fixed set, each with a reference answer | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/), [SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/), [SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/), [OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Meta-Harness](recipes/meta_harness/README.md) | Measured: [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [AIME 2024](recipes/opd/examples/math/README.md#results), [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [SciKnowEval](recipes/sdpo/examples/sciknoweval/README.md#results), [ToolAlpaca](recipes/sdft/examples/skill_stream/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
+| Online learning from usage | Sessions with a user, where the interaction itself is the signal | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [GSM8K with a simulated student user](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
 outside the catalog. For a small walkthrough of feedback, candidate edits, and

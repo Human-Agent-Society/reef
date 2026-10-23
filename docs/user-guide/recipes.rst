@@ -15,11 +15,11 @@ catalog, and beta recipes join it once they publish learning results. The root
 `README <../../README.md#-recipes-and-examples>`__ and `recipes/README.md
 <../../recipes/README.md>`__ show the same catalog.
 
-Scientific discovery
+Open-ended discovery
 --------------------
 
-One hard problem with a measurable objective, where the recipe makes repeated
-attempts and trains on those attempts at test time.
+One hard problem with a measurable objective and no known answer, where the
+recipe makes repeated attempts and trains on those attempts at test time.
 
 .. list-table::
    :header-rows: 1
@@ -40,11 +40,12 @@ attempts and trains on those attempts at test time.
      - `Guidance-TTT <recipes/guidance-ttt.rst>`__
      - `Guidance-TTT on four discovery tasks <../../recipes/tttd/examples/guidance_ttt/README.md>`__
 
-Continual learning on a task stream
------------------------------------
+Offline tasks with a known answer
+---------------------------------
 
-A stream of independent tasks that a verifier scores one by one, so the recipe
-learns from each score before the next task arrives.
+Independent tasks from a fixed set, each with a reference answer. The recipe
+samples a batch through Reef, trains on it, and serves the next batch from
+the update.
 
 .. list-table::
    :header-rows: 1
@@ -69,6 +70,11 @@ learns from each score before the next task arrives.
      - ``recipes/sdpo/``
      - `SDPO <recipes/sdpo.rst>`__
      - `SDPO on SciKnowEval Chemistry <../../recipes/sdpo/examples/sciknoweval/README.md>`__
+   * - OPD
+     - model weights
+     - ``recipes/opd/``
+     - `OPD <recipes/opd.rst>`__
+     - `OPD on mathematical reasoning <../../recipes/opd/examples/math/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``
@@ -82,11 +88,11 @@ learns from each score before the next task arrives.
        `example <../../recipes/meta_harness/examples/terminal_bench/README.md>`__,
        `results <../../recipes/meta_harness/RESULTS.md>`__
 
-Learning from usage
--------------------
+Online learning from usage
+--------------------------
 
-Real interaction where no one reports a score or the feedback arrives late, so
-the recipe reads the signal out of the traffic it already serves.
+Sessions with a user, where the interaction itself is the signal, so the
+recipe reads it out of the traffic it already serves.
 
 .. list-table::
    :header-rows: 1
