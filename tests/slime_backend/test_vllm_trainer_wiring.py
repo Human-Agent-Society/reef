@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -59,6 +60,9 @@ def test_vllm_inference_config_uses_reef_option_names_and_placement_decisions(mo
 
 @pytest.mark.parametrize("backend", ["sglang", "vllm"])
 def test_remote_engine_input_loads_the_components_model_without_this_hosts_addresses(monkeypatch, backend):
+    # An SGLang image sets SGLANG_* variables of its own; only the one set here may reach the engine.
+    for name in [name for name in os.environ if name.startswith("SGLANG_")]:
+        monkeypatch.delenv(name)
     monkeypatch.setenv("SLIME_HOST_IP", "10.0.0.5")
     monkeypatch.setenv("SGLANG_ENABLE_X", "1")
     args = slime_args(hf_checkpoint="/root/.cache/huggingface/hub/snapshot", rollout_num_gpus=2, num_gpus_per_node=8)
@@ -68,7 +72,9 @@ def test_remote_engine_input_loads_the_components_model_without_this_hosts_addre
     assert remote["model_path"] == "Qwen/Qwen3-8B"
     if "model_path" in local["options"]:
         assert remote["options"]["model_path"] == "Qwen/Qwen3-8B"
-    assert "REEF_INFERENCE_HOST" in local["env_vars"] and remote["env_vars"] == {"SGLANG_ENABLE_X": "1"}
+    # SGLang's variables reach only an SGLang engine.
+    assert "REEF_INFERENCE_HOST" in local["env_vars"]
+    assert remote["env_vars"] == ({"SGLANG_ENABLE_X": "1"} if backend == "sglang" else {})
     assert remote["gpus_per_node"] == 2
     if backend == "sglang":
         assert (remote["external_engines"], remote["router_host"], remote["router_port"]) == ((), None, None)
