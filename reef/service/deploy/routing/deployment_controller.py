@@ -79,25 +79,26 @@ class RoutingReadinessTimeout(RoutingDeploymentError):
 class RoutingDeploymentController:
     """Serialize startup, observation, bounded recovery, policy updates and shutdown mutations.
 
-    Signal handlers only set stop intent. The startup future is joined before
-    cleanup; no monitor thread is allowed to mutate the container deployment.
+    One owner process holds the registry lock and is the only caller of the mutating methods. Signal handlers
+    only set stop intent. No monitor thread may mutate the container deployment. The startup future is joined
+    before cleanup.
 
-    State: a new controller is constructed but not prepared: ``ownership``, ``control``, ``management`` and
-    ``event_stream`` are None, ``snapshot_version`` is empty and ``directory`` is a placeholder. ``prepare``
-    fills ``ownership``, ``directory``, ``control``, ``management`` and ``snapshot_version`` for one new
-    generation; ``event_stream`` stays None until ``begin_start`` subscribes. Restoring lost observation and
-    recovery replace it with a new subscription, and shutdown closes it. ``state`` is ``"new"`` or the last
-    state given to ``event`` other than the diagnostics ``policy_rejected``, ``policy_unchanged`` and
-    ``status_timeout``, which leave the serving state in place: ``prepared``, ``starting``,
-    ``runtime_published``, ``ready``, ``observation_lost``, ``draining``, ``finalizing``, the ``policy_*``
-    update and rollback states, ``pending_policy_recovered``, ``unready``, ``recovering``,
+    A new controller is not prepared: ``ownership``, ``control``, ``management`` and ``event_stream`` are
+    None, ``snapshot_version`` is empty and ``directory`` is a placeholder. ``prepare`` fills all but
+    ``event_stream`` for one new generation. ``begin_start`` subscribes ``event_stream``. Restoring lost
+    observation and recovery replace it, and shutdown closes it.
+
+    ``state`` is ``"new"`` or the last state given to ``event``, except the diagnostics ``policy_rejected``,
+    ``policy_unchanged`` and ``status_timeout``, which leave it unchanged. The other states are ``prepared``,
+    ``starting``, ``runtime_published``, ``ready``, ``observation_lost``, ``draining``, ``finalizing``, the
+    ``policy_*`` update and rollback states, ``pending_policy_recovered``, ``unready``, ``recovering``,
     ``recovery_failed``, ``stopping``, ``stopped``, or a shutdown failure such as ``forced_shutdown`` or
-    ``cleanup_incomplete``. ``tick`` acts only in ``ready``. When its periodic status read times out, it
-    records ``status_timeout`` instead of failing; a reply that arrives is still checked. ``stop_requested``
-    and ``force_stop_requested`` only become true; ``closed`` means shutdown has begun and makes it run once,
-    and ``failed`` that some step failed. ``restart_count`` (≥ 0) never resets and is bounded by
-    ``policy.max_restarts``. ``reload_requested`` is intent that ``tick`` consumes. One owner process
-    holds the registry lock and is the only caller of the mutating methods.
+    ``cleanup_incomplete``. ``tick`` acts only in ``ready``. A timed-out periodic status read only records
+    ``status_timeout``. A reply that arrives is still checked. Status reads in startup, policy updates,
+    drains and recovery keep their deadlines. ``stop_requested`` and ``force_stop_requested`` only become
+    true. ``closed`` means shutdown has begun and makes it run once. ``failed`` means some step failed.
+    ``restart_count`` (≥ 0) never resets and is bounded by ``policy.max_restarts``. ``reload_requested`` is
+    intent that ``tick`` consumes.
     """
 
     def __init__(

@@ -1,15 +1,15 @@
 """Managed deployment admission, private lifecycle control, and bounded request finalization.
 
-Admission covers a whole HTTP request: body upload, routing selection, the
-model call, and the response up to its local EOF, including streamed
-receipts. Admission and the routing policy a request keeps are both decided
-when its headers arrive, before any body is read. Runtime admission remains
-responsible for individual model attempts and can therefore outlive neither
-this boundary nor the response's local EOF.
+Admission covers a whole inference HTTP request: body upload, routing selection,
+the model call, and the response up to its local EOF, including streamed
+receipts. Before reading the body, middleware admits the request and captures its
+routing policy, if enabled. Runtime admission covers one model attempt and can
+end before HTTP EOF. A stream's runtime admission may remain held while its record
+write finishes after request cancellation.
 
 The owner controls admission through ``/reef/lifecycle`` on a separate
-application served only on a private Unix socket (``serve_managed``); the
-public TCP application has no lifecycle route.
+application served only on a private Unix socket (``serve_managed``). The public
+TCP application has no lifecycle route.
 """
 
 from __future__ import annotations
@@ -258,22 +258,24 @@ class RoutingPublisher(ABC):
 
 
 class RequestAcceptance:
-    """An event-loop-local admission barrier, response lease, and control state.
+    """The admission state of one managed REEF child on one event loop.
 
-    State: it starts closed (``accepting`` false), not ``stopping``, with ``control_revision == -1`` and no
-    ``last_action``. ``stopping`` is terminal and implies not ``accepting``. ``control_revision`` is -1
-    exactly when ``last_action`` is None; otherwise it is the revision of the last applied command and
-    ``last_action`` is that command's ``(action, cancel_active, snapshot_version, router_config_hash,
-    open_deadline)``, with empty strings and 0.0 for fields the action lacks. ``accepting`` implies
-    ``drain_sequence`` is None; after a close, ``drain_sequence`` is the write sequence at the first close
-    and limits which writes the drain waits for. ``active`` holds the root task of each admitted request;
-    middleware removes it when the response is complete, so it may briefly hold a finished task.
-    ``forced_requests`` (≥ 0) counts tasks cancelled by a forced close, stop or owner loss.
-    Operations: ``control`` applies one validated command: an ``open`` opens admission, ``close`` and ``stop``
-    close it (``stop`` also sets ``stopping``), ``activate`` replaces ``settings`` through ``publisher``
+    State: it starts closed, with ``accepting`` and ``stopping`` false, ``control_revision == -1``, and
+    ``last_action`` and ``drain_sequence`` None. ``stopping`` is terminal and implies not ``accepting``.
+    ``control_revision`` is -1 exactly when ``last_action`` is None. Otherwise it is the revision of the last
+    applied command, and ``last_action`` is that command's ``(action, cancel_active, snapshot_version,
+    router_config_hash, open_deadline)``. Missing ``cancel_active`` defaults to False, and missing snapshot
+    and hash fields default to empty strings. ``open_deadline`` is 0.0 outside ``open``.
+    ``accepting`` implies ``drain_sequence`` is None. After a close, ``drain_sequence`` is the write sequence
+    at the first close and limits which writes the drain waits for. ``active`` holds the root task of each
+    admitted request. Middleware removes it when response handling ends. A finished task may remain until
+    removal. ``forced_requests`` (≥ 0) counts cancellation requests from commands with ``cancel_active=True``
+    or from owner loss.
+    Operations: ``control`` applies one validated command. ``open`` opens admission. ``close`` and ``stop``
+    close it, and ``stop`` also sets ``stopping``. ``activate`` replaces ``settings`` through ``publisher``
     while closed and drained. Repeating the last revision with the same command returns the status and
-    changes nothing; an older or conflicting revision is refused. ``writes`` is shared with the service;
-    ``publisher`` is set once by the app that creates this object, or stays None without routing.
+    changes nothing. An older or conflicting revision is refused. ``writes`` is shared with the service.
+    The app that creates this object sets ``publisher`` once, and it stays None without routing.
     """
 
     def __init__(self, settings: LifecycleSettings, writes: PendingWrites) -> None:
