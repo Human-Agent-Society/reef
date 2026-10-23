@@ -115,6 +115,7 @@ def initialize_megatron_objective(args) -> None:
     resolve_objective_paths(args)
     _install_external_batch_keys(args)
     _install_step_batch_size()
+    install_finalize_grads_memory_relief()
     _install_metric_capture()
     _install_rollout_logging()
     _install_critic_metrics(args)
@@ -160,6 +161,59 @@ def _install_step_batch_size() -> None:
     marked_loss_function._reef_step_batch_size = True
     loss.loss_function = loss_function
     model.loss_function = loss_function
+
+
+#: Free device memory below which the cache is emptied before the step's final
+#: gradient collective, as Slime does from THUDM/slime@2f4280e3 on.
+FINALIZE_GRADS_MIN_FREE_BYTES = 3 * 1024**3
+
+#: The pinned Slime revision (pyproject.toml), which predates 2f4280e3 and so
+#: lacks the guard. A test fails when the pin moves: then drop the hook if the
+#: new pin includes 2f4280e3, or update this revision if it does not.
+SLIME_REVISION_WITHOUT_FINALIZE_GUARD = "41014d1f29e201137fdffce737bb8bac65bc5219"
+
+
+@dataclass
+class FinalizeGradsRelief:
+    """Whether this worker process wrapped Slime's ``finalize_model_grads``.
+
+    ``installed`` is False until :func:`install_finalize_grads_memory_relief`
+    first runs in the process, and True from then on. The installer reads it so
+    that a second call does not wrap the wrapper.
+    """
+
+    installed: bool = False
+
+
+FINALIZE_GRADS_RELIEF = FinalizeGradsRelief()
+
+
+def install_finalize_grads_memory_relief() -> None:
+    """Empty the CUDA cache before the gradient collective when device memory is low.
+
+    NCCL creates some gradient communicators only after the last backward, and
+    their allocations bypass PyTorch's cache reclamation. With colocated
+    offload the process groups are rebuilt every step, so the allocation
+    recurs. Slime dropped its guard in 796d1e48 (THUDM/slime#1701: training
+    slows from the second step on) and restored it in 2f4280e3, after
+    :data:`SLIME_REVISION_WITHOUT_FINALIZE_GUARD`.
+    """
+    if FINALIZE_GRADS_RELIEF.installed:
+        return
+    import torch
+    from slime.backends.megatron_utils import model
+    from slime.utils.memory_utils import clear_memory
+
+    megatron_finalize_model_grads = model.finalize_model_grads
+
+    def finalize_model_grads(*call_args, **kwargs):
+        free_bytes, _ = torch.cuda.mem_get_info(torch.cuda.current_device())
+        if free_bytes < FINALIZE_GRADS_MIN_FREE_BYTES:
+            clear_memory()
+        return megatron_finalize_model_grads(*call_args, **kwargs)
+
+    model.finalize_model_grads = finalize_model_grads
+    FINALIZE_GRADS_RELIEF.installed = True
 
 
 def _install_metric_capture() -> None:
