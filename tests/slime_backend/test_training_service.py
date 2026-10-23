@@ -180,17 +180,21 @@ class ExportingGroup:
             (directory / shard).write_bytes(b"weights")
 
 
-def exporting_backend(group, root):
+def exporting_backend(group, root, tmp_path):
     from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
 
     return SlimeTrainingBackend(
-        group, batch_processor=None, args=SimpleNamespace(), save_hf_template=None, weight_files_root=root
+        group,
+        batch_processor=None,
+        args=SimpleNamespace(),
+        save_hf_template=str(tmp_path / "hf" / "{rollout_id}"),
+        weight_files_root=root,
     )
 
 
 def test_backend_exports_full_weights_once_per_publication_and_keeps_only_the_latest(tmp_path):
     group = ExportingGroup()
-    backend = exporting_backend(group, tmp_path / "weight-files")
+    backend = exporting_backend(group, tmp_path / "weight-files", tmp_path)
     first = backend.weight_files(None, "inc:1")
     assert first == WeightFiles(tmp_path / "weight-files" / "inc-1", "full")
     second = backend.weight_files(None, "inc:2")
@@ -199,7 +203,7 @@ def test_backend_exports_full_weights_once_per_publication_and_keeps_only_the_la
     assert group.exports == [first.path, second.path]
     with pytest.raises(RuntimeError, match="only full weights"):
         backend.weight_files("math", "inc:3")
-    assert exporting_backend(group, None).weight_files(None, "inc:3") is None
+    assert exporting_backend(group, None, tmp_path).weight_files(None, "inc:3") is None
 
 
 def test_backend_refuses_an_export_whose_shards_are_on_another_node(tmp_path):
@@ -208,7 +212,7 @@ def test_backend_refuses_an_export_whose_shards_are_on_another_node(tmp_path):
         written=("model-00001-of-00002.safetensors",),
     )
     with pytest.raises(RuntimeError, match=r"lack shards \['model-00002-of-00002.safetensors'\].*shared storage"):
-        exporting_backend(group, tmp_path / "weight-files").weight_files(None, "inc:1")
+        exporting_backend(group, tmp_path / "weight-files", tmp_path).weight_files(None, "inc:1")
 
 
 def test_service_does_not_observe_original_workers_after_operation_handoff(monkeypatch):
