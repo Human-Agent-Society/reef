@@ -297,7 +297,7 @@ directory. The controller restores ``committed-library.json`` and checks the
 stored training identity. A changed task contract or executor configuration
 requires a new state directory.
 
-The default checkpoint interval is one version. Checkpoint availability is
+The example saves a checkpoint after each version. Checkpoint availability is
 separate from archive availability. A saved program alone is insufficient
 for a full optimizer resume.
 

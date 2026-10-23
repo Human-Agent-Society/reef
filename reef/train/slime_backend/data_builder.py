@@ -246,24 +246,16 @@ def build_policy_rollout_data(
         ]
     rollout_count = len(set(normalized_ids))
     step_sizes = payload.get("external_step_sizes")
-    if step_sizes is not None:
-        if (
-            not isinstance(step_sizes, Sequence)
-            or isinstance(step_sizes, str | bytes)
-            or not step_sizes
-            or any(not isinstance(size, Integral) or isinstance(size, bool) or size <= 0 for size in step_sizes)
-        ):
-            raise ValueError("external_step_sizes must be a non-empty sequence of positive integers")
-        if sum(step_sizes) != rollout_count:
-            raise ValueError(
-                f"external_step_sizes sum {sum(step_sizes)} must equal the {rollout_count} distinct rollout_ids"
-            )
-        data["external_step_sizes"] = [int(size) for size in step_sizes]
-    remainder = payload.get("external_remainder")
-    if remainder is not None:
-        if step_sizes is not None:
-            raise ValueError("external_remainder applies only when external_step_sizes is absent")
-        if remainder not in ("partial", "error"):
-            raise ValueError(f"external_remainder must be 'partial' or 'error', got {remainder!r}")
-        data["external_remainder"] = remainder
+    if (
+        not isinstance(step_sizes, Sequence)
+        or isinstance(step_sizes, str | bytes)
+        or not step_sizes
+        or any(not isinstance(size, Integral) or isinstance(size, bool) or size <= 0 for size in step_sizes)
+    ):
+        raise ValueError("external_step_sizes must be a non-empty sequence of positive integers")
+    if sum(step_sizes) != rollout_count:
+        raise ValueError(
+            f"external_step_sizes sum {sum(step_sizes)} must equal the {rollout_count} distinct rollout_ids"
+        )
+    data["external_step_sizes"] = [int(size) for size in step_sizes]
     return data

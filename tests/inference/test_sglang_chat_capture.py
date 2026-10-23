@@ -169,6 +169,63 @@ def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, te
     asyncio.run(run())
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("request_kwargs", "message"),
+    [
+        (None, {"role": "assistant", "content": "The answer is 5."}),
+        ({"enable_thinking": True}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
+    ],
+)
+def test_handler_chat_template_kwargs_apply_when_the_request_omits_them(tmp_path, request_kwargs, message) -> None:
+    """The handler's default renders non-thinking prompts; a request's own key wins."""
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "The answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        payload = {
+            "model": "served-model",
+            "messages": [{"role": "user", "content": "what is 2+3?"}],
+            "max_completion_tokens": 2,
+        }
+        if request_kwargs is not None:
+            payload["chat_template_kwargs"] = request_kwargs
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=HybridThinkingTokenizer(),
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            response = await backend.inference(_artifact(tmp_path), "/v1/chat/completions", payload)
+        finally:
+            await server.close()
+
+        assert response["choices"][0]["message"] == message
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_handler_chat_template_kwargs_must_not_carry_tools() -> None:
+    with pytest.raises(ValueError, match="tools is reserved"):
+        SGLangInferenceHandler("http://engine", model_path="model", chat_template_kwargs={"tools": []})
+
+
 def _artifact(tmp_path) -> Artifact:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()

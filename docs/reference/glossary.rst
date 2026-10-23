@@ -109,7 +109,7 @@ release. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
 ``CandidateEvaluationPlugin`` implements both. The docs also call this the
 gate. Every recipe carries the plugin as ``candidate_evaluation``. It is
-independent of checkpoint cadence and retention.
+independent of checkpoint saves and retention.
 
 Surface
 -------

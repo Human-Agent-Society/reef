@@ -76,7 +76,9 @@ The engine supervision hooks an inference integration also implements
 ``reef/runtime/recovery.py``, next to the objects that drive them.
 Implementations inherit the corresponding interface and provide every abstract
 operation. Slime's ``SlimeTrainingBackend`` inherits ``TrainingBackend``;
-SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``. Reef's
+SGLang's ``SGLangInferenceBackend`` inherits ``InferenceMemoryHandoffBackend``, an
+``InferenceBackend`` that can also release GPU memory to a trainer and take it
+back; it serves colocated and separate deployments alike. Reef's
 coordinator owns publication and recovery ordering across them. Component
 allocation and service shutdown belong to ``TrainingService`` and
 ``InferenceService`` in ``reef/runtime/deployment.py``. Those service interfaces
@@ -86,8 +88,12 @@ that only happen to expose similarly named methods.
 Two other extension points have separate names and purposes:
 
 - ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
-  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
-  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+  including harness edits. ``RuntimeCandidateBackend`` connects weight
+  updates to Reef's scheduler; ``Trainer`` accepts it as
+  ``candidate_backend``. ``Trainer.build(..., batch_size=...)`` takes the
+  samples in one training step: a weight recipe passes the training
+  runtime's ``batch_size``, and a harness recipe passes
+  ``evolution.batch_size``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -187,9 +193,6 @@ Common members
 | ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
-|                                                   |                             | ``EveryNVersions(1)``          |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
 | ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
 |                                                   |                             | ``Trainer.build``              |
@@ -271,7 +274,7 @@ parser, and an optional environment fallback:
 
 .. code:: python
 
-   batch_size: int = config_field(4, env="REEF_MY_METHOD_BATCH_SIZE")
+   clip_ratio: float = config_field(0.2, env="REEF_MY_METHOD_CLIP_RATIO")
 
 Precedence is explicit configuration, then environment, then the default.
 ``from_environment()`` builds the recipe. On weight-training recipes,
@@ -454,10 +457,11 @@ removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostic
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
 Concrete storage classes live under ``reef.storage``:
-``commit_log.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
-``TaskStorage`` (``tasks=``), and a ``CommitHistory``, either the JSONL
-``commit_log.CommitLog`` or the ``postgres.PostgresCommitTable``. The bundled
-record stores give their ``TaskStorage`` from ``task_storage()``. ``sqlite.SQLiteScenarioStorage`` and
+``commit_history.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
+``TaskStorage`` (``tasks=``), and a ``CommitHistory``. The bundled record
+stores give their ``TaskStorage`` from ``task_storage()`` and their
+``sql_commits.SQLCommitHistory`` from ``commit_history()``; the commits are a
+``scenario_commit`` table in the same database as the records. ``sqlite.SQLiteScenarioStorage`` and
 ``postgres.PostgresScenarioStorage`` assemble their respective backends. The
 scenario package depends only on storage contracts. The storage contract is:
 
@@ -534,10 +538,11 @@ expected step, or a retry with conflicting content, raises
 ``ScenarioStoreConflict`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
-``CommitLog`` uses a local POSIX file lock. Its fsynced JSONL line is the
-durable commit point. ``PostgresCommitTable`` holds an advisory lock in one
-transaction and inserts the commit row in that transaction. The commit is
-durable when the transaction ends. Direct writes through a ``CommitHistory``
+``SQLCommitHistory`` holds one write transaction of the record store, which
+SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
+store generation. It reads the history and inserts the commit row in that
+transaction. The commit is durable when the transaction ends; an exception
+before then stores no commit. Direct writes through a ``CommitHistory``
 bypass this store contract.
 A failure after append can leave the step committed. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
@@ -778,8 +783,8 @@ The URL constructor owns its pool. To share a pool across sessions, construct
 close sessions before closing the database. Both close operations are idempotent.
 ``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
 (the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
-the schema. It uses ``directory`` only to import the commit logs and model
-configuration files of earlier versions on start. Pass it through
+the schema. It uses ``directory`` only to import the model configuration
+files of earlier versions on start. Pass it through
 ``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
 selects this storage service with ``storage.record_backend: postgres``; see
@@ -847,7 +852,7 @@ and keeps consumption metadata out of record reads.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
-the read API does not guess which. Use the commit log's per-step
+the read API does not guess which. Use the commit history's per-step
 ``consumed_ids`` to determine consumption, including intentional skips; it is
 not proof that every named record produced a model update.
 
@@ -944,6 +949,13 @@ record2task=..., task2batch=...)``):
   An automatic batch gets ``<scenario>:batch:<number>``. An instruction's
   batch gets ``<scenario>:instruction:<request id>``. The number counts the
   batches of one pipeline. It is not a training step.
+  ``Task2Batch.__init__(context, buffer_size)`` sets the most samples that
+  wait for a batch. ``None`` takes ``context.default_buffer_size``, four
+  times the trainer's batch size. ``Trainer.build`` raises
+  ``PluginConfigError`` for a buffer smaller than one batch, and for a batch
+  size above the stage's ``max_batch_samples`` (an SDPO or TTTD grid).
+  ``BufferSettings`` parses the ``buffer_size`` key, and a stage with more
+  keys extends it.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
@@ -1276,8 +1288,10 @@ the recipe nor the signal repeats that choice.
 
 ``WeightTrainingSpec.scheduling`` is the recipe's ``StepScheduling``
 (``reef.core.batches``): the rollout unit (``comparison_set`` or ``sample``),
-rollouts per optimizer step (``configured``, ``actual`` or an int), ``epochs``,
-``shuffle`` and ``remainder`` handling. It is deployment configuration rather
+``epochs``, ``shuffle`` and ``remainder`` handling. The backend's batch size
+(Slime's ``--global-batch-size``, Tinker's ``batch_size``) is the rollouts in
+one optimizer step; ``remainder`` decides what happens to a shorter last step.
+It is deployment configuration rather
 than method math, so it lives on the recipe and the runtime carries it to the
 backend with the objective reference. An objective declares only what its loss
 tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
@@ -1539,6 +1553,10 @@ inherits from the other, and there is no aggregate runtime.
 * ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
   candidates and restores training weights/optimizer state. It receives serving
   versions as values; it does not own an inference endpoint or request backend.
+  Its ``batch_size`` property is the samples in one optimizer step. The
+  deployment reads it from the training options (Slime's
+  ``--global-batch-size``, Tinker's ``batch_size``) when it builds the
+  runtime; a hand-assembled runtime config sets ``batch_size``.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
   serving weights without restoring optimizer state. Its ``model_path`` property
@@ -1599,10 +1617,12 @@ publishes through ``activate_checkpoint``. With a local inference engine the
 same deployment instead returns a model-driver plan: ``TinkerTrainingService``
 supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
 that delivers each published adapter as a PEFT directory through
-``adapter_files``; Reef's publisher then calls the receiver's
-``InferenceBackend.load_adapter_files`` (the ``reef-adapter-files-v1``
-transfer any engine that loads adapter directories can declare), so the
-trainer never holds an engine handle. The HTTP service connects through the
+``weight_files``, which returns a ``WeightFiles`` value with the ``"adapter"``
+layout. Reef's publisher then calls the receiver's
+``InferenceBackend.load_weight_files``, so the trainer never holds an engine
+handle. This is the ``reef-weight-files-v1`` transfer. A receiver that declares
+it loads both layouts: ``"adapter"`` under the adapter name Reef chooses, and
+``"full"`` (a Hugging Face checkpoint) in place of the served weights. The HTTP service connects through the
 ``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.

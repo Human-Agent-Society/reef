@@ -48,6 +48,7 @@ class TurnTokenizer:
 
     def __init__(self) -> None:
         self.calls: list[tuple[list[Mapping[str, Any]], Sequence[Any] | None, bool]] = []
+        self.template_kwargs: list[dict[str, Any]] = []
 
     def from_pretrained(self, path: str, **options: Any) -> TurnTokenizer:
         return self
@@ -60,8 +61,10 @@ class TurnTokenizer:
         tokenize: bool = True,
         add_generation_prompt: bool = False,
         return_dict: bool = True,
+        **template_kwargs: Any,
     ) -> list[int] | dict[str, list[int]]:
         self.calls.append((list(conversation), tools, add_generation_prompt))
+        self.template_kwargs.append(template_kwargs)
         ids: list[int] = []
         for message in conversation:
             if message["role"] == "assistant":
@@ -140,7 +143,7 @@ def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenize
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    (sample,) = pipeline.build_batch().items
+    (sample,) = pipeline.build_batch(1).items
 
     assert source_record_id(sample) == "i1"
     assert sample.source_agent_record_ids == ("i1", "r1")
@@ -153,6 +156,17 @@ def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenize
 
 
 @pytest.mark.unit
+def test_chat_template_kwargs_reach_every_render(tokenizer: TurnTokenizer) -> None:
+    pipeline = _pipeline(chat_template_kwargs={"enable_thinking": False})
+    pipeline.push(_inference("i1"))
+    pipeline.push(_report("r1", ("i1",)))
+
+    assert len(pipeline.build_batch(1).items) == 1
+    # The prompt and the sequence render alike, as the inference handler renders the served prompt.
+    assert tokenizer.template_kwargs == [{"enable_thinking": False}, {"enable_thinking": False}]
+
+
+@pytest.mark.unit
 def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline(target="response")
     tool_call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": '{"q": "water"}'}}
@@ -160,7 +174,7 @@ def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: T
     pipeline.push(_inference("i1", response))
     pipeline.push(_report("r1", ("i1",), teacher_context=""))
 
-    (sample,) = pipeline.build_batch().items
+    (sample,) = pipeline.build_batch(1).items
 
     target_ids = [ord(character) for character in "lookup"] + [END_OF_TURN]
     assert sample.training["tokens"] == [*_prompt_ids(), *target_ids]
@@ -176,7 +190,7 @@ def test_a_sample_over_max_tokens_is_skipped_and_counted(tokenizer: TurnTokenize
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    assert not pipeline.ready()
+    assert not pipeline.ready(1)
     assert pipeline.record2task.operational_metrics() == {"sft_overflow_reports": 1}
     assert pipeline.record2record.releasable_record_ids() == frozenset({"i1", "r1"})
 
@@ -216,8 +230,8 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
     pipeline.observe_serving_runtime_load_id("slime-v4")
     pipeline.observe_serving_runtime_load_id("slime-v5")
 
-    assert pipeline.ready()
-    assert len(pipeline.build_batch().items) == 1
+    assert pipeline.ready(1)
+    assert len(pipeline.build_batch(1).items) == 1
 
 
 @pytest.mark.unit
@@ -227,6 +241,8 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
         ({"tokenizer_path": ""}, "tokenizer_path"),
         ({"tokenizer_path": TOKENIZER_PATH, "target": "teacher"}, "target"),
         ({"tokenizer_path": TOKENIZER_PATH, "max_tokens": -1}, "max_tokens"),
+        ({"tokenizer_path": TOKENIZER_PATH, "chat_template_kwargs": ["enable_thinking"]}, "chat_template_kwargs"),
+        ({"tokenizer_path": TOKENIZER_PATH, "chat_template_kwargs": {"tools": []}}, "tools"),
     ],
 )
 def test_settings_reject_invalid_values(config: dict[str, Any], message: str) -> None:
@@ -251,7 +267,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages(tokenizer
         {
             "pipeline": {
                 "record2task": {"config": {"tokenizer_path": TOKENIZER_PATH, "target": "response", "max_tokens": 8}},
-                "task2batch": {"config": {"batch_size": 64}},
+                "task2batch": {"config": {"buffer_size": 256}},
             }
         },
         **runtime_bindings(StubTrainingRuntime()),
@@ -263,12 +279,12 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages(tokenizer
     spec = SFTRecipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("reef.recipe.sft:SftObjective", "sft")
     assert spec.scheduling == StepScheduling(unit="sample")
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport, default_buffer_size=64))
     assert isinstance(pipeline.record2record, SFTRecord2Record)
     assert isinstance(pipeline.record2task, SFTTasks)
     assert (pipeline.record2task.target, pipeline.record2task.max_tokens) == ("response", 8)
     assert isinstance(pipeline.task2batch, DistillBatches)
-    assert pipeline.task2batch.batch_size == 64
+    assert pipeline.task2batch.buffer_size == 256
 
 
 @pytest.mark.unit
@@ -293,7 +309,7 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    signal = SftObjective().prepare(pipeline.build_batch(), {"steps": 2})
+    signal = SftObjective().prepare(pipeline.build_batch(1), {"steps": 2})
 
     assert (signal.action, signal.next_algorithm_state, signal.advantages) == ("train", {"steps": 3}, None)
     assert signal.metrics == {"steps": 3, "samples": 1}
@@ -313,7 +329,11 @@ def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
     pipeline.push(_report("r1", ("i1",)))
 
     step = prepare_slime_step(
-        pipeline.build_batch(), TrainingMethod(SFTRecipe.training_spec().objective), {}, StepScheduling(unit="sample")
+        pipeline.build_batch(1),
+        TrainingMethod(SFTRecipe.training_spec().objective),
+        {},
+        StepScheduling(unit="sample"),
+        step_size=1,
     )
 
     assert step.payload is not None
@@ -327,7 +347,7 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     pipeline.push(_report("r1", ("i1",)))
 
     payload = prepare_slime_step(
-        pipeline.build_batch(), TrainingMethod("sft"), {}, StepScheduling(unit="sample")
+        pipeline.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(unit="sample"), step_size=1
     ).payload
 
     assert payload is not None

@@ -47,11 +47,8 @@ class SDPORecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="sdpo",
-            # The grid is the optimizer step, however many rollouts it holds.
-            scheduling=StepScheduling(unit="sample", batch_size="actual"),
-        )
+        # A batch is one grid; a batch size equal to the grid trains it as one optimizer step.
+        return WeightTrainingSpec(objective="sdpo", scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

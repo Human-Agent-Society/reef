@@ -32,7 +32,6 @@ from reef.evaluation import (
     build_candidate_evaluation,
 )
 from reef.storage.commits import SCENARIO_METADATA_KEY
-from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario import Scenario
 from reef.recipe import (
     RecipeConfigError,
@@ -54,11 +53,9 @@ __all__ = [
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
-    "CheckpointStrategy",
     "ConfiguredEvaluationPlugin",
     "Dispatcher",
     "EvaluationResult",
-    "EveryNVersions",
     "InferenceRuntime",
     "ModelCandidate",
     "PostgresRecordStore",

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.config import config_option
+from reef.core.config import config_metadata, config_option
 
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.runtime import ExecutorInferenceRuntime
@@ -42,13 +42,23 @@ CONNECTION_CONFIG_KEYS = (
     "inference_handler_factory",
     "inference_handler_config",
 )
+#: Inference runtime options the coordinator runtime sets itself; ``inference_runtime_options`` cannot name them.
+RESERVED_INFERENCE_OPTIONS = frozenset({*CONNECTION_CONFIG_KEYS, "type", "control"})
 #: Keys the config path forwards verbatim to :func:`connect_ray_runtime`.
-RAY_CONFIG_KEYS = ("actor_name", "namespace", "ray_address", "train_timeout_s", *CONNECTION_CONFIG_KEYS[1:])
+RAY_CONFIG_KEYS = (
+    "actor_name",
+    "namespace",
+    "ray_address",
+    "train_timeout_s",
+    "batch_size",
+    *CONNECTION_CONFIG_KEYS[1:],
+)
 
 
 def connect_executor_runtimes(
     *,
     train_group_handle: CoordinatorClient,
+    batch_size: int,
     inference: InferenceRuntime | None = None,
     inference_url: str | None = None,
     model_path: str = "",
@@ -56,10 +66,13 @@ def connect_executor_runtimes(
     inference_handler_factory: type[InferenceHandler] = HttpInferenceHandler,
     inference_handler_config: Mapping[str, Any] | None = None,
 ) -> tuple[TrainingRuntime, InferenceRuntime]:
-    """Assemble independent components over the existing deployment connection."""
+    """Assemble independent components over the existing deployment connection.
+
+    ``batch_size`` is the samples in one training step, from the training options.
+    """
     if inference is not None and inference_url is not None:
         raise ValueError("pass inference or inference_url, not both")
-    training = ExecutorTrainingRuntime(train_group_handle)
+    training = ExecutorTrainingRuntime(train_group_handle, batch_size=batch_size)
     if inference is None:
         inference = ExecutorInferenceRuntime(
             control=train_group_handle,
@@ -74,6 +87,7 @@ def connect_executor_runtimes(
 
 def connect_ray_runtime(
     *,
+    batch_size: int = 1,
     inference_url: str | None = None,
     actor_name: str = DEFAULT_ACTOR_NAME,
     namespace: str = DEFAULT_NAMESPACE,
@@ -89,6 +103,7 @@ def connect_ray_runtime(
     Reef and the backend run as separate services in one Ray cluster.
     ``namespace`` must match the namespace used when the backend actor was
     created. ``inference_url`` defaults to the address the actor reports.
+    ``batch_size`` is the samples in one training step.
     """
     return connect_executor_runtimes(
         train_group_handle=connect_ray_coordinator(
@@ -98,6 +113,7 @@ def connect_ray_runtime(
             train_timeout_s=train_timeout_s,
             inference_timeout_s=inference_timeout_s,
         ),
+        batch_size=batch_size,
         inference_url=inference_url,
         model_path=model_path,
         inference_timeout_s=inference_timeout_s,
@@ -182,6 +198,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             )
             return connect_executor_runtimes(
                 train_group_handle=handle,
+                batch_size=config.get("batch_size", 1),
                 model_path=model_path,
                 **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
             )
@@ -194,16 +211,31 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
 
 @dataclass(frozen=True)
 class CoordinatorRuntimeConfig(RayRuntimeConfig):
-    """Connect to a Reef coordinator in Ray and pair it with a separately selected inference runtime."""
+    """Connect to a Reef coordinator in Ray and pair it with a separately selected inference runtime.
+
+    Values: the ``RayRuntimeConfig`` values, where also ``inference_runtime`` is
+    a non-empty runtime kind or factory reference, and
+    ``inference_runtime_options`` maps option names of that runtime to their
+    values. No option name is one that the coordinator sets itself
+    (``RESERVED_INFERENCE_OPTIONS``). ``CoordinatorRuntimeFactory`` passes the
+    options, the connection settings and the coordinator client to the
+    selected runtime's factory, which validates the options.
+    """
 
     inference_runtime: str = config_option(
         "", help="Independently selected inference runtime kind or factory reference."
+    )
+    inference_runtime_options: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Options of the selected inference runtime.")
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if not self.inference_runtime:
             raise ValueError("runtime.inference_runtime must name the selected inference implementation")
+        reserved = sorted(set(self.inference_runtime_options) & RESERVED_INFERENCE_OPTIONS)
+        if reserved:
+            raise ValueError(f"runtime.inference_runtime_options cannot set {', '.join(reserved)}")
 
 
 class CoordinatorRuntimeFactory(RuntimeFactory):
@@ -247,10 +279,12 @@ class CoordinatorRuntimeFactory(RuntimeFactory):
                 inference_timeout_s=config.get("inference_timeout_s", 300.0),
                 train_timeout_s=config.get("train_timeout_s"),
             ),
+            batch_size=config.get("batch_size", 1),
         )
         try:
             inference = registry.build(
                 {
+                    **dict(config.get("inference_runtime_options") or {}),
                     **{key: config[key] for key in CONNECTION_CONFIG_KEYS if key in config},
                     "type": config["inference_runtime"],
                     "control": training.train_group_handle,

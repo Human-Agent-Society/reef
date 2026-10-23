@@ -22,8 +22,10 @@ from recipes.sdpo import SDPOBatches, SDPORecipe, SDPORecord2Record, SDPOReport,
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOGridSettings, SDPOTeacherSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
-from reef.train import PipelineContext
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -53,7 +55,7 @@ def tokenizer(monkeypatch: pytest.MonkeyPatch) -> SDPOTokenizer:
 
 
 def processor(**config: Any) -> TrainingPipeline:
-    context = PipelineContext("science", SDPOReport)
+    """An SDPO pipeline; a test asks it for a batch of one grid, so a batch is one optimizer step."""
     config = {
         "groups_per_step": 1,
         "rollouts_per_group": 2,
@@ -61,6 +63,7 @@ def processor(**config: Any) -> TrainingPipeline:
         "max_teacher_tokens": 18432,
         **config,
     }
+    context = PipelineContext("science", SDPOReport)
 
     def _settings(settings_type: type):
         # Each stage takes its own keys of the shared test config.
@@ -114,15 +117,32 @@ def push(
 
 
 @pytest.mark.unit
+def test_the_trainer_refuses_a_batch_size_above_one_grid(tokenizer: SDPOTokenizer) -> None:
+    def build(batch_size: int) -> Trainer:
+        return Trainer.build(
+            "science",
+            SQLiteRecordStore(),
+            pipeline_factory=lambda context: processor(groups_per_step=2),
+            batch_size=batch_size,
+        )
+
+    build(4).close()
+    with pytest.raises(
+        PluginConfigError, match="SDPOBatches holds at most 4 samples in one batch, not the batch size 5"
+    ):
+        build(5)
+
+
+@pytest.mark.unit
 def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokenizer) -> None:
     target = processor(groups_per_step=2)
     push(target, 1, score=0.0)
     push(target, 0, group=1, score=0.0)
     push(target, 1, group=1, score=0.0)
     with pytest.raises(RuntimeError, match="no batch ready"):
-        target.build_batch()
+        target.build_batch(4)
     push(target, 0, score=1.0)
-    batch = target.build_batch()
+    batch = target.build_batch(4)
     assert isinstance(batch, TrainingBatch)
     assert batch.batch_id == "science:batch:1"
     assert [s.training["distill_sample_weight"] for s in batch.items] == [0.0, 1.0, 0.0, 0.0]
@@ -141,7 +161,7 @@ def test_a_rollout_reads_its_own_success_only_when_allowed(tokenizer: SDPOTokeni
     target = processor(allow_own_success_as_demonstration=True)
     push(target, 0, score=1.0)
     push(target, 1, score=0.0)
-    batch = target.build_batch()
+    batch = target.build_batch(2)
     assert [s.training["distill_sample_weight"] for s in batch.items] == [1.0, 1.0]
     assert "Answer from s0g0r0" in tokenizer.calls[0][0][-1]["content"]
 
@@ -152,9 +172,9 @@ def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
     push(target, 0, score=0.0)
     push(target, 0, score=1.0, suffix="retry")
     with pytest.raises(RuntimeError, match="no batch ready"):
-        target.build_batch()
+        target.build_batch(2)
     push(target, 1, score=0.0)
-    batch = target.build_batch()
+    batch = target.build_batch(2)
     assert len(batch.items) == 2
     assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.items)
 
@@ -166,7 +186,7 @@ def test_rejects_steps_without_one_known_policy_release(tokenizer: SDPOTokenizer
     push(target, 0)
     push(target, 1, release=release)
     with pytest.raises(RuntimeError, match="no batch ready"):
-        target.build_batch()
+        target.build_batch(2)
     assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_release_ids"}]
 
 
@@ -176,7 +196,7 @@ def test_rejects_different_questions_in_one_group(tokenizer: SDPOTokenizer) -> N
     push(target, 0)
     push(target, 1, question=[{"role": "user", "content": "A different question"}])
     with pytest.raises(RuntimeError, match="no batch ready"):
-        target.build_batch()
+        target.build_batch(2)
     assert target.status()["failed_steps"][0]["reason"] == "different_requests_in_group"
 
 
@@ -186,7 +206,7 @@ def test_environment_feedback_is_opt_in(tokenizer: SDPOTokenizer, include_feedba
     target = processor(include_environment_feedback=include_feedback)
     push(target, 0, feedback="The tool call is missing a required argument.")
     push(target, 1)
-    batch = target.build_batch()
+    batch = target.build_batch(2)
     assert [s.training["distill_sample_weight"] for s in batch.items] == [float(include_feedback), 0.0]
     assert ("missing a required argument" in tokenizer.calls[0][0][-1]["content"]) == include_feedback
 
@@ -201,7 +221,7 @@ def test_solution_can_take_priority_over_feedback_and_prompt_truncates_right(tok
     )
     push(target, 0, score=1.0)
     push(target, 1, feedback="Do not include this feedback when a solution exists.")
-    batch = target.build_batch()
+    batch = target.build_batch(2)
     assert "Do not include" not in tokenizer.calls[1][0][-1]["content"]
     assert list(batch.items[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
 
@@ -212,7 +232,7 @@ def test_teacher_overflow_fails_without_silently_dropping_part_of_a_step(tokeniz
     push(target, 0)
     push(target, 1)
     with pytest.raises(ValueError, match="exceeds max_teacher_tokens"):
-        target.build_batch()
+        target.build_batch(2)
 
 
 @pytest.mark.unit
@@ -235,10 +255,10 @@ PIPELINE = {"record2task": {"config": {"tokenizer_path": "/models/test"}}}
 
 
 @pytest.mark.unit
-def test_sdpo_recipe_uses_one_actual_sized_step(tokenizer: SDPOTokenizer) -> None:
+def test_sdpo_recipe_trains_samples_from_the_paper_grid(tokenizer: SDPOTokenizer) -> None:
     recipe = recipe_from({"pipeline": PIPELINE})
     assert recipe.report_type is SDPOReport
-    assert recipe.training_spec().scheduling == StepScheduling(unit="sample", batch_size="actual")
+    assert recipe.training_spec().scheduling == StepScheduling(unit="sample")
     pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
     record2record, record2task, task2batch = pipeline.record2record, pipeline.record2task, pipeline.task2batch
     assert isinstance(record2record, SDPORecord2Record)
@@ -247,7 +267,7 @@ def test_sdpo_recipe_uses_one_actual_sized_step(tokenizer: SDPOTokenizer) -> Non
     assert record2record.step_grouping.groups_per_step == 32 and record2record.step_grouping.rollouts_per_group == 8
     assert (record2task.max_teacher_prompt_tokens, record2task.max_teacher_tokens) == (10240, 18432)
     assert task2batch.allow_own_success_as_demonstration is False
-    assert task2batch.batch_size == 1
+    assert task2batch.max_batch_samples == 256, "a batch is at most one grid of 32 groups of 8 rollouts"
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
         recipe_from({"pipeline": PIPELINE, "optimization": {"divergence": "forward"}})
 
@@ -313,7 +333,7 @@ def wire(weights: list[float]) -> dict[str, Any]:
         ["one", [9, 1, 2], [1, 1], [-0.1, -0.2], 1.0, [7, 1, 2], weights[0]],
         ["two", [8, 3], [1], [-0.3], 0.0, [7, 3], weights[1]],
     ]
-    return {"loss": "sdpo", "samples": rows, "rollout_ids": [0, 1]}
+    return {"loss": "sdpo", "samples": rows, "rollout_ids": [0, 1], "external_step_sizes": [2]}
 
 
 @pytest.mark.unit

@@ -57,7 +57,7 @@ them does not give one generation more time.
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (the backend's batch size of samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready, and its ``processor`` entry compares ``ready_samples`` with ``batch_size``. When more samples wait than ``pipeline.task2batch.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -65,9 +65,9 @@ Reports and training
 
 **The training step fails and /reef/status reports an error.** The service log has the traceback. A driver rejecting ``--wandb-key`` or ``--use-wandb`` means tracking must be configured under ``observability.wandb`` instead. A mismatch between the recipe's loss family and the Slime flags is refused at startup by design.
 
-**After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``checkpoint_every_n_versions`` at 1 unless you can afford to lose live versions.
+**After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``save-interval`` at 1 unless you can afford to lose live versions.
 
-**After a restart, the training of the last jobs is lost.** With ``--reef-checkpoint-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. To lose fewer jobs, decrease the interval.
+**After a restart, the training of the last jobs is lost.** With ``--save-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. To lose fewer jobs, decrease the interval.
 
 **A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
 
@@ -84,7 +84,7 @@ For a first job, empty the checkpoint root, including the hidden ``.reef-retenti
 
 *Full-weight run, the job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. A marker written by an earlier release has no copy, so recover it by hand.
 
-*Full-weight run, the job before it saved no checkpoint.* With ``--reef-checkpoint-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again.
+*Full-weight run, the job before it saved no checkpoint.* With ``--save-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again.
 
 Recover by hand only when all of these hold:
 
@@ -94,13 +94,15 @@ Recover by hand only when all of these hold:
 2. ``.reef-retention/records/`` under the checkpoint root has a record for ``P``. The file name is ``P`` padded to 20 digits, then ``.json``. No record is newer. Its ``job_id`` is the job for rollout ``P``.
 3. That job was committed. A rejected job also leaves a checkpoint record and moves the tracker. Its rollout holds the declined candidate. Retention can also have deleted the committed rollout before it.
 
-   Each scenario has a commit log in ``agent_record_dir`` on the Reef service's host. The default is ``.reef/agent-record``. A committed training step records its job ID as ``training_job_id``. A rejected step does not. But a rejected step still has the ID in another field of its line. So search for the exact pair:
+   Each scenario has a SQLite database in ``agent_record_dir`` on the Reef service's host. The default is ``.reef/agent-record``. Its ``scenario_commit`` table has one row for each committed step. A committed training step records its job ID as ``training_job_id``. A rejected step does not. But a rejected step still has the ID in another field of its row. So search for the exact pair with the ``sqlite3`` command-line tool:
 
    .. code:: bash
 
-      grep -l '"training_job_id":"<job_id>"' <agent_record_dir>/*.commits.jsonl
+      for db in <agent_record_dir>/*.sqlite3; do
+        sqlite3 "$db" "SELECT '$db', step FROM scenario_commit WHERE instr(commit_json, '\"training_job_id\":\"<job_id>\"') > 0"
+      done
 
-   A printed file name means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
+   A printed row means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
 4. The ``RUNNING`` marker has a ``parent_runtime_load_id``: the runtime load ID that rollout ``P`` is served under.
 
 Before you replace the marker, back up the ``RUNNING`` marker to a directory outside the checkpoint root. The preflight refuses any extra file or directory in the HF, Megatron or critic checkpoint directory as ``unowned checkpoint assets``. It also refuses any extra ``*.json`` file in ``.reef-retention/records/``.

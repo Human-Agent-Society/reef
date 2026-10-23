@@ -122,7 +122,7 @@ def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
     pool = RecordSetUnitPool()
     for name in ("a", "b", "c"):
         pool.put(named(name, pool.next_arrival_index()))
-    reserved = pool.reserve(2)
+    reserved = pool.reserve(pool.ordered_units()[:2])
     pool.remove("a")
     pool.put(named("d", pool.next_arrival_index()))
     assert pool.reserved_units() == reserved
@@ -132,13 +132,22 @@ def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
     assert pool.reserved_units() == ()
 
 
-def test_a_reservation_refuses_a_negative_count_and_units_the_pool_does_not_hold() -> None:
-    with pytest.raises(ValueError, match="max_unit_count must not be negative"):
-        RecordSetUnitPool().reserve(-1)
+def test_a_reservation_refuses_a_repeated_unit_and_units_the_pool_does_not_hold() -> None:
+    pool = RecordSetUnitPool()
+    held = named("held", pool.next_arrival_index())
+    pool.put(held)
+    with pytest.raises(ValueError, match="more than one time"):
+        pool.reserve((held, held))
+    with pytest.raises(ValueError, match="units that the pool holds"):
+        pool.reserve((named("not-held", 2),))
+    assert pool.reserved_units() == ()
+
+
+def test_the_pool_refuses_a_selection_policy_that_returns_units_it_does_not_hold() -> None:
     pool = RecordSetUnitPool(ForeignUnit())
     pool.put(named("held", pool.next_arrival_index()))
     with pytest.raises(ValueError, match="does not hold"):
-        pool.reserve(1)
+        pool.ordered_units()
 
 
 def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
@@ -189,7 +198,7 @@ def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserve
         stage.settle(single(record_id, stage.pool.next_arrival_index()), TaskStatus.READY, frozenset({version}))
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
-    stage.pool.reserve(2)
+    stage.pool.reserve(stage.pool.ordered_units())
     stage.drop_stale_units(0)
     assert len(stage.pool) == 2
 

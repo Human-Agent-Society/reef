@@ -9,6 +9,7 @@ recipe:
       seed: [harness.benchmark:SEED]
       tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
       episode_repeats: 2
+      batch_size: 1  # Each report is one trace batch.
       episode_timeout_s: 9000
       forbid_residue: true
       executor: sandbox
@@ -29,11 +30,6 @@ recipe:
         max_candidates: 4
         max_target_episodes: 1424  # Four gates, two sides, 89 tasks, two repeats.
       max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
-# Each report is one trace batch.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 1
 inference:
   upstream-url: ${REEF_UPSTREAM_URL}
   upstream-model: ${REEF_MODEL}

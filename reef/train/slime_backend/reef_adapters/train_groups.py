@@ -32,6 +32,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRAIN_RPC_TIMEOUT_S = 14_400
 
 
+def merge_rank_metrics(per_rank: list[dict[str, Any]]) -> dict[str, Any]:
+    """One metrics mapping from every rank's, in rank order; the lowest rank wins a shared key."""
+    merged: dict[str, Any] = {}
+    for metrics in reversed(per_rank):
+        merged.update(metrics or {})
+    return merged
+
+
 class SlimeTrainGroup:
     """Training operations shared by actor and critic worker groups.
 
@@ -206,8 +214,13 @@ class SlimeTrainGroup:
             "set_runtime_load_id_for_update", args=(runtime_load_id,), timeout=self.train_rpc_timeout_s
         )
 
-    def async_pop_rank0_metrics(self):
-        return self.executor.rpc(0, "pop_metrics", non_block=True)
+    def async_pop_metrics(self):
+        """Drain every rank's metrics, in rank order.
+
+        Slime logs a train step (loss, grad norm, learning rate) on the last
+        pipeline stage, which is not rank 0 under pipeline parallelism.
+        """
+        return self.executor.collective_rpc("pop_metrics", non_block=True)
 
     def activate_scenario(self, scenario: str) -> bool:
         """Put one scenario's adapter into every actor's LoRA slot."""
@@ -264,6 +277,16 @@ class SlimeTrainGroup:
         if self._release_train_enabled():
             self._released_runtime_load_id = exported
             self.release()
+
+    def export_weight_files(self, directory: Path) -> None:
+        """Write the actor's current weights to ``directory``: the active scenario's adapter, or full weights.
+
+        Every rank takes part. Rank 0 writes the configuration and an adapter;
+        each node's writer rank writes its full-weight shards. No receiver is involved.
+        """
+        if self._executor is None and self._release_train_enabled():
+            self.create()
+        self.executor.collective_rpc("export_weight_files", args=(str(directory),), timeout=self.train_rpc_timeout_s)
 
     def send_prepared_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         """Send the prepared target after Reef has restored receiver memory."""
@@ -486,4 +509,4 @@ def create_train_groups(
         raise
 
 
-__all__ = ["SlimeTrainGroup", "create_train_groups", "prepare_critic_args"]
+__all__ = ["SlimeTrainGroup", "create_train_groups", "merge_rank_metrics", "prepare_critic_args"]

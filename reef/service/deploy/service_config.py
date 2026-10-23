@@ -29,7 +29,7 @@ from reef.storage.tasks import TaskFileStore
 class ServiceConfig:
     """The HTTP service's settings, translated from a deployment config.
 
-    Recipe-specific config fields (batch sizes, group counts, checkpoint cadence)
+    Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
@@ -84,6 +84,15 @@ class ServiceConfig:
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
+    )
+    inference_remote: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata(
+            "Run the engines that inference.backend names on a remote inference component: url, "
+            "control-token-env, inference-token-env and startup-timeout-s. Resolution replaces it with the "
+            "fields of the validated RemoteInferenceSettings.",
+            public_path=("inference", "remote"),
+        ),
     )
     teacher_model_path: str | None = config_option(
         None, public_path=("teacher", "model_path"), help="Teacher engine HF model or directory; frozen SGLang."

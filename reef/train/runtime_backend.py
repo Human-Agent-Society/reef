@@ -136,18 +136,9 @@ class RuntimeCandidateBackend(CandidateBackend):
     def initial_state(self) -> Mapping[str, Any]:
         return {}
 
-    def recover_pending_step(
-        self,
-        scenario_step: int,
-        *,
-        committed_training_job_id: str | None = None,
-        committed_training_without_job_id: bool = False,
-    ) -> None:
+    def recover_pending_step(self, scenario_step: int, *, committed_training_job_id: str | None = None) -> None:
         self.scheduler.recover_pending_step(
-            scenario_step,
-            scenario=self._scenario,
-            committed_training_job_id=committed_training_job_id,
-            committed_training_without_job_id=committed_training_without_job_id,
+            scenario_step, scenario=self._scenario, committed_training_job_id=committed_training_job_id
         )
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str) -> None:

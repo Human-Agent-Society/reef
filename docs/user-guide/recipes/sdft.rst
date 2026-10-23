@@ -32,8 +32,8 @@ What it does
 
 The harness sends a request through Reef. It gets a demonstration of the
 response from somewhere else such as a reference solution or a stronger
-model. It reports the demonstration against the request's receipt. With the
-default batch size of 1 each report is one training step.
+model. It reports the demonstration against the request's receipt. With a
+batch size of 1, each report is one training step.
 
 .. flow::
    :loop: the next request is served by the updated weights
@@ -50,8 +50,9 @@ How Reef implements it
 SDFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
 ``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTTasks``
-turns each report into a task. The shared ``DistillBatches`` stage puts
-``batch_size`` tasks into each batch.
+turns each report into a task. The shared ``DistillBatches`` stage batches
+the tasks in arrival order. A batch holds the Slime ``--global-batch-size`` of
+tasks.
 
 ``SDFTTasks`` extends the shared ``DistillTasks``. ``DistillTasks`` turns every
 ``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the
@@ -126,9 +127,9 @@ no config.
        config:
          tokenizer_path: /models/Qwen2.5-7B-Instruct
          max_teacher_tokens: 8192
-     task2batch:
-       config:
-         batch_size: 32
+   training:
+     config:
+       global_batch_size: 32
 
 Reef checks each stage's config when it loads the recipe. A bad
 ``context_template`` or a missing ``tokenizer_path`` fails the deployment. A
@@ -140,7 +141,7 @@ key's place in ``pipeline``.
    pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
    pipeline.record2task.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
    pipeline.record2task.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
-   pipeline.task2batch.config.batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   training.config.global_batch_size | the batch size: rollouts in one batch and in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
    recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
 
 ``SDFTTasks`` also takes the sample assembly's keys

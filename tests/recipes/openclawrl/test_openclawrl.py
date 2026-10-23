@@ -97,7 +97,7 @@ def _successor(prior_messages, next_state: str):
     return [*prior_messages, {"role": "assistant", "content": "a"}, {"role": "user", "content": next_state}]
 
 
-def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None, **judging):
+def _processor(*, worker=None, ttl_s: float = 900.0, clients=None, **judging):
     context = PipelineContext("s")
     settings = OpenClawRLJudgingSettings(session_ttl_s=ttl_s, **judging)
     stage = OpenClawRLRecord2Record(settings, worker=worker, clients=clients)
@@ -105,7 +105,7 @@ def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, client
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=batch_size), stage),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(), stage),
     )
 
 
@@ -119,7 +119,7 @@ ANCHOR = ({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)
 @pytest.mark.unit
 def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     worker = FakeWorker()
-    processor = _processor(batch_size=1, worker=worker)
+    processor = _processor(worker=worker)
     processor.push(_turn("t1", Q1))
     assert not worker.jobs  # no successor yet
     processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
@@ -127,16 +127,16 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert [job.receipt for job in worker.jobs] == ["t1"]
     assert worker.jobs[0].next_state_text == "Great, that works!"
     assert worker.jobs[0].next_state_role == "user"
-    assert not processor.ready()
+    assert not processor.ready(1)
 
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
-    assert processor.ready()
-    batch = processor.build_batch()
+    assert processor.ready(1)
+    batch = processor.build_batch(1)
     assert isinstance(batch, TrainingBatch)
     assert [trajectory_reward(sample) for sample in batch.items] == [1.0]
     assert source_record_id(batch.items[0]) == "t1"
     processor.acknowledge(batch.batch_id)
-    assert not processor.ready()
+    assert not processor.ready(1)
     decision = processor.releasable_record_ids()
     assert "t1" in decision
     assert "t2" not in decision  # still the session's open turn
@@ -184,7 +184,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     processor = _processor(worker=worker, ttl_s=1e-6)
     processor.push(_turn("t1", Q1))
     time.sleep(0.001)
-    assert not processor.ready()  # catches up: the TTL pass runs
+    assert not processor.ready(1)  # catches up: the TTL pass runs
     decision = processor.releasable_record_ids()
     assert "t1" in decision
     assert not processor.background_jobs_running()
@@ -197,21 +197,21 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.push(_turn("declined", Q1))
     processor.push(_turn("cont1", _successor(Q1, "meh")))
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
-    assert not processor.ready()
+    assert not processor.ready(1)
     assert "declined" in processor.releasable_record_ids()
 
     # ragged top-K capture: one row missing → the select loss cannot run
     processor.push(_turn("ragged", Q2, topk_rows=[[1, 2]]))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
-    assert not processor.ready()
+    assert not processor.ready(1)
     assert "ragged" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
 def test_candidates_behind_the_serving_version_drop_from_pending_candidates() -> None:
     worker = FakeWorker()
-    processor = _processor(batch_size=2, worker=worker)
+    processor = _processor(worker=worker)
     processor.observe_serving_runtime_load_id("v1")
     processor.push(_turn("old", Q1, runtime_load_id="v1"))
     processor.push(_turn("cont1", _successor(Q1, "ok")))
@@ -220,7 +220,7 @@ def test_candidates_behind_the_serving_version_drop_from_pending_candidates() ->
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
-    assert not processor.ready()  # the stale candidate was dropped, 1 < batch_size
+    assert not processor.ready(2)  # the stale candidate was dropped, 1 < 2
     assert "old" in processor.releasable_record_ids()
     assert "new" not in processor.releasable_record_ids()
 
@@ -230,7 +230,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor = _processor(worker=None)  # no prm_url, no injected worker
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "ok")))
-    assert not processor.ready()
+    assert not processor.ready(1)
     assert "t1" in processor.releasable_record_ids()
 
 
@@ -296,10 +296,10 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
     processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
     deadline = time.monotonic() + 10.0
-    while not processor.ready() and time.monotonic() < deadline:
+    while not processor.ready(1) and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert processor.ready(), "worker judgment never landed"
-    batch = processor.build_batch()
+    assert processor.ready(1), "worker judgment never landed"
+    batch = processor.build_batch(1)
     sample = batch.items[0]
     assert trajectory_reward(sample) == 1.0
     # The RL-only anchor is the native ids verbatim, built without the
@@ -324,7 +324,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = TrainingBatch("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"))
+    result = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"), step_size=4)
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"
@@ -369,10 +369,10 @@ def test_the_pipeline_section_configures_the_stages() -> None:
                     "max_open_sessions": 16,
                 }
             },
-            "task2batch": {"config": {"batch_size": 2, "prm_record_file": "/tmp/prm-records.jsonl"}},
+            "task2batch": {"config": {"buffer_size": 8, "prm_record_file": "/tmp/prm-records.jsonl"}},
         }
     )
-    built = recipe.build_pipeline(PipelineContext("s"))
+    built = recipe.build_pipeline(PipelineContext("s", default_buffer_size=4))
     try:
         assert isinstance(built.record2record, OpenClawRLRecord2Record)
         assert isinstance(built.record2task, OpenClawRLTasks)
@@ -384,7 +384,7 @@ def test_the_pipeline_section_configures_the_stages() -> None:
         assert judging.max_hint_candidates == 2
         assert judging.index.ttl_s == 60.0 and judging.index.max_sessions == 16
         assert isinstance(built.record2record.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"
-        assert built.batch_size == 2
+        assert built.buffer_size == 8
         assert built.task2batch.openclawrl_judging is judging, "the batches report what the record stage judged"
         assert str(built.task2batch.record_path) == "/tmp/prm-records.jsonl"
     finally:
@@ -392,11 +392,12 @@ def test_the_pipeline_section_configures_the_stages() -> None:
 
 
 @pytest.mark.unit
-def test_the_default_stages_are_correlate_only_with_the_upstream_batch_size() -> None:
-    built = openclawrl_recipe().build_pipeline(PipelineContext("s"))
+def test_the_default_stages_are_correlate_only_and_buffer_the_trainer_default() -> None:
+    built = openclawrl_recipe().build_pipeline(PipelineContext("s", default_buffer_size=64))
     assert isinstance(built.record2record, OpenClawRLRecord2Record)
     assert built.record2record.openclawrl_judging.prm is None and built.record2record.worker is None
-    assert built.batch_size == 16
+    assert built.buffer_size == 64
+    assert isinstance(built.task2batch, OpenClawRLBatches) and built.task2batch.record_path is None
     built.close()
 
 
@@ -423,7 +424,8 @@ def test_the_retired_teacher_settings_are_refused() -> None:
         ({"record2record": {"config": {"prm_url": "http://prm:23001"}}}, "prm_tokenizer_path"),
         ({"record2record": {"config": {"prm_concurrency": 0}}}, "prm_concurrency must be positive"),
         ({"record2record": {"config": {"batch_size": 2}}}, "batch_size"),
-        ({"task2batch": {"config": {"batch_size": 0}}}, "batch_size must be positive"),
+        ({"task2batch": {"config": {"batch_size": 16}}}, "OpenClawRLBatches: unknown config fields: batch_size"),
+        ({"task2batch": {"config": {"buffer_size": 0}}}, "buffer_size must be positive"),
         ({"task2batch": {"config": {"prm_url": "http://prm:23001"}}}, "prm_url"),
     ],
 )
@@ -558,15 +560,13 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(
-            context, OpenClawRLBatchSettings(batch_size=1, prm_record_file=str(record)), stage
-        ),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(prm_record_file=str(record)), stage),
     )
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
-    assert processor.ready()
-    processor.build_batch()
+    assert processor.ready(1)
+    processor.build_batch(1)
 
     line = json.loads(record.read_text().splitlines()[0])
     assert line["batch_id"] == "s:batch:1"

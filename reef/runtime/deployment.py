@@ -95,29 +95,36 @@ class ModelPlanSource(ABC):
 
 @dataclass(frozen=True)
 class InferenceConnection:
-    """Borrowed control transport with an explicitly versioned adapter protocol.
+    """What a started ``InferenceService`` returns: its control protocol and, when it has one, its control executor.
 
-    The protocol identifies the RPC vocabulary, including direct weight-update
-    attachment. An HTTP endpoint alone does not satisfy this connection.
-    Reusing it for replacement training workers requires the owning deployment
-    to retire the prior trainer and perform the protocol's attachment handshake.
+    ``protocol`` is the service's non-empty ``connection_protocol``; it names
+    the control vocabulary, including direct weight-update attachment.
+    ``control`` is the borrowed executor that a native weight transfer hands to
+    the sender, or None for a receiver that its ``InferenceBackend`` reaches by
+    other means, such as HTTP. A service whose connection has no executor does
+    not list ``connection_protocol`` in ``supported_transfer_protocols``.
+    Reusing a connection for replacement training workers requires the owning
+    deployment to retire the prior trainer and perform the attachment handshake.
     """
 
     protocol: str
-    control: Executor
+    control: Executor | None
 
 
 @dataclass(frozen=True)
 class WeightTransferSession:
-    """One deployment's borrowed native sender/receiver attachment.
+    """One deployment's attachment of a trainer to its receiver.
 
-    This carries the existing adapter control protocol, not a universal tensor
-    format. Reef creates a new session identity whenever it rebuilds a receiver;
-    training workers must not reuse a previous deployment's attachment.
+    A value holds the transfer ``protocol`` that the deployment selected and the
+    ``session_id`` that Reef generates whenever it builds a receiver; both are
+    non-empty. ``ModelDeployment`` makes it and the training service reads it in
+    ``attach_weight_transport``. Training workers must not reuse a previous
+    deployment's session. A session that is not a
+    :class:`NativeWeightTransferSession` gives the trainer no receiver handle:
+    the trainer writes weight files and Reef's coordinator delivers them.
     """
 
     protocol: str
-    receiver: Executor
     session_id: str
 
     def __post_init__(self) -> None:
@@ -125,8 +132,20 @@ class WeightTransferSession:
             raise ValueError("weight transfer sessions require a protocol and identity")
 
 
-#: The transfer a trainer declares when it delivers adapters as PEFT directories Reef loads itself.
-ADAPTER_FILES_PROTOCOL = "reef-adapter-files-v1"
+@dataclass(frozen=True)
+class NativeWeightTransferSession(WeightTransferSession):
+    """A session over the receiver's own control protocol.
+
+    It adds the receiver's borrowed control ``Executor``; the sender drives the
+    engines through it (for example NCCL or a shared-disk update). This is the
+    existing adapter control protocol, not a universal tensor format.
+    """
+
+    receiver: Executor
+
+
+#: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
+WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
 
 
 class InferenceService(DeploymentHealth):
@@ -139,7 +158,11 @@ class InferenceService(DeploymentHealth):
 
     @property
     def supported_transfer_protocols(self) -> tuple[str, ...]:
-        """Weight transfers this receiver accepts: its native one, plus Reef-owned file delivery if it loads files."""
+        """Weight transfers this receiver accepts: its native one, plus Reef-owned file delivery if it loads files.
+
+        Only ``connection_protocol`` attaches the sender to this receiver's
+        control connection; any other protocol here is delivered by Reef.
+        """
         return (self.connection_protocol,)
 
     @abstractmethod
@@ -172,8 +195,12 @@ class TrainingService(DeploymentHealth):
 
     @property
     @abstractmethod
-    def weight_transfer_protocol(self) -> str | None:
-        """Native weight transport consumed by a separately attached sender."""
+    def weight_transfer_protocols(self) -> tuple[str, ...]:
+        """Weight transfers this trainer can send, most preferred first.
+
+        The tuple is empty exactly when the trainer has no separately attached
+        sender, which is the combined lifecycle without an inference component.
+        """
 
     @abstractmethod
     def start(self, resources: DeploymentResources) -> None:
@@ -229,16 +256,24 @@ class ModelDeploymentPlan:
     def validate(self) -> None:
         if self.coordinator is not None and self.inference is None:
             raise ValueError("a Reef coordinator requires separate training and inference components")
-        required = self.training.weight_transfer_protocol
         if self.inference is None:
-            if required is not None:
-                raise ValueError(f"training requires {required!r} but no inference component is configured")
+            sent = self.training.weight_transfer_protocols
+            if sent:
+                raise ValueError(f"training sends {sent!r} but no inference component is configured")
             return
-        provided = self.inference.supported_transfer_protocols
-        if not self.inference.connection_protocol or required not in provided:
-            raise ValueError(
-                f"incompatible inference control protocol: training requires {required!r}, got {provided!r}"
-            )
+        self.weight_transfer_protocol(self.inference)
+
+    def weight_transfer_protocol(self, inference: InferenceService) -> str:
+        """The first protocol in the trainer's preference order that ``inference`` accepts."""
+        sent = self.training.weight_transfer_protocols
+        accepted = inference.supported_transfer_protocols
+        if inference.connection_protocol:
+            for protocol in sent:
+                if protocol in accepted:
+                    return protocol
+        raise ValueError(
+            f"incompatible inference control protocol: training sends {sent!r}, receiver accepts {accepted!r}"
+        )
 
 
 class ModelDeployment:
@@ -287,17 +322,19 @@ class ModelDeployment:
             return None
         self._inference_started = True
         connection = inference.start(self.plan.resources)
-        required = self.plan.training.weight_transfer_protocol
-        if (
-            connection.protocol != inference.connection_protocol
-            or required not in inference.supported_transfer_protocols
-        ):
+        if connection.protocol != inference.connection_protocol:
             raise ValueError("inference returned a connection with an incompatible protocol")
         inference.check_health()
         # Colocated trainers cannot initialize until inference has
         # acknowledged releasing its initial device allocations.
         inference.prepare_weight_transfer(connection)
-        self.weight_transfer_session = WeightTransferSession(required, connection.control, uuid4().hex)
+        protocol = self.plan.weight_transfer_protocol(inference)
+        if protocol == connection.protocol:
+            if connection.control is None:
+                raise ValueError("a native weight transfer requires the receiver's control executor")
+            self.weight_transfer_session = NativeWeightTransferSession(protocol, uuid4().hex, connection.control)
+        else:
+            self.weight_transfer_session = WeightTransferSession(protocol, uuid4().hex)
         return connection
 
     def _start_training(self) -> None:
@@ -482,6 +519,7 @@ _BUILTIN_FACTORIES = {
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
+    "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
     "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",
@@ -625,6 +663,9 @@ class RuntimeConnectionConfig:
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
     train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
+    batch_size: int = config_option(
+        1, help="Samples in one training step; Reef's Slime and Tinker deployments set it from the training options."
+    )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
@@ -636,6 +677,8 @@ class RuntimeConnectionConfig:
         ):
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"runtime.{name} must be a positive finite number")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size <= 0:
+            raise ValueError("runtime.batch_size must be a positive integer")
 
 
 @dataclass(frozen=True)

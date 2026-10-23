@@ -258,20 +258,6 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             replace(argument, public_path=("recipe", "config", argument.name))
             for argument in config_arguments(recipe_type, prefix=prefix)
         )
-        if issubclass(recipe_type, WeightTrainingRecipe):
-            # The legacy service contract projects this control into artifact
-            # settings rather than the recipe's data fields; keep its default there.
-            arguments.append(
-                ConfigArgument(
-                    "checkpoint_every_n_versions",
-                    (*prefix, "checkpoint_every_n_versions"),
-                    "int",
-                    True,
-                    None,
-                    "Artifact checkpoint interval in published versions.",
-                    public_path=("recipe", "config", "checkpoint_every_n_versions"),
-                )
-            )
         arguments.extend(
             ConfigArgument(
                 section,
