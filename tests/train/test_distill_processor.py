@@ -133,7 +133,7 @@ def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: Countin
     processor.push(_inference("i1"))
     processor.push(_report("r1", ("i1",), teacher_context=""))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
 
     assert isinstance(batch, TrainingBatch)
     (sample,) = batch.items
@@ -162,7 +162,7 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     processor.push(_inference("i1"))
     processor.push(_report("r1", ("i1",), teacher_context="Too low."))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
 
     rendered, tools = tokenizer.calls[0]
     assert rendered[0] == {"role": "system", "content": "You answered: About 90 degrees.\nVerifier: Too low."}
@@ -182,7 +182,7 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     processor.push(long_request)
     processor.push(_report("r1", ("i1",)))
 
-    assert not processor.ready()
+    assert not processor.ready(1)
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
     # The report and its inference are released for compaction.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
@@ -190,7 +190,7 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     # A later report that fits still trains.
     processor.push(short_request)
     processor.push(_report("r2", ("i2",), teacher_context="ok"))
-    assert len(processor.build_batch().items) == 1
+    assert len(processor.build_batch(1).items) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
 
 

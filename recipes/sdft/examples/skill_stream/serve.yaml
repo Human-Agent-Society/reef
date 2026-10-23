@@ -56,9 +56,6 @@ pipeline:
     config:
       tokenizer_path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence is skipped and counted
-  task2batch:
-    config:
-      batch_size: 32                   # MUST equal training.config.global_batch_size and the stage's SDFT_PROMPTS_PER_STEP
 training:
   backend: slime
   colocate: true
@@ -75,7 +72,7 @@ training:
       max_storage_fraction: 0.80
       min_free_space_fraction: 0.10
       policy: latest
-    global_batch_size: 32
+    global_batch_size: 32              # MUST equal the stage's SDFT_PROMPTS_PER_STEP
   options:
     reef-checkpoint-max-storage: "${training.config.checkpoint_retention.max_storage}"
     reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"

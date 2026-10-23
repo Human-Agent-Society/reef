@@ -88,8 +88,12 @@ that only happen to expose similarly named methods.
 Two other extension points have separate names and purposes:
 
 - ``reef.train.CandidateBackend`` prepares, evaluates and settles recipe updates,
-  including harness edits. ``RuntimeCandidateBackend`` connects weight updates
-  to Reef's scheduler; ``Trainer`` accepts it as ``candidate_backend``.
+  including harness edits. ``RuntimeCandidateBackend`` connects weight
+  updates to Reef's scheduler; ``Trainer`` accepts it as
+  ``candidate_backend``. ``Trainer.build(..., batch_size=...)`` takes the
+  samples in one training step: a weight recipe passes the training
+  runtime's ``batch_size``, and a harness recipe passes
+  ``evolution.batch_size``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -270,7 +274,7 @@ parser, and an optional environment fallback:
 
 .. code:: python
 
-   batch_size: int = config_field(4, env="REEF_MY_METHOD_BATCH_SIZE")
+   clip_ratio: float = config_field(0.2, env="REEF_MY_METHOD_CLIP_RATIO")
 
 Precedence is explicit configuration, then environment, then the default.
 ``from_environment()`` builds the recipe. On weight-training recipes,
@@ -945,6 +949,13 @@ record2task=..., task2batch=...)``):
   An automatic batch gets ``<scenario>:batch:<number>``. An instruction's
   batch gets ``<scenario>:instruction:<request id>``. The number counts the
   batches of one pipeline. It is not a training step.
+  ``Task2Batch.__init__(context, buffer_size)`` sets the most samples that
+  wait for a batch. ``None`` takes ``context.default_buffer_size``, four
+  times the trainer's batch size. ``Trainer.build`` raises
+  ``PluginConfigError`` for a buffer smaller than one batch, and for a batch
+  size above the stage's ``max_batch_samples`` (an SDPO or TTTD grid).
+  ``BufferSettings`` parses the ``buffer_size`` key, and a stage with more
+  keys extends it.
 
 Reef builds the stages for each scenario, in this order, with the class
 methods below; a later stage receives the stages built before it:
@@ -1277,8 +1288,10 @@ the recipe nor the signal repeats that choice.
 
 ``WeightTrainingSpec.scheduling`` is the recipe's ``StepScheduling``
 (``reef.core.batches``): the rollout unit (``comparison_set`` or ``sample``),
-rollouts per optimizer step (``configured``, ``actual`` or an int), ``epochs``,
-``shuffle`` and ``remainder`` handling. It is deployment configuration rather
+``epochs``, ``shuffle`` and ``remainder`` handling. The backend's batch size
+(Slime's ``--global-batch-size``, Tinker's ``batch_size``) is the rollouts in
+one optimizer step; ``remainder`` decides what happens to a shorter last step.
+It is deployment configuration rather
 than method math, so it lives on the recipe and the runtime carries it to the
 backend with the objective reference. An objective declares only what its loss
 tolerates: ``supports_multiple_epochs`` (default ``False``) says whether passes
@@ -1540,6 +1553,10 @@ inherits from the other, and there is no aggregate runtime.
 * ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
   candidates and restores training weights/optimizer state. It receives serving
   versions as values; it does not own an inference endpoint or request backend.
+  Its ``batch_size`` property is the samples in one optimizer step. The
+  deployment reads it from the training options (Slime's
+  ``--global-batch-size``, Tinker's ``batch_size``) when it builds the
+  runtime; a hand-assembled runtime config sets ``batch_size``.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
   serving weights without restoring optimizer state. Its ``model_path`` property

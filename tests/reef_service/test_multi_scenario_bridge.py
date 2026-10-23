@@ -247,7 +247,8 @@ def _actor(
 
 def _job(scenario: str, step: int, producing: str) -> dict:
     payload = _payload([_sao_row(f"{scenario}-{step}", producing_runtime_load_id=producing)])
-    payload.update(scenario=scenario, scenario_step=step, parent_runtime_load_id=producing)
+    # One rollout is one optimizer step.
+    payload.update(scenario=scenario, scenario_step=step, parent_runtime_load_id=producing, external_step_sizes=[1])
     return payload
 
 

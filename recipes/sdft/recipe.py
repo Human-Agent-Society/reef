@@ -24,16 +24,16 @@ class SDFTRecipe(WeightTrainingRecipe):
     demonstration added and its next-token distributions over the student's
     on-policy response become the target of a per-token KL. Each report
     carries one rollout's receipt and the demonstration as ``teacher_context``; with
-    ``batch_size=1`` a report trains as soon as it arrives.
+    a Slime ``--global-batch-size`` of 1 a report trains as soon as it arrives.
 
     The recipe binds the objective, the step schedule, and the report
     contract. Its stages are ``ExclusiveReportRecord2Record``, ``SDFTTasks``, and
     ``DistillBatches``; the deployment's ``pipeline`` section gives their config.
     ``pipeline.record2task.config`` takes ``tokenizer_path`` (required: the
     served model's tokenizer renders the teacher prompt),
-    ``max_teacher_tokens``, and ``context_template``.
-    ``pipeline.task2batch.config.batch_size`` must equal the Slime driver's
-    ``--global-batch-size``: each sample is its own DP unit.
+    ``max_teacher_tokens``, and ``context_template``. A batch holds the Slime
+    driver's ``--global-batch-size`` of samples; each sample is its own DP
+    unit.
 
     Objective settings such as the KL direction belong to the training
     backend; for Slime they are ``--sdft-*`` flags in ``training.options``.

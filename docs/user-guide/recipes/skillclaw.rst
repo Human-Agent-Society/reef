@@ -64,7 +64,7 @@ Configuration
 
 ``recipes/skillclaw/skillclaw.yaml`` is the recipe config the driver boots. It
 names ``recipes.skillclaw.recipe:SkillClawRecipe`` as its ``implementation``
-and sets ``pipeline.task2batch.config.batch_size: 60``, so every report of
+and sets ``evolution.batch_size: 60``, so every report of
 the day batches and the day's last one triggers the night. The engine's keys are
 in `Recipe configuration
 <../../reference/configuration.rst#recipe-configuration>`__.

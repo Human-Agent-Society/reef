@@ -145,13 +145,7 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
         return None
 
-    def recover_pending_step(
-        self,
-        scenario_step: int,
-        *,
-        committed_training_job_id: str | None,
-        committed_training_without_job_id: bool,
-    ) -> None:
+    def recover_pending_step(self, scenario_step: int, *, committed_training_job_id: str | None) -> None:
         """Finish or roll back backend work left pending across a restart."""
         return
 

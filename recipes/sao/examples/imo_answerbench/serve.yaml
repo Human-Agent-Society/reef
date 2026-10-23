@@ -1,9 +1,9 @@
 # SAO functional-smoke config for recipes/sao/examples/imo_answerbench/run.sh.
 #
 # SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) samples one
-# rollout per prompt with no comparison group, and trains on batch_size of them
-# per optimizer step (the paper: 128, the default). This smoke config
-# sets batch_size 1 so the dispatcher runs a full train step the moment a
+# rollout per prompt with no comparison group, and trains on the global batch
+# size of them per optimizer step (the paper: 128). This smoke config
+# sets global_batch_size 1 so the dispatcher runs a full train step the moment a
 # rollout's score arrives; that is a different estimator from the paper's and
 # is only here so the loop is visible end to end on two GPUs. The value model
 # computes advantages in-backend via skip-observation GAE, so reef ships no
@@ -39,11 +39,6 @@ recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
     max-staleness: 18
-# SAO's stages. The batch stage trains on batch_size scored rollouts per optimizer step.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 1                    # smoke only; the paper and the stage default are 128. MUST equal training.config.global_batch_size
 training:
   backend: slime
   ready-timeout: 900
@@ -57,7 +52,7 @@ training:
     # checkpoint preflight requires roughly 16x the HF model size free on this
     # filesystem before the stack boots (the critic doubles the training state).
     checkpoint_dir: work/checkpoints
-    global_batch_size: 1
+    global_batch_size: 1               # smoke only; the paper trains 128 rollouts per optimizer step
   # SAO objective as slime flags: --use-critic creates the value-model group;
   # the algorithm spec sets --custom-advantage-function-path (skip-observation
   # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)

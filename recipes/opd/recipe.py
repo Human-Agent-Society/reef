@@ -19,9 +19,9 @@ class OPDRecipe(WeightTrainingRecipe):
     The teacher reads the recorded prompt and response ids, so the recipe
     needs no tokenizer. Its stages are ``ExclusiveReportRecord2Record``, ``OPDTasks``,
     and ``DistillBatches``; the deployment's ``pipeline`` section gives their
-    config: ``max_teacher_tokens`` in ``record2task`` and ``batch_size`` in
-    ``task2batch``. ``batch_size`` responses form one optimizer step; the
-    caller waits for publication before sampling the next batch. The teacher
+    config: ``max_teacher_tokens`` in ``record2task``. The backend's batch
+    size (Slime ``--global-batch-size``) of responses forms one optimizer
+    step; the caller waits for publication before sampling the next batch. The teacher
     checkpoint and the divergence are the backend's ``--opd-*`` training
     options.
     """
@@ -34,11 +34,7 @@ class OPDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="opd",
-            # The batch is the optimizer step, however many responses it holds.
-            scheduling=StepScheduling(unit="sample", batch_size="actual"),
-        )
+        return WeightTrainingSpec(objective="opd", scheduling=StepScheduling(unit="sample"))
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

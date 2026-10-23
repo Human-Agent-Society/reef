@@ -123,7 +123,7 @@ reef-eval starts the task container and the judge service for the next session
   -> the harness posts hermes's reply to the student service, and the student reacts
   -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
   -> the PRM judges that next state and may propose a hindsight hint
-  -> batch_size judged turns form one batch; the top-K select loss trains the policy
+  -> global_batch_size judged turns form one batch; the top-K select loss trains the policy
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> the next session runs on the updated weights
 ```

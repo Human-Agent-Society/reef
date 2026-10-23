@@ -40,10 +40,6 @@ LORA_MODES = frozenset({"shared", "scenario"})
 #: RPCs that only read state; a named client retries them across actor replacement.
 _READ_ONLY_RPCS = frozenset({"health", "serving_runtime_load_id"})
 
-_OUTDATED_BACKEND = (
-    "training backend predates deferred serving-weight updates; restart the Reef service and training actor together"
-)
-
 
 class CoordinatorClient(ABC):
     """Client contract for Reef coordinator RPCs, shared by both runtimes.
@@ -116,14 +112,9 @@ class ExecutorCoordinatorClient(CoordinatorClient):
         return self._executor.rpc(self._rank, method, args=args, timeout=self._timeout_s)
 
     def health(self) -> Mapping[str, Any]:
-        try:
-            value = self._rpc("health")
-        except AttributeError as exc:
-            raise TrainingRuntimeError(_OUTDATED_BACKEND) from exc
+        value = self._rpc("health")
         if not isinstance(value, Mapping):
             raise TrainingRuntimeError("train group returned invalid health")
-        if not isinstance(value.get("training_job"), Mapping):
-            raise TrainingRuntimeError(_OUTDATED_BACKEND)
         return dict(value)
 
     def serving_runtime_load_id(self) -> str | None:
@@ -172,9 +163,7 @@ def training_job_status(handle: CoordinatorClient) -> Mapping[str, Any]:
     status = health.get("training_job")
     if not isinstance(status, Mapping):
         raise TrainingRuntimeError("train group health is missing training_job status")
-    if status.get("deferred_weight_update") is not True:
-        raise TrainingRuntimeError("Reef requires deferred serving-weight updates")
-    state = status.get("status", "COMPLETE")
+    state = status.get("status")
     if not isinstance(state, str):
         raise TrainingRuntimeError("train group returned malformed training-job status")
     if state not in TRAINING_JOB_STATES:

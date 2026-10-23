@@ -16,13 +16,16 @@ from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpu
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
 
 
-def model_gpu_layout(args: Any) -> ModelGpuLayout:
-    """The deployment's GPU layout from Slime's parsed topology flags."""
+def model_gpu_layout(args: Any, *, remote_inference: bool = False) -> ModelGpuLayout:
+    """The deployment's GPU layout from Slime's parsed topology flags.
+
+    Engines on a remote component reserve no GPU here, like external engines.
+    """
     return ModelGpuLayout(
         training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node),
         inference_gpus=int(getattr(args, "rollout_num_gpus", 0) or 0),
         colocate=bool(getattr(args, "colocate", False)),
-        external_inference=bool(getattr(args, "rollout_external", False)),
+        external_inference=bool(getattr(args, "rollout_external", False)) or remote_inference,
     )
 
 
@@ -37,8 +40,10 @@ class SlimeDeploymentResources(InferenceResources):
         namespace: str,
         runtime_env: dict[str, Any] | None = None,
         allocate_models: bool = True,
+        remote_inference: bool = False,
     ) -> None:
         self.args = args
+        self.remote_inference = remote_inference
         self.ray_address = ray_address
         self.namespace = namespace
         self.runtime_env = runtime_env
@@ -77,7 +82,7 @@ class SlimeDeploymentResources(InferenceResources):
         if self._process_lease is not None:
             self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
         if self.allocate_models:
-            self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+            self._reservation = reserve_model_gpus(model_gpu_layout(self.args, remote_inference=self.remote_inference))
             self.placement_groups = {
                 "actor": self._reservation.training,
                 "critic": self._reservation.training if getattr(self.args, "use_critic", False) else None,

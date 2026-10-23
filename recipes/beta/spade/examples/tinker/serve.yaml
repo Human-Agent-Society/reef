@@ -54,16 +54,14 @@ pipeline:
           hint_plays: 2
           skills: [inspection, repair]
           state_dir: ${REEF_SPADE_STATE_DIR}/generations
-  # A batch is tasks_per_step complete task groups.
-  task2batch:
-    config:
-      tasks_per_step: 2
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 1800
   options:
     state-dir: ${REEF_SPADE_STATE_DIR}/tinker
+    # Episodes in one batch and one optimizer step: two complete task groups of plays_per_task plays.
+    batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004
 storage:

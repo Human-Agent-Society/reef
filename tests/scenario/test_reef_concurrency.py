@@ -160,7 +160,6 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     dispatcher = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(runtime),
-            batch_size=1,
             max_staleness=pairs_per_thread * thread_count,
         ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
@@ -201,7 +200,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, max_staleness=4),
+        TestPolicyRecipe(**runtime_bindings(runtime), max_staleness=4),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

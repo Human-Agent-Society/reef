@@ -52,11 +52,14 @@ class RecordSetUnitPool:
         """Return the reserved units. Return an empty tuple if no batch is reserved."""
         return () if self.reserved is None else self.reserved
 
-    def reserve(self, max_unit_count: int) -> tuple[RecordSetUnit, ...]:
-        """Select at most ``max_unit_count`` units as the next batch, and keep them reserved."""
-        if max_unit_count < 0:
-            raise ValueError("max_unit_count must not be negative")
-        self.reserved = self.select(max_unit_count)
+    def reserve(self, units: tuple[RecordSetUnit, ...]) -> tuple[RecordSetUnit, ...]:
+        """Keep ``units``, distinct held units in batch order, reserved as the next batch, and return them."""
+        unit_ids = [unit.unit_id for unit in units]
+        if len(set(unit_ids)) != len(unit_ids):
+            raise ValueError("a reservation must not name a unit more than one time")
+        if any(self.units_by_id.get(unit.unit_id) is not unit for unit in units):
+            raise ValueError("a reservation must name units that the pool holds")
+        self.reserved = units
         return self.reserved
 
     def release_reservation(self) -> None:

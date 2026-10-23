@@ -17,7 +17,7 @@ the backend's forward passes.
 A recipe binds ``WeightTrainingSpec(objective=..., scheduling=...)``.
 ``WeightTrainingSpec.loss_family`` derives the family from that objective;
 ``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
-``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
+``StepScheduling``, with the backend's batch size, says how the runtime cuts the batch into optimizer steps.
 The workers start with that objective's family. A job that selects another
 objective trains that objective's family on the same workers (see
 `Per-job families`_).

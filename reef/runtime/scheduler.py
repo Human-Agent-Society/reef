@@ -57,7 +57,6 @@ from reef.runtime.recovery import (
     marker_checkpoint_result,
     marker_committed,
     marker_disposition,
-    marker_in_flight,
     marker_path,
     marker_result,
 )
@@ -160,7 +159,7 @@ class TrainingExecution:
 
     def __init__(
         self,
-        store: TrainingJobStore | None,
+        store: TrainingJobStore,
         backend: TrainingBackend,
         state: TrainingJobState,
         *,
@@ -173,7 +172,7 @@ class TrainingExecution:
 
     def recover(self) -> dict[str, Any] | None:
         """Read restart state without guessing whether an optimizer step completed."""
-        marker = self._store.read() if self._store is not None else None
+        marker = self._store.read()
         if marker is not None and marker["status"] == "RUNNING":
             raise RuntimeError(f"ambiguous training job {marker['job_id']}")
         if marker is not None and marker["checkpoint_path"] is None:
@@ -187,8 +186,6 @@ class TrainingExecution:
     def execute(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         job_id = training_job_id(payload)
         scenario_step = job_scenario_step(payload)
-        if self._store is None:
-            raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
         disposition = marker_disposition(marker, job_id)
         if marker is not None and disposition == "conflict":
@@ -379,15 +376,12 @@ class RuntimeScheduler:
         *,
         scenario: str | None = None,
         committed_training_job_id: str | None = None,
-        committed_training_without_job_id: bool = False,
     ) -> None:
         """Reconcile a backend journal only against the owning scenario commit."""
         if committed_training_job_id is not None and (
             not isinstance(committed_training_job_id, str) or not committed_training_job_id
         ):
             raise TrainingRuntimeError("committed_training_job_id must be a non-empty string or None")
-        if not isinstance(committed_training_without_job_id, bool):
-            raise TrainingRuntimeError("committed_training_without_job_id must be a boolean")
         scenario = scenario if self.training_runtime.concurrent_training_scenarios else None
         training_job = self.training_runtime.training_job_status()
         if training_job is None:
@@ -412,25 +406,12 @@ class RuntimeScheduler:
             return
         if status not in COMMIT_PENDING_STATES:
             return
-        if "scenario_step" not in training_job and not marker_in_flight(training_job):
-            # A settled job an earlier release recorded without its scenario step has nothing left to finish.
-            return
         job_scenario_step, training_job_id = pending_job_identity(training_job)
         if status == "UPDATING_WEIGHTS":
             with self.operations.measure("weight_sync"):
                 self.inference_runtime.resume_weight_update(training_job_id)
         # Other components can advance the scenario; only this job's commit can finish it.
-        if committed_training_job_id is not None:
-            committed = scenario_step > job_scenario_step and committed_training_job_id == training_job_id
-        else:
-            # Older bridges lack job IDs and require an unacknowledged COMPLETE marker at the exact next step.
-            committed = (
-                committed_training_without_job_id
-                and status == "COMPLETE"
-                and training_job.get("commit_acknowledged") is not True
-                and scenario_step == job_scenario_step + 1
-            )
-        if committed:
+        if scenario_step > job_scenario_step and committed_training_job_id == training_job_id:
             self.finish_committed_training_job(training_job_id)
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str, *, scenario: str | None = None) -> None:
@@ -495,8 +476,7 @@ class TrainingCoordinator:
         self._owns_training = owns_training
         self._context = training.context
         self._config = training.config
-        path = marker_path(self._config.save_hf_template) if self._config.save_hf_template is not None else None
-        self._store = FileTrainingJobStore(path) if path is not None else None
+        self._store = FileTrainingJobStore(marker_path(self._config.save_hf_template))
         state = TrainingJobState()
         self._weight_publisher = BackendWeightPublisher(training, inference, state, self._store)
         self._publication = TrainingPublication(self._store, self._weight_publisher, state)
@@ -564,11 +544,8 @@ class TrainingCoordinator:
 
     def _training_job_health(self) -> dict[str, Any]:
         """The durable job block of :meth:`health`, read from the marker when one exists."""
-        training_job: dict[str, Any] = {
-            "deferred_weight_update": self._config.save_hf_template is not None,
-            "status": "COMPLETE" if self._config.save_hf_template is None else "IDLE",
-        }
-        marker = self._store.read() if self._store is not None else None
+        training_job: dict[str, Any] = {"status": "IDLE"}
+        marker = self._store.read()
         if marker is None:
             return training_job
         training_job.update(
@@ -579,10 +556,8 @@ class TrainingCoordinator:
         )
         if "scenario" in marker:
             training_job["scenario"] = marker["scenario"]
-        if "scenario_step" in marker:
-            # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index. Every
-            # job still out names its step; only a settled marker an earlier release wrote has none.
-            training_job["scenario_step"] = marker["scenario_step"]
+        # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
+        training_job["scenario_step"] = marker["scenario_step"]
         return training_job
 
     def start_rollout_id(self) -> int:
@@ -599,8 +574,6 @@ class TrainingCoordinator:
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         """Delegate job replay, train ordering and checkpoint recording to Reef."""
-        if self._config.save_hf_template is None:
-            raise RuntimeError("training checkpoint path is not configured")
         with self._operation_lock:
             return self._execution.execute(payload)
 

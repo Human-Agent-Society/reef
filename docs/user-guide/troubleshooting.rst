@@ -57,7 +57,7 @@ them does not give one generation more time.
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (the backend's batch size of samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready, and its ``processor`` entry compares ``ready_samples`` with ``batch_size``. When more samples wait than ``pipeline.task2batch.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 

@@ -113,6 +113,9 @@ needs from an earlier stage:
      task2batch:
        config:
          include_environment_feedback: false
+   training:
+     config:
+       global_batch_size: 256           # groups_per_step x rollouts_per_group
 
 Reef checks each stage's config when it loads the recipe. A stage key under
 ``recipe.config`` fails the deployment, and the error names the key's place
@@ -135,8 +138,11 @@ in ``pipeline``.
 
 ``SDPOTasks`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``). One batch is always one grid, so ``SDPOBatches``
-takes no ``batch_size``.
+``scaffold_tolerance``). One batch is always one grid. The batch size, Slime's
+``--global-batch-size``, must not exceed the grid's rollouts
+(``groups_per_step x rollouts_per_group``); with a larger one the scenario's pipeline fails to build. Set
+it equal to the grid to train one optimizer step per grid, as the example
+does.
 
 The Slime driver takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.

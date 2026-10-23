@@ -49,20 +49,18 @@ from reef.train.types import TrainingBatch
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 
 
-def sao_processor(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+def sao_processor(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
         record2task=SAOTasks(SampleAssemblySettings()),
-        task2batch=SAOBatches(context, batch_size),
+        task2batch=SAOBatches(context, None),
     )
 
 
 def single_rollout_steps() -> PipelineConfig:
-    """SAO's stages with one rollout per optimizer step, as a ``pipeline`` section would configure them."""
-    return PipelineConfig.from_setting(
-        {"task2batch": {"config": {"batch_size": 1}}}, spec=SAORecipe.pipeline_spec(), environ={}
-    )
+    """SAO's default stages; with a runtime batch size of 1 each rollout is one optimizer step."""
+    return PipelineConfig.from_setting({}, spec=SAORecipe.pipeline_spec(), environ={})
 
 
 class _StateOnlySaoBackend(CandidateBackend):
@@ -75,7 +73,7 @@ class _StateOnlySaoBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, TrainingMethod("sao"), state, StepScheduling(unit="sample"))
+        prepared = prepare_slime_step(batch, TrainingMethod("sao"), state, StepScheduling(unit="sample"), step_size=1)
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -160,7 +158,8 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
         SAOTasks,
         SAOBatches,
     )
-    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 128
+    # Without a configured buffer_size the buffer holds the trainer's default.
+    assert recipe.build_pipeline(PipelineContext("math", default_buffer_size=512)).buffer_size == 512
 
 
 @pytest.mark.unit
@@ -168,12 +167,12 @@ def test_sao_recipe_reads_reef_side_config() -> None:
     recipe = SAORecipe.from_environment(
         {},
         config={
-            "pipeline": {"task2batch": {"config": {"batch_size": 2}}},
+            "pipeline": {"task2batch": {"config": {"buffer_size": 16}}},
         },
         **runtime_bindings(_StubTrainingRuntime()),
     )
 
-    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 2
+    assert recipe.build_pipeline(PipelineContext("math", default_buffer_size=8)).buffer_size == 16
 
 
 @pytest.mark.unit
@@ -181,15 +180,18 @@ def test_sao_recipe_reads_reef_side_config() -> None:
 def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     deployment = yaml.safe_load((EXAMPLES / example).read_text(encoding="utf-8"))
     recipe = SAORecipe.from_environment(
-        {}, config={"pipeline": deployment["pipeline"]}, **runtime_bindings(_StubTrainingRuntime())
+        {}, config={"pipeline": deployment.get("pipeline", {})}, **runtime_bindings(_StubTrainingRuntime())
     )
+    # The Slime driver's global batch size is the batch size that the training runtime reports.
+    global_batch_size = deployment["training"]["config"]["global_batch_size"]
+    assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
 
-    pipeline = recipe.build_pipeline(PipelineContext("math"))
+    pipeline = recipe.build_pipeline(PipelineContext("math", default_buffer_size=4 * global_batch_size))
 
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, SAOTasks)
     assert isinstance(pipeline.task2batch, SAOBatches)
-    assert pipeline.batch_size == deployment["training"]["config"]["global_batch_size"]
+    assert pipeline.buffer_size is not None and pipeline.buffer_size >= global_batch_size
 
 
 @pytest.mark.unit
@@ -203,7 +205,8 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"task2batch": {"config": {"batch_size": 0}}}, "batch_size must be positive"),
+        ({"task2batch": {"config": {"batch_size": 8}}}, "SAOBatches: unknown config fields: batch_size"),
+        ({"task2batch": {"config": {"buffer_size": 0}}}, "buffer_size must be positive"),
         ({"task2batch": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"record2record": {"config": {"batch_size": 2}}}, "ExclusiveReportRecord2Record takes no config"),
     ],
@@ -237,7 +240,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     processor.push(_sao_inference("i1"))
     processor.push(_sao_report("r1", "i1", 0.75))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
 
     assert isinstance(batch, TrainingBatch)
     assert len(batch.items) == 1
@@ -275,7 +278,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live()
     processor.push(inference)
     processor.push(_sao_report("r1", "i1", 0.5))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
 
     assert batch.items[0].training.get("runtime_load_id", None) == "slime-v7"
 
@@ -296,7 +299,7 @@ def test_processor_preserves_explicit_observation_boundaries() -> None:
     )
     processor.push(_sao_report("r1", "i1", 1.0))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
 
     assert tuple(batch.items[0].training.get("action_mask", [])) == (1, 0, 1)
     assert tuple(batch.items[0].training.get("loss_mask", [])) == (1, 0, 1)
@@ -318,8 +321,8 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     )
     processor.push(_sao_report("r1", "i1", 1.0))
 
-    batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    batch = processor.build_batch(1)
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -331,8 +334,8 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     processor.push(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
     processor.push(_sao_report("r1", "i1", 1.0))
 
-    batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    batch = processor.build_batch(1)
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -344,7 +347,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     processor.push(_sao_inference("i1"))
     with pytest.raises(ReportValidationError, match="finite"):
         processor.push(_sao_report("r1", "i1", float("nan")))
-    assert not processor.ready()
+    assert not processor.ready(1)
     assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
@@ -353,8 +356,8 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     processor = sao_processor(PipelineContext("math"))
     processor.push(_sao_inference("i1", loss_mask=(0, 0, 0)))
     processor.push(_sao_report("r1", "i1", 1.0))
-    batch = processor.build_batch()
-    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    batch = processor.build_batch(1)
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
@@ -383,7 +386,7 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
             processor.push(item)
         processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
     assert [source_record_id(sample) for sample in batch.items] == ["i1"]
     processor.acknowledge(batch.batch_id)
     assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
@@ -399,11 +402,11 @@ def test_backend_declares_sao_and_defers_model_dependent_advantages() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    result = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    result = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
 
     assert result.payload is not None and result.payload["loss"] == "sao"
     assert "advantages" not in result.payload
-    assert result.metrics == {"steps": 1, "rollouts": 1}
+    assert result.metrics == {"steps": 1, "rollouts": 1, "optimizer_steps": 1}
 
 
 @pytest.mark.unit
@@ -413,9 +416,9 @@ def test_backend_preparation_advances_step_state() -> None:
         (policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5, action_mask=(1,)),),
     )
 
-    first = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
+    first = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     second = prepare_slime_step(
-        batch, TrainingMethod("sao"), first.next_algorithm_state, StepScheduling(unit="sample")
+        batch, TrainingMethod("sao"), first.next_algorithm_state, StepScheduling(unit="sample"), step_size=1
     )
 
     assert first.next_algorithm_state == {"steps": 1}
@@ -459,7 +462,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
     ):
         assert isinstance(batch, TrainingBatch)
         sample = batch.items[0]
-        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
+        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
         assert prepared.payload is not None
         payload = {
             **prepared.payload,
@@ -535,7 +538,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         dispatcher.accept_record(_sao_inference("i1"))
         dispatcher.accept_record(_sao_report("r1", "i1", 0.9))
 
-        # batch_size 1 => exactly one accepted rollout drives one training step,
+        # A runtime batch size of 1 => exactly one accepted rollout drives one training step,
         # executed asynchronously on the dispatcher's training worker.
         _wait_for_step(dispatcher, 1)
         scenario = dispatcher.get_or_create_scenario("math")
@@ -560,7 +563,6 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
-            "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
             "evaluation": {
                 "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
                 "config": {

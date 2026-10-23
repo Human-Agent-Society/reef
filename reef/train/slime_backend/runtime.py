@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.config import config_option
+from reef.core.config import config_metadata, config_option
 from reef.runtime.deployment import RayRuntimeConfig, RuntimeConfigError, RuntimeFactory, RuntimeRegistry, runtime_pair
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, connect_ray_coordinator
 from reef.runtime.interfaces import InferenceRuntime, TrainingJobResult, TrainingRuntime
@@ -20,6 +20,7 @@ TRAINING_CONFIG_KEYS = (
     "ray_address",
     "inference_timeout_s",
     "train_timeout_s",
+    "batch_size",
 )
 #: Keys forwarded verbatim to the independently selected inference factory.
 INFERENCE_CONFIG_KEYS = (
@@ -41,6 +42,7 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
         ray_address: str | None = None,
         inference_timeout_s: float = 300.0,
         train_timeout_s: float | None = None,
+        batch_size: int,
     ) -> None:
         super().__init__(
             connect_ray_coordinator(
@@ -50,6 +52,7 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
                 inference_timeout_s=inference_timeout_s,
                 train_timeout_s=train_timeout_s,
             ),
+            batch_size=batch_size,
         )
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -63,14 +66,29 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
 
 @dataclass(frozen=True)
 class SlimeRuntimeConfig(RayRuntimeConfig):
+    """Connect to the Slime coordinator in Ray and pair it with a separately selected inference runtime.
+
+    Values: the ``RayRuntimeConfig`` values, where also ``inference_runtime``
+    is a non-empty runtime kind or factory reference, and
+    ``inference_runtime_options`` maps option names of that runtime to their
+    values; no name is one that ``SlimeRuntimeFactory`` sets itself
+    (``INFERENCE_CONFIG_KEYS``, ``type`` and ``control``).
+    """
+
     inference_runtime: str = config_option(
         "", help="Independently selected inference runtime kind or factory reference."
+    )
+    inference_runtime_options: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Options of the selected inference runtime.")
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if not self.inference_runtime:
             raise ValueError("runtime.inference_runtime must name the selected inference implementation")
+        reserved = sorted(set(self.inference_runtime_options) & {*INFERENCE_CONFIG_KEYS, "type", "control"})
+        if reserved:
+            raise ValueError(f"runtime.inference_runtime_options cannot set {', '.join(reserved)}")
 
 
 class SlimeRuntimeFactory(RuntimeFactory):
@@ -102,10 +120,13 @@ class SlimeRuntimeFactory(RuntimeFactory):
             if pair is None:
                 raise RuntimeConfigError("the configured training connector must return a runtime pair")
             return pair
+        if "batch_size" not in config:
+            raise RuntimeConfigError("runtime.batch_size is required: Slime's --global-batch-size")
         training = SlimeTrainingRuntime(**{key: config[key] for key in TRAINING_CONFIG_KEYS if key in config})
         try:
             inference = registry.build(
                 {
+                    **dict(config.get("inference_runtime_options") or {}),
                     **{key: config[key] for key in INFERENCE_CONFIG_KEYS if key in config},
                     "type": config["inference_runtime"],
                     "control": training.train_group_handle,

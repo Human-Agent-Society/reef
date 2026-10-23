@@ -254,7 +254,7 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record),
+        task2batch=TTTDBatches(context, record2record, None),
     )
     processor.push(
         AgentRecord.create(

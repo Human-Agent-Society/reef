@@ -15,13 +15,13 @@ from dataclasses import dataclass, replace
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.plugins import NoSettings, PluginConfigError, PluginSettings
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import Task2Batch
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
@@ -196,15 +196,16 @@ class TTTDBatches(Task2Batch):
     the backend performs a well-defined zero-gradient step, also matching the
     reference behavior.
 
-    The stage takes no config: the grid comes from the record stage, and a
-    batch is always one step.
+    The grid comes from the record stage. ``max_batch_samples`` is the grid,
+    so the trainer refuses a larger batch size and a batch takes exactly one
+    step. Config: ``buffer_size``.
     """
 
-    def __init__(self, context: PipelineContext, record2record: TTTDRecord2Record) -> None:
+    def __init__(self, context: PipelineContext, record2record: TTTDRecord2Record, buffer_size: int | None) -> None:
         self.groups_per_step = record2record.groups_per_step
         self.rollouts_per_group = record2record.rollouts_per_group
-        # A batch is one unit: the whole step.
-        super().__init__(context, 1)
+        super().__init__(context, buffer_size)
+        self.max_batch_samples = self.groups_per_step * self.rollouts_per_group
 
     @classmethod
     def from_config(
@@ -216,12 +217,12 @@ class TTTDBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
+        settings = BufferSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, TTTDRecord2Record):
             raise PluginConfigError(
                 f"{cls.__name__} needs TTTDRecord2Record as record2record, not {type(record2record).__name__}"
             )
-        return cls(context, record2record)
+        return cls(context, record2record, settings.buffer_size)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         steps = {item.metadata["tttd"]["step"] for item in items}
