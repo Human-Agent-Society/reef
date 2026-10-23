@@ -622,7 +622,10 @@ its terminal event carries no receipt. A stream from Reef's SGLang or vLLM
 backend that the engine aborts also carries no receipt, because Reef cannot
 restart a stream after it sent frames. In both cases a harness that reports by
 receipt does not reference the record. Reef stores it as an incomplete delivery
-record, and an aborted stream's record has no training tensors.
+record and preserves the captured response, including any training tensors.
+The record-to-record stage excludes aborted records from task creation and
+training, including when a report references their IDs directly or retained
+records are replayed after a restart.
 
 On a scenario that serves harness files, every inference response also
 carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when

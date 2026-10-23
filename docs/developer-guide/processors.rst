@@ -244,6 +244,14 @@ A record that the stage ends, for example a report in a taken slot or a unit
 that is too stale, appears in ``releasable_record_ids()``. The next commit
 names it, so the record never trains after a restart.
 
+Before exposing a record set to the task stage, ``Record2Record.form`` checks
+its inference responses for an engine abort. An abort rejects the entire set,
+including a report and all its referenced inferences. The stage uses its normal
+rejection and release lifecycle; it does not alter the stored responses or
+delete captured tensors. Retained records pass the same check during replay.
+A missing ``training`` block alone does not reject a record: some methods use
+records to generate tasks without captured policy tensors.
+
 Every record stage runs the staleness check. No other part of Reef checks the
 version of training data. The check has these steps:
 

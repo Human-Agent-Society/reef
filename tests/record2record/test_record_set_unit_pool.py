@@ -215,3 +215,33 @@ def test_a_serving_version_of_another_incarnation_restarts_the_served_versions()
     for version in ("e:1", "e:2", "e:2", "f:0"):
         stage.observe_serving_runtime_load_id(version)
     assert stage.served_runtime_load_ids == ["f:0"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"finish_reason": "abort", "training": {"tokens": [1, 2]}},
+        {"meta_info": {"finish_reason": {"type": "abort"}}},
+        {"choices": [{"finish_reason": "abort"}]},
+        {"choices": [{"finish_reason": "tool_calls", "meta_info": {"finish_reason": "abort"}}]},
+        {"stop_reason": "end_turn", "training": {"finish_reason": "abort", "tokens": [1, 2]}},
+        {
+            "stop_reason": "end_turn",
+            "stream_delivery": {"complete": False, "error": "upstream engine aborted the generation"},
+        },
+    ],
+    ids=["native", "sglang", "openai", "tool-call", "anthropic", "legacy-stripped-anthropic"],
+)
+def test_aborted_inference_ends_before_task_creation(response: dict[str, object]) -> None:
+    stage = InferenceRecord2Record()
+    aborted = AgentRecord.create(
+        scenario="s", request_type=RequestType.INFERENCE, payload={"response": response}, agent_record_id="aborted"
+    )
+    stage.push(aborted)
+    stage.push(inference("valid-without-tensors"))
+    assert [record_set.record_ids() for record_set in stage.pull()] == [("valid-without-tensors",)]
+    assert stage.releasable_record_ids() == {"aborted"}
+    assert aborted.payload["response"] == response
+    stage.release_records(frozenset({"aborted"}))
+    assert not stage.releasable_record_ids()

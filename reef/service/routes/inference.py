@@ -7,8 +7,9 @@ from typing import Any
 
 from aiohttp import web
 
+from reef.core.records_types import INFERENCE_ABORT_ERROR, inference_aborted
 from reef.runtime.interfaces import MULTIMODAL_ROUTES, InferenceHandler
-from reef.service.request_service import RequestService, inference_aborted
+from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (
     SSEFrameDecoder,
@@ -112,7 +113,7 @@ async def _relay_inference_stream(
 
     def engine_aborted() -> bool:
         # A stream cannot restart after it sent frames. An engine-aborted stream
-        # ends like an incomplete one: no receipt, no training sample.
+        # ends like an incomplete one, without a receipt.
         return upstream.record_response is not None and inference_aborted(upstream.record_response)
 
     if not is_sse and record and not engine_aborted():
@@ -141,7 +142,7 @@ async def _relay_inference_stream(
             if relay.terminal is None:
                 error = "upstream SSE ended without a terminal event"
             elif engine_aborted():
-                error = "upstream engine aborted the generation"
+                error = INFERENCE_ABORT_ERROR
                 await response.write(relay.terminal)
             else:
                 record_attempted = True
@@ -164,7 +165,7 @@ async def _relay_inference_stream(
                 body.extend(chunk)
                 await response.write(chunk)
             if engine_aborted():
-                error = "upstream engine aborted the generation"
+                error = INFERENCE_ABORT_ERROR
             else:
                 complete = True
     except ConnectionResetError:

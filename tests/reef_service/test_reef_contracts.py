@@ -901,7 +901,7 @@ def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
             assert handler.calls == 1
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             recorded = record.payload["response"]
-            assert "training" not in recorded
+            assert recorded["training"] == record_response["training"]
             assert recorded["stream_delivery"]["complete"] is False
             assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
             metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
@@ -952,7 +952,7 @@ def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
             assert body == b"".join(frames)
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             recorded = record.payload["response"]
-            assert "training" not in recorded
+            assert recorded["training"] == record_response["training"]
             assert recorded["stream_delivery"]["complete"] is False
             assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
             metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
@@ -984,7 +984,7 @@ def test_aborted_non_sse_stream_has_no_receipt_header(tmp_path) -> None:
             assert "x-reef-agent-record-id" not in headers
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             recorded = record.payload["response"]
-            assert "training" not in recorded
+            assert recorded["training"] == STREAM_TRAINING
             assert recorded["stream_delivery"]["complete"] is False
             assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
             metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()

@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any, Self
 
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, inference_aborted
 from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.selection import SelectionPolicy
@@ -51,7 +51,10 @@ class Record2Record(ABC, Plugin):
     advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and starts work that is due. No record is in two record sets of one stage:
     ``form`` refuses a set that holds a record of another set. The pipeline
-    makes tasks from each set and gives the result back (``settle``). The stage
+    makes tasks from each set and gives the result back (``settle``). Before
+    exposing a set, ``form`` rejects it if any inference response reports an
+    engine abort. Rejection ends the whole set through the stage's lifecycle,
+    including reports that reference an aborted inference. The stage
     holds the sets that have tasks in batch units in its ``pool`` until the
     pipeline reserves them for a batch; the pipeline reserves and consumes
     through the pool, and the stage ends the consumed units (``consume``). The
@@ -109,6 +112,8 @@ class Record2Record(ABC, Plugin):
         """Form ``record_set`` for the pipeline. Raises ``ValueError`` if a record of it is in another set.
 
         A set with the ID of an earlier set takes its records again, as a retry does.
+        An engine-aborted inference rejects the whole set before task creation.
+        Replaying retained records applies the same check.
         """
         record_ids = record_set.record_ids()
         taken = [
@@ -119,6 +124,13 @@ class Record2Record(ABC, Plugin):
         if taken:
             raise ValueError(f"records {taken!r} are in another record set and cannot join {record_set.set_id!r}")
         self.set_of_record.update(dict.fromkeys(record_ids, record_set.set_id))
+        for record in record_set.records():
+            if record.request_type is not RequestType.INFERENCE:
+                continue
+            response = record.payload.get("response")
+            if isinstance(response, Mapping) and inference_aborted(response):
+                self.reject(record_set)
+                return
         self.formed.append(record_set)
 
     def advance(self, now: float) -> None:

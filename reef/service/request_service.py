@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, inference_aborted
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
@@ -78,27 +78,6 @@ def install_service_url(headers: Mapping[str, str]) -> str | None:
     if not host:
         return None
     return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
-
-
-def inference_aborted(response: Mapping[str, Any]) -> bool:
-    def aborted(value: Any) -> bool:
-        return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
-
-    meta = response.get("meta_info")
-    if aborted(response.get("finish_reason")) or (isinstance(meta, Mapping) and aborted(meta.get("finish_reason"))):
-        return True
-    training = response.get("training")
-    if isinstance(training, Mapping) and aborted(training.get("finish_reason")):
-        return True
-    choices = response.get("choices")
-    return isinstance(choices, list) and any(
-        isinstance(choice, Mapping)
-        and (
-            aborted(choice.get("finish_reason"))
-            or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
-        )
-        for choice in choices
-    )
 
 
 def normalize_request_payload(
@@ -366,7 +345,7 @@ class RequestService:
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
                     # An engine-aborted generation may carry no runtime-load ID; the route
-                    # ends its stream without a receipt or a training block, so skip the checks.
+                    # records it as incomplete, and the record stage excludes it from training.
                     if not inference_aborted(record_response):
                         if prepared.hooks is not None:
                             prepared.hooks.verify_response(prepared.artifact, path, record_response)
@@ -441,17 +420,13 @@ class RequestService:
         succeeded = False
         try:
             payload = dict(pending.item.payload)
-            response = dict(response)
-            # A stream cannot restart after it sent frames, so an engine-aborted
-            # stream keeps no training block, like a token-by-token stream that ended early.
-            if inference_aborted(response):
-                response.pop("training", None)
-            # A token-native streaming handler fills record_response only when
-            # the upstream generation finishes. Validate that final capture
-            # here, after the route has drained the stream but before it can
-            # become a training record. Incomplete/disconnected streams have
-            # no training block and remain delivery diagnostics only.
-            if pending.deferred_prepared is not None and isinstance(response.get("training"), Mapping):
+            # An abort may have no runtime-load ID. Preserve its captured response;
+            # the record stage decides whether it can enter task creation.
+            if (
+                pending.deferred_prepared is not None
+                and isinstance(response.get("training"), Mapping)
+                and not inference_aborted(response)
+            ):
                 if pending.path is None:
                     raise ReefError("deferred inference response has no request path")
                 hooks = pending.deferred_prepared.hooks
