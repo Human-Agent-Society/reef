@@ -34,7 +34,7 @@ WEIGHT_TRANSFER_PROTOCOLS = {"sglang": "slime-sglang-control-v2", "vllm": "reef-
 class SlimeTrainingService(TrainingService):
     """Own actor/critic workers and a sender attachment, never the coordinator.
 
-    The workers send ``inference_backend``'s native protocol, else full-weight
+    The workers send ``inference_backend``'s native protocol, else weight
     files, else ``reef-no-weight-transfer-v1``; ``inference.backend: none`` has
     only the last. With the no-transfer session, no updater connects to a receiver
     and no weights leave the workers: the backend records each version in the
@@ -85,12 +85,13 @@ class SlimeTrainingService(TrainingService):
 
     @property
     def weight_transfer_protocols(self) -> tuple[str, ...]:
-        """The native transfer first, then full-weight files for a receiver that the workers cannot reach, then none.
+        """The native transfer first, then weight files for a receiver that the workers cannot reach, then none.
 
-        LoRA training sends only natively: Slime does not export per-scenario adapters as files.
+        As files, full-weight training delivers Hugging Face checkpoints and
+        LoRA training delivers each scenario's PEFT adapter.
         ``inference.backend: none`` has neither: its receiver takes only the no-transfer protocol.
         """
-        files = () if self.preparation.lora or not self._native_protocols else (WEIGHT_FILES_PROTOCOL,)
+        files = (WEIGHT_FILES_PROTOCOL,) if self._native_protocols else ()
         # Last, so that a receiver with engines keeps its native protocol.
         return (*self._native_protocols, *files, NO_WEIGHT_TRANSFER_PROTOCOL)
 

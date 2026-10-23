@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
@@ -152,7 +153,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     ) -> None:
         self.train_rpc_timeout_s = train_rpc_timeout_s
         self.version_receiver = version_receiver
-        #: Set for a file session: each publication exports the actor's full weights here.
+        #: Set for a file session: each publication exports the actor's weights here.
         self.weight_files_root = weight_files_root
         self._worker_failure: ExecutorFailure | None = None
         self._score_centering = score_centering
@@ -471,35 +472,46 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
 
     def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
-        """Export the actor's current full weights as ``runtime_load_id`` when the session delivers files.
+        """Export the actor's weights as ``runtime_load_id`` when the session delivers files.
 
         Without a file session this returns None and Reef uses the native
-        sender. The export is a Hugging Face checkpoint in
-        ``weight_files_root``; it replaces the previous export, which the
-        receiver loaded before Reef asks for the next one. Per-scenario LoRA
-        adapters are not exported.
+        sender. Full-weight training exports a Hugging Face checkpoint, and
+        ``scenario`` is None. LoRA training activates ``scenario`` and exports
+        its current adapter as a PEFT directory, as the native adapter transfer
+        sends it. The export goes to ``weight_files_root`` and replaces the
+        previous export, which the receiver loaded before Reef asks for the next one.
         """
         root = self.weight_files_root
         if root is None:
             return None
-        if scenario is not None:
+        if (scenario is not None) != self._config.lora:
             raise RuntimeError(
-                "Slime delivers only full weights as files; per-scenario adapters need its native transfer"
+                "Slime exports a scenario's adapter for LoRA training and full weights otherwise; "
+                f"got scenario {scenario!r} with lora={self._config.lora}"
             )
         if root.exists():
             for previous in root.iterdir():
                 shutil.rmtree(previous)
         directory = root / runtime_load_id.replace(":", "-")
         root.mkdir(parents=True, exist_ok=True)
+        if scenario is not None:
+            self._group.activate_scenario(scenario)
         self._group.export_weight_files(directory)
+        # Rank 0 writes the configuration and the adapter; each training node writes its own full-weight shards.
+        # The coordinator reads them on its node.
         index = directory / "model.safetensors.index.json"
-        if directory.is_symlink() or not (directory / "config.json").is_file() or not index.is_file():
-            raise RuntimeError(f"exported weights are missing or incomplete: {directory}")
+        required = (ADAPTER_CONFIG, ADAPTER_METADATA) if scenario is not None else ("config.json", index.name)
+        if directory.is_symlink() or not all((directory / name).is_file() for name in required):
+            raise RuntimeError(
+                f"exported weights are missing or incomplete: {directory}; "
+                f"training on other nodes needs {root} on shared storage"
+            )
+        if scenario is not None:
+            return WeightFiles(directory, "adapter")
         missing = sorted(
             set(json.loads(index.read_text())["weight_map"].values()) - {path.name for path in directory.iterdir()}
         )
         if missing:
-            # Each training node writes its own shards; the coordinator reads them on rank 0's node.
             raise RuntimeError(
                 f"exported weights lack shards {missing} on this node; multi-node training needs {root} on shared storage"
             )

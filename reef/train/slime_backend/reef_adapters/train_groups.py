@@ -279,10 +279,10 @@ class SlimeTrainGroup:
             self.release()
 
     def export_weight_files(self, directory: Path) -> None:
-        """Write the actor's current full weights to ``directory`` as a Hugging Face checkpoint.
+        """Write the actor's current weights to ``directory``: the active scenario's adapter, or full weights.
 
-        Every rank takes part; rank 0 writes the configuration and each node's
-        writer rank its shards. No receiver is involved.
+        Every rank takes part. Rank 0 writes the configuration and an adapter;
+        each node's writer rank writes its full-weight shards. No receiver is involved.
         """
         if self._executor is None and self._release_train_enabled():
             self.create()

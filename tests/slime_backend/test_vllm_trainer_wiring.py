@@ -129,7 +129,11 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
         == (WEIGHT_TRANSFER_PROTOCOLS["sglang"], WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
         == ("slime-sglang-control-v2", "reef-weight-files-v1", "reef-no-weight-transfer-v1")
     )
-    assert service(lora).weight_transfer_protocols == ("slime-sglang-control-v2", NO_WEIGHT_TRANSFER_PROTOCOL)
+    assert service(lora).weight_transfer_protocols == (
+        "slime-sglang-control-v2",
+        WEIGHT_FILES_PROTOCOL,
+        NO_WEIGHT_TRANSFER_PROTOCOL,
+    )
     vllm_trainer = service(inference_backend="vllm")
     assert vllm_trainer.weight_transfer_protocols == (
         VLLM_PROTOCOL,
@@ -152,14 +156,11 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
         resources=_Resources(), inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), training=vllm_trainer
     )
     assert plan.weight_transfer_protocol(plan.inference) == VLLM_PROTOCOL
-    # Without the receiver's native protocol, full weights travel as files; LoRA has no such fallback.
-    mismatched = ModelDeploymentPlan(
-        resources=_Resources(), inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), training=service()
-    )
-    assert mismatched.weight_transfer_protocol(mismatched.inference) == WEIGHT_FILES_PROTOCOL
-    with pytest.raises(ValueError, match="incompatible inference control protocol"):
-        ModelDeploymentPlan(
+    # Without the receiver's native protocol, the weights travel as files.
+    for preparation in (full, lora):
+        mismatched = ModelDeploymentPlan(
             resources=_Resources(),
             inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)),
-            training=service(lora),
-        ).validate()
+            training=service(preparation),
+        )
+        assert mismatched.weight_transfer_protocol(mismatched.inference) == WEIGHT_FILES_PROTOCOL

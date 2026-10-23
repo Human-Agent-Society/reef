@@ -561,7 +561,7 @@ def test_a_deployment_without_an_inference_engine_refuses_a_composite_recipe(tmp
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
-def test_slime_remote_engines_take_full_weights_without_colocation(tmp_path):
+def test_slime_remote_engines_take_weight_files_without_colocation(tmp_path):
     from reef.runtime.deployment import RuntimeConfigError
     from reef.service.deploy.service_config import service_config_from_mapping
     from reef.service.deploy.training import local_model_required, training_deployment_for
@@ -582,12 +582,19 @@ def test_slime_remote_engines_take_full_weights_without_colocation(tmp_path):
     }
     with pytest.raises(RuntimeConfigError, match="inference_runtime_options cannot set inference_url"):
         SlimeRuntimeFactory().parse_config({**runtime, "inference_runtime_options": {"inference_url": "x"}}, {})
+    lora = training_config()
+    lora["inference"]["remote"] = {"url": "https://gpu-host.example"}
+    lora["training"]["options"] = {**lora["training"]["options"], "megatron-lora-rank": 8}
+    resolve_deployment_config(lora, None, tmp_path / "serve.yaml")
     for change, match in (
-        ({"colocate": True}, "training.colocate"),
-        ({"options": {**raw["training"]["options"], "megatron-lora-rank": 8}}, "only full weights"),
+        ({"training": {**raw["training"], "colocate": True}}, "training.colocate"),
+        (
+            {"training": lora["training"], "inference": {**lora["inference"], "backend": "vllm"}},
+            "vllm does not publish LoRA",
+        ),
     ):
         refused = training_config()
         refused["inference"]["remote"] = {"url": "https://gpu-host.example"}
-        refused["training"] = {**refused["training"], **change}
+        refused.update(change)
         with pytest.raises(DeployConfigError, match=match):
             resolve_deployment_config(refused, None, tmp_path / "serve.yaml")
