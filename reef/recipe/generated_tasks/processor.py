@@ -49,6 +49,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
+from reef.harness.client.tasks import TaskPlay
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult
 from reef.record2record import (
@@ -63,7 +64,6 @@ from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.runner import Episode, EpisodeRunner
 from reef.storage.tasks import SplitName, TaskConflict, TaskStore
 from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
@@ -102,7 +102,7 @@ def reported_arm(report: AgentRecord) -> str | None:
     return arm if isinstance(arm, str) else None
 
 
-def rewards_of(episodes: tuple[Episode, ...]) -> tuple[float, ...]:
+def rewards_of(episodes: tuple[TaskPlay, ...]) -> tuple[float, ...]:
     """The rewards of the episodes that ran. An episode that ran without a reward counts as 0."""
     return tuple(
         episode.reward if episode.reward is not None else 0.0
@@ -555,7 +555,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             if context.task_storage is None:
                 raise ValueError("rounds need the task storage of a scenario session")
         self.task_generator = task_generator
-        self.episode_runner = EpisodeRunner(task_player) if task_player is not None else None
+        self.task_player = task_player
         self.worker = worker
         if self.worker is None and self.rounds > 0:
             self.worker = BackgroundJobWorker(self, thread_name="generated-task-rounds", concurrency=1)
@@ -771,19 +771,20 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         not played. A task whose training episodes all could not run comes back with the first episode's error;
         its staged copy stays for the next play.
         """
-        if self.episode_runner is None:
+        if self.task_player is None:
             raise RuntimeError("playing a task needs the generator service")
         try:
-            task_path = await self.episode_runner.stage(task)
+            task_path = (await self.task_player.write_task(task)).path
         except (DuplicateTask, TaskNameConflict) as exc:
             return TaskPlayResult(task, error=f"refused: {exc}"), 0
-        training = await self.episode_runner.play(
+        training = await self.task_player.play(
             task_path,
             scenario=self.scenario,
             arm=TRAINING_ARM,
             plays=self.plays_per_task,
+            is_reporting=True,
             extra_instruction_files=(),
-            labels={"round": str(round_number)},
+            tags={"round": str(round_number)},
             model=self.served_model,
         )
         if training and all(episode.is_infrastructure_failure for episode in training):

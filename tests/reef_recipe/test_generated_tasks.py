@@ -37,7 +37,6 @@ from reef.recipe.generated_tasks.processor import (
 )
 from reef.record2record import GroupDecision, ReportContext
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.runner import Episode
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.task2batch import BufferSettings
@@ -121,8 +120,8 @@ def played(processor: TrainingPipeline, task: str, index: int, score: float, **f
 
 
 def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
-    def episode(reward: float | None, error: str = "") -> Episode:
-        return Episode("e", reward, (), error)
+    def episode(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
     assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
     assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)

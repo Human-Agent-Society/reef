@@ -467,9 +467,8 @@ at a time. In each round it:
 2. Saves the candidates in the scenario's task store, then validates each
    task with the generator.
 3. Publishes each valid task with its train/eval split.
-4. Stages each training task through an ``EpisodeRunner``
-   (``reef.record2task.generator.runner``) and plays it ``plays_per_task``
-   times on the training arm. It does not play eval tasks. Staging the same
+4. Stages each training task in the generator service (``write_task``) and
+   plays it ``plays_per_task`` times on the training arm. It does not play eval tasks. Staging the same
    task again returns its staged copy, so a play that a stop interrupted can
    stage and play again. An episode with an error and no reward could not run;
    when every training episode of a task could not run, the task's result

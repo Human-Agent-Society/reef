@@ -54,7 +54,6 @@ from reef.record2task.generator.client import (
 )
 from reef.record2task.generator.designer import DIFFICULTIES, DesignerRequest
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.runner import EpisodeRunner
 
 logger = logging.getLogger(__name__)
 
@@ -232,14 +231,14 @@ class SpadeTaskGenerator(TaskGenerator):
         Staging the task again returns the copy that the recipe played. The plays report on the ``hint`` arm,
         which the recipe does not train on.
         """
-        runner = EpisodeRunner(self.service)
-        episodes = await runner.play(
-            await runner.stage(task),
+        episodes = await self.service.play(
+            (await self.service.write_task(task)).path,
             scenario=self.scenario,
             arm=HINT_ARM,
             plays=self.hint_plays,
+            is_reporting=True,
             extra_instruction_files=(HINT_FILE,),
-            labels={"generation": str(self.generation)},
+            tags={"generation": str(self.generation)},
             model=self.served_model,
         )
         return rewards_of(episodes)
