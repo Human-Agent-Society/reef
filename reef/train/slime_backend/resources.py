@@ -14,18 +14,23 @@ import ray
 from reef.runtime.deployment import InferenceResources
 from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
-def model_gpu_layout(args: Any, *, remote_inference: bool = False) -> ModelGpuLayout:
+def model_gpu_layout(args: SlimeArguments, *, remote_inference: bool = False) -> ModelGpuLayout:
     """The deployment's GPU layout from Slime's parsed topology flags.
 
-    Engines on a remote component reserve no GPU here, like external engines.
+    Inference is external to the reservation when Slime's engines are
+    (``--rollout-external``), when they run on a remote component, or when
+    Slime starts none (``--rollout-num-gpus 0``, which ``inference.backend:
+    none`` sets). Every model GPU then trains.
     """
+    inference_gpus = int(args.rollout_num_gpus or 0)
     return ModelGpuLayout(
         training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node),
-        inference_gpus=int(getattr(args, "rollout_num_gpus", 0) or 0),
-        colocate=bool(getattr(args, "colocate", False)),
-        external_inference=bool(getattr(args, "rollout_external", False)) or remote_inference,
+        inference_gpus=inference_gpus,
+        colocate=bool(args.colocate),
+        external_inference=bool(args.rollout_external) or remote_inference or inference_gpus == 0,
     )
 
 

@@ -298,14 +298,21 @@ The Tinker backend still produces SGLang engine options and keeps
 
 With an ``inference.remote`` section, Slime's engines run on a remote inference
 component, and Slime reserves only its training GPUs. Each publication exports
-the actor's current weights as a Hugging Face checkpoint under ``weight-files``,
-beside the HF and Megatron checkpoint directories. The coordinator uploads the
-export to the component, which reloads it in place of the served weights; the
-next publication replaces the export. Every training node writes its own
-shards, so multi-node training needs that directory on shared storage; a
-publication whose export lacks a shard on rank 0's node fails. A full-weight
-publication moves the whole model each time, for example about 16 GB for an 8B
-bf16 model. LoRA and ``training.colocate`` are refused with remote engines.
+the actor's current weights under ``weight-files``, beside the HF and Megatron
+checkpoint directories. The coordinator uploads the export to the component,
+and the next publication replaces the export.
+
+- Full-weight training exports a Hugging Face checkpoint. The component reloads
+  it in place of the served weights. A publication moves the whole model each
+  time, for example about 16 GB for an 8B bf16 model.
+- LoRA training (``training.options.megatron-lora-rank``) exports the
+  scenario's PEFT adapter. The component loads it as a new adapter beside the
+  base model. Only ``inference.backend: sglang`` serves LoRA adapters.
+
+Every training node writes its own shards of a full-weight export, so
+multi-node training needs ``weight-files`` on shared storage. A publication
+whose export lacks a file on rank 0's node fails. ``training.colocate`` is
+refused with remote engines.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -328,6 +335,55 @@ recipe contracts before starting children. Config references such as
 The HTTP service binds to loopback by default. The ``reef`` section contains
 only declared HTTP settings; model and recipe fields belong to their owning
 sections.
+
+Train without an inference engine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``inference.backend: none`` runs no inference engine. Use it for supervised
+fine-tuning on data that does not come from the served model, such as uploaded
+trajectories (``POST /reef/trajectories``) or imported records
+(``POST /reef/records``). Only the Slime backend supports it. The trainer
+takes every GPU that ``training.options.actor-*`` names:
+
+.. code:: yaml
+
+   inference:
+     model-path: /models/Qwen3-8B   # the weights to train; nothing serves them
+     backend: none
+   training:
+     backend: slime
+     options:
+       actor-num-nodes: "1"
+       actor-num-gpus-per-node: "8"
+       save-interval: "42"
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+A training step in this mode works as follows:
+
+- The trainer stays on its GPUs between steps. Reef does not offload or
+  reload it, because no other model shares the GPUs.
+- Each step commits a scenario version with its records, metrics and runtime
+  load ID, as with an engine. No weights leave the trainer: the version names
+  the weights that the trainer holds.
+- The step after each ``save-interval`` versions saves the Megatron
+  checkpoint and the HF export, and Reef publishes that version as an
+  artifact. See `Set the checkpoint cadence
+  <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
+- A restart continues from the last saved checkpoint, as with an engine.
+
+The deployment serves no inference. ``/v1/chat/completions``,
+``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+trained version, serve its published checkpoint from a separate deployment.
+
+``reef serve`` refuses the settings that configure an engine or call the
+model: ``inference.num-gpus`` (other than 0),
+``inference.tensor-parallel-size``, ``inference.options``, ``inference.url``,
+``inference.remote``, ``inference.handler-factory``,
+``inference.handler-config``, ``training.colocate``, a ``teacher`` engine, an
+``evaluation`` section, a ``generator`` section and a composite recipe. The
+Slime driver also refuses LoRA (``megatron-lora-rank``), ``offload-train`` and
+a loss family that reads rollout log probs, such as the on-policy
+distillation, SAO and TTT-Discover families.
 
 Native backend options
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -1048,9 +1104,9 @@ names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 ``reef serve`` refuses the section unless the training backend supports remote
-engines. Tinker publishes its adapters; Slime publishes full weights and
-refuses LoRA and ``training.colocate`` with remote engines. The section tells
-Reef how to reach the component:
+engines. Tinker publishes its adapters. Slime publishes full weights, or
+per-scenario adapters with LoRA, and refuses ``training.colocate`` with remote
+engines. The section tells Reef how to reach the component:
 
 .. config::
 

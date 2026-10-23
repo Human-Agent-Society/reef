@@ -7,7 +7,12 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, NativeWeightTransferSession, WeightTransferSession
+from reef.runtime.deployment import (
+    NO_WEIGHT_TRANSFER_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
+    NativeWeightTransferSession,
+    WeightTransferSession,
+)
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.runtime.interfaces import WeightFiles
@@ -39,14 +44,18 @@ class Group:
         self.executor.shutdown()
 
 
-def service_and_resources(monkeypatch, *, critic=False, release_error=False, timeout=None):
+def service_and_resources(monkeypatch, *, critic=False, release_error=False, timeout=None, inference="sglang"):
     events = []
     actor = Group("actor", events, release_error=release_error)
     critic_group = Group("critic", events) if critic else None
     args = SimpleNamespace()
     preparation = SimpleNamespace(lora=False)
     service = training.SlimeTrainingService(
-        args, preparation=preparation, loss_family_config="recipe-settings", train_rpc_timeout_s=timeout
+        args,
+        preparation=preparation,
+        loss_family_config="recipe-settings",
+        inference_backend=inference,
+        train_rpc_timeout_s=timeout,
     )
     resources = SlimeDeploymentResources(args, ray_address="unused", namespace="test")
     resources.placement_groups = {"actor": "actor-pg", "critic": "critic-pg"}
@@ -99,17 +108,62 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     service.attach_weight_transport(NativeWeightTransferSession(PROTOCOL, "session-1", control))
     captured = []
 
-    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, delivers_weight_files):
-        assert not delivers_weight_files
+    def create(
+        args,
+        actor,
+        critic,
+        *,
+        preparation,
+        loss_family_config,
+        train_rpc_timeout_s,
+        version_receiver,
+        delivers_weight_files,
+    ):
+        assert version_receiver is None and not delivers_weight_files
         assert actor.train_parallel_config == {"attached": True}
         assert critic.train_parallel_config == {"attached": True}
         assert train_rpc_timeout_s == (14400 if timeout is None else timeout)
+        assert version_receiver is None
         captured.append((args, preparation, loss_family_config))
         return object()
 
     monkeypatch.setattr(training, "create_training_backend", create)
     assert service.backend() is service.backend()
     assert captured == [(service.args, service.preparation, "recipe-settings")]
+    service.close()
+
+
+@pytest.mark.parametrize("inference", ["none", "sglang"])
+def test_the_no_transfer_session_reads_the_worker_layout_and_connects_no_updater(monkeypatch, inference):
+    service, resources, events = service_and_resources(monkeypatch, critic=True, inference=inference)
+    engine = () if inference == "none" else (PROTOCOL, WEIGHT_FILES_PROTOCOL)
+    assert service.weight_transfer_protocols == (*engine, NO_WEIGHT_TRANSFER_PROTOCOL)
+    service.start(resources)
+    record = UniProcExecutor.from_workers([object()])
+    service.attach_weight_transport(NativeWeightTransferSession(NO_WEIGHT_TRANSFER_PROTOCOL, "session-1", record))
+    # The batch split needs each worker's parallel layout; no receiver handle reaches an updater.
+    assert events == [("allocate",), ("attach", "actor", None), ("attach", "critic", None)]
+    captured = []
+
+    def create(
+        args,
+        actor,
+        critic,
+        *,
+        preparation,
+        loss_family_config,
+        train_rpc_timeout_s,
+        version_receiver,
+        delivers_weight_files,
+    ):
+        assert not delivers_weight_files
+        assert actor.train_parallel_config == critic.train_parallel_config == {"attached": True}
+        captured.append(version_receiver)
+        return object()
+
+    monkeypatch.setattr(training, "create_training_backend", create)
+    assert service.backend() is service.backend()
+    assert captured == [record]
     service.close()
 
 
@@ -141,7 +195,7 @@ def test_native_transport_rejects_reuse_across_receiver_incarnations(monkeypatch
 
 def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(monkeypatch):
     service, resources, events = service_and_resources(monkeypatch, critic=True)
-    assert service.weight_transfer_protocols == (PROTOCOL, WEIGHT_FILES_PROTOCOL)
+    assert service.weight_transfer_protocols == (PROTOCOL, WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
     service.start(resources)
     session = WeightTransferSession(WEIGHT_FILES_PROTOCOL, "first")
     service.attach_weight_transport(session)
@@ -152,7 +206,18 @@ def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(
     ]
     captured = []
 
-    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s, delivers_weight_files):
+    def create(
+        args,
+        actor,
+        critic,
+        *,
+        preparation,
+        loss_family_config,
+        train_rpc_timeout_s,
+        version_receiver,
+        delivers_weight_files,
+    ):
+        assert version_receiver is None
         captured.append(delivers_weight_files)
         return object()
 
@@ -163,16 +228,24 @@ def test_file_session_attaches_no_receiver_and_makes_the_backend_export_weights(
 
 
 class ExportingGroup:
-    """An actor group whose export writes what Slime's HF writer writes: config, index and shards."""
+    """An actor group whose export writes what Slime's writers write: a full checkpoint, or the active adapter."""
 
     def __init__(self, shards=("model-00001-of-00001.safetensors",), written=None):
         self.shards = shards
         self.written = shards if written is None else written
         self.exports = []
+        self.active = None
+
+    def activate_scenario(self, scenario):
+        self.active = scenario
 
     def export_weight_files(self, directory):
-        self.exports.append(directory)
+        self.exports.append((self.active, directory))
         directory.mkdir(parents=True)
+        if self.active is not None:
+            for name in ("adapter_config.json", "reef-adapter.json", "adapter_model.safetensors"):
+                (directory / name).write_text(self.active)
+            return
         (directory / "config.json").write_text("{}")
         index = {"weight_map": {f"layer.{number}": shard for number, shard in enumerate(self.shards)}}
         (directory / "model.safetensors.index.json").write_text(json.dumps(index))
@@ -180,7 +253,7 @@ class ExportingGroup:
             (directory / shard).write_bytes(b"weights")
 
 
-def exporting_backend(group, root, tmp_path):
+def exporting_backend(group, root, tmp_path, *, lora=False):
     from reef.train.slime_backend.reef_adapters.bridge import SlimeTrainingBackend
 
     return SlimeTrainingBackend(
@@ -188,6 +261,7 @@ def exporting_backend(group, root, tmp_path):
         batch_processor=None,
         args=SimpleNamespace(),
         save_hf_template=str(tmp_path / "hf" / "{rollout_id}"),
+        lora=lora,
         weight_files_root=root,
     )
 
@@ -200,10 +274,22 @@ def test_backend_exports_full_weights_once_per_publication_and_keeps_only_the_la
     second = backend.weight_files(None, "inc:2")
     assert second.path == tmp_path / "weight-files" / "inc-2"
     assert [path.name for path in (tmp_path / "weight-files").iterdir()] == ["inc-2"]
-    assert group.exports == [first.path, second.path]
-    with pytest.raises(RuntimeError, match="only full weights"):
+    assert group.exports == [(None, first.path), (None, second.path)]
+    with pytest.raises(RuntimeError, match="got scenario 'math' with lora=False"):
         backend.weight_files("math", "inc:3")
     assert exporting_backend(group, None, tmp_path).weight_files(None, "inc:3") is None
+
+
+def test_lora_backend_exports_the_named_scenarios_adapter(tmp_path):
+    group = ExportingGroup()
+    backend = exporting_backend(group, tmp_path / "weight-files", tmp_path, lora=True)
+    math = backend.weight_files("math", "inc:1")
+    assert math == WeightFiles(tmp_path / "weight-files" / "inc-1", "adapter")
+    code = backend.weight_files("code", "inc:1")
+    assert (code.path / "adapter_config.json").read_text() == "code"
+    assert group.exports == [("math", math.path), ("code", code.path)]
+    with pytest.raises(RuntimeError, match="got scenario None with lora=True"):
+        backend.weight_files(None, "inc:2")
 
 
 def test_backend_refuses_an_export_whose_shards_are_on_another_node(tmp_path):

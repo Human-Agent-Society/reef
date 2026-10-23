@@ -616,6 +616,39 @@ def test_native_trainer_attaches_to_inference_without_pushing_batch_config(monke
     assert layout is not worker.train_parallel_config
 
 
+@pytest.mark.parametrize("lora", [True, False])
+def test_actor_exports_the_active_adapter_or_the_full_weights_as_files(monkeypatch, tmp_path, lora):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    written = []
+
+    def save_adapter(args, path, tensors, *, scenario, scenario_step):
+        written.append(("adapter", path, tensors, scenario, scenario_step))
+
+    def save_full(args, path, model, **options):
+        written.append(("full", path, model, options["model_name"]))
+
+    monkeypatch.setattr(module, "megatron_lora_enabled", lambda args: lora)
+    monkeypatch.setattr(module, "save_lora_adapter_to_path", save_adapter)
+    monkeypatch.setattr(module, "save_hf_model_to_path", save_full)
+    monkeypatch.setattr(module, "get_gloo_group", lambda: None)
+    monkeypatch.setattr(module.dist, "barrier", lambda group: None)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace(offload_train=False)
+    actor.model = "model"
+    actor.adapter_slots = types.SimpleNamespace(active="math") if lora else None
+    actor.weight_updater = types.SimpleNamespace(
+        model_name="qwen3", quantization_config=None, export_lora_adapter_tensors=lambda: ["lora_A"]
+    )
+    actor.export_weight_files(str(tmp_path / "inc-1"))
+    if lora:
+        assert written == [("adapter", tmp_path / "inc-1", ["lora_A"], "math", None)]
+        actor.adapter_slots.active = None
+        with pytest.raises(RuntimeError, match="activated scenario"):
+            actor.export_weight_files(str(tmp_path / "inc-2"))
+    else:
+        assert written == [("full", tmp_path / "inc-1", "model", "qwen3")]
+
+
 @pytest.mark.parametrize(
     "current,target,expected",
     [

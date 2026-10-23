@@ -14,6 +14,7 @@ from reef.runtime.executor.arguments import native_arguments, normalize_native_o
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.deployment import (
     INFERENCE_RESERVED_OPTIONS,
+    NO_INFERENCE_BACKEND,
     TrainingDeployment,
     TrainingDeploymentPlan,
     driver_service,
@@ -94,6 +95,9 @@ def driver_arguments(config: Mapping[str, Any], *, loss_family: str = "") -> lis
     arguments = native_arguments(training_options)
     if reef.get("inference_num_gpus") is None:
         return arguments
+    if reef.get("inference_backend") == NO_INFERENCE_BACKEND:
+        # No local engine and no colocation: the workers stay on their GPUs between steps.
+        return [*arguments, *native_arguments({"rollout-num-gpus": 0})]
     options = {
         "rollout-num-gpus": reef["inference_num_gpus"],
         "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
@@ -212,8 +216,8 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError(
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
-        if settings["inference_backend"] not in (None, "sglang", "vllm"):
-            raise DeployConfigError("Slime weight transfer requires inference.backend: sglang or vllm")
+        if settings["inference_backend"] not in (None, "sglang", "vllm", NO_INFERENCE_BACKEND):
+            raise DeployConfigError("Slime weight transfer requires inference.backend: sglang, vllm or none")
 
         require_ray_roles(config, "training", "rollout", backend="Slime")
         options = normalize_native_options(settings["training_backend_options"])
@@ -222,13 +226,11 @@ class SlimeDeployment(TrainingDeployment):
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
         remote = bool(settings["inference_remote"])
         if remote:
-            # Remote engines receive full Hugging Face weights as files; no native transfer reaches them.
+            # Remote engines receive weights as files; no native transfer reaches them.
             if settings["colocate"]:
                 raise DeployConfigError("training.colocate shares GPUs with the engines; remote engines run elsewhere")
-            if int(options.get("megatron-lora-rank", 0) or 0) > 0:
-                raise DeployConfigError(
-                    "Slime publishes only full weights to remote engines; remove training.options.megatron-lora-rank"
-                )
+            if settings["inference_backend"] == "vllm" and int(options.get("megatron-lora-rank", 0) or 0) > 0:
+                raise DeployConfigError("inference.backend: vllm does not publish LoRA adapters yet; use full weights")
         elif settings["inference_backend"] == "vllm":
             require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)
