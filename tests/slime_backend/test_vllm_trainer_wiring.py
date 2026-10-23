@@ -12,8 +12,13 @@ from reef.inference.sglang.service import SGLangInferenceService
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.service import INFERENCE_PROTOCOL as VLLM_PROTOCOL
 from reef.inference.vllm.service import VLLMInferenceService
-from reef.runtime.deployment import NO_WEIGHT_TRANSFER_PROTOCOL, DeploymentResources, ModelDeploymentPlan
-from reef.train.slime_backend.inference import inference_config
+from reef.runtime.deployment import (
+    NO_WEIGHT_TRANSFER_PROTOCOL,
+    WEIGHT_FILES_PROTOCOL,
+    DeploymentResources,
+    ModelDeploymentPlan,
+)
+from reef.train.slime_backend.inference import inference_config, remote_inference_config
 from reef.train.slime_backend.reef_adapters.bridge import BridgePreparation, RetentionConfig
 from reef.train.slime_backend.training import WEIGHT_TRANSFER_PROTOCOLS, SlimeTrainingService
 
@@ -58,6 +63,34 @@ def test_vllm_inference_config_uses_reef_option_names_and_placement_decisions():
         inference_config(slime_args(), "tinker")
 
 
+@pytest.mark.parametrize("backend", ["sglang", "vllm"])
+def test_remote_engine_input_loads_the_components_model_without_this_hosts_addresses(monkeypatch, backend):
+    monkeypatch.setenv("SLIME_HOST_IP", "10.0.0.5")
+    monkeypatch.setenv("SGLANG_ENABLE_X", "1")
+    args = slime_args(hf_checkpoint="/root/.cache/huggingface/hub/snapshot", rollout_num_gpus=2, num_gpus_per_node=8)
+    local = inference_config(args, backend)
+    remote = remote_inference_config(args, backend, None, model_path="Qwen/Qwen3-8B")
+    assert local["model_path"] == "/root/.cache/huggingface/hub/snapshot"
+    assert remote["model_path"] == "Qwen/Qwen3-8B"
+    if "model_path" in local["options"]:
+        assert remote["options"]["model_path"] == "Qwen/Qwen3-8B"
+    assert "REEF_INFERENCE_HOST" in local["env_vars"] and remote["env_vars"] == {"SGLANG_ENABLE_X": "1"}
+    assert remote["gpus_per_node"] == 2
+    if backend == "sglang":
+        assert (remote["external_engines"], remote["router_host"], remote["router_port"]) == ((), None, None)
+    assert {
+        key: value
+        for key, value in remote.items()
+        if key
+        not in {"model_path", "options", "env_vars", "gpus_per_node", "external_engines", "router_host", "router_port"}
+    } == {
+        key: value
+        for key, value in local.items()
+        if key
+        not in {"model_path", "options", "env_vars", "gpus_per_node", "external_engines", "router_host", "router_port"}
+    }
+
+
 def test_sglang_mapping_is_unchanged_by_the_backend_argument():
     legacy = inference_config(slime_args())
     assert inference_config(slime_args(), "sglang") == legacy
@@ -77,18 +110,20 @@ class _Resources(DeploymentResources):
 
 
 def test_training_service_declares_the_receiver_protocol_for_its_backend():
-    preparation = BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=False)
+    full = BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=False)
+    lora = BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=True)
 
-    def service(**kwargs):
+    def service(preparation=full, **kwargs):
         return SlimeTrainingService(SimpleNamespace(), preparation=preparation, loss_family_config=None, **kwargs)
 
     assert (
         service().weight_transfer_protocols
-        == (WEIGHT_TRANSFER_PROTOCOLS["sglang"], NO_WEIGHT_TRANSFER_PROTOCOL)
-        == ("slime-sglang-control-v2", "reef-no-weight-transfer-v1")
+        == (WEIGHT_TRANSFER_PROTOCOLS["sglang"], WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
+        == ("slime-sglang-control-v2", "reef-weight-files-v1", "reef-no-weight-transfer-v1")
     )
+    assert service(lora).weight_transfer_protocols == ("slime-sglang-control-v2", NO_WEIGHT_TRANSFER_PROTOCOL)
     vllm_trainer = service(inference_backend="vllm")
-    assert vllm_trainer.weight_transfer_protocols == (VLLM_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
+    assert vllm_trainer.weight_transfer_protocols == (VLLM_PROTOCOL, WEIGHT_FILES_PROTOCOL, NO_WEIGHT_TRANSFER_PROTOCOL)
     assert service(inference_backend="none").weight_transfer_protocols == (NO_WEIGHT_TRANSFER_PROTOCOL,)
     # A receiver with engines keeps its native protocol; only the null receiver selects the no-transfer one.
     for trainer, receiver, selected in (
@@ -104,8 +139,15 @@ def test_training_service_declares_the_receiver_protocol_for_its_backend():
     plan = ModelDeploymentPlan(
         resources=_Resources(), inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), training=vllm_trainer
     )
-    plan.validate()
+    assert plan.weight_transfer_protocol(plan.inference) == VLLM_PROTOCOL
+    # Without the receiver's native protocol, full weights travel as files; LoRA has no such fallback.
+    mismatched = ModelDeploymentPlan(
+        resources=_Resources(), inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), training=service()
+    )
+    assert mismatched.weight_transfer_protocol(mismatched.inference) == WEIGHT_FILES_PROTOCOL
     with pytest.raises(ValueError, match="incompatible inference control protocol"):
         ModelDeploymentPlan(
-            resources=_Resources(), inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)), training=service()
+            resources=_Resources(),
+            inference=VLLMInferenceService(VLLMConfig("model", 1, 1, 1)),
+            training=service(lora),
         ).validate()
