@@ -69,7 +69,9 @@ class ServiceConfig:
         None, public_path=("inference", "model_path"), help="Local model directory or Hugging Face repository ID."
     )
     inference_backend: str | None = config_option(
-        None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
+        None,
+        public_path=("inference", "backend"),
+        help="Managed local inference backend (default: sglang); none trains without an inference engine.",
     )
     tensor_parallel_size: int | None = config_option(
         None,
