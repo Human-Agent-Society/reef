@@ -433,7 +433,8 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
         shutil.rmtree(partial / ".git")
         git("init", "-q", cwd=partial)
         git("add", "-A", cwd=partial)
-        git("-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit", "-qm", "base commit", cwd=partial)
+        commit = ("-c", "user.name=reef", "-c", "user.email=reef@localhost", "-c", "gc.auto=0", "commit")
+        git(*commit, "-qm", "base commit", cwd=partial)
         partial.rename(target)
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
