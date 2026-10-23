@@ -1,7 +1,7 @@
 """Durable candidate population for the Meta-Harness method.
 
 The population is algorithm state, not a filesystem database.  Reef carries
-the value through its scenario commit log and snapshot metadata.  The JSON
+the value through its scenario commit history and snapshot metadata.  The JSON
 file managed by :class:`PopulationStore` is deliberately write-only from the
 method's point of view: it is an inspectable post-commit mirror, and recovery
 always rewrites it from Reef's committed state.

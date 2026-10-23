@@ -58,7 +58,11 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S, SlimeTrainGroup
+from reef.train.slime_backend.reef_adapters.train_groups import (
+    DEFAULT_TRAIN_RPC_TIMEOUT_S,
+    SlimeTrainGroup,
+    merge_rank_metrics,
+)
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     LEARNING_RATE_SCHEDULES_FILENAME,
     CheckpointStorage,
@@ -339,7 +343,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
             {},
         )
-        train_metrics.update(self.resolve_training_result(self._group.async_pop_rank0_metrics()))
+        train_metrics.update(merge_rank_metrics(self.resolve_training_result(self._group.async_pop_metrics())))
         train_metrics.update(job.algorithm_metrics)
         if training.actor_trained:
             # The actor fetched the job's data, and with it any worker switch.

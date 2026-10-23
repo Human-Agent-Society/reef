@@ -5,7 +5,7 @@ model: Reef's coordinator owns the job marker, the
 publication barrier and adapter residency; this backend trains one
 optimizer step on Tinker per job and materializes the result as a PEFT
 adapter directory under its checkpoint. It delivers adapters as files
-through ``adapter_files``; Reef's receiver contract loads them, so the
+through ``weight_files``; Reef's receiver contract loads them, so the
 trainer never holds an engine handle and never sends tensors.
 """
 
@@ -30,6 +30,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
+    WeightFiles,
     learning_rate_metrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, read_json, write_json
@@ -205,8 +206,10 @@ class TinkerTrainingBackend(TrainingBackend):
         job.result.write(directory)
         self._require_history().record_checkpoint(job.checkpoint.scenario or "", job.checkpoint.rollout_id)
 
-    def adapter_files(self, scenario: str, runtime_load_id: str) -> Path:
+    def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles:
         """The adapter to serve as ``runtime_load_id``: the scenario's newest checkpoint, or its incumbent again."""
+        if scenario is None:
+            raise RuntimeError("Tinker trains per-scenario adapters; it has no shared model weights to deliver")
         _, rollout_id, version = self._incumbent(scenario)
         if version != runtime_load_id:
             entry = self._require_history().entry(scenario)
@@ -223,7 +226,7 @@ class TinkerTrainingBackend(TrainingBackend):
         if version != runtime_load_id:
             # Reef publishes what it asked for; the marker retries the same checkpoint on failure.
             self._remember_incumbent(scenario, TinkerCheckpoint.read(directory), rollout_id, runtime_load_id)
-        return adapter
+        return WeightFiles(adapter, "adapter")
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")

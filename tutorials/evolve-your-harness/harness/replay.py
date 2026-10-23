@@ -1,17 +1,19 @@
 """The replay page: what one run of harness evolution did, from the files it left under work/.
 
-``python3 harness/replay.py [work] [out.html]`` reads the commit log (every
-step's verdict, its mutations and the entries each release holds), the
-resident process's log (mounts, polls) and every session log (turns,
-stages, tool calls), and writes one self contained HTML page: the release
-chain with each step's verdict and the tree diff it made, the loop graph of
-each release with a scrubber that replays a session's stage path over it,
-the event log of each session, and the process timeline. No server,
-no network: the page carries its data inline.
+``python3 harness/replay.py [work] [out.html]`` reads the commit history in
+each scenario database (every step's verdict, its mutations and the entries
+each release holds), the resident process's log (mounts, polls) and every
+session log (turns, stages, tool calls), and writes one self contained HTML
+page: the release chain with each step's verdict and the tree diff it made,
+the loop graph of each release with a scrubber that replays a session's stage
+path over it, the event log of each session, and the process timeline. No
+server, no network: the page carries its data inline.
 """
 
 import json
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 WORK = Path(__file__).resolve().parent.parent / "work"
@@ -54,8 +56,10 @@ def collect(work: Path) -> dict:
     if (tree_dir / "tree.json").is_file():
         seed_entries = json.loads((tree_dir / "tree.json").read_text(encoding="utf-8"))
     commits = []
-    for path in sorted((work / "agent-record").glob("*.commits.jsonl")) if (work / "agent-record").is_dir() else []:
-        commits.extend(_lines(path))
+    for path in sorted((work / "agent-record").glob("*.sqlite3")) if (work / "agent-record").is_dir() else []:
+        with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
+            rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
+        commits.extend(json.loads(text) for (text,) in rows)
     commits.sort(key=lambda row: row.get("recorded_at") or 0)
     previous = None
     first_entries = None

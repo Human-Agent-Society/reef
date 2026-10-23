@@ -14,11 +14,14 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import textwrap
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -116,10 +119,10 @@ FAKE_COOKBOOK = textwrap.dedent(
 
 def _write_fake_sdk(root: Path, model: str) -> Path:
     site = root / "fake_sdk"
-    (site / "tinker").mkdir(parents=True)
+    (site / "tinker").mkdir(parents=True, exist_ok=True)
     (site / "tinker" / "__init__.py").write_text(FAKE_SDK)
     (site / "tinker" / "settings.json").write_text(json.dumps({"root": str(root), "model": model}))
-    (site / "tinker_cookbook").mkdir()
+    (site / "tinker_cookbook").mkdir(exist_ok=True)
     (site / "tinker_cookbook" / "__init__.py").write_text("")
     (site / "tinker_cookbook" / "weights.py").write_text(FAKE_COOKBOOK)
     return site
@@ -147,27 +150,25 @@ def _training_item(version: str, index: int):
     )
 
 
-@pytest.mark.integration
-def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, monkeypatch):
+@contextmanager
+def model_driver(tmp_path, monkeypatch, inference, runtime, *, ray_gpus, driver_env=None):
+    """Run the model driver for a Tinker deployment with this ``inference`` section; connect like the HTTP service."""
     ray = pytest.importorskip("ray")
     for key in list(os.environ):
         if key.startswith("REEF_") and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    site = _write_fake_sdk(tmp_path, MODEL if REAL else str(model_dir))
+    # The HTTP service side of this process reads the same variables as the driver.
+    for key, value in (driver_env or {}).items():
+        monkeypatch.setenv(key, value)
+    site = _write_fake_sdk(tmp_path, inference["model-path"])
     api_key = os.environ["TINKER_API_KEY"] if REAL else "fake-key"
     monkeypatch.setenv("TINKER_API_KEY", api_key)
     raw = {
         "reef": {"run-dir": str(tmp_path / "stack")},
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
-        "inference": {
-            "model-path": MODEL if REAL else str(model_dir),
-            "backend": "tests.support._stub_engine:create_inference",
-            "num-gpus": 2,
-        },
+        "inference": inference,
         "training": {
             "backend": "tinker",
             "options": {"state-dir": str(tmp_path / "tinker"), "lora-rank": 32, "batch-size": 1, "kl-coef": 0.0},
@@ -184,14 +185,14 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
     config_path = tmp_path / "reef-config.yaml"
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
-    ray.init(address="local", num_cpus=8, num_gpus=2, include_dashboard=False, namespace=NAMESPACE)
+    ray.init(address="local", num_cpus=8, num_gpus=ray_gpus, include_dashboard=False, namespace=NAMESPACE)
     driver = None
-    dispatcher = None
     pair = None
     log_path = tmp_path / "driver.log"
     try:
         address = ray.get_runtime_context().gcs_address
         ready = tmp_path / "ready"
+        ready.unlink(missing_ok=True)  # a restarted driver writes it again
         # Ray 2.59 starts a local cluster with token auth and records the mode in RAY_AUTH_MODE;
         # a driver that loses it cannot join the cluster.
         env = {
@@ -207,6 +208,7 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
             REEF_BRIDGE_READY_FILE=str(ready),
             TINKER_API_KEY=api_key,
             PYTHONPATH=os.pathsep.join(([] if REAL else [str(site)]) + [str(REPO_ROOT), env.get("PYTHONPATH", "")]),
+            **(driver_env or {}),
         )
         with log_path.open("w") as log:
             driver = subprocess.Popen(
@@ -226,46 +228,62 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
         pair = RuntimeRegistry().build(
             {
                 "type": "coordinator_training",
-                "inference_runtime": "sglang",
                 "actor_name": ACTOR,
                 "namespace": NAMESPACE,
                 "ray_address": address,
                 "inference_timeout_s": 600.0,
                 "train_timeout_s": 1800.0,
+                **runtime,
             },
-            model_path=raw["inference"]["model-path"],
+            model_path=inference["model-path"],
         )
-        training, inference = pair
-        assert training.concurrent_training_scenarios  # per-scenario adapters, as the coordinator reports
-        engine = ray.get_actor("reef-test-engine", namespace=NAMESPACE)
-        assert ray.get(engine.state.remote())["versions"] == [inference.serving_runtime_load_id()] * 2
+        yield SimpleNamespace(ray=ray, training=pair[0], inference=pair[1], driver=driver, log_path=log_path, raw=raw)
+    finally:
+        if pair is not None:
+            pair[0].shutdown()
+            pair[1].shutdown()
+        stop_process(driver)
+        ray.shutdown()
 
-        from tests.support._threshold_processor import threshold_pipeline  # noqa: F401  (import side effects none)
 
-        from recipes.tttd.recipe import TTTDRecipe
-        from reef.artifact import InMemoryRepositoryBackend
-        from reef.core import AgentRecord, RequestType
-        from reef.dispatcher import Dispatcher
-        from reef.storage.sqlite import SQLiteScenarioStorage
-        from reef.train.pipeline import PipelineConfig
+def stop_process(process) -> None:
+    if process is not None and process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
 
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        dispatcher = Dispatcher(
-            TTTDRecipe(
-                training,
-                runtime=inference,
-                pipeline_stages=PipelineConfig.from_setting(
-                    raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
-                ),
+
+@contextmanager
+def one_trained_step(stack, tmp_path, scenario_name: str):
+    """Feed one TTTD group through the Dispatcher, wait for its publication, and keep the Dispatcher open."""
+    from tests.support._threshold_processor import threshold_pipeline  # noqa: F401  (import side effects none)
+
+    from recipes.tttd.recipe import TTTDRecipe
+    from reef.artifact import InMemoryRepositoryBackend
+    from reef.core import AgentRecord, RequestType
+    from reef.dispatcher import Dispatcher
+    from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.train.pipeline import PipelineConfig
+
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    dispatcher = Dispatcher(
+        TTTDRecipe(
+            stack.training,
+            runtime=stack.inference,
+            pipeline_stages=PipelineConfig.from_setting(
+                stack.raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
             ),
-            InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            local_artifact_dir=tmp_path / "staged",
-            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-        )
-        scenario_name = "erdos"
+        ),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+    try:
         scenario = dispatcher.get_or_create_scenario(scenario_name)
-        version = inference.serving_runtime_load_id()
+        version = stack.inference.serving_runtime_load_id()
         for index in range(4):
             item = _training_item(version, index)
             dispatcher.accept_record(
@@ -299,38 +317,143 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
             )
         deadline = time.monotonic() + (1500 if REAL else 300)
         while scenario.scenario_step < 1 and time.monotonic() < deadline:
-            assert driver.poll() is None, log_path.read_text()[-4000:]
+            assert stack.driver.poll() is None, stack.log_path.read_text()[-4000:]
             time.sleep(1)
         assert scenario.scenario_step == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
-
-        loads = ray.get(engine.loads.remote())
-        published = inference.current_runtime_load_id()
-        assert loads == [(adapter_name(scenario_name, published), loads[0][1], published)]
-        adapter = Path(loads[0][1])
-        assert (adapter / "adapter_config.json").is_file() and (adapter / "adapter_model.safetensors").is_file()
-        assert adapter.parent.name == "rollout_0" and adapter.parent.parent == tmp_path / "tinker" / "checkpoints"
-        state = ray.get(engine.state.remote())
-        assert state["versions"] == [published] * 2 and not state["paused"] and state["terminated"] == 0
-        assert inference.inference_admission_status["open"]
-        incumbent = json.loads((tmp_path / "tinker" / "scenarios" / scenario_name / "incumbent.json").read_text())
-        assert incumbent["runtime_load_id"] == published and incumbent["rollout_id"] == 0
-        if not REAL:
-            events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-            assert [event["event"] for event in events if event["event"] in ("initialize", "restore")] == [
-                "initialize",
-                "restore",
-            ]
-            assert events[-1]["event"] == "forward_backward" and events[-1]["rows"] == 4
+        yield
     finally:
-        if dispatcher is not None:
-            dispatcher.close()
-        if pair is not None:
-            pair[0].shutdown()
-            pair[1].shutdown()
-        if driver is not None and driver.poll() is None:
-            os.killpg(driver.pid, signal.SIGTERM)
+        dispatcher.close()
+
+
+def assert_tinker_trained_once(tmp_path, scenario_name: str, published: str) -> None:
+    incumbent = json.loads((tmp_path / "tinker" / "scenarios" / scenario_name / "incumbent.json").read_text())
+    assert incumbent["runtime_load_id"] == published and incumbent["rollout_id"] == 0
+    if not REAL:
+        events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+        assert [event["event"] for event in events if event["event"] in ("initialize", "restore")] == [
+            "initialize",
+            "restore",
+        ]
+        assert events[-1]["event"] == "forward_backward" and events[-1]["rows"] == 4
+
+
+@pytest.mark.integration
+def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, monkeypatch):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    inference = {
+        "model-path": MODEL if REAL else str(model_dir),
+        "backend": "tests.support._stub_engine:create_inference",
+        "num-gpus": 2,
+    }
+    with model_driver(tmp_path, monkeypatch, inference, {"inference_runtime": "sglang"}, ray_gpus=2) as stack:
+        ray, training, inference_runtime = stack.ray, stack.training, stack.inference
+        assert training.concurrent_training_scenarios  # per-scenario adapters, as the coordinator reports
+        engine = ray.get_actor("reef-test-engine", namespace=NAMESPACE)
+        assert ray.get(engine.state.remote())["versions"] == [inference_runtime.serving_runtime_load_id()] * 2
+        scenario_name = "erdos"
+        with one_trained_step(stack, tmp_path, scenario_name):
+            loads = ray.get(engine.loads.remote())
+            published = inference_runtime.current_runtime_load_id()
+            assert loads == [(adapter_name(scenario_name, published), loads[0][1], published)]
+            adapter = Path(loads[0][1])
+            assert (adapter / "adapter_config.json").is_file() and (adapter / "adapter_model.safetensors").is_file()
+            assert adapter.parent.name == "rollout_0" and adapter.parent.parent == tmp_path / "tinker" / "checkpoints"
+            state = ray.get(engine.state.remote())
+            assert state["versions"] == [published] * 2 and not state["paused"] and state["terminated"] == 0
+            assert inference_runtime.inference_admission_status["open"]
+            assert_tinker_trained_once(tmp_path, scenario_name, published)
+
+
+@pytest.mark.integration
+def test_tinker_trains_behind_the_model_driver_with_a_remote_engine(tmp_path, monkeypatch):
+    """The stub engines run in a separate component process with its own Ray session; adapters travel over HTTP."""
+    pytest.importorskip("ray")  # the component process starts its own Ray session
+    from reef.inference.remote.service import RemoteControl
+    from reef.inference.sglang.chat import SGLangInferenceHandler
+
+    tokens = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    work_dir = tmp_path / "remote-work"
+    component_log = tmp_path / "component.log"
+    component_env = {key: value for key, value in os.environ.items() if not key.startswith(("REEF_", "RAY_"))}
+    component_env.update(tokens, PYTHONPATH=os.pathsep.join([str(REPO_ROOT), component_env.get("PYTHONPATH", "")]))
+    engine = "tests.support._stub_engine:create_inference"
+    with component_log.open("w") as log:
+        component = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "reef.inference.remote",
+                "--engine",
+                engine,
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--work-dir",
+                str(work_dir),
+                "--ray-num-gpus",
+                "2",
+            ],
+            cwd=REPO_ROOT,
+            env=component_env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    control = RemoteControl(url, tokens["REEF_REMOTE_CONTROL_TOKEN"])
+    try:
+        deadline = time.monotonic() + 120
+        while True:
+            assert component.poll() is None, component_log.read_text()[-4000:]
             try:
-                driver.wait(timeout=60)
-            except subprocess.TimeoutExpired:
-                os.killpg(driver.pid, signal.SIGKILL)
-        ray.shutdown()
+                control.call("GET", "health", timeout_s=5)
+            except RuntimeError as exc:
+                if "409" in str(exc):
+                    break  # serving, with no engines started yet
+            assert time.monotonic() < deadline, "component did not start:\n" + component_log.read_text()[-4000:]
+            time.sleep(0.5)
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        inference = {
+            "model-path": MODEL if REAL else str(model_dir),
+            "backend": engine,
+            "num-gpus": 2,
+            "remote": {"url": url},
+        }
+        runtime = {
+            "inference_runtime": "remote",
+            "inference_runtime_options": {"engine": engine},
+            "inference_handler_factory": SGLangInferenceHandler,
+        }
+        with model_driver(tmp_path, monkeypatch, inference, runtime, ray_gpus=0, driver_env=tokens) as stack:
+            initial = stack.inference.serving_runtime_load_id()
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
+            assert stack.inference.base_url == url
+            scenario_name = "erdos"
+            with one_trained_step(stack, tmp_path, scenario_name):
+                published = stack.inference.current_runtime_load_id()
+                assert published != initial
+                assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+                (adapter,) = [path for path in work_dir.iterdir() if path.is_dir()]
+                assert (adapter / "adapter_config.json").is_file()
+                assert (adapter / "adapter_model.safetensors").is_file()
+                assert stack.inference.inference_admission_status["open"]
+                assert_tinker_trained_once(tmp_path, scenario_name, published)
+        # Closing the deployment stops the remote engines; the component keeps serving.
+        with pytest.raises(RuntimeError, match="409"):
+            control.call("GET", "runtime-load-ids")
+        assert [path for path in work_dir.iterdir() if path.is_dir()] == []
+        # A restarted driver starts the engines again and reloads the committed adapter before it serves.
+        with model_driver(tmp_path, monkeypatch, inference, runtime, ray_gpus=0, driver_env=tokens) as stack:
+            assert stack.inference.serving_runtime_load_id() == published
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+            (adapter,) = [path for path in work_dir.iterdir() if path.is_dir()]
+            assert (adapter / "adapter_config.json").is_file()
+    finally:
+        stop_process(component)

@@ -19,6 +19,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import has_image_content, make_trajectory
+from reef.inference.chat import template_kwargs_of
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
 from reef.record2task import ReportTasks, SkippedReport
@@ -49,7 +50,9 @@ class SFTSettings(PluginSettings):
 
     Values: ``tokenizer_path`` is a non-blank str, ``target`` is a member of
     ``SFT_TARGETS``, and ``max_tokens`` is a non-negative int, excluding bool.
-    Zero disables the sample length limit. Construction checks all domains.
+    Zero disables the sample length limit. ``chat_template_kwargs`` is None
+    or a mapping of template arguments without the reserved ``tools`` key.
+    Construction checks these domains.
     Purpose: ``SFTTasks.from_config`` parses these settings; ``SFTTasks``
     loads the named tokenizer and uses the target and sample length limit.
     """
@@ -63,6 +66,13 @@ class SFTSettings(PluginSettings):
     )
     max_tokens: int = config_option(
         0, help="The maximum tokens in a sample. Reef skips a longer report. 0 disables the limit."
+    )
+    chat_template_kwargs: Mapping[str, Any] | None = config_option(
+        None,
+        help=(
+            "Chat template arguments for the render, for example {enable_thinking: false}. "
+            "Set the inference handler's chat_template_kwargs to the same value."
+        ),
     )
 
     def __post_init__(self) -> None:
@@ -78,6 +88,7 @@ class SFTSettings(PluginSettings):
             raise ValueError(f"target must be one of: {', '.join(SFT_TARGETS)}")
         if self.max_tokens < 0:
             raise ValueError("max_tokens must be non-negative (0 disables the limit)")
+        template_kwargs_of(self.chat_template_kwargs, "chat_template_kwargs")
 
 
 class SFTTasks(ReportTasks):
@@ -101,7 +112,10 @@ class SFTTasks(ReportTasks):
     ``make_sample`` adds to it). The constructor copies ``target`` and
     ``max_tokens`` from a validated ``SFTSettings``; bool is not a token count.
     Construction rejects other settings types before loading the tokenizer.
-    The tokenizer's loading and rendering contract belongs to transformers.
+    ``chat_template_kwargs`` is a copied dictionary of the settings' template
+    arguments, or an empty dictionary for None; it excludes ``tools`` and
+    is passed to each render. The tokenizer's loading and rendering contract
+    belongs to transformers.
     Purpose: ``SFTRecipe`` names it as the record-to-task stage, and
     ``from_config`` makes it from the stage config. For each
     ``ReportContext``, ``make_sample`` returns one ``TrajectoryItem``, or
@@ -123,6 +137,8 @@ class SFTTasks(ReportTasks):
         self.target = settings.target
         self.max_tokens = settings.max_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer_path, trust_remote_code=True)
+        #: The chat template arguments of every render; a task-to-batch stage that renders reuses them.
+        self.chat_template_kwargs = template_kwargs_of(settings.chat_template_kwargs, "chat_template_kwargs")
         self.overflow_count = 0
 
     @classmethod
@@ -164,12 +180,18 @@ class SFTTasks(ReportTasks):
                 tokenize=True,
                 add_generation_prompt=True,
                 return_dict=False,
+                **self.chat_template_kwargs,
             ),
         )
         sequence_ids = cast(
             list[int],
             self.tokenizer.apply_chat_template(
-                list(conversation), tools=template_tools, tokenize=True, add_generation_prompt=False, return_dict=False
+                list(conversation),
+                tools=template_tools,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_dict=False,
+                **self.chat_template_kwargs,
             ),
         )
         if sequence_ids[: len(prompt_ids)] != prompt_ids:

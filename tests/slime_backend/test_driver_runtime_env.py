@@ -136,4 +136,4 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode,
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert plan.training.weight_transfer_protocol is not None
+    assert plan.training.weight_transfer_protocols

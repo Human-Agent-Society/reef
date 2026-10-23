@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from threading import Event
 
@@ -26,7 +29,7 @@ from reef.observability import TrainingExperimentContext, TrainingExperimentEven
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -160,11 +163,11 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     scenario = value.get_or_create_scenario("math")
     assert scenario is not None
     assert isinstance(scenario.store, CommitHistoryScenarioStore)
-    journal = scenario.store.commit_history
-    assert journal is not None
-    path = journal.path
-    records = path.read_text(encoding="utf-8").splitlines()
-    path.write_text("\n".join(records[:-1]) + "\n", encoding="utf-8")
+    last_step = scenario.store.history()[-1].step
+    # Lose the rollback commit behind the store's back.
+    database = tmp_path / "agent-record" / f"{hashlib.sha256(b'math').hexdigest()}.sqlite3"
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("DELETE FROM scenario_commit WHERE step = ?", (last_step,))
 
     restarted = Dispatcher(
         TestPolicyRecipe(

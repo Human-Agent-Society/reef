@@ -320,7 +320,7 @@ class ScenarioFactory:
 
             # Publication stages durable bytes before the commit record is durable, while
             # the backend's head is only a post-commit mirror. A crash between the
-            # two leaves the commit log's checkpoint ahead of that pointer.
+            # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
                     record

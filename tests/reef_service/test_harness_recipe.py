@@ -7,6 +7,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -581,7 +582,7 @@ def test_commit_applied_aligns_the_tree_to_the_committed_entries(tmp_path: Path)
 
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # An unlaunchable episode loses its pairing but must not put -inf into
-    # the metrics: the commit log serializes them as JSON, which has no
+    # the metrics: the commit history serializes them as JSON, which has no
     # -Infinity, and a non-JSON reader would decode a wrong finite number.
     import json
 
@@ -902,9 +903,8 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     finally:
         dispatcher.close()
 
-    raw = (agent_record_dir / f"{hashlib.sha256(b'leak-476').hexdigest()}.commits.jsonl").read_bytes()
-    assert key.encode() not in raw
-    record = json.loads(raw.splitlines()[0])
+    assert_no_key_in_database(agent_record_dir, "leak-476", key)
+    record = first_commit(agent_record_dir, "leak-476")
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
@@ -924,6 +924,23 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         recovered.commit(follow_up)
     finally:
         restarted.close()
+
+
+def scenario_database(agent_record_dir: Path, scenario: str) -> Path:
+    return agent_record_dir / f"{hashlib.sha256(scenario.encode()).hexdigest()}.sqlite3"
+
+
+def assert_no_key_in_database(agent_record_dir: Path, scenario: str, key: str) -> None:
+    """Check every file of the scenario database, including the SQLite WAL files."""
+    paths = list(agent_record_dir.glob(f"{scenario_database(agent_record_dir, scenario).name}*"))
+    assert paths
+    for path in paths:
+        assert key.encode() not in path.read_bytes(), path
+
+
+def first_commit(agent_record_dir: Path, scenario: str) -> dict:
+    with SQLiteRecordStore(scenario_database(agent_record_dir, scenario)) as records:
+        return records.commit_history().records()[0].to_dict()
 
 
 def test_disabled_seed_with_an_inline_key_refuses_boot(tmp_path: Path) -> None:
@@ -981,9 +998,8 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     finally:
         dispatcher.close()
 
-    raw = (agent_record_dir / f"{hashlib.sha256(b'leak-476-disabled').hexdigest()}.commits.jsonl").read_bytes()
-    assert key.encode() not in raw
-    record = json.loads(raw.splitlines()[0])
+    assert_no_key_in_database(agent_record_dir, "leak-476-disabled", key)
+    record = first_commit(agent_record_dir, "leak-476-disabled")
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
@@ -1016,11 +1032,18 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         dispatcher.close()
 
     # Rewrite the committed record as a pre-gate workdir holds it: the seed
-    # entry names the key inline. This file is the only one with key bytes.
-    log_path = agent_record_dir / f"{hashlib.sha256(b'pregate-476').hexdigest()}.commits.jsonl"
-    record = json.loads(log_path.read_bytes().splitlines()[-1])
-    record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"] = {"apiKey": key}
-    log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
+    # entry names the key inline. This row is the only stored value with key bytes.
+    database = scenario_database(agent_record_dir, "pregate-476")
+    with closing(sqlite3.connect(database)) as connection, connection:
+        step, commit_json = connection.execute(
+            "SELECT step, commit_json FROM scenario_commit ORDER BY step DESC LIMIT 1"
+        ).fetchone()
+        record = json.loads(commit_json)
+        record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"] = {"apiKey": key}
+        connection.execute(
+            "UPDATE scenario_commit SET commit_json = ? WHERE step = ?",
+            (json.dumps(record, separators=(",", ":"), sort_keys=True), step),
+        )
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
     restarted = Dispatcher(
@@ -1038,8 +1061,17 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         restarted.close()
 
     for path in tmp_path.rglob("*"):
-        if path.is_file() and before.get(path) != path.read_bytes():
+        if path.is_file() and not path.name.startswith(database.name) and before.get(path) != path.read_bytes():
             assert key.encode() not in path.read_bytes(), path
+    with closing(sqlite3.connect(database)) as connection:
+        tables = [name for (name,) in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        holders = [
+            (table, row[0])
+            for table in tables
+            for row in connection.execute(f'SELECT * FROM "{table}"')
+            if key in repr(row)
+        ]
+    assert holders == [("scenario_commit", step)]
 
 
 def test_yaml_seed_must_be_a_list_of_mappings(tmp_path: Path, monkeypatch) -> None:

@@ -116,7 +116,7 @@ Track experiments with W&B
 
 Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and the Slime driver refuses ``--wandb-key`` so a credential never enters a command line or a run config.
 
-What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit log, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
+What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
@@ -142,12 +142,12 @@ What survives a restart, provided the storage paths are persistent:
      - Guarantee
    * - records
      - persisted before the processor sees them; never trained twice
-   * - the commit log
-     - append-only per scenario; the fsynced append is the commit point
+   * - the commit history
+     - append-only per scenario; the database transaction that adds a step is the commit point
    * - checkpointed versions
      - in the Git LFS repository; the recovered head is what is served
    * - algorithm state and record progress
-     - restored from the log's head record
+     - restored from the head record of the commit history
    * - live weights
      - not recoverable; the last checkpoint is restored
    * - a training step in flight
@@ -187,8 +187,8 @@ Select the backend with ``storage.record-backend``:
    * - Value
      - Where scenario state is kept
    * - ``sqlite`` (default)
-     - One SQLite database per scenario (records and settings) and one JSONL
-       commit log per scenario, both under ``agent_record_dir``
+     - One SQLite database per scenario (records, commits and settings) under
+       ``agent_record_dir``
    * - ``postgres``
      - Tables in one PostgreSQL schema; ``agent_record_dir`` holds no scenario state
    * - a plugin reference
@@ -223,10 +223,12 @@ scenario gets a new identifier. The same retention settings apply across all
 active and archived stores in the configured schema, while preserving active
 records and retry hashes.
 
-When you upgrade, Reef imports the files that earlier versions kept in
-``agent_record_dir``. PostgreSQL imports its commit logs and model configuration
-files. SQLite imports its model configuration files. Reef then moves the
-imported files to ``agent_record_dir/archived/imported-*``.
+When you upgrade, Reef imports the model configuration files that earlier
+versions kept in ``agent_record_dir`` into the storage backend. Reef then moves
+the imported files to ``agent_record_dir/archived/imported-*``. Reef does not
+read the ``*.commits.jsonl`` files of earlier versions. A deployment upgraded
+from such a version recovers each scenario from its last checkpointed release,
+as after a lost commit history.
 
 A change from one backend to another does not move records or commit history.
 Use a new deployment directory or schema for a new backend.
@@ -389,7 +391,7 @@ by default.
      max-loaded-scenarios: 50
      max-scenarios: 1000
 
-An unload keeps all durable state: the records, the commit log, the settings
+An unload keeps all durable state: the records, the commit history, the settings
 and the releases. The next request to the scenario loads it again, as after a
 restart. Counters in memory, such as the operation metrics, start again from
 zero.

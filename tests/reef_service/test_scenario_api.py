@@ -109,7 +109,7 @@ def test_delete_scenario_refuses_names_that_are_paths() -> None:
 
 
 def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
-    """With a record directory, the scenario's SQLite store and commit log move under ``archived``; the
+    """With a record directory, the scenario's SQLite store and commit history move under ``archived``; the
     directory keeps nothing of the name at the top level, so a restart does not find it."""
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()

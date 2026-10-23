@@ -1,4 +1,4 @@
-"""Scenario store contracts and the commit log adapter's recovery boundaries."""
+"""Scenario store contracts and the commit history adapter's recovery boundaries."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commit_log import CommitHistoryScenarioStore, CommitLog
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioStoreConflict
@@ -92,6 +92,16 @@ def test_retry_returns_original_timestamp_even_after_later_commits(store):
     assert accepted.recorded_at == original.recorded_at
     assert len(store.history()) == 2
     assert store.training_run_position() == (0, 2)
+
+
+def test_retry_with_tuple_values_matches_the_stored_json(store):
+    # A stored record reads back lists where the caller's commit held tuples.
+    tuples = replace(commit(), algorithm_state={"path": ("a", "b")}, metrics={"paths": ({"stages": ()},)})
+
+    original = store.commit_step(expected_step=0, commit=tuples)
+
+    assert store.commit_step(expected_step=0, commit=tuples) == original
+    assert store.history()[0].metrics == {"paths": [{"stages": []}]}
 
 
 @pytest.mark.parametrize(
@@ -208,17 +218,22 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
         _ = store.records
 
 
-def sqlite_session(journal=None, *, database=None, initial_step=0):
+def sqlite_session(*, database=None, initial_step=0):
     records = SQLiteRecordStore(database)
     tasks = records.task_storage(LocalTaskFileStore(), "math")
     return CommitHistoryScenarioStore(
-        "math", records, journal, tasks=tasks, trajectories=records.trajectory_store(), initial_step=initial_step
+        "math",
+        records,
+        records.commit_history(),
+        tasks=tasks,
+        trajectories=records.trajectory_store(),
+        initial_step=initial_step,
     )
 
 
 def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
-    journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(sqlite_session(journal, database=tmp_path / "records.sqlite3")) as session:
+    with closing(sqlite_session(database=tmp_path / "records.sqlite3")) as session:
+        journal = session.commit_history
         for step in range(1, 4):
             session.records.append(record(f"record-{step}"))
             journal.append(commit(step))
@@ -231,22 +246,23 @@ def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
         session.commit_step(expected_step=3, commit=commit(4))
 
 
-@pytest.mark.parametrize("durable_append", [False, True])
-def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch, durable_append):
-    journal = CommitLog(tmp_path / "commits.jsonl")
-    with closing(sqlite_session(journal)) as session:
+@pytest.mark.parametrize("written", [False, True])
+def test_a_failed_commit_step_stores_no_commit(monkeypatch, written):
+    """The commit step is one transaction, so a failure after the insert also rolls the insert back."""
+    with closing(sqlite_session()) as session:
+        journal = session.commit_history
         session.records.append(record("record-1"))
         append = journal.append
 
         def interrupt_append(value):
-            if durable_append:
+            if written:
                 append(value)
             raise OSError("interrupted append")
 
         monkeypatch.setattr(journal, "append", interrupt_append)
         with pytest.raises(OSError, match="interrupted append"):
             session.commit_step(expected_step=0, commit=commit())
-        assert session.history() == ((commit(),) if durable_append else ())
+        assert session.history() == ()
         assert session.records.count("math") == 1
 
         monkeypatch.setattr(journal, "append", append)
@@ -256,25 +272,19 @@ def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("steps,checkpoint_step,message", [([2], 0, "resumes at step 2"), ([1, 3], 0, "jumps")])
-def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, checkpoint_step, message):
-    journal = CommitLog(tmp_path / "commits.jsonl")
-    for step in steps:
-        journal.append(commit(step))
-    with (
-        closing(sqlite_session(journal)) as session,
-        pytest.raises(ReefError, match=message),
-    ):
-        session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
+def test_recovery_rejects_gaps_after_checkpoint(steps, checkpoint_step, message):
+    with closing(sqlite_session()) as session:
+        for step in steps:
+            session.commit_history.append(commit(step))
+        with pytest.raises(ReefError, match=message):
+            session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
 
 
-def test_recovery_rejects_journal_for_another_scenario(tmp_path):
-    journal = CommitLog(tmp_path / "commits.jsonl")
-    journal.append(commit(scenario="code"))
-    with (
-        closing(sqlite_session(journal)) as session,
-        pytest.raises(ReefError, match="holds records for 'code'"),
-    ):
-        session.recover(checkpoint=None)
+def test_recovery_rejects_journal_for_another_scenario():
+    with closing(sqlite_session()) as session:
+        session.commit_history.append(commit(scenario="code"))
+        with pytest.raises(ReefError, match="holds records for 'code'"):
+            session.recover(checkpoint=None)
 
 
 def test_existing_initial_step_is_fenced_without_history():
@@ -377,12 +387,10 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
         session.records.append(record("record-1"))
         session.commit_step(expected_step=0, commit=commit())
     assert tmp_path / f"{key}.sqlite3" in factory.state_paths("math")
-    assert tmp_path / f"{key}.commits.jsonl" in factory.state_paths("math")
 
     first_archive = factory.archive("math")
-    assert len(first_archive) == 2
+    assert [Path(location).name for location in first_archive] == [f"{key}.sqlite3"]
     assert all(Path(location).exists() for location in first_archive)
-    assert (tmp_path / ".locks" / f"{key}.commits.jsonl.lock").exists()
     with closing(factory.open("math")) as session:
         assert session.history() == ()
         assert session.records.count("math") == 0
@@ -427,7 +435,7 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
             factory.prune(max_bytes=1)
 
 
-def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):
+def test_sqlite_storage_does_not_require_posix_locks(tmp_path):
     code = textwrap.dedent(
         """
         import sys
@@ -436,7 +444,6 @@ def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):
 
         sys.modules['fcntl'] = None
         import reef
-        from reef.core.errors import ReefError
         from reef.storage.sqlite import SQLiteScenarioStorage
 
         with closing(SQLiteScenarioStorage()) as factory:
@@ -446,12 +453,7 @@ def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):
 
         with closing(SQLiteScenarioStorage(Path(sys.argv[1]))) as factory:
             with closing(factory.open('math')) as store:
-                try:
-                    store.history()
-                except ReefError as exc:
-                    assert 'require POSIX file locking (fcntl)' in str(exc)
-                else:
-                    raise AssertionError('durable store must reject unavailable POSIX locking')
+                assert store.history() == ()
         """
     )
     result = subprocess.run(
