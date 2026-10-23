@@ -435,7 +435,11 @@ def test_recipe_parses_step_record_dir_and_the_backend_refuses_an_unwritable_one
             }
         }
 
-    on = CordisRecipe.from_environment({}, config=config(step_record_dir=str(tmp_path / "record")), runtime=runtime())
+    on = CordisRecipe.from_environment(
+        {},
+        config=config(step_record_dir=str(tmp_path / "record"), binary=str(make_native_binary(tmp_path))),
+        runtime=runtime(),
+    )
     assert on.step_record_dir == str(tmp_path / "record")
     assert CordisRecipe.from_environment({}, config=config()).step_record_dir is None
     for bad in (42, "", "  "):
@@ -469,6 +473,7 @@ def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeyp
             "evaluate": resolve_episode_scorer(evaluate),
             "tasks": ["one"],
             "step_record_dir": "rel",
+            "binary": str(make_native_binary(tmp_path)),
         }
     }
     recipe = CordisRecipe.from_environment({}, config=config, runtime=runtime())
