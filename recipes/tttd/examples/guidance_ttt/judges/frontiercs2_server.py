@@ -151,7 +151,6 @@ class FrontierCS2Judge(Judge):
                 "TMPDIR": "/scratch",
             }
             command = [
-                "taskset", "-c", ",".join(map(str, cpus)),
                 "apptainer", "exec", "--containall", "--cleanenv", "--no-home",
                 "-B", f"{root / 'in'}:/in:ro", "-B", f"{root / 'out'}:/out", "-B", f"{root / 'scratch'}:/scratch",
                 "-B", f"{root / 'home'}:/frontier",
@@ -161,7 +160,7 @@ class FrontierCS2Judge(Judge):
             ]  # fmt: skip
             started = time.monotonic()
             try:
-                process = subprocess.run(command, capture_output=True, text=True, timeout=task.timeout_s)
+                process = self._run(task, command, cpus, root)
             except subprocess.TimeoutExpired:
                 return {"valid": False, "score": 0, "message": f"verification exceeded {task.timeout_s:g} seconds"}
             elapsed = time.monotonic() - started
@@ -171,6 +170,11 @@ class FrontierCS2Judge(Judge):
             return self._read(task, mode, json.loads(result_path.read_text()), elapsed)
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def _run(self, task: Task, command: list[str], cpus: list[int], root: Path) -> subprocess.CompletedProcess:
+        """Run one verifier command on its CPU set; a cluster can override this to send it elsewhere."""
+        pinned = ["taskset", "-c", ",".join(map(str, cpus)), *command]
+        return subprocess.run(pinned, capture_output=True, text=True, timeout=task.timeout_s)
 
     @staticmethod
     def _read(task: Task, mode: str, result: dict, elapsed: float) -> dict:
