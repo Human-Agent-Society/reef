@@ -18,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import InferenceUnavailable, ReefError, UnknownScenario
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.errors import translate_error, translate_errors
 from reef.service.request_service import InferenceRetryTimeout
@@ -41,6 +41,7 @@ from reef.surface.weights import RuntimeLoadMismatch
         (RecordConflict("record id already used"), 409),
         (RuntimeLoadMismatch("engine served other weights"), 409),
         (InferenceRetryTimeout("retries exhausted"), 503),
+        (InferenceUnavailable("this deployment serves no inference requests"), 503),
         (ReefError("generic reef failure"), 400),
         (ValueError("bad field"), 400),
     ],

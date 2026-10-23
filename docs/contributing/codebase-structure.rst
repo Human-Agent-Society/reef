@@ -232,7 +232,9 @@ the KV connector that stamps tokens with their weight version, and engine launch
 control over vLLM's HTTP control routes. ``inference/remote/`` runs those engines
 on another host: its component (``python -m reef.inference.remote``) serves their
 control operations and requests over HTTP, and ``RemoteInferenceService`` is the
-control plane's receiver for it. ``train/slime_backend/inference.py`` only
+control plane's receiver for it. ``inference/null.py`` is the receiver of
+``inference.backend: none``: it runs no engine, records the version that the
+trainer holds and refuses every request. ``train/slime_backend/inference.py`` only
 translates Slime options into plain launch data; the selected inference factory
 constructs its own configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions.

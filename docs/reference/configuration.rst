@@ -336,6 +336,55 @@ The HTTP service binds to loopback by default. The ``reef`` section contains
 only declared HTTP settings; model and recipe fields belong to their owning
 sections.
 
+Train without an inference engine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``inference.backend: none`` runs no inference engine. Use it for supervised
+fine-tuning on data that does not come from the served model, such as uploaded
+trajectories (``POST /reef/trajectories``) or imported records
+(``POST /reef/records``). Only the Slime backend supports it. The trainer
+takes every GPU that ``training.options.actor-*`` names:
+
+.. code:: yaml
+
+   inference:
+     model-path: /models/Qwen3-8B   # the weights to train; nothing serves them
+     backend: none
+   training:
+     backend: slime
+     options:
+       actor-num-nodes: "1"
+       actor-num-gpus-per-node: "8"
+       save-interval: "42"
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+A training step in this mode works as follows:
+
+- The trainer stays on its GPUs between steps. Reef does not offload or
+  reload it, because no other model shares the GPUs.
+- Each step commits a scenario version with its records, metrics and runtime
+  load ID, as with an engine. No weights leave the trainer: the version names
+  the weights that the trainer holds.
+- The step after each ``save-interval`` versions saves the Megatron
+  checkpoint and the HF export, and Reef publishes that version as an
+  artifact. See `Set the checkpoint cadence
+  <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
+- A restart continues from the last saved checkpoint, as with an engine.
+
+The deployment serves no inference. ``/v1/chat/completions``,
+``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+trained version, serve its published checkpoint from a separate deployment.
+
+``reef serve`` refuses the settings that configure an engine or call the
+model: ``inference.num-gpus`` (other than 0),
+``inference.tensor-parallel-size``, ``inference.options``, ``inference.url``,
+``inference.remote``, ``inference.handler-factory``,
+``inference.handler-config``, ``training.colocate``, a ``teacher`` engine, an
+``evaluation`` section, a ``generator`` section and a composite recipe. The
+Slime driver also refuses LoRA (``megatron-lora-rank``), ``offload-train`` and
+a loss family that reads rollout log probs, such as the on-policy
+distillation, SAO and TTT-Discover families.
+
 Native backend options
 ~~~~~~~~~~~~~~~~~~~~~~
 
