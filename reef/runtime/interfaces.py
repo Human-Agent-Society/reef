@@ -555,6 +555,7 @@ class InferenceAdmissionController:
 
 
 #: Delivery diagnostic retained by older records that stripped the abort finish reason.
+#: Stored records keep this text and ``inference_aborted`` compares it exactly. Do not change it.
 INFERENCE_ABORT_ERROR = "upstream engine aborted the generation"
 
 
