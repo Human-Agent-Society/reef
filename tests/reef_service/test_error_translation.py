@@ -18,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import ImageContentNotSupported, ReefError, UnknownScenario
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.errors import translate_error, translate_errors
 from reef.service.request_service import InferenceRetryTimeout
@@ -119,3 +119,20 @@ def test_middleware_answers_mapped_errors_and_lets_the_rest_become_a_500() -> No
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("scenario", "agent_record_id"),
+    [(1, None), (None, None), ("s", []), ("s", 1)],
+    ids=["int-scenario", "none-scenario", "list-record-id", "int-record-id"],
+)
+def test_image_content_not_supported_refuses_arguments_outside_its_domain(scenario, agent_record_id) -> None:
+    with pytest.raises(TypeError):
+        ImageContentNotSupported(scenario, agent_record_id=agent_record_id)
+
+
+@pytest.mark.unit
+def test_image_content_not_supported_names_the_request_or_the_record() -> None:
+    assert str(ImageContentNotSupported("s")).startswith("the request carries image content")
+    assert str(ImageContentNotSupported("s", agent_record_id="r")).startswith("record 'r' carries image content")

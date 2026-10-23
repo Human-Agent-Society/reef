@@ -15,7 +15,7 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact.artifact import LiveWeightArtifactRef
-from reef.core import AgentRecord, RequestType
+from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
@@ -90,9 +90,11 @@ def tokenizer(monkeypatch: pytest.MonkeyPatch) -> TurnTokenizer:
     return fake
 
 
-def _inference(agent_record_id: str, response: Mapping[str, Any] | None = None) -> AgentRecord:
+def _inference(
+    agent_record_id: str, response: Mapping[str, Any] | None = None, messages: Sequence[Mapping[str, Any]] = QUESTION
+) -> AgentRecord:
     payload: dict[str, Any] = {
-        "messages": QUESTION,
+        "messages": messages,
         "response": response or {"choices": [{"message": {"role": "assistant", "content": "Cold."}}]},
         # The served model's own sample: SFT with a demonstration ignores it.
         "tokens": [5, 6, 7],
@@ -205,6 +207,17 @@ def test_a_broken_training_contract_raises(tokenizer: TurnTokenizer) -> None:
     response.push(_inference("i2", {"output_text": "no choices"}))
     with pytest.raises(ValueError, match="recorded response message"):
         response.push(_report("r2", ("i2",)))
+
+
+@pytest.mark.unit
+def test_an_image_record_raises_instead_of_training_on_its_text(tokenizer: TurnTokenizer) -> None:
+    image_url = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    question = [{"role": "user", "content": [{"type": "text", "text": "What is shown?"}, image_url]}]
+    pipeline = _pipeline()
+    pipeline.push(_inference("i1", messages=question))
+    with pytest.raises(ReefError, match="'i1' of scenario 'science' carries image content"):
+        pipeline.push(_report("r1", ("i1",)))
+    assert tokenizer.calls == []
 
 
 @pytest.mark.unit
@@ -357,3 +370,25 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     family = resolve_loss_family("sft")
     assert isinstance(family, SftAlgorithm)
     assert (family.loss_type, family.requires_rollout_logprobs) == ("sft_loss", False)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tokenizer_path", 1),
+        ("target", []),
+        ("max_tokens", 1.5),
+        ("max_tokens", True),
+        ("max_tokens", "10"),
+        ("max_tokens", None),
+    ],
+)
+def test_sft_settings_reject_invalid_field_domains(field, value) -> None:
+    settings = {"tokenizer_path": TOKENIZER_PATH, field: value}
+    with pytest.raises(TypeError, match=field):
+        SFTSettings(**settings)
+
+
+def test_sft_tasks_reject_invalid_settings_before_loading_a_tokenizer() -> None:
+    with pytest.raises(TypeError, match="settings must be an SFTSettings"):
+        SFTTasks(object())

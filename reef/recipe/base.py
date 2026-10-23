@@ -92,6 +92,18 @@ class Recipe:
     batches. Specialized recipes are frozen dataclasses over this base: they
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
+
+    Values: ``name`` is a str; ``runtime`` is an ``InferenceRuntime`` or
+    ``None``; ``training_runtime`` is a ``TrainingRuntime`` or ``None``;
+    ``pipeline_stages`` is a ``PipelineConfig`` or ``None``; and
+    ``training_mode`` is ``"auto"``, ``"manual"`` or ``"hybrid"``.
+    Construction checks these domains. ``None`` for ``pipeline_stages``
+    selects the classes of :meth:`pipeline_spec` with no configuration;
+    construction raises ``RecipeConfigError`` if those classes cannot load.
+    Subclasses add fields and conditions without removing these conditions.
+    Purpose: ``build_recipe`` makes the deployment's recipe from its config.
+    ``ScenarioFactory`` reads it to make the surface, the trainers and the
+    binding of each scenario.
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -106,8 +118,18 @@ class Recipe:
     pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.training_mode, str):
+            raise TypeError("training_mode must be a str")
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if not isinstance(self.name, str):
+            raise TypeError("name must be a str")
+        if self.runtime is not None and not isinstance(self.runtime, InferenceRuntime):
+            raise TypeError("runtime must be an InferenceRuntime or None")
+        if self.training_runtime is not None and not isinstance(self.training_runtime, TrainingRuntime):
+            raise TypeError("training_runtime must be a TrainingRuntime or None")
+        if self.pipeline_stages is not None and not isinstance(self.pipeline_stages, PipelineConfig):
+            raise TypeError("pipeline_stages must be a PipelineConfig or None")
         # The stages' classes fail the deployment here, not the first scenario.
         self.stages()
 
@@ -229,6 +251,42 @@ class Recipe:
         runtime capability, not a dataclass field or recipe configuration.
         """
         return None
+
+    @property
+    def supports_images(self) -> bool:
+        """Whether the samples that this recipe builds may carry image content. The default is ``False``.
+
+        This is a runtime capability, not a dataclass field or recipe
+        configuration. :attr:`refuses_image_content` of this recipe reads it.
+        A ``CompositeRecipe`` builds no samples itself: the values of its
+        components apply, and its own value is not read.
+
+        No built-in sample builder supports images in this release:
+        ``make_policy_trajectory`` and ``SFTTasks.make_sample`` raise
+        ``ReefError`` for a record with image content, whatever this value
+        is. A recipe that returns ``True`` must build its samples with its own
+        builder. Otherwise ``True`` only turns off the refusal, and its image
+        records stop training with that error.
+        """
+        return False
+
+    @property
+    def refuses_image_content(self) -> bool:
+        """Whether Reef refuses recorded inference requests and records with image content for this recipe.
+
+        Value: ``True`` if and only if the recipe trains model weights through
+        a part that does not support images. For a recipe without components,
+        the part is the recipe itself:
+        ``isinstance(self, WeightTrainingRecipe) and not self.supports_images``.
+        A ``CompositeRecipe`` refuses if and only if a component refuses.
+        When the value is ``True``, the request check and the record check
+        refuse a recorded request or an inference record in which
+        ``has_image_content`` finds an image, so Reef stores none of them.
+        Shapes that it does not read are not refused (see
+        ``has_image_content``). A recipe that does not train weights keeps
+        the images in its records.
+        """
+        return isinstance(self, WeightTrainingRecipe) and not self.supports_images
 
     def build(
         self,

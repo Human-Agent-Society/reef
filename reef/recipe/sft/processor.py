@@ -15,9 +15,10 @@ from typing import Any, Self, cast
 
 from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
+from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
-from reef.core.trajectories import make_trajectory
+from reef.core.trajectories import has_image_content, make_trajectory
 from reef.inference.chat import template_kwargs_of
 from reef.pipeline_context import PipelineContext
 from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
@@ -45,7 +46,16 @@ class SFTRecord2Record(ExclusiveReportRecord2Record):
 
 @dataclass(frozen=True)
 class SFTSettings(PluginSettings):
-    """The config of ``SFTTasks``: the tokenizer, the target, and the maximum sample length."""
+    """Validated configuration used to construct ``SFTTasks``.
+
+    Values: ``tokenizer_path`` is a non-blank str, ``target`` is a member of
+    ``SFT_TARGETS``, and ``max_tokens`` is a non-negative int, excluding bool.
+    Zero disables the sample length limit. ``chat_template_kwargs`` is None
+    or a mapping of template arguments without the reserved ``tools`` key.
+    Construction checks these domains.
+    Purpose: ``SFTTasks.from_config`` parses these settings; ``SFTTasks``
+    loads the named tokenizer and uses the target and sample length limit.
+    """
 
     tokenizer_path: str = config_option(
         "", help="The served model's tokenizer. It renders the request and the target."
@@ -66,6 +76,12 @@ class SFTSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.tokenizer_path, str):
+            raise TypeError("tokenizer_path must be a str")
+        if not isinstance(self.target, str):
+            raise TypeError("target must be a str")
+        if not isinstance(self.max_tokens, int) or isinstance(self.max_tokens, bool):
+            raise TypeError("max_tokens must be an int, excluding bool")
         if not self.tokenizer_path.strip():
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the sample")
         if self.target not in SFT_TARGETS:
@@ -85,9 +101,35 @@ class SFTTasks(ReportTasks):
     ``target: response``, the target is the recorded response message with
     its tool calls, for example an imported dataset example. The stage skips
     a sample longer than ``max_tokens`` and counts it in ``sft_overflow_reports``.
+    A recorded request with image content raises ``ReefError``: SFT samples
+    do not support images yet.
+
+    Values: an ``SFTTasks`` holds ``target`` (a member of ``SFT_TARGETS``),
+    ``max_tokens`` (a non-negative int, where 0 turns off the limit),
+    ``tokenizer`` (the tokenizer that ``AutoTokenizer.from_pretrained``
+    loads from the settings' ``tokenizer_path``) and ``overflow_count`` (the
+    number of samples it skipped as too long: 0 at construction, and only
+    ``make_sample`` adds to it). The constructor copies ``target`` and
+    ``max_tokens`` from a validated ``SFTSettings``; bool is not a token count.
+    Construction rejects other settings types before loading the tokenizer.
+    ``chat_template_kwargs`` is a copied dictionary of the settings' template
+    arguments, or an empty dictionary for None; it excludes ``tools`` and
+    is passed to each render. The tokenizer's loading and rendering contract
+    belongs to transformers.
+    Purpose: ``SFTRecipe`` names it as the record-to-task stage, and
+    ``from_config`` makes it from the stage config. For each
+    ``ReportContext``, ``make_sample`` returns one ``TrajectoryItem``, or
+    ``SkippedReport("sft_overflow")`` for a sample longer than a non-zero
+    ``max_tokens``. It raises ``ValueError`` when the report is not a
+    ``TeacherContextReport``, when the report does not reference exactly one
+    inference record, when the target is missing, or when the chat template
+    does not render the target as its own tokens after the prompt. It raises
+    ``ReefError`` when ``has_image_content`` finds an image in that record.
     """
 
     def __init__(self, settings: SFTSettings) -> None:
+        if not isinstance(settings, SFTSettings):
+            raise TypeError("settings must be an SFTSettings")
         # transformers is part of the training environment. The service never renders a sample.
         super().__init__()
         from transformers import AutoTokenizer
@@ -170,6 +212,11 @@ class SFTTasks(ReportTasks):
                 f"{context.report.agent_record_id} references {len(context.inferences)}"
             )
         inference = context.inferences[0]
+        if has_image_content(inference.payload):
+            raise ReefError(
+                f"inference record {inference.agent_record_id!r} of scenario {inference.scenario!r} carries image "
+                "content. SFT samples do not support images, and Reef does not train on the text without them."
+            )
         messages, tools = recorded_request(inference.payload)
         conversation = normalize_messages_for_template([*messages, self.target_message(inference.payload, parsed)])
         tokens, target_length = self.sequence_ids(conversation, tools)

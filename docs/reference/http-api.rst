@@ -199,8 +199,11 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 not mean a training step has finished. Identical retries return the existing
 receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
-report schemas or references return 400. Scenario selection comes only from
-headers; envelope fields other than the three shown above are rejected.
+report schemas or references return 400. An inference record with image
+content also returns 400 when the scenario's recipe trains weights and does
+not support images (see `Recipe <python-api.rst#recipe>`__). Scenario
+selection comes only from headers; envelope fields other than the three shown
+above are rejected.
 
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
@@ -602,6 +605,10 @@ bookkeeping keys: ``lora_path`` to address the served adapter and
 ``return_meta_info`` so the record proves which weights answered; a body
 naming a different ``lora_path`` is refused. Set ``"stream": true`` and read
 the SSE response for streaming.
+
+A scenario whose recipe trains weights and does not support images refuses a
+request with image content with HTTP 400. Reef does not call the model and
+stores nothing. Evaluation calls are not checked.
 
 The receipt identifies the stored record:
 

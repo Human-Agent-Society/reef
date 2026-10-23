@@ -8,8 +8,10 @@ import pytest
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.registry import InstanceState
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.surface import Surface
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -359,3 +361,66 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
     }
     with pytest.raises(ValueError, match=message):
         parse_scenario_metadata(metadata, checkpoint_head=base)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["false", 1, None])
+def test_a_scenario_binding_refuses_a_refuses_image_content_flag_that_is_not_a_bool(value) -> None:
+    fields = {"surface": Surface(), "runtime": None, "inference_handler": None}
+    with pytest.raises(TypeError, match="refuses_image_content must be a bool"):
+        ScenarioBinding(**fields, refuses_image_content=value)
+    assert ScenarioBinding(**fields, refuses_image_content=True).refuses_image_content is True
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("surface", "invalid"),
+        ("runtime", object()),
+        ("inference_handler", object()),
+        ("training_runtime", object()),
+        ("report_type", str),
+        ("report_type", object()),
+    ],
+)
+def test_scenario_binding_rejects_invalid_field_domains(field, value) -> None:
+    fields = {"surface": Surface(), "runtime": None, "inference_handler": None, field: value}
+    with pytest.raises(TypeError, match=field):
+        ScenarioBinding(**fields)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("name", 1, TypeError),
+        ("binding", object(), TypeError),
+        ("repository", object(), TypeError),
+        ("store", object(), TypeError),
+        ("trainers", [], TypeError),
+        ("model_config", object(), TypeError),
+        ("scenario_step", -1, ValueError),
+        ("scenario_step", 1.5, ValueError),
+        ("scenario_step", True, ValueError),
+        ("process_id", 1, TypeError),
+        ("recovered_head_record", object(), TypeError),
+        ("experiment_observer", object(), TypeError),
+    ],
+)
+def test_scenario_rejects_invalid_constructor_domains(field, value, error) -> None:
+    from reef.scenario.scenario import Scenario
+
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    try:
+        scenario = dispatcher.get_or_create_scenario("math")
+        fields = {
+            "name": scenario.name,
+            "binding": ScenarioBinding(surface=scenario.surface, runtime=None, inference_handler=None),
+            "repository": scenario.repository,
+            "store": scenario.store,
+            "trainers": scenario.trainers,
+        }
+        fields[field] = value
+        with pytest.raises(error, match=field):
+            Scenario(**fields)
+    finally:
+        dispatcher.close()

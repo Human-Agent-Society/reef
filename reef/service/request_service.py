@@ -17,10 +17,11 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import ImageContentNotSupported, ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import normalize_training_request_payload
+from reef.core.trajectories import has_image_content
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
@@ -546,6 +547,10 @@ class RequestService:
                     dict(payload),
                 )
             )
+            # The check reads the payload the hooks made, which is the one the record stores. An evaluation
+            # call stores nothing, so it keeps its image content.
+            if record and initial.refuses_image_content and has_image_content(transformed):
+                raise ImageContentNotSupported(parsed.scenario)
             if isinstance(hooks, LeasingInferenceHooks):
                 # Freeze the served adapter for the attempt: the surface has
                 # named it, so it must stay resident until the attempt ends.
