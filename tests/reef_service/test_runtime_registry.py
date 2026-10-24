@@ -31,6 +31,7 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "coordinator_training",
         "executor_training",
         "inference_proxy",
+        "mlx",
         "none",
         "ray_training",
         "remote",

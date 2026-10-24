@@ -47,7 +47,13 @@ results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
+  2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/
+                                 a run on one Mac with the raw distillation gap, and its demo
+  2026-10-22-mlx-gsm8k-stream-normalized-opd/
+                                 a run on one Mac with the normalized distillation gap
 serve.yaml                       Reef/Slime configuration and the recipe's PRM endpoint
+serve-mlx.yaml                   Reef/MLX configuration for one Apple Silicon Mac, with a hosted PRM
+reply_probe.json                 hermes conversations for the candidate evaluation's reply probe (serve-mlx.yaml)
 docker-compose.yaml              Reef, PRM and student-model containers with separate GPUs
 run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
@@ -241,6 +247,50 @@ uv run --no-project --with matplotlib \
     --lab ~/reef-run/lab --csv results/<run>/learning_curve.csv --plot results/<run>/learning_curve.png
 ```
 
+## Run on Apple Silicon
+
+`serve-mlx.yaml` runs the same stream on one Apple Silicon Mac. The policy
+serves and trains in the Reef process on MLX, with no GPUs and no Docker
+stack for Reef. The PRM judge (`z-ai/glm-5.3`) is called through OpenRouter,
+so set `OPENROUTER_API_KEY`. The student model is a hosted model too: point
+`OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL` at it.
+
+```bash
+uv pip install -e ".[mlx]" -e ./third_party/reef-client
+reef serve -c recipes/openclawrl/examples/openclawrl/serve-mlx.yaml
+```
+
+Run `reef serve` on the host, not in a container. `run.sh` starts the GPU
+Compose stack, so it does not run this config. Use its other steps instead:
+build the student service image, then run its `reef-eval stream` command
+with `REEF_URL=http://<LAN address>:8904` and `REEF_TOKEN=reef-local`. The
+task containers reach the service over the machine's LAN address, so do not
+use localhost.
+
+Some Docker runtimes, such as colima, cannot route a container to the
+host's LAN address. With these runtimes, do these steps:
+
+- Keep `reef_url` at the LAN address. The shim runs on the host and uses it.
+- Add `"shim_host": "host.docker.internal"` to the agent `kwargs`. Hermes
+  then calls the shim at that name.
+- Set `extra_allowed_hosts` to `["host.docker.internal"]`.
+- Set `OPENCLAWRL_USER_LLM_URL` to a `host.docker.internal` address if the
+  student model runs on the host.
+
+Serving on a Mac is slower than on GPUs. A turn can wait for a whole
+training step and the candidate evaluation, which together take about 15
+minutes on a 9B model. Set `OPENCLAWRL_TURN_TIMEOUT_S` to 1800, and keep
+`pipeline.record2record.config.session_ttl_s` at the 1800 that
+`serve-mlx.yaml` sets. [Train on Apple Silicon with
+MLX](../../../../docs/user-guide/mlx.rst) documents the backend, its options
+and the sizing measurements.
+
+To resume a stream after `reef-eval stream` stops, keep Reef running and
+start the stream again on the remaining tasks with the same `--name`. Set
+`OPENCLAWRL_SCENARIO` to the scenario that the stream used, as
+`/reef/status` shows it. Otherwise the stream mints a new scenario, and Reef
+refuses it because the process already trains the first one.
+
 ## Results
 
 ### GSM8K homework stream
@@ -270,6 +320,79 @@ A session passes when the agent's first solution reply already matches the stude
 The demo above replays two sessions from this run. In session 1 the student
 rejects a formatted reply, reef keeps the training going, and by session 16
 the first reply passes directly.
+
+### GSM8K homework stream on Apple Silicon
+
+Two full runs of the 72-session stream on one Mac differ in the distillation
+term. `results/2026-10-22-mlx-gsm8k-stream-normalized-opd/` is a run of
+`serve-mlx.yaml` as committed: the gap is normalized over each training job,
+bounded to ±5 and weighted with `w_opd` 0.3, and the candidate evaluation
+also checks that the policy still opens with a tool call.
+`results/2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/` is an earlier run with the
+raw gap: `diff_clip` 1.0, `w_opd` 1.0 and no first-turn check.
+
+| Setting | Value |
+| --- | --- |
+| Config | `serve-mlx.yaml`, with machine-specific paths and port |
+| Task | the 72-session GSM8K homework stream |
+| Model | `mlx-community/Qwen3.5-9B-MLX-4bit` as the policy, thinking off |
+| PRM | `z-ai/glm-5.3` through OpenRouter, 3 votes per turn |
+| Student | `qwen/qwen3-32b` through OpenRouter |
+| Hardware | one Mac mini, Apple M4 Pro, 48 GB of memory |
+| Hermes turn timeout | 1800 s (the raw-gap run: 900 s for sessions 1 to 14) |
+
+![Accumulated accepts and the rolling bold and list rates over the 72 sessions of the normalized run](results/2026-10-22-mlx-gsm8k-stream-normalized-opd/learning_curve.png)
+
+| Measurement | Normalized gap | Raw gap |
+| --- | --- | --- |
+| Sessions before the adaptation criterion | 15 | 14 |
+| Passed after adaptation | 26 of 57 | 35 of 58 |
+| Answered first replies with bold or a list after adaptation | 20 of 56 | 13 of 57 |
+| Best held-out score of a served candidate | 11 of 16 | 8 of 16 |
+| Candidates selected | 7 of 23 | 4 of 19 |
+
+The untrained model passed none of the 16 held-out problems.
+
+In the normalized run, the held-out score rose over steps 1 to 5 and peaked at
+11 of 16 at steps 8 and 13. From step 15 on, the candidates lost the tool
+call: they opened with a read of the homework in 7 to 22 of 32 sampled
+openings, and the first-turn check held all of them. The weights of step 13
+served sessions 41 to 72, which passed 13 of 32. A higher held-out score did
+not give a higher pass rate in the stream: the check decodes greedily, and
+the stream samples at temperature 0.6.
+
+With the normalized gap at `w_opd` 1.0, one step from the untrained model made
+the policy announce the file read in prose instead of calling the tool; a
+stream at that setting passed none of its first 9 sessions. At `w_opd` 0.4,
+one step lost the tool call in half of the stream's sessions. The comments in
+`serve-mlx.yaml` record these settings.
+
+In the raw-gap run, the weights of step 6 served sessions 21 to 72: every
+later candidate scored 5 of 16 or less and was held. A held step then kept
+its gradient in the optimizer state. Reef now restores that state when it
+rejects a candidate, and the normalized run used that behavior.
+
+Other observations from the runs:
+
+- The first turn can wait for a training step and its candidate
+  evaluation, about 16 minutes, before it gets a reply. In the raw-gap run,
+  sessions 10 and 14 reached the 900-second turn timeout this way, and
+  session 55 reached the 1800-second timeout.
+- Each run took about 12 hours. A training step took about 10 minutes and
+  its candidate evaluation about 6, and serving waited for both.
+
+Each result folder holds `learning_curve.csv`, the per-session verdicts that
+`results/learning_curve.py` writes, and `training_steps.csv`, one row per
+training step: the stream sessions finished before the step, the outcome of
+the candidate evaluation, the rows kept and left out, the loss, the adapter
+change, the advantage signs and the probe metrics. The normalized run also
+records the gap statistics and the first-turn tool rate.
+
+![A rejected and an accepted session replayed from the raw-gap run](results/2026-10-20-mlx-gsm8k-stream-qwen3.5-9b/demo.gif)
+
+The demo replays the raw-gap run: session 2, which the student rejects for
+its formatting, and session 23, which passes after 6 training steps.
+`demo.mp4` is the same demo in 1080p.
 
 ## Configuration ownership
 

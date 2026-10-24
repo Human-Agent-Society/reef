@@ -523,6 +523,7 @@ _BUILTIN_FACTORIES = {
     "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "mlx": "reef.train.mlx_backend.runtime:MLXRuntimeFactory",
     "none": "reef.inference.null:NullRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",

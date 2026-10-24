@@ -11,7 +11,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `core/`, `scenario/` | Shared value contracts, scenario lifecycle, dispatcher coordination, and commit recovery |
 | `runtime/`, `inference/`, `train/` | Runtime coordination, inference integrations, and the training pipeline |
 | `sandbox/` | Shared execution, environment contracts, isolation, file transfer, and cleanup |
-| `slime_backend/`, `tinker_backend/` | Contracts specific to a training backend |
+| `slime_backend/`, `tinker_backend/`, `mlx_backend/` | Contracts specific to a training backend |
 | `record2record/`, `record2task/`, `task2batch/` | The corresponding stages of the training pipeline |
 | `evaluation/`, `harness/`, `observability/` | Candidate evaluation, harness execution, and tracking |
 | `reef_recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |

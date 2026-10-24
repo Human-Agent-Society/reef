@@ -2,12 +2,12 @@
 
 An upstream-verbatim port of the method's scoring stack
 (``openclaw_api_server.py`` / ``openclaw_opd_api_server.py`` at the pinned
-commit). Everything talks to one sglang server over its native ``/generate``
-API — judge generations and teacher prefills alike, byte-identical request
-shapes to the upstream servers. One deliberate deviation: every request has
-a timeout, and failures degrade instead of blocking — a failed judge call is
-a failed vote feeding the same tie rules, a failed prefill returns ``None``
-and the turn trains RL-only.
+commit). A :class:`JudgeTransport` sends each judge prompt: either upstream's
+byte-identical request to an sglang server's native ``/generate``, or chat
+messages to an OpenAI-compatible ``/chat/completions`` URL. One deliberate
+deviation: every request has a timeout, and failures degrade instead of
+blocking — a failed judge call is a failed vote feeding the same tie rules,
+a failed prefill returns ``None`` and the turn trains RL-only.
 
 :mod:`recipes.openclawrl.judging` owns when these are called; this
 module owns what one call does.
@@ -23,7 +23,9 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.record2task.samples import flatten_content
@@ -256,14 +258,14 @@ def load_tokenizer(path: str):
     return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
 
 
-async def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> Any | None:
-    """POST and parse one sglang request; any failure is ``None``."""
+async def _post_json(url: str, payload: dict[str, Any], timeout_s: float, headers: Mapping[str, str]) -> Any | None:
+    """POST and parse one judge request; any failure is ``None``."""
     from aiohttp import ClientError, ClientSession, ClientTimeout
 
     try:
         async with (
             ClientSession(timeout=ClientTimeout(total=timeout_s)) as session,
-            session.post(url, json=payload) as response,
+            session.post(url, json=payload, headers=headers) as response,
         ):
             if response.status >= 400:
                 return None
@@ -272,58 +274,29 @@ async def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> Any
         return None
 
 
-@dataclass
-class PRMJudge:
-    """Run m independent PRM judgments per turn.
+class JudgeTransport(ABC):
+    """How :class:`PRMJudge` sends one judge prompt and reads the generated text."""
 
-    ``generate_url`` is the PRM sglang server's native ``/generate``
-    endpoint; requests are byte-identical to the upstream API server's. A
-    failed or timed-out generation is a failed vote flowing into the same
-    tie rules, so a flaky PRM degrades to neutral instead of blocking.
+    @abstractmethod
+    async def generate(self, messages: list[dict[str, str]]) -> str:
+        """The generated text for ``messages``; "" on failure, which becomes a failed vote."""
+
+
+@dataclass(frozen=True)
+class SGLangTransport(JudgeTransport):
+    """Upstream's verbatim payload to a PRM server's native ``/generate``.
+
+    The transport applies the chat template locally with the PRM's tokenizer.
+    ``url`` is the full ``/generate`` URL.
     """
 
-    generate_url: str
+    url: str
     tokenizer_path: str
-    m: int = 3
     temperature: float = 0.6
     max_tokens: int = 8192
     timeout_s: float = 120.0
 
-    def __post_init__(self) -> None:
-        if self.m <= 0:
-            raise ValueError("m must be positive")
-        if self.timeout_s <= 0:
-            raise ValueError("timeout_s must be positive")
-
-    async def evaluate(
-        self,
-        response_text: str,
-        next_state_text: str,
-        next_state_role: str = "user",
-    ) -> float:
-        """The evaluative judgment: the majority of m votes, ties neutral."""
-        messages = build_prm_judge_messages(response_text, next_state_text, next_state_role)
-        texts = await asyncio.gather(*(self._generate(messages) for _ in range(self.m)))
-        return majority_vote([parse_prm_score(text) for text in texts])
-
-    async def evaluate_hint_votes(
-        self,
-        response_text: str,
-        next_state_text: str,
-        next_state_role: str = "user",
-    ) -> list[dict[str, Any]]:
-        """m hindsight hint votes, unselected (the caller applies upstream's
-        candidate rule, :func:`collect_hint_candidates`)."""
-        messages = build_hint_judge_messages(response_text, next_state_text, next_state_role)
-        texts = await asyncio.gather(*(self._generate(messages) for _ in range(self.m)))
-        votes = []
-        for text in texts:
-            score, hint = parse_hint_judgment(text)
-            votes.append({"score": score, "hint": hint})
-        return votes
-
-    async def _generate(self, messages: list[dict[str, str]]) -> str:
-        """One judge generation (upstream's payload, verbatim); "" on failure."""
+    async def generate(self, messages: list[dict[str, str]]) -> str:
         try:
             tokenizer = await asyncio.to_thread(load_tokenizer, self.tokenizer_path)
             prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -343,10 +316,90 @@ class PRMJudge:
             },
             "return_logprob": False,
         }
-        data = await _post_json(self.generate_url, payload, self.timeout_s)
+        data = await _post_json(self.url, payload, self.timeout_s, {})
         if not isinstance(data, dict):
             return ""
         return str(data.get("text", ""))
+
+
+@dataclass(frozen=True)
+class OpenAIChatTransport(JudgeTransport):
+    """Chat messages to an OpenAI-compatible ``/chat/completions`` URL.
+
+    The provider applies its own model's chat template. ``url`` is the full
+    ``/chat/completions`` URL. An empty ``api_key`` sends no ``Authorization``
+    header.
+    """
+
+    url: str
+    model: str
+    api_key: str = field(default="", repr=False)
+    temperature: float = 0.6
+    max_tokens: int = 8192
+    timeout_s: float = 120.0
+
+    async def generate(self, messages: list[dict[str, str]]) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [dict(message) for message in messages],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        data = await _post_json(self.url, payload, self.timeout_s, headers)
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            return ""
+        message = choices[0].get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        return content if isinstance(content, str) else ""
+
+
+@dataclass
+class PRMJudge:
+    """Run m independent PRM judgments per turn.
+
+    The prompts, the parser, the vote rule, and the hint candidates are
+    upstream's for every ``transport``. A failed or timed-out generation is
+    a failed vote flowing into the same tie rules, so a flaky judge degrades
+    to neutral instead of blocking.
+    """
+
+    transport: JudgeTransport
+    m: int = 3
+
+    def __post_init__(self) -> None:
+        if self.m <= 0:
+            raise ValueError("m must be positive")
+
+    async def evaluate(
+        self,
+        response_text: str,
+        next_state_text: str,
+        next_state_role: str = "user",
+    ) -> float:
+        """The evaluative judgment: the majority of m votes, ties neutral."""
+        messages = build_prm_judge_messages(response_text, next_state_text, next_state_role)
+        texts = await asyncio.gather(*(self.transport.generate(messages) for _ in range(self.m)))
+        return majority_vote([parse_prm_score(text) for text in texts])
+
+    async def evaluate_hint_votes(
+        self,
+        response_text: str,
+        next_state_text: str,
+        next_state_role: str = "user",
+    ) -> list[dict[str, Any]]:
+        """m hindsight hint votes, unselected (the caller applies upstream's
+        candidate rule, :func:`collect_hint_candidates`)."""
+        messages = build_hint_judge_messages(response_text, next_state_text, next_state_role)
+        texts = await asyncio.gather(*(self.transport.generate(messages) for _ in range(self.m)))
+        votes = []
+        for text in texts:
+            score, hint = parse_hint_judgment(text)
+            votes.append({"score": score, "hint": hint})
+        return votes
 
 
 class ResponseRenderer:
@@ -401,6 +454,9 @@ class DirectiveTeacher:
     """
 
     tokenizer_path: str
+    #: Chat-template arguments of the hint-enhanced prompt; the policy's own (``enable_thinking``, say),
+    #: so the teacher's prompt ends where the policy's did.
+    template_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
     async def candidate_tokens(
         self,
@@ -418,7 +474,7 @@ class DirectiveTeacher:
             tokenizer = await asyncio.to_thread(load_tokenizer, self.tokenizer_path)
             normalized = normalize_messages_for_template(enhanced_messages)
             prompt_text = tokenizer.apply_chat_template(
-                normalized, tools=tools, tokenize=False, add_generation_prompt=True
+                normalized, tools=tools, tokenize=False, add_generation_prompt=True, **dict(self.template_kwargs)
             )
             prompt_ids = tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
         except Exception:

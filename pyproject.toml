@@ -54,6 +54,12 @@ e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
 wandb = [
     "wandb>=0.29.0",
 ]
+# Apple Silicon serving and training (`reef.train.mlx_backend`), on arm64 macOS only.
+# Pin both packages, and bump them together: mlx-lm tracks mlx closely.
+mlx = [
+    "mlx>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx-lm>=0.31,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 # Record tracing over OTLP/HTTP (observability.tracing); any OpenTelemetry-compatible backend receives it.
 opentelemetry = [
     "opentelemetry-sdk>=1.25",

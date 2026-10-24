@@ -19,12 +19,16 @@ import collections
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Self
 
 from recipes.openclawrl.prm import (
     DirectiveTeacher,
+    JudgeTransport,
+    OpenAIChatTransport,
     PRMJudge,
     ResponseRenderer,
+    SGLangTransport,
     append_hint_to_messages,
     collect_hint_candidates,
     render_response_fallback,
@@ -71,14 +75,50 @@ class OpenClawRLJudgingSettings(PluginSettings):
     max_open_sessions: int = config_option(
         DEFAULT_MAX_SESSIONS, help="The live sessions, at most; the least recently active are evicted above it."
     )
-    prm_url: str = config_option("", help="The PRM's SGLang server; empty is correlate-only mode.")
-    prm_tokenizer_path: str = config_option("", help="The PRM's tokenizer. Required when prm_url is set.")
+    prm_url: str = config_option(
+        "",
+        help="The judge endpoint: for prm_api 'sglang', the server base URL; "
+        "for prm_api 'openai', the full /chat/completions URL. Empty is correlate-only mode.",
+    )
+    prm_tokenizer_path: str = config_option(
+        "", help="The PRM's tokenizer for the teacher, the renderer, and an 'sglang' judge. Required with prm_url."
+    )
+    # "openai" lets a hosted provider judge: the judge needs generated text, never log-probs.
+    prm_api: str = config_option(
+        "sglang",
+        help="How the judge is reached: 'sglang' posts to a served PRM's native /generate; "
+        "'openai' posts chat messages to an OpenAI-compatible /chat/completions.",
+    )
+    prm_model: str = config_option("", help="The provider model name. Required by prm_api 'openai'.")
+    # The config records which variable holds the credential, never the secret itself.
+    prm_api_key_env: str = config_option(
+        "", help="The environment variable that holds the provider credential for prm_api 'openai'."
+    )
     prm_m: int = config_option(3, help="The judge votes for each turn.")
     prm_temperature: float = config_option(0.6, help="The judge sampling temperature.")
     prm_max_tokens: int = config_option(8192, help="The judge generation budget in tokens.")
     prm_timeout_s: float = config_option(120.0, help="The timeout of one judge call in seconds.")
     prm_concurrency: int = config_option(8, help="The turns judged at the same time.")
     prm_max_hint_candidates: int = config_option(3, help="The hint candidates collected for each turn, at most.")
+    teacher_chat_template_kwargs: Mapping[str, Any] = config_option(
+        default_factory=dict,
+        help="Chat-template arguments of the teacher's hint-enhanced prompt. Set the policy's own, such as "
+        "training.options.chat_template_kwargs, so the teacher's prompt ends where the policy's did.",
+    )
+    # Upstream's judge scores any non-error tool output +1, so a policy can earn
+    # reward with tool calls that do nothing for the user.
+    tool_turn_reward: str = config_option(
+        "prm",
+        help="The reward of a turn whose next state is a tool result: 'prm' asks the PRM, as upstream does; "
+        "'neutral' gives no reward, so only the hint judge can train the turn; 'skip' does not train it.",
+    )
+    # A whole-sequence -1 lowers the probability of the reply as a whole, and a
+    # policy can lower it by not replying in text at all.
+    negative_reward: str = config_option(
+        "prm",
+        help="The reward of a turn that the PRM scores -1: 'prm' keeps -1, as upstream does; "
+        "'neutral' gives no reward, so only the hint judge can train the turn.",
+    )
 
     def __post_init__(self) -> None:
         if self.session_ttl_s <= 0:
@@ -87,6 +127,12 @@ class OpenClawRLJudgingSettings(PluginSettings):
             raise ValueError("max_open_sessions must be positive")
         if self.prm_url.strip() and not self.prm_tokenizer_path.strip():
             raise ValueError("OpenClaw-RL judging requires prm_tokenizer_path next to prm_url")
+        if self.prm_api not in ("sglang", "openai"):
+            raise ValueError(f"prm_api must be 'sglang' or 'openai', got {self.prm_api!r}")
+        if self.prm_api == "openai" and self.prm_url.strip() and not self.prm_model.strip():
+            raise ValueError("an openai-dialect judge requires prm_model next to prm_url")
+        if self.prm_api == "sglang" and self.prm_api_key_env.strip():
+            raise ValueError("prm_api_key_env applies only to prm_api 'openai'")
         if self.prm_m <= 0:
             raise ValueError("prm_m must be positive")
         if self.prm_temperature < 0:
@@ -99,39 +145,74 @@ class OpenClawRLJudgingSettings(PluginSettings):
             raise ValueError("prm_concurrency must be positive")
         if self.prm_max_hint_candidates <= 0:
             raise ValueError("prm_max_hint_candidates must be positive")
+        if self.tool_turn_reward not in ("prm", "neutral", "skip"):
+            raise ValueError(f"tool_turn_reward must be 'prm', 'neutral' or 'skip', got {self.tool_turn_reward!r}")
+        if self.negative_reward not in ("prm", "neutral"):
+            raise ValueError(f"negative_reward must be 'prm' or 'neutral', got {self.negative_reward!r}")
 
 
-def prm_clients(settings: OpenClawRLJudgingSettings) -> tuple[Any, Any, Any]:
+def prm_clients(settings: OpenClawRLJudgingSettings, environ: Mapping[str, str]) -> tuple[Any, Any, Any]:
     """The PRM judge, the directive teacher, and the response renderer that ``settings`` describe.
 
-    Without ``prm_url`` all three are ``None``: correlate-only mode.
+    Without ``prm_url`` all three are ``None``: correlate-only mode. ``environ``
+    holds the variable that ``prm_api_key_env`` names. A remote judge applies
+    its own chat template, but the teacher and the renderer still need the
+    local tokenizer.
     """
     url = settings.prm_url.strip()
     if not url:
         return None, None, None
     tokenizer_path = settings.prm_tokenizer_path.strip()
-    prm = PRMJudge(
-        generate_url=url.rstrip("/") + "/generate",
-        tokenizer_path=tokenizer_path,
-        m=settings.prm_m,
-        temperature=settings.prm_temperature,
-        max_tokens=settings.prm_max_tokens,
-        timeout_s=settings.prm_timeout_s,
+    transport: JudgeTransport
+    if settings.prm_api == "openai":
+        key_variable = settings.prm_api_key_env.strip()
+        api_key = environ.get(key_variable, "") if key_variable else ""
+        if key_variable and not api_key:
+            raise ValueError(f"prm_api_key_env names {key_variable!r}, which is unset")
+        # The user gives the full /chat/completions URL, so no path is appended.
+        transport = OpenAIChatTransport(
+            url=url,
+            model=settings.prm_model.strip(),
+            api_key=api_key,
+            temperature=settings.prm_temperature,
+            max_tokens=settings.prm_max_tokens,
+            timeout_s=settings.prm_timeout_s,
+        )
+    else:
+        transport = SGLangTransport(
+            url=url.rstrip("/") + "/generate",
+            tokenizer_path=tokenizer_path,
+            temperature=settings.prm_temperature,
+            max_tokens=settings.prm_max_tokens,
+            timeout_s=settings.prm_timeout_s,
+        )
+    prm = PRMJudge(transport, m=settings.prm_m)
+    teacher = DirectiveTeacher(
+        tokenizer_path=tokenizer_path, template_kwargs=dict(settings.teacher_chat_template_kwargs)
     )
-    return prm, DirectiveTeacher(tokenizer_path=tokenizer_path), ResponseRenderer(tokenizer_path)
+    return prm, teacher, ResponseRenderer(tokenizer_path)
 
 
 class OpenClawRLJudging(RecordJudging):
     """Turns judged by their next state; terminal exclusions mirror upstream.
 
     Side calls, retried turns, session-final turns, and reports retire
-    terminal instead of ever being judged. ``clients`` (PRM judge, directive
-    teacher, renderer) overrides the configured clients for tests.
+    terminal instead of ever being judged. ``environ`` holds the judge
+    credential variable. ``clients`` (PRM judge, directive teacher, renderer)
+    overrides the configured clients for tests.
     """
 
-    def __init__(self, settings: OpenClawRLJudgingSettings, clients: tuple[Any, Any, Any] | None = None) -> None:
-        self.prm, self.teacher, self.renderer = clients if clients is not None else prm_clients(settings)
+    def __init__(
+        self,
+        settings: OpenClawRLJudgingSettings,
+        clients: tuple[Any, Any, Any] | None = None,
+        *,
+        environ: Mapping[str, str] = MappingProxyType({}),
+    ) -> None:
+        self.prm, self.teacher, self.renderer = clients if clients is not None else prm_clients(settings, environ)
         self.max_hint_candidates = settings.prm_max_hint_candidates
+        self.tool_turn_reward = settings.tool_turn_reward
+        self.negative_reward = settings.negative_reward
         self.index = SessionIndex(settings.session_ttl_s, max_sessions=settings.max_open_sessions)
         # Correlation reports itself through the log, not the record file:
         # the failure worth catching is "nothing ever bound", and a run in
@@ -198,6 +279,11 @@ class OpenClawRLJudging(RecordJudging):
         single OPD candidate, so the distillation term keeps pulling the
         policy toward the frozen base distribution on its top-K.
         """
+        # 0. A skipped tool turn is not judged and not trained.
+        if job.next_state_role == "tool" and self.tool_turn_reward == "skip":
+            self.judged["next_state:tool"] += 1
+            self.judged["declined"] += 1
+            return TurnJudgment(job.receipt)
         # 1. The judges and teacher see the same text upstream does: the
         #    chat-template re-render of the FULL assistant turn (reasoning +
         #    content + native tool calls); the visible render is the fallback.
@@ -210,11 +296,18 @@ class OpenClawRLJudging(RecordJudging):
                 tools=job.request_tools,
             )
         response_text = response_text or render_response_fallback(job.response_message)
-        # 2. Both PRM judges vote.
-        eval_score, hint_votes = await asyncio.gather(
-            self.prm.evaluate(response_text, job.next_state_text, job.next_state_role),
-            self.prm.evaluate_hint_votes(response_text, job.next_state_text, job.next_state_role),
-        )
+        # 2. Both PRM judges vote. With a neutral tool-turn reward, a turn
+        #    whose next state is a tool result gets no evaluative vote.
+        if job.next_state_role == "tool" and self.tool_turn_reward == "neutral":
+            eval_score = 0.0
+            hint_votes = await self.prm.evaluate_hint_votes(response_text, job.next_state_text, job.next_state_role)
+        else:
+            eval_score, hint_votes = await asyncio.gather(
+                self.prm.evaluate(response_text, job.next_state_text, job.next_state_role),
+                self.prm.evaluate_hint_votes(response_text, job.next_state_text, job.next_state_role),
+            )
+        if eval_score == -1.0 and self.negative_reward == "neutral":
+            eval_score = 0.0
         # 3. The accepted hindsight hints, shortest first, capped.
         candidates = collect_hint_candidates(hint_votes, max_cand=self.max_hint_candidates)
         # 4. Every candidate ships as a TOKEN SEQUENCE — upstream's
@@ -321,20 +414,21 @@ class OpenClawRLRecord2Record(JudgingRecord2Record):
     """OpenClaw-RL's record stage: sessions correlated, and turns judged on a PRM worker.
 
     Config: :class:`OpenClawRLJudgingSettings`. Without a ``worker``, the
-    stage starts one when the config names a PRM judge. ``worker`` and
-    ``clients`` (PRM judge, directive teacher, renderer) replace the
-    configured ones in tests.
+    stage starts one when the config names a PRM judge. ``environ`` holds
+    the judge credential variable. ``worker`` and ``clients`` (PRM judge,
+    directive teacher, renderer) replace the configured ones in tests.
     """
 
     def __init__(
         self,
         settings: OpenClawRLJudgingSettings,
         *,
+        environ: Mapping[str, str] = MappingProxyType({}),
         worker: BackgroundJobWorker | None = None,
         clients: tuple[Any, Any, Any] | None = None,
     ) -> None:
         #: The judging that the batches read for the PRM record file.
-        self.openclawrl_judging = OpenClawRLJudging(settings, clients)
+        self.openclawrl_judging = OpenClawRLJudging(settings, clients, environ=environ)
         if worker is None and self.openclawrl_judging.prm is not None:
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
@@ -343,4 +437,4 @@ class OpenClawRLRecord2Record(JudgingRecord2Record):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(OpenClawRLJudgingSettings.parse(config, plugin_class=cls))
+        return cls(OpenClawRLJudgingSettings.parse(config, plugin_class=cls), environ=environ)

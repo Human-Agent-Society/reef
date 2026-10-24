@@ -7,6 +7,8 @@ Installation depends on what you want Reef to evolve:
   laptop; no GPU involved. See `Laptop, no GPU`_.
 - **Model weights, and optionally a harness.** Set up docker image that
   contains GPU management stack. See `GPU image, for weight training`_.
+  On an Apple Silicon Mac, see `Apple Silicon, for local weight training`_
+  instead.
 - **Neither — you only call a Reef deployment.** See `Client only`_.
 
 Laptop, no GPU
@@ -61,6 +63,21 @@ Keep ``--no-deps``: the CUDA-specific packages are already in the image, and
 resolving them again replaces working builds. The ``slime`` extra installs only
 the Python-side dependencies; the ``runtime`` group pins the training runtime
 itself.
+
+Apple Silicon, for local weight training
+----------------------------------------
+
+On an Apple Silicon Mac, Reef can serve and train a LoRA adapter in one
+process with MLX. This needs no GPU image, Ray or CUDA. Install the ``mlx``
+extra from a source checkout:
+
+.. code:: bash
+
+   git submodule update --init --recursive
+   uv pip install -e ".[mlx]" -e ./third_party/reef-client
+
+The extra installs only on macOS arm64. `Train on Apple Silicon with MLX
+<../user-guide/mlx.rst>`__ explains how to configure and run it.
 
 Client only
 -----------

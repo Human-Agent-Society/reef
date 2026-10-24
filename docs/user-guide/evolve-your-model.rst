@@ -16,6 +16,8 @@ answering across the update.
 +--------------------------+-----------------------------------------------+
 
 For hosted LoRA training from a CPU machine, see `Train with Tinker <tinker.rst>`__.
+To serve and train a LoRA adapter on one Apple Silicon Mac, see `Train on
+Apple Silicon with MLX <mlx.rst>`__.
 The GPU deployment below uses the default Slime backend.
 
 When it fits

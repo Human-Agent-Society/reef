@@ -252,6 +252,32 @@ class TestHarness:
         with pytest.raises(ValueError, match="reef_url"):
             HermesStreamAgent(logs_dir=Path("/tmp"))
 
+    def test_shim_host_sets_the_address_hermes_calls(self, harbor_runtime):
+        import asyncio
+        from types import SimpleNamespace
+
+        from recipes.openclawrl.examples.openclawrl.harness import HermesStreamAgent
+
+        class FakeEnvironment:
+            def __init__(self):
+                self.commands = []
+
+            async def exec(self, command, user=None):
+                self.commands.append(command)
+                return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        def hermes_config(agent):
+            environment = FakeEnvironment()
+            asyncio.run(agent._prepare(environment, {"index": 0, "question": "What is 2+2?"}))
+            return next(c for c in environment.commands if ".hermes/config.yaml" in c)
+
+        default = HermesStreamAgent(logs_dir=Path("/tmp"), reef_url="http://172.31.0.5:8904")
+        assert "http://172.31.0.5:29101/v1" in hermes_config(default)
+        split = HermesStreamAgent(
+            logs_dir=Path("/tmp"), reef_url="http://172.31.0.5:8904", shim_host="host.docker.internal"
+        )
+        assert "http://host.docker.internal:29101/v1" in hermes_config(split)
+
     def test_session_loop_drives_hermes_against_the_judge(self, harbor_runtime, monkeypatch):
         import asyncio
         from types import SimpleNamespace
