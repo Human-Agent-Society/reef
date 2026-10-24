@@ -3,28 +3,30 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 import yaml
 
 from reef.artifact.artifact import Artifact
-from reef.inference.remote.runtime import RemoteAdapterRuntimeFactory
-from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.inference.remote.runtime import RemoteServingRuntimeFactory
+from reef.runtime.deployment import RuntimeRegistry
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
+from reef.runtime.jobs import TrainingJob, job_id_for
 from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.training import local_model_required, training_deployment_for
 from reef.surface.adapter import adapter_name
-from reef.train.algos import StepScheduling, StepSignal
+from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.job_runtime import JobTrainingRuntime
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
-from reef.train.types import TrainingBatch, TrajectoryItem
+from reef.train.types import JobData, TrajectoryItem
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
 
@@ -85,7 +87,7 @@ class Engines(InferenceBackend):
         return
 
     def recover(self):
-        raise AssertionError("unused")
+        return 0
 
     def abort(self):
         raise AssertionError("unused")
@@ -104,7 +106,9 @@ class SampleObjective(TrainingObjective):
     name = "tinker-local-engine-objective"
 
     def prepare(self, batch, state):
-        return StepSignal("train", {"steps": state.get("steps", 0) + 1}, advantages=tuple(1.0 for _ in batch.items))
+        return TrainingSignal(
+            "train", {"steps": state.get("steps", 0) + 1}, advantages=tuple(1.0 for _ in batch.items)
+        )
 
 
 @pytest.fixture
@@ -158,11 +162,13 @@ def remote_engine_config(tmp_path):
 
 
 def runtime_config(config):
-    return training_deployment_for("tinker").runtime_config(service_config_from_mapping(config).__dict__)
+    return training_deployment_for("tinker").runtime_config(
+        service_config_from_mapping(config).__dict__, loss_family="tttd"
+    )
 
 
 def build(config, monkeypatch, engines):
-    """The runtime pair the HTTP service builds, over the SDK double and the engine double."""
+    """The component and serving runtime the HTTP service builds, over the SDK double and the engine double."""
     monkeypatch.setattr("reef.train.tinker_backend.client.TinkerSDKClient", RemoteClient)
     seen = {}
 
@@ -170,29 +176,26 @@ def build(config, monkeypatch, engines):
         seen.update(config)
         return AdapterServingRuntime(engines, Handler(), adapter_capacity=config["adapter_capacity"])
 
-    monkeypatch.setattr(RemoteAdapterRuntimeFactory, "__call__", serve)
-    training, inference = RuntimeRegistry().build(
+    monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
+    component, inference = RuntimeRegistry().build(
         runtime_config(config), model_path="Qwen/Qwen3-8B", environ={"TINKER_API_KEY": "test-key"}
     )
-    return training, inference, seen
+    return component, inference, seen
 
 
-def train(training, inference, objective, scenario, sample):
-    prepared = training.prepare_training_step(
-        TrainingBatch("b", (item(sample),)),
-        TrainingMethod(objective.name),
-        {},
-        StepScheduling(unit="sample"),
-        sample,
-        scenario=scenario,
-    )
-    candidate = training.train_candidate(prepared.payload)
-    return candidate, inference.activate_candidate(candidate)
-
-
-def commit(training, inference, candidate, scenario):
-    inference.acknowledge_publication(candidate.training_job_id)
-    training.commit_candidate(candidate.training_job_id, scenario=scenario)
+def train(component, inference, objective, scenario, sample, start=None):
+    """Run one job to its end, then serve its checkpoint for ``scenario``; return the checkpoint and its version."""
+    data = JobData("b", (item(sample),))
+    parameters = {"method": TrainingMethod(objective.name).to_dict()}
+    job_id = job_id_for(component.name, start, data.to_dict()["items"], parameters)
+    component.submit(TrainingJob(job_id, component.name, start, data, parameters))
+    deadline = time.monotonic() + 10
+    while (status := component.status(job_id)).state == "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert status.state == "finished", status.error
+    (checkpoint,) = status.checkpoints
+    return checkpoint, inference.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
 
 
 def test_local_engines_run_on_an_inference_component_that_reef_serve_starts(tmp_path):
@@ -240,59 +243,60 @@ def test_remote_engines_keep_the_section_and_start_no_local_component(tmp_path):
     assert runtime_config(config)["serving"]["remote"] == config["reef"]["inference_remote"]
 
 
-def test_each_scenario_trains_and_serves_its_own_adapter(tmp_path, monkeypatch, objective):
+def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(tmp_path, monkeypatch, objective):
     raw = local_engine_config(tmp_path)
     raw["training"]["options"]["max-loaded-adapters"] = 3
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     engines = Engines()
-    training, inference, seen = build(config, monkeypatch, engines)
+    component, inference, seen = build(config, monkeypatch, engines)
     try:
-        assert isinstance(training, JobTrainingRuntime) and training.concurrent_training_scenarios
+        assert isinstance(component, TinkerTrainingComponent) and isinstance(inference, AdapterServingRuntime)
+        assert (seen["type"], seen["layout"], seen["adapter_capacity"]) == ("remote_serving", "adapter", 3)
         options = seen["engine_config"]["options"]
         assert options["enable_lora"] and options["max_lora_rank"] == 16 and options["lora_target_modules"] == ["all"]
         assert seen["engine_config"]["model_path"] == "Qwen/Qwen3-8B"
-        math, activated = train(training, inference, objective, "math", 0)
-        adapter = Path(math.checkpoint_path) / ADAPTER_DIR
-        assert engines.loads == [(adapter_name("math", activated.runtime_load_id), adapter, activated.runtime_load_id)]
-        commit(training, inference, math, "math")
-        assert inference.serving_adapter_runtime_load_id("math") == activated.runtime_load_id
-        # Another scenario starts from the base; the committed scenario continues from its own adapter.
-        train(training, inference, objective, "code", 1)
-        train(training, inference, objective, "math", 2)
-        client = training.component._client
-        assert [checkpoint.state_path for checkpoint in client.calls] == [
+        math, served = train(component, inference, objective, "math", 0)
+        adapter = Path(math.release_path) / ADAPTER_DIR
+        assert (adapter / "adapter_config.json").is_file()
+        assert engines.loads == [(adapter_name("math", served), adapter, served)]
+        assert inference.serving_adapter_runtime_load_id("math") == served
+        # Another scenario serves its own adapter beside the first one.
+        _, code = train(component, inference, objective, "code", 1)
+        assert inference.serving_adapter_runtime_load_id("code") == code != served
+        assert inference.serving_adapter_runtime_load_id("math") == served
+        train(component, inference, objective, "math", 2, start=math.path)
+        assert [checkpoint.state_path for checkpoint in component._client.calls] == [
             "tinker://base/state",
             "tinker://base/state",
             "tinker://update-1/state",
         ]
     finally:
         inference.shutdown()
-        training.shutdown()
+        component.close()
 
 
-def test_a_restart_serves_each_committed_release_and_trains_from_it(tmp_path, monkeypatch, objective):
+def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypatch, objective):
     config, _ = resolve_deployment_config(local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
-    training, inference, _ = build(config, monkeypatch, Engines())
-    math, _ = train(training, inference, objective, "math", 0)
-    commit(training, inference, math, "math")
+    component, inference, _ = build(config, monkeypatch, Engines())
+    math, _ = train(component, inference, objective, "math", 0)
     inference.shutdown()
-    training.shutdown()
+    component.close()
 
     engines = Engines()
-    training, inference, _ = build(config, monkeypatch, engines)
+    component, inference, _ = build(config, monkeypatch, engines)
     try:
-        served = inference.activate_checkpoint(Artifact.local(Path(math.checkpoint_path)), scenario="math")
-        assert engines.loads == [(adapter_name("math", served), Path(math.checkpoint_path) / ADAPTER_DIR, served)]
-        _, activated = train(training, inference, objective, "math", 1)
-        assert training.component._client.calls[0].state_path == "tinker://update-1/state"
+        served = inference.activate_checkpoint(Artifact.local(Path(math.release_path)), scenario="math")
+        assert engines.loads == [(adapter_name("math", served), Path(math.release_path) / ADAPTER_DIR, served)]
+        _, activated = train(component, inference, objective, "math", 1, start=math.path)
+        assert component._client.calls[0].state_path == "tinker://update-1/state"
         # One adapter slot: generation is paused, so the scenario's new adapter replaces its served one.
         assert engines.loads[1:] == [
             ("unload", adapter_name("math", served)),
-            (adapter_name("math", activated.runtime_load_id), engines.loads[2][1], activated.runtime_load_id),
+            (adapter_name("math", activated), engines.loads[2][1], activated),
         ]
     finally:
         inference.shutdown()
-        training.shutdown()
+        component.close()
 
 
 def test_engine_topologies_refuse_conflicting_inputs_before_starting(tmp_path, monkeypatch):
@@ -339,23 +343,3 @@ def test_tinker_samples_in_process_without_engines(tmp_path):
     assert not local_model_required(config)
     assert not TinkerDeployment.requires_local_model
     assert "serving" not in runtime_config(config)
-
-
-def test_coordinator_runtime_kind_connects_through_an_injected_connector():
-    seen = {}
-
-    def connect(**kwargs):
-        seen.update(kwargs)
-        from tests.support.runtime_stubs import StubTrainingRuntime
-
-        stub = StubTrainingRuntime()
-        return stub, stub.inference
-
-    built = RuntimeRegistry().build(
-        {"type": "coordinator_training", "inference_runtime": "sglang", "actor_name": "bridge", "connect": connect},
-        model_path="/models/demo",
-    )
-    assert seen["actor_name"] == "bridge" and seen["model_path"] == "/models/demo"
-    assert built[0] is not None and built[1] is not None
-    with pytest.raises(RuntimeConfigError, match="inference_runtime"):
-        RuntimeRegistry().build({"type": "coordinator_training", "connect": connect}, model_path="/models/demo")

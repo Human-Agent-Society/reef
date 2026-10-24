@@ -7,12 +7,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.tttd import (
-    TTTDBatches,
     TTTDGridSettings,
     TTTDGroupedRolloutReport,
+    TTTDJobData,
     TTTDRecipe,
     TTTDRecord2Record,
     TTTDTasks,
@@ -29,10 +29,10 @@ from reef.record2task.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
-from reef.train.algos import StepScheduling
+from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import TrajectoryItem, trajectory_groups
 
 
@@ -91,8 +91,8 @@ def _report(step: int, group: int, rollout: int, score: float) -> AgentRecord:
     )
 
 
-def _processor(experiment_logger=None) -> TrainingPipeline:
-    # A test asks for a batch of the grid's six rollouts, so a batch is one step.
+def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
+    # A test asks for job data of the grid's six rollouts, so one job's data is one step.
     context = PipelineContext(
         "discovery",
         report_type=TTTDGroupedRolloutReport,
@@ -103,13 +103,13 @@ def _processor(experiment_logger=None) -> TrainingPipeline:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record, None),
+        task2job=TTTDJobData(context, record2record, None, job_samples),
     )
 
 
 def _recipe(config: dict) -> TTTDRecipe:
     recipe = TTTDRecipe.from_environment(
-        {}, config={"model": {"path": "Qwen/Qwen3-8B"}, **config}, **runtime_bindings(StubTrainingRuntime())
+        {}, config={"model": {"path": "Qwen/Qwen3-8B"}, **config}, **runtime_bindings()
     )
     assert isinstance(recipe, TTTDRecipe)
     return recipe
@@ -131,19 +131,19 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
 
     assert isinstance(pipeline.record2record, TTTDRecord2Record)
     assert isinstance(pipeline.record2task, TTTDTasks)
-    assert isinstance(pipeline.task2batch, TTTDBatches)
+    assert isinstance(pipeline.task2job, TTTDJobData)
     assert (pipeline.record2task.groups_per_step, pipeline.record2task.rollouts_per_group) == (2, 3)
-    assert (pipeline.task2batch.groups_per_step, pipeline.task2batch.rollouts_per_group) == (2, 3)
+    assert (pipeline.task2job.groups_per_step, pipeline.task2job.rollouts_per_group) == (2, 3)
     assert pipeline.record2task.assembly.settings.accept_multi_turn_policy_samples
-    assert pipeline.task2batch.max_batch_samples == 6
+    assert pipeline.task2job.max_job_samples == 6
 
 
 @pytest.mark.unit
 def test_tttd_default_grid_is_the_paper_grid() -> None:
     pipeline = _recipe({"data": {}}).build_pipeline(PipelineContext("discovery"))
 
-    assert isinstance(pipeline.task2batch, TTTDBatches)
-    assert (pipeline.task2batch.groups_per_step, pipeline.task2batch.rollouts_per_group) == (8, 64)
+    assert isinstance(pipeline.task2job, TTTDJobData)
+    assert (pipeline.task2job.groups_per_step, pipeline.task2job.rollouts_per_group) == (8, 64)
 
 
 @pytest.mark.unit
@@ -160,7 +160,7 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
         ({"record2record": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
         ({"record2record": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
         ({"record2task": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
-        ({"task2batch": {"config": {"batch_size": 2}}}, "TTTDBatches: unknown config fields: batch_size"),
+        ({"task2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
     ],
 )
 def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, message: str) -> None:
@@ -170,25 +170,25 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 
 
 @pytest.mark.unit
-def test_the_trainer_refuses_a_tttd_batch_size_above_one_grid() -> None:
-    def build(batch_size: int) -> Trainer:
+def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
+    def build(job_samples: int) -> Trainer:
         return Trainer.build(
-            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(), batch_size=batch_size
+            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(job_samples=job_samples)
         )
 
     build(6).close()
     with pytest.raises(
-        PluginConfigError, match="TTTDBatches holds at most 6 samples in one batch, not the batch size 7"
+        PluginConfigError, match="TTTDJobData holds at most 6 samples in one job's data, not job_samples 7"
     ):
         build(7)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stage", [TTTDTasks, TTTDBatches])
+@pytest.mark.parametrize("stage", [TTTDTasks, TTTDJobData])
 def test_tttd_later_stages_need_the_tttd_record_stage(stage: type) -> None:
     context = PipelineContext("discovery")
     stages = {"record2record": NoRecordSets()}
-    if stage is TTTDBatches:
+    if stage is TTTDJobData:
         stages["record2task"] = TTTDTasks(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
     with pytest.raises(PluginConfigError, match=f"{stage.__name__} needs TTTDRecord2Record"):
         stage.from_config({}, context=context, environ={}, **stages)
@@ -262,8 +262,8 @@ def test_tttd_waits_for_every_rollout_in_one_policy_step() -> None:
     processor.push(_report(0, 1, 2, 3.0))
 
     assert processor.ready(6)
-    batch = processor.build_batch(6)
-    assert batch.batch_id == "discovery:batch:1"
+    batch = processor.build_job_data(6)
+    assert batch.data_id == "discovery:data:1"
     assert len(trajectory_groups(batch)) == 2
     assert [[trajectory_reward(sample) for sample in group] for group in trajectory_groups(batch)] == [
         [0.0, 1.0, 2.0],
@@ -370,7 +370,7 @@ def test_tttd_refuses_reports_before_their_inferences() -> None:
         for rollout in range(3):
             processor.push(_report(0, group, rollout, float(group + rollout)))
     assert [
-        [trajectory_reward(sample) for sample in group] for group in trajectory_groups(processor.build_batch(6))
+        [trajectory_reward(sample) for sample in group] for group in trajectory_groups(processor.build_job_data(6))
     ] == [
         [0.0, 1.0, 2.0],
         [1.0, 2.0, 3.0],
@@ -394,7 +394,7 @@ def test_tttd_filters_constant_groups_after_step_barrier() -> None:
             processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
             processor.push(_report(0, group, rollout, rewards[group][rollout]))
 
-    batch = processor.build_batch(6)
+    batch = processor.build_job_data(6)
 
     assert len(trajectory_groups(batch)) == 1
     assert [trajectory_reward(sample) for sample in trajectory_groups(batch)[0]] == [1.0, 2.0, 3.0]
@@ -410,7 +410,7 @@ def test_tttd_logs_full_grid_reward_and_filter_metrics() -> None:
             processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
             processor.push(_report(0, group, rollout, rewards[group][rollout]))
 
-    processor.build_batch(6)
+    processor.build_job_data(6)
 
     assert len(experiment_logger.events) == 1
     namespace, metrics = experiment_logger.events[0]
@@ -439,8 +439,8 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
             processor.push(_inference(f"i-0-{group}-{rollout}", 100 + group * 3 + rollout))
             processor.push(_report(0, group, rollout, 1.0))
 
-    batch = processor.build_batch(6)
-    result = prepare_slime_step(batch, TrainingMethod("tttd"), {}, StepScheduling(unit="sample"), step_size=6)
+    batch = processor.build_job_data(6)
+    result = prepare_slime_job(batch, TrainingMethod("tttd"), {}, StepScheduling(), step_size=6)
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None
@@ -615,13 +615,13 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
     from reef.train.algos.registry import resolve_objective
-    from reef.train.types import TrainingBatch
+    from reef.train.types import JobData
 
     def sample(record_id: str, reward: float) -> TrajectoryItem:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
     objective = resolve_objective("tttd")
-    constant = TrainingBatch(
+    constant = JobData(
         "b",
         tuple(
             replace(sample, group_id=str(index))
@@ -629,7 +629,7 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
             for sample in group
         ),
     )
-    mixed = TrainingBatch(
+    mixed = JobData(
         "b",
         tuple(
             replace(sample, group_id=str(index))

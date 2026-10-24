@@ -4,24 +4,15 @@ from __future__ import annotations
 
 import importlib
 import os
-import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import CoordinatorConfig, DeploymentResources, TrainingService, runtime_factory_for
+from reef.runtime.deployment import runtime_factory_for
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.interfaces import InferenceHandler
-
-#: What the model driver writes once every component is ready; ``reef serve`` probes for it.
-READY_PROBE = (
-    "import os, pathlib, sys; "
-    "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
-    "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-training-ready' else 1)"
-)
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
 NO_INFERENCE_BACKEND = "none"
@@ -37,8 +28,7 @@ INFERENCE_LAUNCH_OPTIONS = frozenset(
         "prefill-num-servers",
     }
 )
-# Colocation is Reef's placement decision (training.colocate); its native
-# spellings would let the trainer and the reservation disagree.
+# Training and serving never share GPUs; these native options would make them.
 PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
 #: Native SGLang options Reef binds itself for a managed engine.
 INFERENCE_RESERVED_OPTIONS = frozenset(
@@ -100,8 +90,7 @@ def prepare_inference_config(
     Public engine options use SGLang names without Slime's prefix. The first
     managed topology uses tensor parallel engines, with independent replicas
     when the total GPU budget exceeds the per-engine tensor parallel size.
-    LoRA and colocated deployments retain their existing runtime lifecycle.
-    ``inference.backend: none`` takes no inference GPUs and colocates with nothing.
+    ``inference.backend: none`` takes no inference GPUs.
     """
     for name in training_options:
         if (
@@ -115,9 +104,9 @@ def prepare_inference_config(
                 "inference.tensor-parallel-size or inference.options instead"
             )
         if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
-            raise DeployConfigError(f"training.options.{name} places the model; use training.colocate instead")
+            raise DeployConfigError(f"training.options.{name} shares GPUs between training and serving; remove it")
     if settings["inference_backend"] == NO_INFERENCE_BACKEND:
-        config["reef"].update(inference_num_gpus=0, inference_options={}, colocate=False)
+        config["reef"].update(inference_num_gpus=0, inference_options={})
         return
     parallel_size = settings["tensor_parallel_size"]
     parallel_size = 1 if parallel_size is None else parallel_size
@@ -138,7 +127,6 @@ def prepare_inference_config(
         inference_num_gpus=num_gpus,
         tensor_parallel_size=parallel_size,
         inference_options=options,
-        colocate=bool(settings["colocate"]),
     )
 
 
@@ -169,44 +157,12 @@ def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None
             raise DeployConfigError(f"automatic {backend} training requires execution.{role}.backend: ray")
 
 
-def driver_service(name: str, settings: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
-    """The model driver process definition ``reef serve`` starts before the HTTP service."""
-    python = os.environ.get("REEF_PYTHON", sys.executable)
-    return {
-        "name": name,
-        "executor": "uni",
-        "command": [python, "-m", "reef.service.training_driver"],
-        "ready": [python, "-c", READY_PROBE],
-        "ready_timeout": settings["training_ready_timeout"],
-        "env": {
-            **env,
-            "REEF_RAY_NAMESPACE": "${reef.ray_namespace}",
-            "REEF_RAY_ACTOR_NAME": "${reef.ray_actor_name}",
-        },
-    }
-
-
-@dataclass(frozen=True)
-class TrainingDeploymentPlan:
-    """Unallocated trainer and its launch requirements for Reef's assembler.
-
-    Native inference options are data passed to the separately selected inference
-    factory. The trainer never constructs or owns an inference service.
-    """
-
-    resources: DeploymentResources
-    training: TrainingService
-    inference_config: Mapping[str, Any] = field(default_factory=dict)
-    coordinator: CoordinatorConfig | None = None
-    monitor_components: bool = True
-
-
 class TrainingDeployment(ABC):
     """Lightweight integration definition; preparation never allocates model resources."""
 
     requires_local_model: bool = True
     supports_teacher_engine: bool = False
-    #: Whether its model driver can run the engines on a remote component (an ``inference.remote`` section).
+    #: Whether its serving engines can run on a remote component (an ``inference.remote`` section).
     supports_remote_inference: bool = False
 
     @abstractmethod
@@ -218,8 +174,21 @@ class TrainingDeployment(ABC):
         """
 
     @abstractmethod
-    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
-        """Describe the runtime for RuntimeRegistry, without constructing it."""
+    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+        """Describe the training component and inference runtime for RuntimeRegistry, without constructing them.
+
+        ``loss_family`` is the recipe's startup loss family, which a backend
+        that starts its workers with one loss family reads.
+        """
+
+    def http_environment(self, settings: Mapping[str, Any]) -> Mapping[str, str]:
+        """Variables the HTTP service process gets, where the training component runs.
+
+        Values may name ``${endpoints.<service>}`` of a service that
+        :meth:`prepare` returned; ``reef serve`` resolves them before it starts
+        the HTTP service.
+        """
+        return {}
 
     def serves_on_inference_component(self, settings: Mapping[str, Any]) -> bool:
         """Whether the control plane serves saved weights on an inference component for these settings.
@@ -230,18 +199,9 @@ class TrainingDeployment(ABC):
         """
         return False
 
-    def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
-        """Provide an unstarted trainer for Reef's optional model driver.
-
-        Integrations using their own process entrypoint or an in-process runtime
-        need not implement this method. Reef selects the inference definition
-        separately and validates the pair before allocating either component.
-        """
-        raise NotImplementedError("this backend does not use Reef's model deployment driver")
-
 
 class InProcessTrainingDeployment(TrainingDeployment):
-    """An integration whose registered runtime owns local inference and training.
+    """An integration whose registered runtime factory builds its training component and inference runtime in process.
 
     Subclasses name their runtime_type. The runtime factory owns option parsing
     and imports its execution dependencies only when constructing the runtime.
@@ -253,7 +213,6 @@ class InProcessTrainingDeployment(TrainingDeployment):
         unsupported = {
             "ray_address",
             "ray_namespace",
-            "ray_actor_name",
             "inference_url",
             "inference_backend",
             "inference_handler_factory",
@@ -261,7 +220,6 @@ class InProcessTrainingDeployment(TrainingDeployment):
             "tensor_parallel_size",
             "inference_num_gpus",
             "inference_options",
-            "colocate",
         } & config["reef"].keys()
         if unsupported or {"training", "rollout"} & config.get("execution", {}).keys():
             raise DeployConfigError(
@@ -271,12 +229,10 @@ class InProcessTrainingDeployment(TrainingDeployment):
         if factory is None:
             raise DeployConfigError(f"unknown training runtime type {self.runtime_type!r}")
         # Use the runtime's schema for both CLI and YAML options, without a model.
-        factory.parse_config(self.runtime_config(settings), os.environ)
+        factory.parse_config(self.runtime_config(settings, loss_family=""), os.environ)
         return ()
 
-    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
-        if connector is not None:
-            raise ValueError("in-process training does not accept a remote connector")
+    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
         options = {
             key.replace("-", "_"): value
             for key, value in normalize_native_options(settings["training_backend_options"]).items()

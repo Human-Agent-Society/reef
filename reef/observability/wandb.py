@@ -521,8 +521,6 @@ class WandbExperimentTracker(ExperimentTracker):
     def _event_metadata(self, event: TrainingExperimentEvent, run_id: str) -> dict[str, Any]:
         source = event.context.source_artifact_ref
         produced = event.produced_artifact_ref
-        source_weight = event.source_runtime_load_id
-        produced_weight = event.produced_runtime_load_id
         return {
             "step": event.context.step,
             "run_segment": event.context.run_segment,
@@ -535,8 +533,6 @@ class WandbExperimentTracker(ExperimentTracker):
             "outcome": event.outcome,
             "source_release_id": source.release_id,
             "produced_release_id": produced.release_id,
-            "source_runtime_load_id": source_weight,
-            "produced_runtime_load_id": produced_weight,
             "checkpoint_path": event.checkpoint_path,
         }
 

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from recipes.tttd.processor import TTTDBatches, TTTDRecord2Record, TTTDTasks
+from recipes.tttd.processor import TTTDJobData, TTTDRecord2Record, TTTDTasks
 from recipes.tttd.report import TTTDGroupedRolloutReport
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.train.algos import StepScheduling
 from reef.train.pipeline import PipelineSpec
 
 
@@ -18,7 +17,7 @@ class TTTDRecipe(WeightTrainingRecipe):
 
     The recipe binds the objective, the step schedule, and the report
     contract. Its stages are ``TTTDRecord2Record``, ``TTTDTasks``, and
-    ``TTTDBatches``. The deployment writes the step grid in
+    ``TTTDJobData``. The deployment writes the step grid in
     ``pipeline.record2record.config``; the later stages read it from the
     record stage.
     """
@@ -33,9 +32,8 @@ class TTTDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        # A batch is one grid; a batch size equal to the grid trains it as one optimizer step.
-        return WeightTrainingSpec(objective="tttd", scheduling=StepScheduling(unit="sample"))
+        return WeightTrainingSpec(objective="tttd")
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=TTTDRecord2Record, record2task=TTTDTasks, task2batch=TTTDBatches)
+        return PipelineSpec(record2record=TTTDRecord2Record, record2task=TTTDTasks, task2job=TTTDJobData)

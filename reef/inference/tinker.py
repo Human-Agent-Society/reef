@@ -19,7 +19,6 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from threading import RLock
 from typing import Any
 
@@ -28,16 +27,7 @@ from reef_client.sse import synthesize_sse_events
 from reef.artifact.artifact import REPOSITORY_FILES, Artifact
 from reef.core.config import config_option
 from reef.runtime.deployment import RuntimeFactory, config_secret
-from reef.runtime.interfaces import (
-    ActivatedModel,
-    InferenceHandler,
-    InferenceRuntime,
-    InferenceStream,
-    ModelCandidate,
-    StaleCandidate,
-    TrainingRuntimeError,
-    UpstreamStatusError,
-)
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
 #: The manifest a Tinker checkpoint artifact carries; the trainer writes it, this side reads it.
 MANIFEST = "tinker-checkpoint.json"
@@ -172,8 +162,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
     """Serve the sampler each frozen artifact names, and follow Reef's publication of new ones.
 
     Every snapshot served in this process gets a runtime load ID of this
-    incarnation; a rollback to an older release mints a new one. A selected
-    candidate stays pending until Reef commits its training job.
+    incarnation; activating a release whose sampler is not the one served
+    mints a new one.
     """
 
     def __init__(
@@ -193,9 +183,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._load_count = 0
         self._versions: dict[str | None, str] = {}
         self._releases: dict[str, tuple[str | None, str]] = {}
-        self._active_release: str | None = None
         self._active, self._version = self._remember(None)
-        self._pending: str | None = None
         self._closed = False
         # The base model the runtime opens with is the published head until an artifact is bound.
         self.mark_published()
@@ -250,46 +238,15 @@ class TinkerInferenceRuntime(InferenceRuntime):
         return self.snapshot(artifact)[1]
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Bind the recovered or republished artifact's sampler before the scenario serves it."""
+        """Serve the release's sampler; a sampler other than the served one is a new serving update."""
         with self._lock:
-            sampler_path, version = self.snapshot(artifact)
-            if self._pending is not None and sampler_path != self._active:
-                # Reload after a failed publication restores the durable head.
-                self._pending = None
-            if self._pending is None and self._active_release != artifact.ref.release_id:
-                # A rollback is a new serving update even if its immutable
-                # sampler was served earlier in this incarnation.
-                sampler_path, version = self._new_load(sampler_path)
-            self._active, self._version = sampler_path, version
-            self._active_release = artifact.ref.release_id
-            self._releases[artifact.ref.release_id] = (sampler_path, version)
-            if self._pending is None:
-                self.mark_published()
-            return version
-
-    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
-        with self._lock:
-            if self._pending == candidate.training_job_id:
-                return ActivatedModel(candidate.candidate_id, self._version)
-            if candidate.current_runtime_load_id not in (None, self._version):
-                raise StaleCandidate
-            if candidate.checkpoint_path is None:
-                raise ValueError("a Tinker candidate must carry a checkpoint")
-            sampler_path = checkpoint_sampler_path(Artifact.local(Path(candidate.checkpoint_path)), self._model)
-            if sampler_path is None:
-                raise ValueError("a Tinker candidate must carry a checkpoint manifest")
-            self._active, self._version = self._remember(sampler_path)
-            self._pending = candidate.training_job_id
-            return ActivatedModel(candidate.candidate_id, self._version)
-
-    def acknowledge_publication(self, training_job_id: str) -> None:
-        """Release the activated candidate once Reef committed exactly its training job."""
-        with self._lock:
-            if self._pending is None:
-                return
-            if training_job_id != self._pending:
-                raise TrainingRuntimeError("Tinker candidate does not match Reef's committed training job")
-            self._pending = None
+            sampler_path = checkpoint_sampler_path(artifact, self._model)
+            if sampler_path != self._active:
+                # Even a sampler served earlier in this incarnation, as after a rollback, serves under a new load.
+                self._active, self._version = self._new_load(sampler_path)
+            self._releases[artifact.ref.release_id] = (self._active, self._version)
+            self.mark_published()
+            return self._version
 
     def shutdown(self) -> None:
         self.pause_admission()

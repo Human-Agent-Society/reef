@@ -14,8 +14,8 @@ generator's method:
   source sessions and starts each task-generation round when it is due;
   ``GeneratedTaskTasks`` runs the rounds (generate, validate, send the results
   back) and each saved task's episodes through the generator service; and
-  ``GeneratedTaskBatches`` rolls saved tasks out and batches the samples of
-  their episodes, which are not records.
+  ``GeneratedTaskJobData`` rolls saved tasks out and makes job data of the
+  samples of their episodes, which are not records.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on Tinker's
@@ -35,12 +35,12 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.generated_tasks.processor import GeneratedTaskBatches, GeneratedTaskRecord2Record, GeneratedTaskTasks
+from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskRecord2Record, GeneratedTaskTasks
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
     "FailedTask",
-    "GeneratedTaskBatches",
+    "GeneratedTaskJobData",
     "GeneratedTaskRecipe",
     "GeneratedTaskRecord2Record",
     "GeneratedTaskResult",

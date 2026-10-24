@@ -24,7 +24,7 @@ harbor/science/       the Science Q&A stage
     judge_server.py   the reef-eval template judge
   tests/grade.py      the verifier that returns the judge's final score
 serve.yaml            the training stack config
-docker-compose.yaml   the stack in the reef image on four GPUs
+docker-compose.yaml   the stack in the reef image on eight GPUs
 run.sh                checks the setup and runs run.py
 results/              the learning curve of the recorded run
 ```
@@ -56,8 +56,8 @@ The teacher is a frozen copy (EMA=0) of the stage's initial weights
 (`sdft-teacher-update-rate: 0`). With non-zero EMA, we did observe SDFT training collapse with model drifting.
 
 `run.py` starts each stage from the previous stage's HF export and the first
-stage starts from the base model. The stack uses four GPUs with the actor and
-four rollout engines colocated. `stage.py` sends each step's 32 prompts
+stage starts from the base model. The stack uses eight GPUs: four for the
+actor and four for the serving engines. `stage.py` sends each step's 32 prompts
 through Reef and reports each demonstration as the report's
 `teacher_context`. It waits for the training step before it samples again so
 every sample is on policy. The judge scores the served model before the first
@@ -88,7 +88,8 @@ The run reads these environment variables:
 - `MODEL_DIR` holds the model and defaults to `~/models`.
 - `RUN_DIR` holds the Lab store and each stage's checkpoints and defaults to
   `./work`.
-- `CUDA_VISIBLE_DEVICES` names the stack's four GPUs and defaults to `0,1,2,3`.
+- `CUDA_VISIBLE_DEVICES` names the stack's eight GPUs and defaults to
+  `0,1,2,3,4,5,6,7`.
 - `REEF_PORT` is the stack's host port and defaults to `28902`.
 - `SDFT_STEPS` caps the steps of each stage.
 

@@ -286,13 +286,13 @@ Put the definition in the docstring of the type. For example:
 ```python
 @dataclass(frozen=True)
 class ReportGroup:
-    """Reports that must train in the same batch.
+    """Reports that must train in the same job.
 
     Values: a tuple ``reports`` belongs to the type if and only if it is
     non-empty, all its reports are of one scenario and have the same group key,
     it is in arrival order, and no report ID occurs twice.
     Purpose: the record stage makes it when the group is complete. The pipeline
-    reserves all of ``reports`` for one batch, or none of them.
+    reserves all of ``reports`` for one job's data, or none of them.
     """
 ```
 

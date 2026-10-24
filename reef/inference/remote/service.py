@@ -13,7 +13,7 @@ from typing import Any, BinaryIO
 from urllib.parse import quote, urlencode
 
 from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, DeploymentResources, InferenceConnection, InferenceService
+from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
 from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
@@ -28,7 +28,7 @@ class RemoteControl:
     call sends one request under ``CONTROL_PATH`` and returns the decoded JSON
     answer; an HTTP error or an unreachable component raises ``RuntimeError``
     with the component's message. Values hold only strings, so they cross
-    process boundaries to Reef's coordinator.
+    process boundaries to Reef's serving runtime.
     """
 
     def __init__(self, url: str, token: str) -> None:
@@ -74,8 +74,8 @@ class RemoteControl:
 class RemoteInferenceBackend(InferenceBackend):
     """Receiver operations of a remote component, called over its control routes.
 
-    ``load_weight_files`` packs the directory into a tar file on the
-    coordinator's node and uploads it; the component unpacks and loads it.
+    ``load_weight_files`` packs the directory into a tar file on the control
+    plane's node and uploads it; the component unpacks and loads it.
     """
 
     def __init__(self, control: RemoteControl) -> None:
@@ -101,8 +101,12 @@ class RemoteInferenceBackend(InferenceBackend):
     def resume(self) -> None:
         self.control.call("POST", "resume")
 
-    def recover(self) -> None:
-        self.control.call("POST", "recover")
+    def recover(self) -> int:
+        answer = self.control.call("POST", "recover")
+        replaced = answer.get("replaced") if isinstance(answer, Mapping) else None
+        if isinstance(replaced, bool) or not isinstance(replaced, int) or replaced < 0:
+            raise RuntimeError(f"remote inference returned an invalid replaced-engine count: {answer!r}")
+        return replaced
 
     def abort(self) -> None:
         self.control.call("POST", "abort")
@@ -130,17 +134,16 @@ class RemoteInferenceBackend(InferenceBackend):
 
 
 class RemoteInferenceService(InferenceService):
-    """Start engines on a remote component and connect Reef's coordinator to them.
+    """Start engines on a remote component and control them over HTTP.
 
     ``start`` asks the component to start ``engine_config`` with the backend
     that ``engine`` names (``inference.backend``) on ``num_gpus`` GPUs, replacing any engines
-    it runs, and returns a connection without a control executor. The trainer
-    must send ``reef-weight-files-v1``; the coordinator uploads its files
-    through :class:`RemoteInferenceBackend`. ``close`` stops the engines.
+    it runs, and returns a connection without a control executor. Weight
+    files reach the engines through :class:`RemoteInferenceBackend`.
+    ``close`` stops the engines.
     """
 
     connection_protocol = CONTROL_PROTOCOL
-    supported_transfer_protocols = (WEIGHT_FILES_PROTOCOL,)
 
     def __init__(
         self,
@@ -175,10 +178,6 @@ class RemoteInferenceService(InferenceService):
             timeout_s=self.settings.startup_timeout_s,
         )
         return InferenceConnection(self.connection_protocol, None)
-
-    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
-        """The component fenced its engines when it started them; nothing remains to release here."""
-        self.require_connection(connection)
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
         self.require_connection(connection)

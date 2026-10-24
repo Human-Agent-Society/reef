@@ -12,10 +12,10 @@
 #
 # run.py sets SDFT_MODEL_PATH (the stage's starting weights) and
 # SDFT_LR_DECAY_ITERS (its step count) per stage; docker-compose.yaml hands
-# them to the container. GPU budget: four GPUs, the actor (tensor parallel
-# 4) colocated with four rollout engines. The teacher pass is a forward of
-# the actor with the teacher copy swapped in from the host. Paths are the
-# container's.
+# them to the container. GPU budget: eight GPUs, four for the actor (tensor
+# parallel 4) and four for the four rollout engines. The teacher pass is a
+# forward of the actor with the teacher copy swapped in from the host. Paths
+# are the container's.
 
 reef:
   ready-timeout: 3600
@@ -26,9 +26,7 @@ reef:
 inference:
   model-path: ${SDFT_MODEL_PATH}
   timeout-s: 1800
-  # Four single-GPU engines colocated with the four actor ranks
-  # (training.colocate): the actor offloads to the host while the engines
-  # serve, the engines release their memory while the actor trains.
+  # Four single-GPU engines on their own four GPUs.
   num-gpus: "4"
   tensor-parallel-size: "1"
   options:
@@ -47,21 +45,25 @@ inference:
       max_new_tokens: 2048
 recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
-  config:
-    max-staleness: 0                   # on-policy: the stage waits for each step's release before sampling again
 # The sdft recipe's stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
+  # The staleness limit of the record stage.
+  record2record:
+    config:
+      max_staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
   # The teacher's tokenizer and window.
   record2task:
     config:
       tokenizer_path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence is skipped and counted
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
-  colocate: true
   ready-timeout: 900
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   timeout-s: 3600
   config:
     checkpoint_dir: /var/lib/reef/checkpoints
@@ -93,7 +95,7 @@ training:
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
-    num-gpus-per-node: "4"
+    num-gpus-per-node: "8"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
     seq-length: "8192"

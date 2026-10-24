@@ -31,16 +31,14 @@ def inference_config(
     env = reef_rollout_env_vars()
     if "SLIME_HOST_IP" in env:
         env["REEF_INFERENCE_HOST"] = env.pop("SLIME_HOST_IP")
-    colocate = bool(getattr(args, "colocate", False))
     if backend == "vllm":
         # SGLang's variables configure no vLLM engine.
         env = {name: value for name, value in env.items() if not name.startswith("SGLANG_")}
-        return vllm_inference_config(args, inference_options or {}, env=env, colocate=colocate)
-    # Colocated engines retract already, because their KV allocation must
-    # leave the GPU during training. A disjoint engine preserves in-flight KV
-    # unless --disjoint-prefix-sharing trades a re-prefill at each publication
-    # for prefix reuse between publications.
-    retracts_at_publication = colocate or bool(args.disjoint_prefix_sharing)
+        return vllm_inference_config(args, inference_options or {}, env=env)
+    # An engine preserves in-flight KV across a weight load unless
+    # --disjoint-prefix-sharing trades a re-prefill at each load for prefix
+    # reuse between loads.
+    retracts_at_publication = bool(args.disjoint_prefix_sharing)
     return {
         "model_path": args.hf_checkpoint,
         "num_gpus": args.rollout_num_gpus,
@@ -57,17 +55,14 @@ def inference_config(
             if key.startswith("sglang_router_") and key not in _ROUTER_BIND_OPTIONS
         },
         "env_vars": env,
-        "offload": bool(getattr(args, "offload_rollout", False)),
-        "shared_gpus": args.actor_num_nodes * args.actor_num_gpus_per_node if colocate else 0,
-        "check_weights": bool(getattr(args, "check_weight_update_equal", False)),
         "pause_mode": "retract" if retracts_at_publication else "in_place",
         "health_enabled": bool(getattr(args, "use_fault_tolerance", False)),
         "health_interval": getattr(args, "rollout_health_check_interval", 30),
         "health_timeout": getattr(args, "rollout_health_check_timeout", 30),
         "health_first_wait": getattr(args, "rollout_health_check_first_wait", 60),
         "request_timeout": getattr(args, "distributed_timeout_minutes", 10) * 60,
-        "executor": getattr(args, "reef_rollout_executor_backend", "auto"),
-        "executor_options": getattr(args, "reef_rollout_executor_options", {}),
+        "executor": args.reef_rollout_executor_backend,
+        "executor_options": args.reef_rollout_executor_options,
     }
 
 
@@ -89,14 +84,11 @@ def remote_inference_config(
     return config
 
 
-def vllm_inference_config(
-    args: Any, inference_options: Mapping[str, Any], *, env: dict[str, str], colocate: bool
-) -> dict[str, Any]:
+def vllm_inference_config(args: Any, inference_options: Mapping[str, Any], *, env: dict[str, str]) -> dict[str, Any]:
     """The ``VLLMConfig`` input: one group of identical engines, Reef's placement decisions, vLLM option names.
 
-    Only the disk weight transport reaches a vLLM engine today, so LoRA and
-    weight-checker settings have no vLLM counterpart here; ``SlimeDeployment``
-    rejects them before this runs.
+    vLLM engines load full weights from files only, so LoRA settings have no
+    vLLM counterpart here; ``SlimeDeployment`` rejects them before this runs.
     """
     options = {key.replace("-", "_"): value for key, value in inference_options.items()}
     options.setdefault("trust_remote_code", True)
@@ -110,16 +102,14 @@ def vllm_inference_config(
         "gpus_per_node": args.num_gpus_per_node,
         "options": options,
         "env_vars": env,
-        "offload": bool(getattr(args, "offload_rollout", False)),
-        "shared_gpus": args.actor_num_nodes * args.actor_num_gpus_per_node if colocate else 0,
-        "pause_mode": "retract" if (colocate or bool(args.disjoint_prefix_sharing)) else "in_place",
+        "pause_mode": "retract" if bool(args.disjoint_prefix_sharing) else "in_place",
         "health_enabled": bool(getattr(args, "use_fault_tolerance", False)),
         "health_interval": getattr(args, "rollout_health_check_interval", 30),
         "health_timeout": getattr(args, "rollout_health_check_timeout", 30),
         "health_first_wait": getattr(args, "rollout_health_check_first_wait", 60),
         "request_timeout": getattr(args, "distributed_timeout_minutes", 10) * 60,
-        "executor": getattr(args, "reef_rollout_executor_backend", "auto"),
-        "executor_options": getattr(args, "reef_rollout_executor_options", {}),
+        "executor": args.reef_rollout_executor_backend,
+        "executor_options": args.reef_rollout_executor_options,
     }
 
 
@@ -134,7 +124,6 @@ def engine_options(args: SlimeArguments) -> dict[str, Any]:
         model_path=args.hf_checkpoint,
         trust_remote_code=True,
         random_seed=args.seed,
-        enable_memory_saver=bool(args.offload_rollout),
         enable_draft_weights_cpu_backup=True,
         skip_server_warmup=True,
         enable_metrics=True,

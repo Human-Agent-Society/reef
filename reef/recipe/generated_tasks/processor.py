@@ -8,17 +8,17 @@ generation job:
 2. Saves the candidates in the scenario's task store, and validates each task with the generator.
 3. Publishes each valid task with its train/eval split. Eval tasks run no episodes.
 
-The round's train tasks wait in the task pool of ``GeneratedTaskBatches``. The pipeline takes up to
-``tasks_per_step`` of them as one rollout batch, and ``GeneratedTaskBatches`` runs them on its own worker:
+The round's train tasks wait in the task pool of ``GeneratedTaskJobData``. The pipeline takes up to
+``tasks_per_step`` of them as one rollout batch, and ``GeneratedTaskJobData`` runs them on its own worker:
 ``episodes_per_task`` episodes of each task's training arm, through the generator service, which limits the
 episodes in flight. A rollout episode is not a record: Reef keeps no record of its model calls, and the
 episode comes back with them. The stage assembles one sample from each episode that ran, and the samples of
-one task form one group. The batch trains on its fresh groups when its episodes end. A task's first rollout
+one task form one group. The rollout batch trains on its fresh groups when its episodes end. A task's first rollout
 saves its result; when every train task of a generation has a result, the next job sends the generation's
 results to the generator.
 
-The first round starts when the pipeline first looks for a batch. The next round starts after
-``batches_per_round`` batches were acknowledged since the previous round started, and only while the task
+The first round starts when the pipeline first looks for job data. The next round starts after
+``jobs_per_round`` jobs' data were acknowledged since the previous round started, and only while the task
 pool holds fewer than ``refill_tasks`` tasks. A round that made no train task, a rollout that trained
 nothing, and an empty task pool with no rollout running are followed at once. A restart continues from the
 task store: train tasks that did not train go back to the task pool.
@@ -42,8 +42,8 @@ from typing import Any, Self
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.batches import TaskItem
 from reef.core.config import config_option
+from reef.core.job_data import TaskItem
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
@@ -58,7 +58,14 @@ from reef.recipe.generated_tasks.results import (
     save_rollout_result,
 )
 from reef.recipe.generated_tasks.rollout import ActiveRollout, TaskPool, consumed_rollout_id
-from reef.record2record import Record2Record, RecordSet, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2record import (
+    Record2Record,
+    Record2RecordSettings,
+    RecordSet,
+    ReportContext,
+    ReportGrouping,
+    ReportRecord2Record,
+)
 from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
 from reef.record2task import Record2Task, TaskResult
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
@@ -66,8 +73,8 @@ from reef.record2task.generator.client import DuplicateTask, Generator, HttpGene
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.runtime.interfaces import inference_aborted
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
-from reef.task2batch import Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.task2job import Task2Job
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +84,7 @@ DEFAULT_EPISODES_PER_TASK = 4
 DEFAULT_SCAFFOLD_TOLERANCE = 8
 # A realigned drift spans the whole previous response, so the budget must exceed max_tokens plus the scaffold.
 REALIGN_THRESHOLD = 32768
-DEFAULT_BATCHES_PER_ROUND = 1
+DEFAULT_JOBS_PER_ROUND = 1
 ERROR_EXCERPT_CHARS = 300
 TASK_STORE_NAME = "generated-tasks"
 DEFAULT_EVAL_FRACTION = 0.0
@@ -418,11 +425,19 @@ class SourceSessionGrouping(ReportGrouping):
 
 
 @dataclass(frozen=True)
-class TaskGroupSettings(PluginSettings):
-    """The config of ``GeneratedTaskRecord2Record``."""
+class TaskGroupSettings(Record2RecordSettings):
+    """The config of ``GeneratedTaskRecord2Record``: the pace of the rounds, the source sessions, and the staleness limit.
 
-    batches_per_round: int = config_option(
-        DEFAULT_BATCHES_PER_ROUND, help="The trained batches after which the next round starts."
+    Values: ``jobs_per_round`` and ``refill_tasks`` are positive ints; ``source_records_per_round`` is a
+    non-negative int, and above 0 it needs a ``source_tag`` of the form ``name=value``; ``max_staleness`` is
+    as in ``Record2RecordSettings``. The constructor refuses other values.
+    Purpose: ``GeneratedTaskRecord2Record.from_config`` parses it from ``pipeline.record2record.config``. The
+    stage holds no unit that trains, so ``GeneratedTaskJobData`` reads the stage's ``max_staleness`` for its
+    rollout groups.
+    """
+
+    jobs_per_round: int = config_option(
+        DEFAULT_JOBS_PER_ROUND, help="The trained jobs after which the next round starts."
     )
     source_records_per_round: int = config_option(0, help="The source sessions that each round takes, at most.")
     source_tag: str = config_option("", help="The name=value tag that marks a source session.")
@@ -431,8 +446,9 @@ class TaskGroupSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
-        if self.batches_per_round < 1:
-            raise ValueError("batches_per_round must be positive")
+        super().__post_init__()
+        if self.jobs_per_round < 1:
+            raise ValueError("jobs_per_round must be positive")
         if self.refill_tasks < 1:
             raise ValueError("refill_tasks must be positive")
         if self.source_records_per_round < 0:
@@ -480,8 +496,8 @@ class RoundSettings(PluginSettings):
 
 
 @dataclass(frozen=True)
-class TaskBatchSettings(PluginSettings):
-    """The config of ``GeneratedTaskBatches``."""
+class TaskJobSettings(PluginSettings):
+    """The config of ``GeneratedTaskJobData``."""
 
     tasks_per_step: int = config_option(DEFAULT_TASKS_PER_STEP, help="The saved tasks of one rollout batch.")
     episodes_per_task: int = config_option(
@@ -503,9 +519,11 @@ class TaskBatchSettings(PluginSettings):
 class GeneratedTaskRecord2Record(ReportRecord2Record):
     """The generated-task record stage: the source sessions and the pace of the rounds.
 
-    Config: ``batches_per_round``, ``source_records_per_round`` (the source sessions that each request takes, at most), ``source_tag``
-    (``name=value``; required when ``source_records_per_round`` is above 0), and ``refill_tasks``. A terminal
-    report owns its sources. No report trains: the recipe trains on its rollout episodes, which are not records.
+    Config: ``jobs_per_round``, ``source_records_per_round`` (the source sessions that each request takes, at most), ``source_tag``
+    (``name=value``; required when ``source_records_per_round`` is above 0), ``refill_tasks``, and
+    ``max_staleness``. A terminal report owns its sources. No report trains: the recipe trains on its rollout
+    episodes, which are not records. ``GeneratedTaskJobData`` drops the rollout groups that are more than
+    ``max_staleness`` versions behind.
 
     The stage starts no round until ``resume_rounds`` gives it the record-to-task stage that runs the rounds,
     the next round number, the complete generations of the task store, and the round limit. The limit counts
@@ -516,10 +534,10 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     ``refill_tasks`` tasks, and one of these is true:
 
     * it is the first round after a start;
-    * the last round made no train task, or the last rollout trained nothing, so no batch comes;
-    * ``batches_per_round`` batches trained since the last round started. A batch that the backend dropped
+    * the last round made no train task, or the last rollout trained nothing, so no job data comes;
+    * ``jobs_per_round`` jobs trained since the last round started. Job data that the backend dropped
       as stale does not count;
-    * the task pool is empty and no rollout runs, so no batch can come.
+    * the task pool is empty and no rollout runs, so no job data can come.
 
     At the limit, the stage stops the rounds and holds no more source sessions. A source session is a report
     that ``SourceSessionGrouping.is_source_report`` accepts, with its inference records.
@@ -530,10 +548,10 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
 
     def __init__(self, context: PipelineContext, settings: TaskGroupSettings) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
-        super().__init__(context, self.source_grouping, exclusive_sources=True)
-        #: The rollout's task pool, which the task-to-batch stage owns; a round's train tasks join it.
+        super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        #: The rollout's task pool, which the task-to-job stage owns; a round's train tasks join it.
         self.task_pool: TaskPool | None = None
-        self.batches_per_round = settings.batches_per_round
+        self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks
         self.runner: GeneratedTaskTasks | None = None
@@ -544,8 +562,8 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         # The first round after a start is due at once.
         self.follow_at_once = True
         self.rounds_stopped = False
-        # Batches that trained since the last round started; the next round is due at batches_per_round.
-        self.trained_batches = 0
+        # Jobs that trained since the last round started; the next round is due at jobs_per_round.
+        self.trained_jobs = 0
         self.waiting_sources: list[ReportContext] = []
         #: The sessions of a round whose generation is incomplete; the next round takes exactly these.
         self.retry_sources: tuple[ReportContext, ...] = ()
@@ -583,9 +601,9 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         pool = self.task_pool
         if pool is None or self.rounds_stopped or self.running_round is not None or len(pool) >= self.refill_tasks:
             return False
-        if self.follow_at_once or self.trained_batches >= self.batches_per_round:
+        if self.follow_at_once or self.trained_jobs >= self.jobs_per_round:
             return True
-        # No task waits and no rollout runs, so no batch comes to count toward the next round.
+        # No task waits and no rollout runs, so no job data comes to count toward the next round.
         return pool.is_idle
 
     def advance(self, now: float) -> None:
@@ -623,14 +641,14 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         self.running_round = generation_round
         self.next_round += 1
         self.follow_at_once = False
-        # The batches that the round's rollouts make count toward the next one.
-        self.trained_batches = 0
+        # The jobs that the round's rollouts make count toward the next one.
+        self.trained_jobs = 0
 
     def rollout_ended(self, *, trained: bool) -> None:
         """A rollout batch ended: one that trained counts toward the next round; one that trained nothing makes
-        no batch to wait for, so the next round may follow."""
+        no job data to wait for, so the next round may follow."""
         if trained:
-            self.trained_batches += 1
+            self.trained_jobs += 1
         else:
             self.follow_at_once = True
 
@@ -669,7 +687,7 @@ class GeneratedTaskTasks(Record2Task, BackgroundJobRunner):
     check that fails to run is retried up to ``generation_attempts`` times within
     ``generation_deadline_seconds``. ``finished_rounds`` hands back each round with its saved train tasks.
 
-    ``GeneratedTaskBatches`` runs saved tasks through ``run_and_record``, which saves a task's first
+    ``GeneratedTaskJobData`` runs saved tasks through ``run_and_record``, which saves a task's first
     rollout result, ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results`. When every train task of a
     generation has a result, the next job sends the generation's results
     to the generator. A restart sends the results that the generator did not receive.
@@ -1077,7 +1095,7 @@ class RolloutJob(SupportsReceipt):
 
     Values: ``receipt`` is the batch ID. ``task_uses`` holds one ``(task_use, task)`` pair for each task of
     the batch, in submit order; each task use is ``<batch>/<task name>`` and is distinct within the batch.
-    Purpose: ``GeneratedTaskBatches.submit`` makes it; its worker runs it in ``run``.
+    Purpose: ``GeneratedTaskJobData.submit`` makes it; its worker runs it in ``run``.
     """
 
     task_uses: tuple[tuple[str, TaskItem], ...]
@@ -1090,7 +1108,7 @@ class RolloutOutcome(SupportsReceipt):
     Values: ``receipt`` is the batch ID. ``samples`` maps each task use that has a group to its samples, at
     least two, one for each episode that ran and assembled; a use whose episodes failed, or that has fewer
     than two samples to compare, is absent.
-    Purpose: the worker hands it back from ``run``; ``GeneratedTaskBatches.rollout_finished`` keeps its fresh
+    Purpose: the worker hands it back from ``run``; ``GeneratedTaskJobData.rollout_finished`` keeps its fresh
     groups.
     """
 
@@ -1101,8 +1119,8 @@ class RolloutOutcome(SupportsReceipt):
             raise ValueError("a rollout group holds at least two samples")
 
 
-class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
-    """Roll saved tasks out as batches, and train on the samples of each rollout's episodes as its own batch.
+class GeneratedTaskJobData(Task2Job, BackgroundJobRunner):
+    """Roll saved tasks out in rollout batches, and train on the samples of each rollout's episodes as the stage's own job data.
 
     The stage owns the task pool: the record stage adds each round's train tasks to it, and a restart puts the
     train tasks that did not train back in it. On each ``advance`` with no rollout batch running, the stage
@@ -1110,7 +1128,7 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
     ``episodes_per_task`` episodes of each, through the record-to-task stage and the generator service, which
     limits the episodes in flight. A rollout episode is not a record: it comes back with its model calls, and
     the stage assembles one sample from each episode that ran. The samples of one task form its group. When
-    the episodes end, the fresh groups are the stage's own batch (see :mod:`reef.recipe.generated_tasks.rollout`).
+    the episodes end, the fresh groups are the stage's own job data (see :mod:`reef.recipe.generated_tasks.rollout`).
     A task's first result goes to the task store, and the record-to-task stage sends finished generations'
     results to the generator. The tasks of groups that trained are marked trained in the store once the
     commit of their training step is durable.
@@ -1126,7 +1144,7 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = TaskBatchSettings.parse(config, plugin_class=cls)
+        settings = TaskJobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, GeneratedTaskRecord2Record) or not isinstance(
             record2task, GeneratedTaskTasks
         ):
@@ -1139,15 +1157,16 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
     def __init__(
         self,
         context: PipelineContext,
-        settings: TaskBatchSettings,
+        settings: TaskJobSettings,
         *,
         record2record: GeneratedTaskRecord2Record,
         record2task: GeneratedTaskTasks,
         worker: BackgroundJobWorker | None = None,
     ) -> None:
-        super().__init__(context, None)
-        # A rollout batch bounds its own samples, at most tasks_per_step x episodes_per_task, so no buffer
-        # releases them.
+        # The stage trains only its own job data, at any size, so job_samples is the samples of one full
+        # rollout batch: tasks_per_step x episodes_per_task. A rollout batch bounds its own samples, so no
+        # buffer releases them.
+        super().__init__(context, None, settings.tasks_per_step * settings.episodes_per_task)
         self.buffer_size = None
         self.record2record = record2record
         self.record2task = record2task
@@ -1170,8 +1189,8 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
         #: The versions that the scenario served, for the staleness check of the rollout groups.
         self.served_versions = ServedVersions()
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
     # ------------------------------------------------------------- the rollout loop
 
@@ -1185,20 +1204,17 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
         if self.rollout is None:
             self.start_rollout()
 
-    def own_batch(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
         rollout = self.rollout
         if rollout is None or rollout.samples is None or not rollout.fresh_uses:
             return None
         samples = rollout.samples
         return tuple(sample for task_use in rollout.fresh_uses for sample in samples[task_use])
 
-    def own_batch_done(self, *, trained: bool) -> frozenset[str]:
+    def own_job_data_done(self) -> frozenset[str]:
         if self.rollout is None:
             raise RuntimeError("no rollout batch was handed out")
         fresh_uses = self.rollout.fresh_uses
-        if not trained:
-            self.end_rollout(trained_uses=())
-            return frozenset()
         ids = frozenset(consumed_rollout_id(task_use) for task_use in fresh_uses)
         self.trained_rollouts.append((self.rollout.batch, fresh_uses, ids))
         self.end_rollout(trained_uses=fresh_uses)
@@ -1278,7 +1294,7 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
             task_use
             for task_use in self.rollout.task_uses
             if task_use in samples
-            and not is_stale(producing_runtime_load_ids(samples[task_use]), served, self.context.max_staleness)
+            and not is_stale(producing_runtime_load_ids(samples[task_use]), served, self.record2record.max_staleness)
         )
         self.rollout = replace(self.rollout, samples=dict(samples), fresh_uses=fresh)
 

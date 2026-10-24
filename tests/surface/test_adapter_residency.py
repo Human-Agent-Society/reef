@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from reef.runtime.interfaces import AdapterEngine
-from reef.runtime.publication import (
+from reef.runtime.residency import (
     AdapterCapacityExhausted,
     AdapterEvictionFailed,
     AdapterResidencyError,
@@ -124,52 +124,12 @@ def test_supersede_lets_a_paused_scenario_evict_its_own_current_revision(engine:
         manager.activate("c", "c1", engine, supersede=True)
 
 
-def test_make_room_then_register_accounts_for_an_out_of_band_load(engine: FakeEngine) -> None:
-    """The training path loads through its own transport and registers afterwards."""
-    manager = AdapterResidencyManager(capacity=2)
-    manager.activate("a", "a1", engine)
-    manager.activate("b", "b1", engine)
-    manager.make_room("a", engine, supersede=True)
-    assert engine.unloaded == [adapter_name("a", "a1")]
-    assert current(manager, "a") is None
-    name = manager.register("a", "a2")
-    assert name == adapter_name("a", "a2")
-    assert engine.loaded == [adapter_name("a", "a1"), adapter_name("b", "b1")], "register loads nothing"
-    assert current(manager, "a") == "a2"
-    assert manager.status()["scenarios"]["a"]["current"]["adapter"] == name
-    status = manager.status()
-    assert status["resident"] == 2 and status["counters"]["loads"] == 3
-    # Registering the resident revision again is idempotent.
-    assert manager.register("a", "a2") == name and manager.status()["resident"] == 2
-
-
 def test_make_room_refuses_when_every_slot_is_protected(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager(capacity=1)
     manager.activate("a", "a1", engine)
     with pytest.raises(AdapterCapacityExhausted):
         manager.make_room("b", engine, supersede=True)
     assert engine.unloaded == [] and current(manager, "a") == "a1"
-
-
-def test_register_reclaims_a_leaked_slot_the_engine_reloaded(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=2)
-    manager.activate("a", "a1", engine)
-    manager.activate("a", "a2", engine)
-    engine.fail_unload.add(adapter_name("a", "a1"))
-    with pytest.raises(AdapterCapacityExhausted, match="leaked"):
-        manager.make_room("a", engine, supersede=True)
-    assert manager.status()["leaked"] == 1
-    # The trainer republished a1 in place (its transport upserts by name).
-    manager.register("a", "a1")
-    assert manager.status()["leaked"] == 0 and current(manager, "a") == "a1"
-    assert manager.status()["recent_actions"][-1]["action"] == "reclaimed"
-
-
-def test_register_beyond_capacity_is_counted_not_hidden(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=1)
-    manager.activate("a", "a1", engine)
-    manager.register("b", "b1")
-    assert manager.status()["resident"] == 2
 
 
 def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeEngine) -> None:
@@ -208,15 +168,37 @@ def test_reactivating_the_resident_revision_is_idempotent(engine: FakeEngine) ->
     assert engine.loaded == [adapter_name("a", "a1")]
 
 
-def test_reconcile_drops_lost_adapters_and_unloads_strays(engine: FakeEngine) -> None:
-    manager = AdapterResidencyManager(capacity=4)
-    kept = manager.activate("a", "a1", engine)
-    lost = manager.activate("b", "b1", engine)
-    dropped = manager.reconcile([kept, "reef-adapter-stale.v0"], engine)
-    assert dropped == (lost,)
-    assert current(manager, "b") is None
-    assert manager.status()["scenarios"]["a"]["current"]["adapter"] == kept
-    assert "reef-adapter-stale.v0" in engine.unloaded
+def test_release_unloads_the_scenario_adapter_and_frees_its_slot(engine: FakeEngine) -> None:
+    manager = AdapterResidencyManager(capacity=1)
+    name = manager.activate("a", "a1", engine)
+    manager.release("a", engine)
+    assert engine.unloaded == [name] and current(manager, "a") is None
+    assert manager.status()["resident"] == 0
+    # The slot is free: another scenario loads without an eviction.
+    manager.activate("b", "b1", engine)
+    assert manager.status()["counters"]["evictions"] == 0
+
+
+def test_release_of_a_scenario_without_an_adapter_does_nothing(engine: FakeEngine) -> None:
+    manager = AdapterResidencyManager(capacity=1)
+    manager.activate("a", "a1", engine)
+    manager.release("b", engine)
+    assert engine.unloaded == [] and current(manager, "a") == "a1"
+
+
+def test_a_refused_release_raises_and_leaves_the_adapter_leaked_and_unprotected(engine: FakeEngine) -> None:
+    manager = AdapterResidencyManager(capacity=1)
+    name = manager.activate("a", "a1", engine)
+    engine.fail_unload.add(name)
+    with pytest.raises(AdapterResidencyError, match="engine keeps"):
+        manager.release("a", engine)
+    status = manager.status()
+    assert (status["resident"], status["leaked"], status["protected"]) == (1, 1, 0)
+    assert current(manager, "a") is None
+    # The leaked adapter is no scenario's current revision, so a later load evicts it once the engine lets go.
+    engine.fail_unload.clear()
+    manager.activate("b", "b1", engine)
+    assert engine.unloaded == [name] and manager.status()["leaked"] == 0
 
 
 def test_unbounded_manager_never_evicts(engine: FakeEngine) -> None:
@@ -247,7 +229,7 @@ def test_capacity_and_names_must_be_well_formed(engine: FakeEngine) -> None:
     with pytest.raises(ValueError, match="scenario"):
         manager.activate("", "v1", engine)
     with pytest.raises(ValueError, match="runtime_load_id"):
-        manager.register("a", "")
+        manager.activate("a", "", engine)
 
 
 class AmbiguousEngine(FakeEngine):

@@ -1,12 +1,9 @@
-"""Container-only tests for the SAO branch of the Reef -> Slime bridge.
+"""Container-only tests for SAO on Slime: its wire rows and its jobs on the Slime training component.
 
-These exercise the SAO payload builder (``build_sao_rollout_data`` in ``recipes.sao.slime``) and
-the SAO path through
-``execute_training_job``, which live in the Slime plugin package and
-transitively import ``ray`` and ``torch``. Like ``test_slime_bridge.py`` they
-need the full Slime image and are excluded from the minimal CI gate (see
-``.github/workflows/ci.yml``); run them in the ``slime`` container. They are
-deterministic Python and touch no GPU.
+These exercise the SAO payload builder (``build_sao_rollout_data`` in
+``recipes.sao.slime``), SAO jobs on ``SlimeTrainingComponent`` over fake
+actor and critic groups, the critic's arguments and its checkpoint storage.
+They transitively import ``ray`` and ``torch`` and touch no GPU.
 """
 
 from __future__ import annotations
@@ -14,13 +11,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import ray
-from tests.support.slime_coordinator import build_slime_coordinator
+from tests.support._trajectories import policy_trajectory
+from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, finished
 
 from reef.runtime.interfaces import TrainingMethod
-from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, read_marker
+from reef.runtime.jobs import JobStatus, TrainingJob
+from reef.train.slime_backend.component import SlimeTrainingComponent
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+from reef.train.types import JobData
 
 
 def _sao_row(
@@ -60,14 +60,6 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
         # The rows train as one optimizer step.
         "external_step_sizes": [len(rows)],
     }
-
-
-def _execute_and_update_weights(actor, payload):
-    result = actor.execute_training_job(payload)
-    if result.outcome != "checkpoint":
-        return result
-    assert result.training_job_id is not None
-    return actor.update_serving_weights(result.training_job_id)
 
 
 @pytest.mark.unit
@@ -156,18 +148,13 @@ def test_sao_parser_tolerates_missing_source_fields() -> None:
 
 
 @pytest.mark.unit
-def test_runtime_load_id_sequence_parses_matching_incarnation() -> None:
-    from recipes.sao.slime import _runtime_load_id_sequence
-
-    assert _runtime_load_id_sequence("abc:7", "abc") == 7
-
-
-@pytest.mark.unit
-def test_runtime_load_id_sequence_is_none_across_incarnations() -> None:
-    from recipes.sao.slime import _runtime_load_id_sequence
-
-    assert _runtime_load_id_sequence("old:7", "new") is None
-    assert _runtime_load_id_sequence("no-colon", "no-colon") is None
+def test_sao_row_versions_must_match_the_shared_producing_versions() -> None:
+    payload = {
+        **_payload([_sao_row(producing_runtime_load_id="engine:1")]),
+        "producing_runtime_load_ids": ["engine:2"],
+    }
+    with pytest.raises(ValueError, match="row runtime load IDs do not match"):
+        to_slime_rollout_data(payload)
 
 
 @pytest.mark.unit
@@ -182,244 +169,160 @@ def test_sao_rollout_metrics_reports_lag_queue_age_and_effective_tokens() -> Non
         )
     )
 
-    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
+    metrics = sao.rollout_metrics(rollout_data)
 
-    assert metrics["sao/policy_lag_max"] == 3
-    assert metrics["sao/policy_lag_mean"] == 2.0
+    # The lag counts versions behind the newest producing version in the job's data.
+    assert metrics["sao/policy_lag_max"] == 2
+    assert metrics["sao/policy_lag_mean"] == 1.0
     assert metrics["sao/effective_token_rate"] == 5 / 6
     assert metrics["sao/queue_age_s_max"] >= 0.0
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_warns_when_dropping_future_producing_steps(caplog) -> None:
+def test_sao_rollout_metrics_skip_the_lag_of_versions_without_a_sequence() -> None:
     sao = resolve_loss_family("sao")
-    rollout_data = to_slime_rollout_data(
-        _payload(
-            [
-                _sao_row("a", producing_runtime_load_id="inc:2"),
-                _sao_row("b", producing_runtime_load_id="inc:9"),
-            ]
-        )
-    )
+    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="no-sequence")]))
 
-    with caplog.at_level("WARNING", logger="recipes.sao.slime"):
-        metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
-
-    assert metrics["sao/policy_lag_max"] == 3
-    assert any("ahead of serving step 5" in record.message for record in caplog.records)
-
-
-@pytest.mark.unit
-def test_sao_rollout_metrics_skips_lag_across_incarnation() -> None:
-    sao = resolve_loss_family("sao")
-    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="oldinc:2")]))
-
-    metrics = sao.rollout_metrics(rollout_data, serving_version="newinc:5")
+    metrics = sao.rollout_metrics(rollout_data)
 
     assert "sao/policy_lag_max" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
 
 
-class _RemoteMethod:
-    def __init__(self, fn):
-        self._fn = fn
+class SaoStack:
+    """A Slime component whose workers started with SAO, over fake actor and critic groups."""
 
-    def remote(self, *args, **kwargs):
-        return self._fn(*args, **kwargs)
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        critic: bool = True,
+        critic_steps_per_actor: int | None = 2,
+        critic_only_steps: int = 0,
+        critic_save: str | None = None,
+        critic_save_interval: int = 1,
+        rank_metrics=None,
+    ) -> None:
+        template = str(tmp_path / "hf" / "{rollout_id}")
+        args = SlimeArguments(
+            loss_family="sao",
+            global_batch_size=2,
+            save_hf=template,
+            start_rollout_id=0,
+            critic_save=critic_save,
+            critic_save_interval=critic_save_interval,
+            critic_steps_per_actor=critic_steps_per_actor,
+            num_critic_only_steps=critic_only_steps,
+            decoupled_lr=None,
+            score_centering=False,
+            reef_rollout_tensor_dtypes={},
+        )
+        self.actor = FakeTrainGroup(template, rank_metrics=rank_metrics)
+        self.actor.train_result = [{"values": [0.25]}]
+        self.critic = FakeTrainGroup(None) if critic else None
+        if self.critic is not None:
+            self.critic.train_result = [{"values": [0.25]}]
+        self.critic_external_data: list[object] = []
+        self.component = SlimeTrainingComponent(
+            args,
+            self.actor,
+            self.critic,
+            batch_processor=RecordingBatchProcessor(),
+            storage=None,
+            lora=False,
+            loss_family="sao",
+        )
+        self.start: str | None = None
 
-
-class _FakeRank:
-    def __init__(self, version="v1", metrics=None):
-        self.version = version
-        self.metrics = {} if metrics is None else metrics
-        self.get_runtime_load_id = _RemoteMethod(lambda: self.version)
-        self.pop_metrics = _RemoteMethod(lambda: self.metrics)
-
-
-# The serving head and the rows' producing head share an incarnation so policy
-# lag is defined; ``_runtime_load_id_sequence`` drops lag across a restart.
-SERVING_VERSION = "inc:5"
-
-
-class _FakeRolloutManager:
-    def __init__(self, packed):
-        self.packed = packed
-        self.prepare_external_train_data = lambda data: "packed-ref"
-        self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
-        self.get_runtime_load_ids = _RemoteMethod(lambda: [SERVING_VERSION])
-        self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
-        self.pause_generation_for_update = _RemoteMethod(lambda: None)
-        self.continue_generation_after_update = _RemoteMethod(lambda: None)
-        self.memory_calls: list[str] = []
-        self.release_tags: list[object] = []
-        self.offload = _RemoteMethod(self._offload)
-        self.onload_weights = _RemoteMethod(lambda: self.memory_calls.append("onload_weights"))
-        self.onload_kv = _RemoteMethod(lambda: self.memory_calls.append("onload_kv"))
-
-    def _offload(self, tags=None) -> None:
-        self.release_tags.append(tags)
-        self.memory_calls.append("offload")
-
-
-class _RecordingGroup:
-    """Actor or critic group that records its ``async_train`` calls."""
-
-    def __init__(self, template: str, worker_metrics=None, *, critic: bool = False):
-        self.template = template
-        self.critic = critic
-        self.train_calls: list[tuple[int, object]] = []
-        self.external_data: list[object] = []
-        self.saved_model_rollouts: list[int] = []
-        self.saved_scenario_steps: list[int | None] = []
-        self.saved_training_checkpoint_rollouts: list[int] = []
-        self._actor_handlers = [_FakeRank(version=SERVING_VERSION, metrics=worker_metrics)]
-
-    def async_train(self, rollout_id, rollout_data_ref, external_data=None):
-        self.train_calls.append((rollout_id, rollout_data_ref))
-        self.external_data.append(external_data)
-        return [{"values": [0.25]}]
-
-    def async_pop_metrics(self):
-        return [rank.pop_metrics.remote() for rank in self._actor_handlers]
-
-    def async_get_rank0_runtime_load_id(self):
-        return self._actor_handlers[0].get_runtime_load_id.remote()
-
-    def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
-        del force_full, manage_generation
-
-    def register_failure_listener(self, listener):
-        pass
-
-    def initialize_runtime_load_id(self, runtime_load_id):
-        self._actor_handlers[0].version = runtime_load_id
-
-    def next_runtime_load_id(self):
-        return self._actor_handlers[0].version
-
-    def prepare_weight_update(self, runtime_load_id, *, force_full):
-        self.set_runtime_load_id_for_update(runtime_load_id)
-
-    def send_prepared_weights(self, runtime_load_id, *, force_full):
-        self.update_weights(manage_generation=False, force_full=force_full)
-
-    def set_runtime_load_id_for_update(self, runtime_load_id):
-        self.restore_runtime_load_id_for_republication(runtime_load_id)
-
-    def restore_runtime_load_id_for_republication(self, runtime_load_id):
-        pass
-
-    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
-        if self.critic:
-            self.saved_training_checkpoint_rollouts.append(rollout_id)
-            return
-        self.saved_model_rollouts.append(rollout_id)
-        self.saved_scenario_steps.append(scenario_step)
-        checkpoint = Path(self.template.format(rollout_id=rollout_id))
-        checkpoint.mkdir(parents=True)
-        (checkpoint / "weights").write_text("hf", encoding="utf-8")
-
-
-def _sao_actor(
-    tmp_path,
-    *,
-    worker_metrics=None,
-    critic_steps_per_actor=2,
-    critic_only_steps=0,
-    critic_save_root=None,
-    critic_save_interval=1,
-):
-    template = str(tmp_path / "checkpoint-{rollout_id}")
-    actor_group = _RecordingGroup(template, worker_metrics=worker_metrics)
-    critic_group = _RecordingGroup(template, critic=True)
-    actor = build_slime_coordinator(
-        actor_group,
-        _FakeRolloutManager(["packed"]),
-        batch_processor=_FakeRolloutManager(["packed"]),
-        save_hf_template=template,
-        critic_group=critic_group,
-        critic_save_root=critic_save_root,
-        critic_save_interval=critic_save_interval,
-        critic_steps_per_actor=critic_steps_per_actor,
-        critic_only_steps=critic_only_steps,
-        loss_family="sao",
-    )
-    payload = _payload(
-        [
-            _sao_row("a", producing_runtime_load_id="inc:4"),
-            _sao_row("b", reward=1.0, producing_runtime_load_id="inc:3"),
-        ]
-    )
-    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
-    return actor, actor_group, critic_group, payload
+    def run(self, step: int = 0) -> JobStatus:
+        batch = JobData(
+            f"batch-{step}",
+            tuple(
+                policy_trajectory(
+                    f"s{step}-{index}",
+                    (9, 1, 2, 3),
+                    (1, 1, 1),
+                    (-0.1, -0.2, -0.3),
+                    reward,
+                    producing,
+                    action_mask=(1, 1, 1),
+                    rollout_created_at=1234.5,
+                )
+                for index, (reward, producing) in enumerate(((0.5, "inc:4"), (1.0, "inc:3")))
+            ),
+        )
+        method = {"method": TrainingMethod("sao").to_dict()}
+        job_id = f"job-{step}"
+        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method))
+        status = finished(self.component, job_id)
+        if status.checkpoints:
+            self.start = status.checkpoints[-1].path
+        return status
 
 
 @pytest.fixture
-def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
+def sao_stacks():
+    built: list[SaoStack] = []
+
+    def build(tmp_path: Path, **options) -> SaoStack:
+        stack = SaoStack(tmp_path, **options)
+        built.append(stack)
+        return stack
+
+    yield build
+    for stack in built:
+        stack.component.close()
+
+
+def checkpoint_metrics(status: JobStatus):
+    assert status.state == "finished", status.error
+    (checkpoint,) = status.checkpoints
+    return checkpoint.metrics
 
 
 @pytest.mark.unit
-def test_sao_durable_job_runs_k_critic_steps_then_the_actor(tmp_path, _local_ray_get) -> None:
-    actor, actor_group, critic_group, payload = _sao_actor(tmp_path)
+def test_a_sao_job_runs_k_critic_steps_then_the_actor(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path)
 
-    result = _execute_and_update_weights(actor, payload)
+    metrics = checkpoint_metrics(stack.run())
 
-    assert result.outcome == "complete"
-    # Two-time-scale update: K critic steps, then one actor step fed the last
-    # critic's values through external_data.
-    assert len(critic_group.train_calls) == 2
-    assert len(actor_group.train_calls) == 1
-    assert actor_group.external_data == [[{"values": [0.25]}]]
-    assert result.metrics["sao/critic_updates"] == 2
-    assert result.metrics["sao/actor_trained"] == 1
-    assert result.metrics["sao/effective_token_rate"] == 1.0
+    # Two-time-scale update: K critic steps, then one actor step fed the last critic's values.
+    assert len(stack.critic.train_calls) == 2
+    assert len(stack.actor.train_calls) == 1
+    assert metrics["sao/critic_updates"] == 2
+    assert metrics["sao/actor_trained"] == 1
+    assert metrics["sao/effective_token_rate"] == 1.0
 
 
 @pytest.mark.unit
-def test_sao_critic_only_warmup_commits_without_moving_the_policy(tmp_path, _local_ray_get) -> None:
-    actor, actor_group, critic_group, payload = _sao_actor(tmp_path, critic_only_steps=1)
+def test_a_sao_critic_only_warmup_saves_without_moving_the_policy(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path, critic_only_steps=1)
 
-    result = _execute_and_update_weights(actor, payload)
+    metrics = checkpoint_metrics(stack.run())
 
-    assert result.outcome == "complete"
-    assert len(critic_group.train_calls) == 2
-    assert actor_group.train_calls == []
-    assert result.metrics["sao/actor_trained"] == 0
-
-
-@pytest.mark.unit
-def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_path, _local_ray_get) -> None:
-    # The other components of a composite advance the scenario step between two weight steps.
-    actor, actor_group, _, payload = _sao_actor(tmp_path)
-
-    first = _execute_and_update_weights(actor, payload)
-    actor.acknowledge_training_commit(first.training_job_id)
-    # The next batch, reserved four scenario steps later.
-    next_batch = _payload([_sao_row("c", producing_runtime_load_id=first.runtime_load_id)])
-    next_batch.update(scenario_step=4, parent_runtime_load_id=first.runtime_load_id)
-    later = _execute_and_update_weights(actor, next_batch)
-
-    assert (first.outcome, later.outcome) == ("complete", "complete")
-    assert [rollout_id for rollout_id, _ in actor_group.train_calls] == [0, 1]
-    assert actor_group.saved_model_rollouts == [0, 1]
-    # The adapter's metadata file names the scenario step, not the checkpoint index.
-    assert actor_group.saved_scenario_steps == [0, 4]
-    marker = read_marker(tmp_path / LATEST_JOB_MARKER_FILENAME)
-    assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
-    assert actor.health()["training_job"]["scenario_step"] == 4
+    assert len(stack.critic.train_calls) == 2
+    assert stack.actor.train_calls == []
+    assert metrics["sao/actor_trained"] == 0
 
 
 @pytest.mark.unit
-def test_sao_durable_record_returns_backend_and_worker_metrics(tmp_path, _local_ray_get) -> None:
-    # Slime is only a producer here: worker metrics are returned in the generic
-    # TrainingJobResult and Dispatcher decides which experiment provider sees them.
-    actor, _, _, payload = _sao_actor(tmp_path, worker_metrics={"slime/lr": 1e-6})
+def test_consecutive_sao_jobs_train_and_save_consecutive_rollouts(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path)
+    stack.run(0)
+    stack.run(1)
+    assert [rollout_id for rollout_id, _ in stack.actor.train_calls] == [0, 1]
+    assert stack.actor.saved == [(0, True), (1, True)]
 
-    result = _execute_and_update_weights(actor, payload)
 
-    assert result.metrics["slime/lr"] == pytest.approx(1e-6)
-    assert set(result.metrics) == {
+@pytest.mark.unit
+def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_stacks) -> None:
+    # Slime is only a producer here: Reef records the checkpoint's metrics and decides who sees them.
+    stack = sao_stacks(tmp_path, rank_metrics=[{"slime/lr": 1e-6}])
+
+    metrics = checkpoint_metrics(stack.run())
+
+    assert metrics["slime/lr"] == pytest.approx(1e-6)
+    assert set(metrics) == {
         "slime/lr",
         "values",
         "sao/critic_updates",
@@ -430,96 +333,64 @@ def test_sao_durable_record_returns_backend_and_worker_metrics(tmp_path, _local_
         "sao/queue_age_s_mean",
         "sao/effective_token_rate",
     }
-    assert actor.health()["last_train_metrics"]["slime/lr"] == 1e-6
 
 
 @pytest.mark.unit
-def test_sao_commit_saves_the_critic_alongside_the_actor(tmp_path, _local_ray_get) -> None:
-    actor, actor_group, critic_group, payload = _sao_actor(
-        tmp_path, critic_save_root=str(tmp_path / "megatron-critic")
-    )
-
-    result = _execute_and_update_weights(actor, payload)
-
-    assert result.outcome == "complete"
-    assert actor_group.saved_model_rollouts == [0]
-    # The critic's weights + optimizer are persisted on the same commit — a
-    # restart must not cold-start the value head.
-    assert critic_group.saved_training_checkpoint_rollouts == [0]
-    # The critic never serves; it must not export an HF checkpoint.
-    assert critic_group.saved_model_rollouts == []
-
-
-@pytest.mark.unit
-def test_sao_critic_only_warmup_commit_also_saves_the_critic(tmp_path, _local_ray_get) -> None:
+@pytest.mark.parametrize("critic_only_steps", [0, 1])
+def test_a_sao_rollout_saves_the_critic_alongside_the_actor(tmp_path, sao_stacks, critic_only_steps) -> None:
     # The warmup steps are exactly the ones whose lost progress the paper's
-    # cold-start concern is about: a warmup commit must persist the critic too.
-    actor, _actor_group, critic_group, payload = _sao_actor(
-        tmp_path, critic_only_steps=1, critic_save_root=str(tmp_path / "megatron-critic")
-    )
+    # cold-start concern is about: a warmup rollout persists the critic too.
+    stack = sao_stacks(tmp_path, critic_only_steps=critic_only_steps, critic_save=str(tmp_path / "megatron-critic"))
 
-    result = _execute_and_update_weights(actor, payload)
+    stack.run()
 
-    assert result.outcome == "complete"
-    assert result.metrics["sao/actor_trained"] == 0
-    assert critic_group.saved_training_checkpoint_rollouts == [0]
+    assert stack.actor.saved == [(0, True)]
+    # The critic's weights and optimizer persist on the same rollout, so a restart keeps the value head.
+    assert stack.critic.saved == [(0, True)]
 
 
 @pytest.mark.unit
-def test_sao_critic_save_interval_skips_the_commits_in_between(tmp_path, _local_ray_get) -> None:
-    # A full critic checkpoint at every commit costs as much as the actor's;
-    # an interval keeps the actor's per-commit publication and saves the
-    # critic on every Nth commit only.
-    actor, actor_group, critic_group, payload = _sao_actor(
-        tmp_path, critic_save_root=str(tmp_path / "megatron-critic"), critic_save_interval=2
-    )
+def test_the_sao_critic_save_interval_skips_the_rollouts_in_between(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path, critic_save=str(tmp_path / "megatron-critic"), critic_save_interval=2)
 
-    result = _execute_and_update_weights(actor, payload)
+    stack.run()
 
-    assert result.outcome == "complete"
-    assert actor_group.saved_model_rollouts == [0]
-    assert critic_group.saved_training_checkpoint_rollouts == []
-
+    assert stack.actor.saved == [(0, True)]
+    assert stack.critic.saved == []
     with pytest.raises(ValueError, match="critic_save_interval"):
-        _sao_actor(tmp_path / "again", critic_save_root=str(tmp_path / "c"), critic_save_interval=0)
+        SaoStack(tmp_path / "again", critic_save=str(tmp_path / "c"), critic_save_interval=0)
 
 
 @pytest.mark.unit
-def test_sao_without_a_critic_root_keeps_the_actor_only_save(tmp_path, _local_ray_get) -> None:
-    # Without a distinct critic root the critic's Megatron save would land in
-    # the actor's tree; the bridge must then fall back to actor-only saves.
-    actor, actor_group, critic_group, payload = _sao_actor(tmp_path, critic_save_root=None)
+def test_sao_without_a_critic_root_keeps_the_actor_only_save(tmp_path, sao_stacks) -> None:
+    # Without a distinct critic root the critic's Megatron save would land in the actor's tree.
+    stack = sao_stacks(tmp_path, critic_save=None)
 
-    result = _execute_and_update_weights(actor, payload)
+    stack.run()
 
-    assert result.outcome == "complete"
-    assert actor_group.saved_model_rollouts == [0]
-    assert critic_group.saved_training_checkpoint_rollouts == []
+    assert stack.actor.saved == [(0, True)]
+    assert stack.critic.saved == []
 
 
 @pytest.mark.unit
-def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get) -> None:
-    # Constructing the bridge without an explicit critic_steps_per_actor must
-    # yield the paper's K=2 (matching the --critic-steps-per-actor default and
-    # the SaoSchedule dataclass default).
-    template = str(tmp_path / "checkpoint-{rollout_id}")
-    actor_group = _RecordingGroup(template)
-    critic_group = _RecordingGroup(template)
-    actor = build_slime_coordinator(
-        actor_group,
-        _FakeRolloutManager(["packed"]),
-        batch_processor=_FakeRolloutManager(["packed"]),
-        save_hf_template=template,
-        critic_group=critic_group,
-        loss_family="sao",
-    )
-    payload = _payload([_sao_row("a", producing_runtime_load_id="inc:4")])
-    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
+def test_the_default_critic_cadence_matches_the_paper(tmp_path, sao_stacks) -> None:
+    # Without an explicit --critic-steps-per-actor the component trains the paper's K=2.
+    stack = sao_stacks(tmp_path, critic_steps_per_actor=None)
 
-    result = _execute_and_update_weights(actor, payload)
+    metrics = checkpoint_metrics(stack.run())
 
-    assert result.metrics["sao/critic_updates"] == 2
-    assert len(critic_group.train_calls) == 2
+    assert metrics["sao/critic_updates"] == 2
+    assert len(stack.critic.train_calls) == 2
+
+
+@pytest.mark.unit
+def test_sao_requires_a_value_model(tmp_path, sao_stacks) -> None:
+    stack = sao_stacks(tmp_path, critic=False)
+
+    status = stack.run()
+
+    assert status.state == "failed" and "SAO requires a value model" in status.error
+    assert status.checkpoints == ()
 
 
 def _install_slime_parser_stubs() -> None:
@@ -865,24 +736,6 @@ def test_storage_flags_unknown_assets_in_the_critic_root(tmp_path) -> None:
 
     assert plan["blocked"]
     assert any("unowned" in reason for reason in plan["reasons"])
-
-
-@pytest.mark.unit
-def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
-    template = str(tmp_path / "checkpoint-{rollout_id}")
-    group = _RecordingGroup(template)
-    actor = build_slime_coordinator(
-        group,
-        _FakeRolloutManager(["packed"]),
-        batch_processor=_FakeRolloutManager(["packed"]),
-        save_hf_template=template,
-        loss_family="sao",
-    )
-    payload = _payload([_sao_row("a")])
-    payload.update(scenario_step=0, parent_runtime_load_id=SERVING_VERSION)
-
-    with pytest.raises(RuntimeError, match="SAO requires a value model"):
-        _execute_and_update_weights(actor, payload)
 
 
 if __name__ == "__main__":

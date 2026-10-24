@@ -67,7 +67,6 @@ NO_INFERENCE_REFUSED_SETTINGS = (
     ("inference_remote", "inference.remote"),
     ("inference_handler_factory", "inference.handler-factory"),
     ("inference_handler_config", "inference.handler-config"),
-    ("colocate", "training.colocate"),
     ("teacher_model_path", "teacher.model-path"),
     ("evaluation_settings", "evaluation"),
     ("generator_settings", "generator"),
@@ -144,6 +143,9 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     if component is not None:
         dependencies = (component, *dependencies)
     http = http_service(config, service_config_from_mapping(config))
+    environment = backend.http_environment(asdict(settings))
+    if environment:
+        http["env"] = {**http.get("env", {}), **environment}
     if dependencies:
         http["depends_on"] = [process["name"] for process in dependencies]
     config["services"] = [*dependencies, http]

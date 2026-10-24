@@ -52,7 +52,7 @@ def test_lora_checkpoint_is_readable_by_peft_without_base_weights(tmp_path) -> N
         ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2)),
     ]
 
-    save_lora_adapter_to_path(_args(megatron_lora_alpha=32), output, tensors, scenario_step=0)
+    save_lora_adapter_to_path(_args(megatron_lora_alpha=32), output, tensors, rollout_id=0)
 
     config = json.loads((output / "adapter_config.json").read_text(encoding="utf-8"))
     assert config["base_model_name_or_path"] == "/models/Qwen3-8B"
@@ -83,13 +83,12 @@ def test_lora_checkpoint_records_auditable_metadata(tmp_path) -> None:
         _args(megatron_lora_alpha=32, hf_checkpoint=str(base)),
         output,
         tensors,
-        scenario="math",
-        scenario_step=4,
+        rollout_id=4,
     )
 
     document = json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))
     assert document["schema"] == 1
-    assert document["source"] == {"scenario": "math", "scenario_step": 4}
+    assert document["source"] == {"rollout_id": 4}
     assert document["dtype"] == "bfloat16"
     assert document["peft"]["r"] == 32
     assert document["base_model"]["name_or_path"] == str(base)
@@ -118,8 +117,7 @@ def test_lora_checkpoint_metadata_passes_reefs_own_validator(tmp_path) -> None:
         _args(megatron_lora_alpha=32, hf_checkpoint=str(base)),
         output,
         [("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4))],
-        scenario="math",
-        scenario_step=0,
+        rollout_id=0,
     )
 
     PEFTValidator(str(base), require_metadata=True).validate(Artifact.local(output))
@@ -136,7 +134,7 @@ def test_lora_checkpoint_records_no_dtype_for_a_mixed_export(tmp_path) -> None:
             ("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4, dtype=torch.float32)),
             ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
         ],
-        scenario_step=0,
+        rollout_id=0,
     )
 
     assert json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))["dtype"] is None
@@ -148,7 +146,7 @@ def test_lora_checkpoint_rejects_base_tensors(tmp_path) -> None:
             _args(megatron_lora_alpha=32),
             tmp_path / "checkpoint-0",
             [("model.embed_tokens.weight", torch.ones(2, 2))],
-            scenario_step=0,
+            rollout_id=0,
         )
 
 
@@ -165,7 +163,7 @@ def test_lora_checkpoint_does_not_publish_a_partial_directory(tmp_path, monkeypa
             _args(megatron_lora_alpha=32),
             output,
             [("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4))],
-            scenario_step=0,
+            rollout_id=0,
         )
 
     assert not output.exists()
@@ -242,7 +240,6 @@ def test_sglang_adapter_config_matches_bridge_default_targets() -> None:
         ({"megatron_lora_dropout": 1.0}, r"\[0, 1\)"),
         ({"megatron_to_hf_mode": "raw"}, "bridge"),
         ({"only_train_params_name_list": ["adapter"]}, "owns actor parameter freezing"),
-        ({"colocate": True, "rollout_num_gpus_per_engine": 2}, "requires --rollout-num-gpus-per-engine=1"),
         ({"megatron_lora_rank": 0, "megatron_lora_alpha": 32}, "requires a positive"),
     ],
 )

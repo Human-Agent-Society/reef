@@ -123,24 +123,28 @@ Built-in surfaces
 | ``create_config_surface()``            | ``config``  | ``ConfigValidator``| none                    | ``ConfigInferenceHooks``         | none             |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 
-**Weights.** ``WeightLoader`` probes whether an in-memory live runtime load ID
-survived a restart and restores durable checkpoints during rollback.
-For a training scenario, Reef records the serving runtime load ID that the
-engine reports for each exchange, and rejects a response that reports none
-(see `HTTP API <../reference/http-api.rst>`__). The training
-runtime activates newly trained weights inside its own durable job
-transaction; the surface does not repeat that step.
+**Weights.** ``WeightLoader`` makes the inference runtime serve a release.
+``activate`` calls the runtime's ``activate_checkpoint`` at startup recovery
+and after Reef publishes a selected checkpoint; ``load`` calls
+``restore_checkpoint`` for a rollback. Each returns the runtime load ID that
+serves the release. The runtime loads only published weights; no trainer
+changes what the engines serve. For a training scenario, Reef records the
+serving runtime load ID that the engine reports for each exchange, and
+rejects a response that reports none (see `HTTP API
+<../reference/http-api.rst>`__).
 
-**Per-scenario adapters.** When a runtime trains one LoRA adapter per
-scenario, ``create_weight_surface(scenario=..., runtime=...)`` puts that
+**Per-scenario adapters.** When the runtime serves one PEFT adapter per
+scenario (``InferenceRuntime.per_scenario_adapters``), the weight recipe
+builds ``create_weight_surface(scenario=..., runtime=...)``, which puts that
 scenario's adapter revision on every request. A release names the revision the
 runtime serves for the scenario, as a full-weight release takes its version
-from the runtime: a restart publishes each scenario's checkpoint under a new
-runtime load ID. ``reef.surface.adapter`` holds only the
+from the runtime: after a restart, each scenario's release loads again under a
+new runtime load ID. ``reef.surface.adapter`` holds only the
 naming contract (``adapter_name(scenario, runtime_load_id)`` and its inverse), so a
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
-engine-global, not per surface: the training bridge owns one
-``AdapterResidencyManager`` per engine, and the surface never touches it.
+engine-global, not per surface: the serving runtime owns one
+``AdapterResidencyManager``, which keeps at most ``adapter_capacity`` adapters
+loaded and evicts the least recently used. The surface never touches it.
 
 **Harness file trees.** ``create_harness_surface()`` exposes the artifact's
 UTF-8 text files through ``TextFileTree``, excluding repository bookkeeping
@@ -220,10 +224,11 @@ each one's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.
 
 Add a small factory function when a composition is reused. Add a new
-capability protocol only when no existing call site can express the consumer
+capability interface only when no existing call site can express the consumer
 interaction. The package depends only on ``artifact/`` and ``core/``; it sees
-runtimes structurally, through the ``ServingRuntime`` and ``WeightRuntime``
-protocols, and never imports a concrete one.
+runtimes through the ``ServingRuntime``, ``WeightRuntime`` and
+``AdapterWeightRuntime`` base classes in ``reef/surface/base.py``, and never
+imports a concrete one.
 
 Remote weight snapshots
 ------------------------
@@ -231,10 +236,12 @@ Remote weight snapshots
 ``WeightLoader.activate`` calls the inference runtime's
 ``activate_checkpoint(artifact)`` when a materializable head becomes
 available, including startup recovery and rollback. ``WeightRuntime`` binds
-nothing by default, since a local engine already serves what the artifact
-names. An inference runtime that serves immutable remote snapshots overrides
-it to validate the checkpoint and bind its remote sampler and training state.
-Tinker's inference runtime uses this to restore the authoritative artifact
-before the scenario serves requests; its training runtime learns the same
-head through ``TrainingRuntime.commit_candidate`` and rollback's
-``restore_checkpoint``. The surface layer never imports the concrete SDK.
+nothing by default and returns the release ID. The saved-weight serving
+runtimes (``reef.runtime.serving``) override it to load the release's files
+into the engines. An inference runtime that serves immutable remote snapshots
+overrides it to validate the checkpoint and bind its remote sampler. Tinker's
+inference runtime uses this to serve the authoritative artifact before the
+scenario serves requests. The training component does not read the head: the
+next job starts from the trainer's committed start, and a rollback imports
+the release into the component with ``import_start``. The surface layer never
+imports the concrete SDK.

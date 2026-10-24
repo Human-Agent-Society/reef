@@ -1,10 +1,10 @@
 """Durable step orchestration for Guidance-TTT runs.
 
-One search step is one Reef training transaction. The controller runs a step
-only after the previous transaction has committed: it samples ``G x R``
-guidance rollouts, waits for the durable train/checkpoint/publish job, checks
-that the LoRA optimizer really consumed the reserved batch, and only then
-pairs the post-step archive with that committed step.
+One search step is one Reef training job. The controller runs a step only
+after the previous job has ended: it samples ``G x R`` guidance rollouts,
+waits on Reef's HTTP status until the job that trains them ends, checks that
+the LoRA optimizer really consumed the reserved batch, and only then pairs the
+post-step archive with that committed step.
 
 Nothing here is task specific. The Harbor agent supplies the harness, the
 archive, and the run settings; ``run()`` returns the rollouts and the per-step
@@ -17,6 +17,7 @@ import json
 import math
 import shutil
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
@@ -65,22 +66,92 @@ class SearchHarness(ABC):
     def run_step(self, step: int) -> Sequence[Any]: ...
 
 
-class TrainingBridge(ABC):
-    """Reef's durable training transaction, seen from the harness."""
+class TrainingProgress(ABC):
+    """Reef's training of one scenario, seen from the harness."""
 
     @abstractmethod
-    def start_step(self) -> int: ...
+    def position(self) -> TrainingPosition:
+        """Where the scenario's training stands now."""
 
     @abstractmethod
-    def wait_for_step(self, *, expected_completed_steps: int, expected_rollout_id: int) -> Mapping[str, Any]: ...
+    def wait_for_step(self, *, after: TrainingPosition, expected_rollout_id: int) -> TrainingJobOutcome:
+        """Wait until the scenario finished the one training job that follows ``after``."""
 
 
-class RayTrainingBridge(TrainingBridge):
-    """Read the durable training job through Reef's Ray train bridge.
+@dataclass(frozen=True)
+class TrainingPosition:
+    """A scenario's training as ``GET /reef/status`` reports it.
 
-    The bridge exposes the optimizer transaction (grad norm, LoRA parameter
-    counts, consumed batch) that ``/reef/status`` deliberately does not, so a
-    step that trained on nothing cannot be mistaken for a healthy one.
+    ``scenario_step`` is Reef's committed scenario step and ``finished_jobs``
+    the number of training jobs that ended, both non-negative ints.
+    ``running_job_id`` is the running job's ID, a non-empty string, or ``None``
+    while no job runs. A scenario that the status does not list yet has not
+    trained: ``TrainingPosition(0, 0, None)``. The controller reads it before
+    a step and waits for the job after it.
+    """
+
+    scenario_step: int
+    finished_jobs: int
+    running_job_id: str | None
+
+    def __post_init__(self) -> None:
+        for name, value in (("scenario_step", self.scenario_step), ("finished_jobs", self.finished_jobs)):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise RuntimeError(f"Reef returned an invalid {name}: {value!r}")
+        if self.running_job_id is not None and (not isinstance(self.running_job_id, str) or not self.running_job_id):
+            raise RuntimeError(f"Reef returned an invalid running training job: {self.running_job_id!r}")
+
+    @classmethod
+    def from_status(cls, status: Mapping[str, Any]) -> TrainingPosition:
+        """Read one scenario's status block; a block without job fields is not a job-loop trainer."""
+        if "training_job" not in status or "finished_jobs" not in status:
+            raise RuntimeError(f"Reef reports no training job state for the scenario: {status!r}")
+        job = status["training_job"]
+        if job is not None and not isinstance(job, Mapping):
+            raise RuntimeError(f"Reef returned an invalid training job: {job!r}")
+        return cls(
+            scenario_step=status.get("scenario_step"),
+            finished_jobs=status["finished_jobs"],
+            running_job_id=None if job is None else job.get("job_id"),
+        )
+
+
+@dataclass(frozen=True)
+class TrainingJobOutcome:
+    """One training job of a Guidance step that ended and saved its checkpoint.
+
+    ``job_id`` is the job's non-empty ID. ``rollout_id`` is the Slime rollout
+    the job saved, a non-negative int. ``checkpoint_metrics`` are the metrics
+    Reef committed for the checkpoint: Slime's training metrics (for example
+    ``train/grad_norm``) and the evaluation and selection result.
+    ``position`` is the scenario's training after the job, with no job
+    running. ``runtime_load_id`` is the serving load ID the status reports
+    then, or ``None``. ``wait_for_training_step`` makes the value and the
+    controller reads it.
+    """
+
+    job_id: str
+    rollout_id: int
+    checkpoint_metrics: Mapping[str, Any]
+    position: TrainingPosition
+    runtime_load_id: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.job_id, str) or not self.job_id:
+            raise RuntimeError(f"Reef returned an invalid training job ID: {self.job_id!r}")
+        if not isinstance(self.rollout_id, int) or isinstance(self.rollout_id, bool) or self.rollout_id < 0:
+            raise RuntimeError(f"training job {self.job_id} reported an invalid rollout ID: {self.rollout_id!r}")
+        if self.position.running_job_id is not None:
+            raise RuntimeError(f"training job {self.job_id} ended while job {self.position.running_job_id} runs")
+
+
+class StatusTrainingProgress(TrainingProgress):
+    """Read a scenario's training through Reef's HTTP API.
+
+    ``GET /reef/status`` reports the scenario step, the running job and the
+    number of finished jobs. ``GET /reef/scenarios/<scenario>/commits`` holds
+    each job's committed checkpoint metrics and its end. No Ray connection is
+    needed.
     """
 
     def __init__(
@@ -89,98 +160,167 @@ class RayTrainingBridge(TrainingBridge):
         scenario: str,
         *,
         token: str | None = None,
-        ray_address: str,
-        ray_namespace: str = "reef",
-        ray_actor_name: str = "reef-train-bridge",
         timeout_s: float = 14_400.0,
         poll_interval_s: float = 2.0,
+        request_timeout_s: float = 30.0,
     ) -> None:
-        if timeout_s <= 0 or poll_interval_s < 0:
+        if timeout_s <= 0 or poll_interval_s < 0 or request_timeout_s <= 0:
             raise ValueError("training timeout must be positive and the poll interval non-negative")
-        import ray
+        self.service_url = service_url.rstrip("/")
+        self.token = token
+        self.scenario = scenario
+        self.timeout_s = float(timeout_s)
+        self.poll_interval_s = float(poll_interval_s)
+        self.request_timeout_s = float(request_timeout_s)
 
-        if not ray.is_initialized():
-            import logging
+    def position(self) -> TrainingPosition:
+        status = self.scenario_status()
+        return TrainingPosition(0, 0, None) if status is None else TrainingPosition.from_status(status)
 
-            ray.init(address=ray_address, namespace=ray_namespace, logging_level=logging.ERROR)
-        self._ray = ray
-        self._actor = ray.get_actor(ray_actor_name, namespace=ray_namespace)
-        self._status_url = service_url.rstrip("/") + "/reef/status"
-        self._token = token
-        self._scenario = scenario
-        self._timeout_s = float(timeout_s)
-        self._poll_interval_s = float(poll_interval_s)
-
-    def start_step(self) -> int:
-        return int(self._ray.get(self._actor.start_rollout_id.remote()))
-
-    def wait_for_step(self, *, expected_completed_steps: int, expected_rollout_id: int) -> Mapping[str, Any]:
+    def wait_for_step(self, *, after: TrainingPosition, expected_rollout_id: int) -> TrainingJobOutcome:
         return wait_for_training_step(
-            health=lambda: dict(self._ray.get(self._actor.health.remote(), timeout=30)),
-            status=self._scenario_status,
-            expected_completed_steps=expected_completed_steps,
+            status=self.scenario_status,
+            commits=self.commits_after,
+            after=after,
             expected_rollout_id=expected_rollout_id,
-            timeout_s=self._timeout_s,
-            poll_interval_s=self._poll_interval_s,
+            timeout_s=self.timeout_s,
+            poll_interval_s=self.poll_interval_s,
         )
 
-    def _scenario_status(self) -> dict[str, Any]:
-        request = urllib.request.Request(self._status_url)
-        if self._token:
-            request.add_header("Authorization", f"Bearer {self._token}")
-        with urllib.request.urlopen(request, timeout=30) as response:
+    def scenario_status(self) -> dict[str, Any] | None:
+        return scenario_status(self.get_json("/reef/status"), self.scenario)
+
+    def commits_after(self, scenario_step: int) -> list[dict[str, Any]]:
+        """Every commit of the scenario after ``scenario_step``, in step order."""
+        path = f"/reef/scenarios/{urllib.parse.quote(self.scenario, safe='')}/commits"
+        commits: list[dict[str, Any]] = []
+        after_step: int | None = scenario_step
+        while after_step is not None:
+            page = self.get_json(f"{path}?{urllib.parse.urlencode({'after_step': after_step, 'limit': 100})}")
+            entries = page.get("commits")
+            if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
+                raise RuntimeError(f"Reef returned invalid commits: {page!r}")
+            commits.extend(dict(entry) for entry in entries)
+            after_step = page.get("next_after_step")
+        return commits
+
+    def get_json(self, path: str) -> Mapping[str, Any]:
+        request = urllib.request.Request(self.service_url + path)
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        with urllib.request.urlopen(request, timeout=self.request_timeout_s) as response:
             body = json.loads(response.read())
-        return scenario_status(body, self._scenario)
+        if not isinstance(body, Mapping):
+            raise RuntimeError(f"Reef returned a non-object for {path}: {body!r}")
+        return body
 
 
 def wait_for_training_step(
     *,
-    health: Callable[[], Mapping[str, Any]],
-    status: Callable[[], Mapping[str, Any]],
-    expected_completed_steps: int,
+    status: Callable[[], Mapping[str, Any] | None],
+    commits: Callable[[int], Sequence[Mapping[str, Any]]],
+    after: TrainingPosition,
     expected_rollout_id: int,
     timeout_s: float,
     poll_interval_s: float,
-) -> Mapping[str, Any]:
-    """Wait for Reef's asynchronous durable train/checkpoint/publish job."""
+) -> TrainingJobOutcome:
+    """Wait for the one training job that follows ``after`` to end, and read its checkpoint.
+
+    The step is done when the scenario step advanced past ``after``, one more
+    job finished, and no job runs. The scenario's training error, a TTTD step
+    failure of ``expected_rollout_id``, and a failed job raise ``RuntimeError``.
+    """
+    expected_jobs = after.finished_jobs + 1
     deadline = time.monotonic() + timeout_s
-    last_health: Mapping[str, Any] = {}
-    last_status: Mapping[str, Any] = {}
+    last_status: Mapping[str, Any] | None = None
     while time.monotonic() < deadline:
-        last_health = health()
-        if last_health.get("ok") is not True:
-            raise RuntimeError(f"durable training bridge failed: {last_health}")
         last_status = status()
-        failure = failed_training_step(last_status, expected_rollout_id)
-        if failure is not None:
-            raise RuntimeError(
-                f"TTTD step {expected_rollout_id} failed ({failure['reason']}) because its reports span "
-                f"releases {failure['release_ids']!r}"
-            )
-        if last_health.get("completed_train_steps") == expected_completed_steps:
-            if last_health.get("last_train_rollout_id") != expected_rollout_id:
-                raise RuntimeError(f"durable training completed the wrong rollout: {last_health}")
-            if last_health.get("phase") == "serving":
-                return last_health
+        if last_status is not None:
+            failure = failed_training_step(last_status, expected_rollout_id)
+            if failure is not None:
+                raise RuntimeError(
+                    f"TTTD step {expected_rollout_id} failed ({failure['reason']}) because its reports span "
+                    f"releases {failure['release_ids']!r}"
+                )
+            position = TrainingPosition.from_status(last_status)
+            if position.finished_jobs > expected_jobs:
+                raise RuntimeError(f"Reef finished {position.finished_jobs} training jobs, expected {expected_jobs}")
+            if (
+                position.running_job_id is None
+                and position.finished_jobs == expected_jobs
+                and position.scenario_step > after.scenario_step
+            ):
+                return finished_job_outcome(
+                    commits(after.scenario_step),
+                    position,
+                    last_status.get("current_runtime_load_id"),
+                    expected_rollout_id,
+                )
         if poll_interval_s:
             time.sleep(poll_interval_s)
     raise GuidanceTrainingTimeoutError(
-        f"training rollout {expected_rollout_id} did not complete after {timeout_s:g}s: "
-        f"bridge={last_health}; reef={last_status}"
+        f"training rollout {expected_rollout_id} did not complete after {timeout_s:g}s: reef={last_status}"
     )
 
 
-def scenario_status(body: Mapping[str, Any], scenario: str) -> dict[str, Any]:
-    """Read one scenario's generic asynchronous training status."""
+def finished_job_outcome(
+    commits: Sequence[Mapping[str, Any]],
+    position: TrainingPosition,
+    runtime_load_id: str | None,
+    expected_rollout_id: int,
+) -> TrainingJobOutcome:
+    """The outcome of the one job that ended in ``commits``; a failed job or a missing checkpoint raises."""
+    events: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+    for commit in commits:
+        metrics = commit.get("metrics")
+        job = metrics.get("training_job") if isinstance(metrics, Mapping) else None
+        if isinstance(job, Mapping):
+            events.append((job, metrics))
+    ended = [(job, metrics) for job, metrics in events if job.get("event") in ("finished", "failed")]
+    if len(ended) != 1:
+        raise RuntimeError(f"expected one training job to end, found {[job for job, _ in ended]!r}")
+    job, end_metrics = ended[0]
+    if job["event"] == "failed":
+        raise RuntimeError(f"Reef training job {job.get('job_id')} failed: {job.get('error')}")
+    checkpoints = [
+        metrics
+        for event, metrics in events
+        if event.get("event") == "checkpoint" and event.get("job_id") == job["job_id"]
+    ]
+    if len(checkpoints) != 1:
+        raise RuntimeError(f"training job {job['job_id']} saved {len(checkpoints)} checkpoints, expected one")
+    outcome = TrainingJobOutcome(
+        job_id=job["job_id"],
+        rollout_id=end_metrics.get("rollout_id"),
+        checkpoint_metrics=dict(checkpoints[0]),
+        position=position,
+        runtime_load_id=runtime_load_id,
+    )
+    if outcome.rollout_id != expected_rollout_id:
+        raise RuntimeError(
+            f"training job {outcome.job_id} saved rollout {outcome.rollout_id}, expected {expected_rollout_id}"
+        )
+    return outcome
+
+
+def scenario_status(body: Mapping[str, Any], scenario: str) -> dict[str, Any] | None:
+    """Read one scenario's training status; ``None`` while the status does not list the scenario."""
     training_error = body.get("error")
     if training_error is not None:
         if not isinstance(training_error, str) or not training_error:
             raise RuntimeError(f"Reef returned an invalid training error: {body!r}")
         raise RuntimeError(f"Reef training failed: {training_error}")
+    preload_errors = body.get("preload_errors")
+    if isinstance(preload_errors, Mapping) and scenario in preload_errors:
+        raise RuntimeError(f"Reef could not restore scenario {scenario!r}: {preload_errors[scenario]}")
     scenarios = body.get("scenarios")
-    status = scenarios.get(scenario) if isinstance(scenarios, Mapping) else None
+    if not isinstance(scenarios, Mapping):
+        raise RuntimeError(f"Reef returned no scenario statuses: {body!r}")
+    status = scenarios.get(scenario)
+    if status is None:
+        return None
     if not isinstance(status, Mapping):
-        raise RuntimeError(f"Reef returned no training status for {scenario!r}: {body!r}")
+        raise RuntimeError(f"Reef returned an invalid status for {scenario!r}: {status!r}")
     return dict(status)
 
 
@@ -208,22 +348,15 @@ def require_step_success(
     expected_rollouts: int,
     actual_rollouts: int,
     retained_trajectories: int,
-    bridge_health: Mapping[str, Any],
-    expected_completed_train_steps: int,
-    expected_rollout_id: int,
-    grad_norm: Any,
+    outcome: TrainingJobOutcome,
     lora_rank: int,
     allow_zero_signal: bool = False,
 ) -> float:
-    """Fail closed unless the LoRA optimizer really consumed this step."""
+    """Fail closed unless the LoRA optimizer really consumed this step; return its grad norm."""
     if actual_rollouts != expected_rollouts:
         raise RuntimeError(f"sampled {actual_rollouts} rollouts, expected {expected_rollouts}")
-    if bridge_health.get("ok") is not True or bridge_health.get("phase") != "serving":
-        raise RuntimeError(f"bridge did not return to serving: {bridge_health}")
-    if bridge_health.get("completed_train_steps") != expected_completed_train_steps:
-        raise RuntimeError(f"expected {expected_completed_train_steps} completed train steps: {bridge_health}")
-    if bridge_health.get("last_train_rollout_id") != expected_rollout_id:
-        raise RuntimeError(f"expected last rollout id {expected_rollout_id}: {bridge_health}")
+    metrics = outcome.checkpoint_metrics
+    grad_norm = metrics.get("train/grad_norm")
     if (
         not isinstance(grad_norm, (int, float))
         or not math.isfinite(float(grad_norm))
@@ -231,7 +364,6 @@ def require_step_success(
         or (grad_norm == 0 and not allow_zero_signal)
     ):
         raise RuntimeError(f"optimizer did not report the expected finite grad norm: {grad_norm!r}")
-    metrics = bridge_health.get("last_train_metrics") or {}
     reported_batch = metrics.get("train/global_batch_size")
     if reported_batch != retained_trajectories:
         raise RuntimeError(f"trainer consumed global batch {reported_batch!r}, expected {retained_trajectories}")
@@ -321,7 +453,7 @@ class GuidanceRunController:
 
     harness: SearchHarness
     library: Any
-    bridge: TrainingBridge
+    progress: TrainingProgress
     state_store: GuidanceRunStateStore
     checkpoint_root: Path
     resume_extra: Mapping[str, Any]
@@ -339,10 +471,14 @@ class GuidanceRunController:
         start_step = int(saved["next_step"]) if saved else 0
         if start_step >= total_steps:
             raise GuidanceRunStateError(f"run already completed {start_step} steps; requested total is {total_steps}")
-        bridge_start_step = self.bridge.start_step()
-        if bridge_start_step != start_step:
+        position = self.progress.position()
+        if position.running_job_id is not None:
             raise GuidanceRunStateError(
-                f"checkpoint starts at rollout {bridge_start_step}, but the Guidance archive starts at {start_step}"
+                f"Reef is still running training job {position.running_job_id}; resume after it ends"
+            )
+        if position.finished_jobs != start_step:
+            raise GuidanceRunStateError(
+                f"Reef finished {position.finished_jobs} training jobs, but the Guidance archive starts at {start_step}"
             )
 
         step_summaries = [dict(summary) for summary in (saved or {}).get("step_summaries", [])]
@@ -352,10 +488,8 @@ class GuidanceRunController:
             started_at = time.monotonic()
             self.emit({"event": "guidance_step_started", "step": step})
             results = tuple(self.harness.run_step(step))
-            bridge_health = self.bridge.wait_for_step(
-                expected_completed_steps=step - start_step + 1,
-                expected_rollout_id=step,
-            )
+            outcome = self.progress.wait_for_step(after=position, expected_rollout_id=step)
+            position = outcome.position
             grouped_rewards = [
                 [result.reward for result in results[offset : offset + rollouts]]
                 for offset in range(0, len(results), rollouts)
@@ -369,15 +503,12 @@ class GuidanceRunController:
             # well-defined. Mirror that cardinality in the qualification
             # checks instead of claiming that the trainer consumed no data.
             retained_trajectories = (nonconstant_groups or 1) * rollouts
-            metrics = dict(bridge_health.get("last_train_metrics") or {})
+            metrics = dict(outcome.checkpoint_metrics)
             grad_norm = require_step_success(
                 expected_rollouts=expected_rollouts,
                 actual_rollouts=len(results),
                 retained_trajectories=retained_trajectories,
-                bridge_health=bridge_health,
-                expected_completed_train_steps=step - start_step + 1,
-                expected_rollout_id=step,
-                grad_norm=metrics.get("train/grad_norm"),
+                outcome=outcome,
                 lora_rank=identity.lora_rank,
                 allow_zero_signal=nonconstant_groups == 0,
             )
@@ -406,7 +537,7 @@ class GuidanceRunController:
                 step_summaries=step_summaries,
                 extra=self.resume_extra,
             )
-            runtime_load_id = bridge_health.get("runtime_load_id") or runtime_load_id
+            runtime_load_id = outcome.runtime_load_id or runtime_load_id
             all_results.extend(results)
             self.emit({"event": "guidance_step_committed", **summary})
 
@@ -447,9 +578,13 @@ __all__ = [
     "GuidanceRunStateError",
     "GuidanceRunStateStore",
     "GuidanceTrainingTimeoutError",
-    "RayTrainingBridge",
+    "StatusTrainingProgress",
+    "TrainingJobOutcome",
+    "TrainingPosition",
+    "TrainingProgress",
     "atomic_copy",
     "failed_training_step",
+    "finished_job_outcome",
     "read_json",
     "require_step_success",
     "scenario_status",

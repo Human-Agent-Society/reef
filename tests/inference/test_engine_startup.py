@@ -286,7 +286,6 @@ def test_startup_and_recovery_relaunch_on_port_conflicts(monkeypatch, site):
     elif site == "sglang recover":
         SGLangModel([sglang_group()]).recover()
     elif site == "vllm start":
-        monkeypatch.setattr(VLLMWorker, "_new_rollout_engine_lock", lambda self: None)
         VLLMWorker(VLLMConfig("model", 2, 1, 2, router_url="http://router"), None)
     else:
         vllm_group().recover()

@@ -155,16 +155,16 @@ def test_named_role_selectors_share_one_configuration_contract():
 
 
 @pytest.mark.parametrize("cli", [False, True])
-def test_slime_driver_honors_yaml_roles_and_explicit_flag_precedence(cli):
+def test_slime_component_honors_the_training_role_and_explicit_flag_precedence(cli):
     pytest.importorskip("ray")
-    from reef.train.slime_backend.driver import _configure_executors
+    from reef.train.slime_backend.component import configure_executors
 
     config = {
         "executors": {"special": {"backend": "custom:Training", "options": {"queue": "gpu"}}},
         "execution": {"training": "special", "rollout": {"backend": "custom:Serving"}},
     }
     args = SimpleNamespace(reef_executor_backend="ray", reef_rollout_executor_backend="ray")
-    _configure_executors(args, config, ["--reef-executor-backend=ray"] if cli else [])
+    configure_executors(args, config, ["--reef-executor-backend=ray"] if cli else [])
     assert args.reef_executor_backend == ("ray" if cli else "custom:Training")
     assert args.reef_train_executor_options == ({} if cli else {"queue": "gpu"})
     assert args.reef_rollout_executor_backend == "custom:Serving"

@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks
+from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
 
-from recipes.openclawrl import OpenClawRLBatches, OpenClawRLRecipe
-from recipes.sao import SAOBatches, SAORecipe
-from recipes.tttd import TTTDBatches, TTTDGroupedRolloutReport, TTTDRecipe
+from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
+from recipes.sao import SAOJobData, SAORecipe
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.inference.http import InferenceProxyRuntime
@@ -22,14 +22,15 @@ from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightT
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2batch import NoBatches
+from reef.task2job import NoJobData
+from reef.train.jobs import FixedJobPlan, JobPlanContext
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.types import JobData
 
 
 def pipeline_stages(recipe_type: type[Recipe], section: dict) -> PipelineConfig:
-    """The recipe's stages configured by a deployment ``pipeline`` section."""
-    return PipelineConfig.from_setting(section, spec=recipe_type.pipeline_spec(), environ={})
+    """The recipe's stages configured by a deployment ``pipeline`` section, with jobs of one sample."""
+    return job_sized_stages(recipe_type.pipeline_spec(), section)
 
 
 def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
@@ -41,13 +42,16 @@ def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
-def test_training_recipes_share_max_staleness(recipe_type) -> None:
-    assert recipe_type(**runtime_bindings(StubTrainingRuntime())).max_staleness == 0
-    recipe = recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=2)
-    assert recipe.max_staleness == 2
-    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.context.max_staleness == 2
-    with pytest.raises(ValueError, match="max_staleness must be a non-negative integer"):
-        recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=-1)
+def test_training_recipes_take_max_staleness_in_their_record_stage_config(recipe_type) -> None:
+    default = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, {}))
+    assert default.build("scenario", SQLiteRecordStore()).pipeline.record2record.max_staleness == 0
+    section = {"record2record": {"config": {"max_staleness": 2}}}
+    recipe = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, section))
+    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.record2record.max_staleness == 2
+    negative = {"record2record": {"config": {"max_staleness": -1}}}
+    refused = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, negative))
+    with pytest.raises(RecipeConfigError, match="max_staleness must be a non-negative int"):
+        refused.build("scenario", SQLiteRecordStore())
 
 
 def test_recipe_class_resolver_has_no_method_short_names() -> None:
@@ -91,52 +95,55 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
 
 
 @pytest.mark.parametrize(
-    ("recipe", "name", "task2batch_type", "objective", "report_type"),
+    ("recipe", "name", "task2job_type", "objective", "report_type"),
     [
-        (Recipe(), "recipe", NoBatches, None, None),
+        (Recipe(), "recipe", NoJobData, None, None),
         (
             OpenClawRLRecipe(
-                **runtime_bindings(StubTrainingRuntime()),
-                pipeline_stages=pipeline_stages(OpenClawRLRecipe, {"task2batch": {"config": {"buffer_size": 3}}}),
+                **runtime_bindings(),
+                pipeline_stages=pipeline_stages(OpenClawRLRecipe, {"task2job": {"config": {"buffer_size": 3}}}),
             ),
             "openclawrl",
-            OpenClawRLBatches,
+            OpenClawRLJobData,
             "openclawrl",
             None,
         ),
         (
             SAORecipe(
-                **runtime_bindings(StubTrainingRuntime()),
-                pipeline_stages=pipeline_stages(SAORecipe, {"task2batch": {"config": {"buffer_size": 4}}}),
+                **runtime_bindings(),
+                pipeline_stages=pipeline_stages(SAORecipe, {"task2job": {"config": {"buffer_size": 4}}}),
             ),
             "sao",
-            SAOBatches,
+            SAOJobData,
             "sao",
             ScoredRolloutReport,
         ),
         (
-            TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), pipeline_stages=tttd_grid(2, 3)),
+            TTTDRecipe(**runtime_bindings(), pipeline_stages=tttd_grid(2, 3)),
             "tttd",
-            TTTDBatches,
+            TTTDJobData,
             "tttd",
             TTTDGroupedRolloutReport,
         ),
     ],
 )
 def test_concrete_recipe_builds_its_processor_objective_and_report_type(
-    recipe, name, task2batch_type, objective, report_type
+    recipe, name, task2job_type, objective, report_type
 ) -> None:
     trainer = recipe.build("math", SQLiteRecordStore())
 
     assert recipe.name == name
     assert recipe.report_type is report_type
     assert type(trainer.pipeline) is TrainingPipeline
-    assert isinstance(trainer.pipeline.task2batch, task2batch_type)
+    assert isinstance(trainer.pipeline.task2job, task2job_type)
     if objective is None:
-        assert trainer.candidate_backend is None
+        assert trainer.job_loop is None
     else:
-        assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-        assert trainer.candidate_backend.training_method_selector.method.objective == objective
+        assert trainer.job_loop is not None
+        plan = trainer.job_loop.plan
+        assert isinstance(plan, FixedJobPlan)
+        request = plan.next_job(JobPlanContext(JobData("math:1"), 0, None))
+        assert request.parameters["method"]["objective"] == objective
     assert trainer.pipeline.context.report_type is report_type
 
 
@@ -156,10 +163,10 @@ def test_build_rejects_an_unknown_objective_before_any_training_step() -> None:
 
         @classmethod
         def pipeline_spec(cls) -> PipelineSpec:
-            return PipelineSpec(record2task=ThresholdTasks, task2batch=ThresholdBatches)
+            return PipelineSpec(record2task=ThresholdTasks, task2job=ThresholdJobData)
 
     with pytest.raises(ValueError, match=r"unknown objective 'online_grpo'.*available objectives"):
-        StaleObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
+        StaleObjectiveRecipe(**runtime_bindings()).build("math", SQLiteRecordStore())
 
 
 def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process() -> None:
@@ -177,12 +184,13 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "from recipes.tttd import TTTDRecipe\n"
                 "from reef.storage.sqlite import SQLiteRecordStore\n"
                 "from reef.train.pipeline import PipelineConfig\n"
-                "from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings\n"
-                "grid = {'record2record': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}}}\n"
+                "from tests.support.runtime_stubs import runtime_bindings\n"
+                "grid = {'record2record': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
+                " 'task2job': {'config': {'job_samples': 2}}}\n"
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
-                "trainer = TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), pipeline_stages=stages)"
+                "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
                 ".build('math', SQLiteRecordStore())\n"
-                "assert trainer.candidate_backend.training_method_selector.method.objective == 'tttd'\n"
+                "assert trainer.job_loop.plan.request.parameters['method']['objective'] == 'tttd'\n"
             ),
         ],
         check=True,
@@ -212,9 +220,9 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
 @pytest.mark.parametrize(
     ("recipe", "metadata"),
     [
-        (SAORecipe(**runtime_bindings(StubTrainingRuntime())), {}),
+        (SAORecipe(**runtime_bindings(), pipeline_stages=pipeline_stages(SAORecipe, {})), {}),
         (
-            TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), pipeline_stages=tttd_grid(1, 2)),
+            TTTDRecipe(**runtime_bindings(), pipeline_stages=tttd_grid(1, 2)),
             {
                 "algorithm": "tttd",
                 "step": 0,
@@ -251,7 +259,9 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # The judging half lives inside the pipeline's record stage: a report is consumed
     # held for retention only — terminal on sight, releasable, never a candidate.
-    trainer = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
+    trainer = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=pipeline_stages(OpenClawRLRecipe, {})).build(
+        "math", SQLiteRecordStore()
+    )
     pipeline = trainer.pipeline
     pipeline.push(
         AgentRecord.create(
@@ -270,19 +280,20 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
 
 
 def test_recipe_factory_keeps_method_configuration_inside_recipe() -> None:
-    runtime = StubTrainingRuntime()
+    component = StubTrainingComponent()
+    runtime = StubInferenceRuntime()
     recipe = build_recipe(
         "recipes.tttd.recipe:TTTDRecipe",
         {"REEF_TRAINER_URL": "http://trainer:8901", "REEF_TRAINER_TOKEN": "secret"},
         config={"pipeline": {"record2record": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}}}},
-        **runtime_bindings(runtime),
+        **runtime_bindings(component, runtime),
     )
 
     assert isinstance(recipe, TTTDRecipe)
     record2record = recipe.build_pipeline(PipelineContext("math")).record2record
     assert (record2record.groups_per_step, record2record.rollouts_per_group) == (2, 3)
-    assert recipe.training_runtime is runtime
-    assert recipe.runtime is runtime.inference
+    assert recipe.training_component is component
+    assert recipe.runtime is runtime
 
 
 def test_recipe_factory_refuses_a_stage_setting_in_the_recipe_config() -> None:
@@ -292,12 +303,12 @@ def test_recipe_factory_refuses_a_stage_setting_in_the_recipe_config() -> None:
             "recipes.tttd.recipe:TTTDRecipe",
             {},
             config={"data": {"groups_per_step": 2}},
-            **runtime_bindings(StubTrainingRuntime()),
+            **runtime_bindings(),
         )
 
 
-def test_training_recipe_requires_its_runtime_environment() -> None:
-    with pytest.raises(RecipeConfigError, match="requires a training runtime"):
+def test_training_recipe_requires_its_training_component() -> None:
+    with pytest.raises(RecipeConfigError, match="requires a training component"):
         build_recipe("recipes.tttd.recipe:TTTDRecipe", {})
 
 
@@ -305,13 +316,13 @@ def test_recipe_config_routes_sections_to_their_consumers() -> None:
     settings = recipe_config_from_mapping(
         {
             "implementation": "recipes.openclawrl.recipe:OpenClawRLRecipe",
-            "pipeline": {"task2batch": {"config": {"buffer_size": 4}}},
+            "pipeline": {"task2job": {"config": {"buffer_size": 4}}},
             "model": {"path": "/models/qwen"},
         }
     )
-    recipe = build_recipe(settings["implementation"], {}, config=settings, **runtime_bindings(StubTrainingRuntime()))
+    recipe = build_recipe(settings["implementation"], {}, config=settings, **runtime_bindings())
 
-    assert recipe.stages().task2batch.config == {"buffer_size": 4}
+    assert recipe.stages().task2job.config == {"buffer_size": 4}
 
 
 def test_recipe_config_requires_implementation(tmp_path) -> None:
@@ -342,7 +353,7 @@ inference:
     assert isinstance(recipe.runtime, InferenceProxyRuntime)
 
 
-def test_config_backed_training_recipe_requires_an_injected_runtime(tmp_path) -> None:
+def test_config_backed_training_recipe_requires_an_injected_training_component(tmp_path) -> None:
     path = tmp_path / "sao-qwen.yaml"
     path.write_text(
         """recipe:
@@ -351,7 +362,7 @@ inference:
   model-path: Qwen/Qwen3.5-27B
 """
     )
-    with pytest.raises(RecipeConfigError, match="requires a training runtime"):
+    with pytest.raises(RecipeConfigError, match="requires a training component"):
         build_named_recipe("sao-qwen", config_directory=tmp_path)
 
 
@@ -423,16 +434,16 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
 
     from reef.train.algos.registry import resolve_objective
     from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.types import TrainingBatch
+    from reef.train.types import JobData
 
     first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
     second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
         spec = recipe_type.training_spec()
-        assert recipe_type.pipeline_spec().task2batch is not NoBatches
+        assert recipe_type.pipeline_spec().task2job is not NoJobData
         if recipe_type is TTTDRecipe:
-            batch = TrainingBatch(
+            batch = JobData(
                 "b",
                 tuple(
                     replace(sample, group_id=str(index))
@@ -441,7 +452,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
                 ),
             )
         else:
-            batch = TrainingBatch(
+            batch = JobData(
                 "b",
                 (
                     first,
@@ -460,18 +471,19 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
 def test_opd_recipe_uses_configured_runtime() -> None:
     from recipes.opd import OPDRecipe
 
-    runtime = StubTrainingRuntime()
+    component = StubTrainingComponent()
     recipe = build_recipe(
         "recipes.opd.recipe:OPDRecipe",
         {},
         config={
-            "pipeline": {"task2batch": {"config": {"buffer_size": 16}}},
+            "pipeline": {"task2job": {"config": {"job_samples": 4, "buffer_size": 16}}},
         },
-        **runtime_bindings(runtime),
+        **runtime_bindings(component),
     )
     assert isinstance(recipe, OPDRecipe)
-    assert recipe.training_runtime is runtime
-    assert recipe.build_pipeline(PipelineContext("math", default_buffer_size=4)).task2batch.buffer_size == 16
+    assert recipe.training_component is component
+    task2job = recipe.build_pipeline(PipelineContext("math")).task2job
+    assert (task2job.job_samples, task2job.buffer_size) == (4, 16)
 
 
 def test_cordis_recipe_reads_the_evolution_batch_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

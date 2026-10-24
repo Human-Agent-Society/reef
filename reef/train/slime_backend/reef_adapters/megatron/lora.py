@@ -49,18 +49,13 @@ def validate_megatron_lora_args(args: Namespace) -> None:
             "Megatron Bridge LoRA owns actor parameter freezing; do not combine it with "
             "--only-train-params-name-list or --freeze-params-name-list"
         )
-    if getattr(args, "colocate", False) and getattr(args, "rollout_num_gpus_per_engine", 1) != 1:
-        raise ValueError(
-            "colocated Megatron LoRA sync currently requires --rollout-num-gpus-per-engine=1 "
-            "so every adapter checksum is verified against its matching SGLang engine"
-        )
     slots = getattr(args, "max_loaded_loras", None)
     if slots is not None and int(slots) < 1:
         raise ValueError("--max-loaded-loras must be at least 1")
 
 
 def lora_engine_slots(args: Namespace) -> int:
-    """Adapter slots the SGLang engine holds; the bridge's residency capacity.
+    """Adapter slots the SGLang engine holds; the serving runtime's adapter capacity.
 
     Every scenario keeps its current revision resident, and publishing a new
     revision needs one more slot while both exist, so size it to the number

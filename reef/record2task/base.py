@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.batches import TrainDataItem
+from reef.core.job_data import TrainDataItem
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, TaskStatus

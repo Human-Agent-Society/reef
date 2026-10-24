@@ -5,8 +5,8 @@ run under ``harness:HarborAgent``. Each stage is a fresh Reef stack started
 from the previous stage's exported weights, the way the reference
 implementation chains its single-task runs; the stack's recipe is the
 ``sdft`` recipe (``serve.yaml``) and its learning-rate schedule spans
-exactly the stage's steps. The stack takes four GPUs (the actor with the
-rollout engines colocated) and one host port, and the stream names it, so
+exactly the stage's steps. The stack takes eight GPUs (four for the actor,
+four for the rollout engines) and one host port, and the stream names it, so
 a second stream on other GPUs and another port (``CUDA_VISIBLE_DEVICES``,
 ``REEF_PORT``) runs beside it: a smoke beside the full run.
 
@@ -49,8 +49,8 @@ STAGES = ("tooluse", "science")
 TRAINING_PROMPTS = {"tooluse": 4046, "science": 2674}
 #: The rows' ``arm`` tag in the Lab store.
 ARM = "sdft"
-#: The stack's GPUs (four comma-separated ids) and the host port its Reef publishes.
-DEFAULT_GPUS = "0,1,2,3"
+#: The stack's GPUs (eight comma-separated ids) and the host port its Reef publishes.
+DEFAULT_GPUS = "0,1,2,3,4,5,6,7"
 DEFAULT_PORT = 28902
 #: serve.yaml's lr-warmup-iters; Megatron requires the decay span to be longer.
 LR_WARMUP_STEPS = 10
@@ -74,7 +74,7 @@ def stage_steps(task: str) -> int:
 
 
 def latest_export(stage_dir: Path) -> Path:
-    """The stage's last HF export (the bridge names them by training step)."""
+    """The stage's last HF export (Slime names them by rollout ID, one per training step)."""
     exports = [path for path in (stage_dir / "checkpoints" / "hf").glob("*") if path.name.isdigit()]
     if not exports:
         raise FileNotFoundError(f"no HF export under {stage_dir}/checkpoints/hf; the stage did not train")
@@ -84,8 +84,8 @@ def latest_export(stage_dir: Path) -> Path:
 def stack_environment(stream: str) -> dict[str, str]:
     """What the stack and the tasks read from the environment: the stack's name, its GPUs and its host port."""
     gpus = os.environ.get("CUDA_VISIBLE_DEVICES", DEFAULT_GPUS).split(",")
-    if len(gpus) != 4:
-        raise ValueError(f"CUDA_VISIBLE_DEVICES must name four GPUs, got {gpus}")
+    if len(gpus) != 8:
+        raise ValueError(f"CUDA_VISIBLE_DEVICES must name eight GPUs, got {gpus}")
     return {
         "STACK": stream,
         "REEF_HOST_PORT": os.environ.get("REEF_PORT", str(DEFAULT_PORT)),
