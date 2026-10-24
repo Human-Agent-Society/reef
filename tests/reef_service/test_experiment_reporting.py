@@ -100,7 +100,9 @@ def test_a_load_that_publishes_shipped_content_does_not_wait_for_the_tracker(
     (update / "harness.txt").write_text("updated shipped content")
     entered, release = Event(), Event()
 
-    def shipped(state, tree):
+    def shipped(backend, state, tree):
+        if backend is not backends[HARNESS]:
+            return None
         return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
 
     def blocked(event):
@@ -116,7 +118,7 @@ def test_a_load_that_publishes_shipped_content_does_not_wait_for_the_tracker(
                 return value.registry.reload("agent")
             return value.get_or_create_scenario("agent")
 
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
+    monkeypatch.setattr(type(backends[HARNESS]), "shipped_content_update", shipped)
     monkeypatch.setattr(tracker, "record", blocked)
     try:
         loaded = load()
@@ -143,7 +145,9 @@ def test_a_failed_load_still_reports_the_commit_that_landed(tmp_path, monkeypatc
     (update / "harness.txt").write_text("updated shipped content")
     publish = Scenario.publish_shipped_content
 
-    def shipped(state, tree):
+    def shipped(backend, state, tree):
+        if backend is not backends[HARNESS]:
+            return None
         return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
 
     def fail_after_publication(scenario):
@@ -154,7 +158,7 @@ def test_a_failed_load_still_reports_the_commit_that_landed(tmp_path, monkeypatc
         tracker.events.append(event)
         raise ConnectionError("tracker unavailable")
 
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
+    monkeypatch.setattr(type(backends[HARNESS]), "shipped_content_update", shipped)
     monkeypatch.setattr(Scenario, "publish_shipped_content", fail_after_publication)
     monkeypatch.setattr(tracker, "record", failing_record)
     try:

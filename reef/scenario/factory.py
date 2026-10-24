@@ -340,10 +340,23 @@ class ScenarioFactory:
                 local_dir=self._local_artifact_dir,
             )
             repository.synchronize_checkpoint()
+            # Repair the head mirror before reading the checkpoint's metadata.
+            # Runtimes decide whether recovery needs bytes before fetching them.
+            recovered_metadata = None if isinstance(current_artifact, LiveWeightArtifactRef) else backend.metadata()
+            if not isinstance(current_artifact, LiveWeightArtifactRef) and backend.current() != current_artifact:
+                raise ArtifactConflict(
+                    "repository head changed while reading recovered artifact metadata; retry recovery"
+                )
+            recovered_artifact = Artifact(
+                current_artifact,
+                repository,
+                metadata=recovered_metadata,
+            )
+            surface.restore_recovered(recovered_artifact, runtime)
             if not isinstance(current_artifact, LiveWeightArtifactRef):
                 # Traffic must not reach a recovered scenario before its committed
                 # head is servable; a failed activation leaves the scenario unloaded.
-                surface.activate(Artifact(current_artifact, repository), runtime)
+                surface.activate(recovered_artifact, runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,

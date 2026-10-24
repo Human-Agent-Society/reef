@@ -283,12 +283,12 @@ def test_the_scheduler_publishes_an_activated_candidate_only_after_the_commit(tm
     serving = runtime.serving
     scheduler = RuntimeScheduler(runtime, serving)
     before = serving.serving_runtime_load_id()
-    candidate = scheduler.train_candidate(
-        runtime.prepare_training_step(batch(), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0).payload
-    )
+    prepared = scheduler.prepare_training_step(batch(), TrainingMethod("mlx-test-tttd"), {}, ONE_STEP, 0)
+    candidate = scheduler.train_candidate(prepared.payload)
 
     activated = scheduler.activate_candidate(candidate)
 
+    assert candidate.current_runtime_load_id == before
     assert activated.runtime_load_id != before
     assert serving.serving_runtime_load_id() == activated.runtime_load_id
     assert runtime.engine.weights == {"layer.lora_a": 1.0, "layer.lora_b": 1.0}
@@ -361,6 +361,46 @@ def test_a_restore_loads_the_adapter_and_keeps_the_admission_state(tmp_path: Pat
     assert serving.serving_runtime_load_id() == restored
     assert serving.engine.loaded == [artifact.local_path]
     assert serving.inference_admission_status["open"] is admission_open
+
+
+def test_startup_recovery_materializes_once_and_activation_does_not_reload_it(tmp_path: Path) -> None:
+    from reef.artifact import InMemoryRepositoryBackend
+    from reef.surface.weights import WeightLoader
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapters.safetensors").write_text(json.dumps({"layer.lora_a": 5.0, "layer.lora_b": 5.0}))
+    backend = InMemoryRepositoryBackend.factory(adapter, root=tmp_path / "repository")("math")
+    reference = backend.fork(metadata={"runtime_load_id": "previous-incarnation:4"})
+    artifact = Artifact(reference, backend, metadata=backend.metadata())
+    serving = build(tmp_path).serving
+
+    assert artifact.local_path is None
+    restored = WeightLoader().restore_recovered(artifact, serving)
+
+    assert restored == serving.serving_runtime_load_id()
+    assert serving.current_runtime_load_id() == restored
+    assert len(serving.engine.loaded) == 1
+    assert serving.activate_checkpoint(artifact) == restored
+    assert len(serving.engine.loaded) == 1
+    assert serving.inference_admission_status["open"] is True
+
+
+def test_a_failed_checkpoint_load_leaves_admission_closed(tmp_path: Path) -> None:
+    @dataclass
+    class FailingEngine(FakeMLXEngine):
+        def load_adapter(self, source: Path) -> None:
+            raise RuntimeError("adapter load failed")
+
+    serving = build(tmp_path, FailingEngine()).serving
+    artifact = published_adapter(tmp_path)
+    current = serving.current_runtime_load_id()
+
+    with pytest.raises(RuntimeError, match="adapter load failed"):
+        serving.restore_checkpoint(artifact)
+
+    assert serving.inference_admission_status["open"] is False
+    assert serving.current_runtime_load_id() == current
 
 
 def test_recovery_reloads_a_checkpoint_published_under_another_engine(tmp_path: Path) -> None:

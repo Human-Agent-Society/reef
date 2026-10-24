@@ -45,6 +45,7 @@ class MLXServingRuntime(InferenceRuntime):
         self._incarnation = new_runtime_load_id_incarnation()
         self._load_sequence = 0
         self._serving_runtime_load_id = self._next_runtime_load_id()
+        self._recovered_release_id: str | None = None
         self._staged: dict[str, AdapterSnapshot] = {}
         self._inference_handler = MLXInferenceHandler(engine, self)
 
@@ -90,10 +91,23 @@ class MLXServingRuntime(InferenceRuntime):
         local_path = artifact.local_path
         if local_path is None:
             raise RuntimeContractError("mlx rollback requires a materialized adapter")
-        with self.paused_admission():
-            self._engine.load_adapter(Path(local_path))
-            self._serving_runtime_load_id = self._next_runtime_load_id()
+        was_open = self.inference_admission_status["open"]
+        self._recovered_release_id = None
+        self.pause_admission(wait=True, timeout=self.inference_timeout_s)
+        # A partial or corrupt adapter must never become visible. Leave
+        # admission closed if loading fails; the coordinator chooses recovery.
+        self._engine.load_adapter(Path(local_path))
+        self._serving_runtime_load_id = self._next_runtime_load_id()
+        self.mark_published()
+        if was_open:
+            self.resume_admission()
         return self._serving_runtime_load_id
+
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
+        """Reload the adapter that this in-process engine lost at startup."""
+        runtime_load_id = self.restore_checkpoint(artifact.materialize())
+        self._recovered_release_id = artifact.ref.release_id
+        return runtime_load_id
 
     def activate_checkpoint(self, artifact: Artifact) -> str:
         """Load a recovered checkpoint when the engine serves other weights.
@@ -102,6 +116,8 @@ class MLXServingRuntime(InferenceRuntime):
         them. An artifact that records the version the engine serves, or no
         version, needs no load.
         """
+        if artifact.ref.release_id == self._recovered_release_id:
+            return self._serving_runtime_load_id
         checkpoint = artifact.materialize()
         recorded = artifact_runtime_load_id(checkpoint)
         if recorded is None or recorded == self._serving_runtime_load_id:
@@ -134,6 +150,7 @@ class MLXServingRuntime(InferenceRuntime):
         except BaseException:
             self.resume_admission()
             raise
+        self._recovered_release_id = None
         self._serving_runtime_load_id = self._next_runtime_load_id()
         logger.info(
             "activated mlx candidate %s at runtime load ID %s", candidate.candidate_id, self._serving_runtime_load_id

@@ -22,7 +22,7 @@ from reef.train import CandidateBackend, PreparedStep, Trainer, TrainingBatch, T
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrajectoryItem
 
-TOKEN = "upload-test-token"
+TOKEN = "upload-test-token"  # Dummy credential for the local test app.
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
 
 
