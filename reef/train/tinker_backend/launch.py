@@ -202,8 +202,9 @@ class TinkerRuntimeFactory(RuntimeFactory):
     def __call__(
         self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
     ) -> tuple[TrainingRuntime, InferenceRuntime]:
+        from reef.train.job_runtime import JobTrainingRuntime
         from reef.train.tinker_backend.client import TinkerSDKClient
-        from reef.train.tinker_backend.runtime import TinkerTrainingRuntime
+        from reef.train.tinker_backend.component import TinkerTrainingComponent
 
         settings = TinkerConfig(**{key: value for key, value in config.items() if key != "type"})
         key = environ.get(settings.api_key_env)
@@ -211,10 +212,11 @@ class TinkerRuntimeFactory(RuntimeFactory):
             raise ValueError(f"Tinker requires the environment variable {settings.api_key_env}")
         client = TinkerSDKClient(model_path, settings, key)
         try:
-            training = TinkerTrainingRuntime(model_path, settings, client)
+            component = TinkerTrainingComponent(model_path, settings, client)
         except BaseException:
             client.close()
             raise
+        training = JobTrainingRuntime(component, component.state_dir / "runtime")
         try:
             inference = RuntimeRegistry().build(
                 {

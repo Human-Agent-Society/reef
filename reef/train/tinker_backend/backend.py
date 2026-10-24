@@ -84,7 +84,6 @@ class TinkerTrainingBackend(TrainingBackend):
         self._context = TrainingContext(
             next_rollout_id=start_rollout_id, history=ScenarioHistory(history_path(self._template))
         )
-        self._active_scenario: str | None = None
 
     # -- Coordinator contract
 
@@ -238,7 +237,8 @@ class TinkerTrainingBackend(TrainingBackend):
         return
 
     def activate_scenario(self, scenario: str) -> None:
-        self._active_scenario = scenario
+        """Every job names its scenario's adapter, so no scenario is active between jobs."""
+        return
 
     def send_adapter(self, scenario: str, name: str) -> None:
         raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")
