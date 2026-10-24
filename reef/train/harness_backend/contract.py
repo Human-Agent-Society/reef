@@ -178,7 +178,9 @@ class AgentHost:
 class ProposalContext:
     """Everything one step gives a proposer.
 
-    Values: ``tree`` is the head tree the patch applies to. ``samples`` are
+    Values: ``tree`` is the head tree the patch applies to, and ``descriptor``
+    the adapter it renders for, which says the kinds and config targets a
+    tree may hold there. ``samples`` are
     the step's trace samples in batch order, and ``sources`` holds one
     ``SampleSource`` per sample in the same order; a sample's ``score`` is
     ``None`` when the deployment batches unscored traffic. ``request`` is the
@@ -200,6 +202,7 @@ class ProposalContext:
     """
 
     tree: HarnessTree
+    descriptor: AdapterDescriptor
     samples: tuple[TrajectoryItem, ...]
     sources: tuple[SampleSource, ...]
     request: TrainingRequest | None

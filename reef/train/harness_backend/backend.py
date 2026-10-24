@@ -292,6 +292,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         calls = self.step_calls if self.step_calls is not None else StepCalls(0, [])
         context = ProposalContext(
             tree=head_tree,
+            descriptor=self.descriptor,
             samples=samples,
             sources=tuple(source_of(sample) for sample in samples),
             request=request,

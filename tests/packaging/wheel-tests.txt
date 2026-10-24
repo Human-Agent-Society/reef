@@ -18,8 +18,6 @@ tests/evaluation/test_evaluation_worker_pool.py
 tests/evaluation/test_regression_gate.py
 tests/evaluation/test_selection.py
 tests/evaluation/test_verifier_reward.py
-tests/harness/test_compose_core.py
-tests/harness/test_compose_loader.py
 tests/harness/test_cordis_floor.py
 tests/harness/test_e2b_executor.py
 tests/harness/test_e2b_tunnel.py
@@ -37,17 +35,14 @@ tests/harness/test_model_binding.py
 tests/harness/test_native_enforce.py
 tests/harness/test_native_harness.py
 tests/harness/test_native_loop.py
-tests/harness/test_native_plugins.py
 tests/harness/test_native_serve.py
 tests/harness/test_node_credential_scan.py
 tests/harness/test_node_directive_scan.py
-tests/harness/test_requests_extension.py
 tests/harness/test_requests_requires.py
 tests/harness/test_task_episode_runner.py
 tests/harness/test_terminus_agent.py
 tests/harness/test_terminus_episode.py
 tests/harness/test_terminus_tree.py
-tests/harness/test_version_check.py
 tests/inference/test_inference_control.py
 tests/inference/test_sglang_chat_capture.py
 tests/inference/test_vllm_chat_capture.py
@@ -105,7 +100,6 @@ tests/reef_service/test_harness_proposals.py
 tests/reef_service/test_harness_recipe.py
 tests/reef_service/test_harness_requests.py
 tests/reef_service/test_harness_step_record.py
-tests/reef_service/test_harness_wrapper.py
 tests/reef_service/test_learning_inspection.py
 tests/reef_service/test_local_inference_startup.py
 tests/reef_service/test_manual_training.py
@@ -129,7 +123,6 @@ tests/reef_service/test_release_page.py
 tests/reef_service/test_reports.py
 tests/reef_service/test_request_body_validation.py
 tests/reef_service/test_request_page.py
-tests/reef_service/test_requests_entries.py
 tests/reef_service/test_routes_off_loop.py
 tests/reef_service/test_runtime_registry.py
 tests/reef_service/test_scenario_api.py

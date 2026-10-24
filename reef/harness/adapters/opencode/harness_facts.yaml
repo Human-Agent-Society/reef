@@ -1,23 +1,24 @@
 # What reef's reefine proposer is told about opencode: see reef.harness.adapters.harness_facts.
 title: opencode
 command: >-
-  A person types an agent_command as /<id>. Its text is an opencode command file: YAML frontmatter with
+  A person types a command file as /<name>. Its text is an opencode command file: YAML frontmatter with
   description, and agent: <name> to run that command's own turn with that agent, then the prompt, where $ARGUMENTS
-  stands for what the person typed after /<id>. The session keeps its selected agent for the turns after the
+  stands for what the person typed after /<name>. The session keeps its selected agent for the turns after the
   command, except that a new session's first message sets it. Quote a frontmatter value that holds ': '
   (description: "Chat: web search only").
 tools: >-
   bash, read, edit, write, glob, grep, task, todowrite, skill, question, webfetch (reads one URL) and websearch
   (searches the web; no key needed)
 mode: >-
-  A mode is an agent. A config entry defines it in opencode.json with a permission map, which limits the tools the
-  model may call and so enforces the mode for the model, and a prompt, which replaces opencode's own system prompt
-  while the agent runs. The person enters the mode by selecting the agent: with /agents (or Tab), or by typing an
-  agent_command with agent: <name> in its frontmatter as the first message of a new session, which starts the
+  A mode is an agent. config/primary.json defines it (rendered into opencode.json) with a permission map, which
+  limits the tools the model may call and so enforces the mode for the model, and a prompt, which replaces
+  opencode's own system prompt while the agent runs. The person enters the mode by selecting the agent: with
+  /agents (or Tab), or by typing a command file with agent: <name> in its frontmatter as the first message of a
+  new session, which starts the
   session in that agent; the same command typed later in a session runs only its own turn with the agent, and the
   next message is back in the selected one. The person leaves with /agents, choosing build (Tab from the mode's
   agent reaches plan first, since Tab cycles build and then the other primary agents by name), together with a
-  leave command, an agent_command with agent: build whose text says the mode has ended and every tool is back, in
+  leave command, a command file with agent: build whose text says the mode has ended and every tool is back, in
   either order: opencode tells the model nothing when the agent changes, so without that turn the build model
   keeps refusing from the history. The leave command alone runs one build turn and leaves the chat agent selected,
   so its text, How to use and the chat agent's prompt never say it switches the session back: they name /agents,
@@ -34,6 +35,6 @@ mode: >-
   its own. Say how to enter and leave in the command's reply and in How to use.
 config_keys: [agent]
 config_example: >-
-  {"target": "primary", "data": {"agent": {"chat": {"mode": "primary", "description": "Chat, web search only",
-  "prompt": "<how the agent behaves>", "permission": {"*": "deny", "websearch": "allow"}}}}} is an agent whose
-  only tool is websearch
+  {"agent": {"chat": {"mode": "primary", "description": "Chat, web search only", "prompt": "<how the agent
+  behaves>", "permission": {"*": "deny", "websearch": "allow"}}}} in config/primary.json is an agent whose only
+  tool is websearch

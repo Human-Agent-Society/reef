@@ -195,7 +195,8 @@ class HarnessEvolutionSpec:
     ``EpisodeScorer`` classes, or are ``None`` when the deployment must name
     them in ``evolution.propose`` and ``evolution.evaluate``. ``selection``
     references the ``SelectionPlugin`` used when ``evolution.selection`` is
-    absent.
+    absent. ``seed`` is the directory of the first tree when
+    ``evolution.seed`` is absent, ``None`` for the empty tree.
     Purpose: a method recipe returns it from ``evolution_spec()``; the config
     parsing fills each part from it, and a deployment's own setting replaces it.
     """
@@ -203,6 +204,7 @@ class HarnessEvolutionSpec:
     proposer: PluginReference | None = None
     scorer: PluginReference | None = None
     selection: PluginReference = field(default_factory=lambda: PluginReference(ScoreComparisonPlugin))
+    seed: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -438,29 +440,30 @@ class HarnessEvolutionRecipe(Recipe):
         per_client = evolution.get("max_promoted_per_client", 5)
         if isinstance(per_client, bool) or not isinstance(per_client, int) or per_client < 0:
             raise RecipeConfigError("evolution.max_promoted_per_client must be an integer of at least 0")
+        spec = cls.evolution_spec()
         seed_dir = evolution.get("seed")
         if seed_dir is not None and (not isinstance(seed_dir, str) or not seed_dir.strip()):
             raise RecipeConfigError("evolution.seed must be the path of a harness tree directory")
+        seed_path = spec.seed if seed_dir is None else Path(seed_dir).expanduser()
         try:
-            seed = HarnessTree({}) if seed_dir is None else HarnessTree.read(Path(seed_dir).expanduser())
+            seed = HarnessTree({}) if seed_path is None else HarnessTree.read(seed_path)
         except ValueError as exc:
             raise RecipeConfigError(f"evolution.seed: {exc}") from exc
-        spec = cls.evolution_spec()
         selection_setting = evolution.get("selection")
         selection = spec.selection if selection_setting is None else selection_reference(selection_setting)
         if budgets["min_win_margin"]:
-            if selection_setting not in (None, "score_comparison"):
+            if not issubclass(selection.plugin_class, ScoreComparisonPlugin):
                 raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
             selection = PluginReference(ScoreComparisonPlugin, {"min_win_margin": budgets["min_win_margin"]})
         floor_score = evolution.get("floor_score", 1.0)
         if isinstance(floor_score, bool) or not isinstance(floor_score, (int, float)) or floor_score <= 0:
             raise RecipeConfigError("evolution.floor_score must be a positive number")
         if "floor_score" in evolution:
-            if selection_setting != "floor":
+            if not issubclass(selection.plugin_class, FloorPlugin):
                 raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
             selection = PluginReference(FloorPlugin, {"floor_score": float(floor_score)})
         # A recheck compares two trees; the floor evaluates one.
-        if selection_setting == "floor" and budgets["recheck_every"]:
+        if issubclass(selection.plugin_class, FloorPlugin) and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
         publish = evolution.get("publish", "auto")
         if publish not in ("auto", "review"):
@@ -603,7 +606,7 @@ class HarnessEvolutionRecipe(Recipe):
         """
         if self.served_endpoint is None or scenario is None:
             return binding
-        # The name is free form: quoted as the wrapper quotes it, so a slash or a space stays one segment.
+        # The name is free form: quoted, so a slash or a space stays one segment.
         route = f"{self.served_endpoint.url}/reef/scenarios/{quote(scenario, safe='')}"
         component = self.served_endpoint.component
         if component is not None:
