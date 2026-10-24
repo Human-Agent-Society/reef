@@ -27,12 +27,12 @@ TASKS = (
     "[csv] compute the median of the value column",
 )
 
-#: The verdicts the issue's all-passing run recorded: one rejection on a 0 win / 0 loss / 3 tie gate, then two
+#: The results the issue's all-passing run recorded: one rejection on a 0 win / 0 loss / 3 tie evaluation, then two
 #: steps the proposer gave no proposal. None of them publishes, so the head stays on the seed.
-REJECTED = {"wins": 0, "losses": 0, "ties": 3, "candidate_score": 3.0, "current_score": 3.0}
+REJECTED = {"selected": False, "wins": 0, "losses": 0, "ties": 3, "candidate_score": 3.0, "current_score": 3.0}
 SKIPPED = {"skipped": "no proposal"}
 NO_PUBLISH = (REJECTED, SKIPPED, SKIPPED)
-PUBLISHED = {"published": True, "wins": 1, "losses": 0, "ties": 2, "candidate_score": 3.0, "current_score": 2.0}
+PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_score": 3.0, "current_score": 2.0}
 #: The release a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
 SEED_RELEASE = "seed-release"
 PUBLISHED_RELEASE = "published-release"
@@ -60,6 +60,7 @@ class StubReefClient:
         self.verdicts = list(verdicts)
         self.head = head
         self.reports: list[dict] = []
+        self.references: list[list[str]] = []
         self.requested: list[str] = []
         self.reads: list[tuple[str, dict | str]] = []
         self.turns: list[str] = []
@@ -75,15 +76,16 @@ class StubReefClient:
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
         return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"
 
-    def report(self, scenario: str, payload: dict, **kwargs: object) -> dict:
+    def report(self, scenario: str, payload: dict, references: list[str], **kwargs: object) -> dict:
         self.reports.append(payload)
+        self.references.append(references)
         return {"agent_record_id": payload["agent_record_id"], "scenario": scenario, "request_type": "report"}
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
         if path == "/reef/harness/releases":
             rows = self._step_rows()
-            published = any(row["metrics"].get("published") for row in rows)
+            published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
             return {"releases": rows}
@@ -147,33 +149,34 @@ def _record_waits(runner: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[i
         waits.append(expected)
         return []
 
-    monkeypatch.setattr(runner, "_wait_for_steps", wait)
+    monkeypatch.setattr(runner, "wait_for_steps", wait)
     return waits
 
 
 def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: StubReefClient) -> None:
-    """The native form's surroundings: a pulled seed tree, and the turn and wrapper calls stubbed out.
+    """The native form's surroundings: a pulled seed tree, and the serve process's turns stubbed out.
 
-    The wrapper's ``report`` command posts the score outside the client, so the stub records it the same way:
-    the step rows the catalog answers with appear once the run has reported a turn, as they do in the service.
+    Each turn returns the receipts of its model calls, and the runner reports the score against them through
+    the client: the step rows the catalog answers with appear once the run has reported a turn, as they do in
+    the service.
     """
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / runner.RELEASE_FILE).write_text(json.dumps({"release_id": SEED_RELEASE}), encoding="utf-8")
     monkeypatch.setattr(runner, "TREE_DIR", tree)
     monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
-    monkeypatch.setattr(runner, "report", lambda score, feedback: client.reports.append({"score": score}))
 
     def turn(prompt, session=None):
         client.turns.append(prompt)
-        return [], {"text": "9592", "session": "session-1", "exit": 0}
+        number = len(client.turns)
+        return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": [f"r{number}"]}
 
     def mount_events(release_id):
         client.mounts.append(release_id)
         return [("native/sessions/serve.jsonl", {"release_id": release_id})]
 
     monkeypatch.setattr(runner, "turn", turn)
-    monkeypatch.setattr(runner, "_mount_events", mount_events)
+    monkeypatch.setattr(runner, "mount_events", mount_events)
 
 
 def test_an_all_passing_run_waits_for_the_step_every_report_it_submitted_batches(
@@ -233,9 +236,9 @@ def test_completed_steps_that_publish_nothing_end_the_run_without_reading_the_he
 
     assert elapsed < 30.0, f"the run waited {elapsed:.1f}s for a head change no step could publish"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
-    assert "step 1: rejected" in printed, "the rejected gate is on the record before the run ends"
+    assert "step 1: rejected" in printed, "the rejected step is on the record before the run ends"
     assert "step 2: no proposal" in printed and "step 3: no proposal" in printed
-    assert "no skill mutation won a gate" in printed
+    assert "no skill change passed the evaluation" in printed
     assert "/reef/harness" not in client.requested, "no step published, so the run must not pull the head"
 
 
@@ -252,7 +255,7 @@ def test_a_publishing_step_still_reaches_the_manifest(
 
     printed = capsys.readouterr().out
     assert "/reef/harness" in client.requested, "a step published, so the run reads the head it left behind"
-    assert "published: artifact published-release" in printed
+    assert "published: release published-release" in printed
 
 
 def test_the_native_run_stops_on_the_verdicts_of_steps_that_publish_nothing(
@@ -274,7 +277,7 @@ def test_the_native_run_stops_on_the_verdicts_of_steps_that_publish_nothing(
     assert elapsed < 2.0, f"the native run waited {elapsed:.1f}s on a head change no step could publish"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
     assert "3 report(s) batched (1 of them failing)" in printed
-    assert "no mutation won a gate" in printed
+    assert "no change passed the evaluation" in printed
     assert "/reef/harness" not in client.requested, "no step published, so the run must not follow the head"
 
 
@@ -319,13 +322,15 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
         first_manifest[1] == PUBLISHED_RELEASE
     ), f"the head the run read is {first_manifest[1]}, not the published one"
 
-    assert len(client.reports) == 3, "three turns, three scores reported through the wrapper"
+    assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
     assert "step 1: published" in printed, "the catalog returned this run's steps, one of them published"
-    assert f"published: artifact {PUBLISHED_RELEASE}" in printed, "the head is a release other than the seed"
+    assert f"published: release {PUBLISHED_RELEASE}" in printed, "the head is a release other than the seed"
     assert set(client.mounts) == {PUBLISHED_RELEASE}, f"the process mounted the published release, saw {client.mounts}"
     assert len(client.turns) == 4, f"the second pass runs after the run's three turns, saw {len(client.turns)}"
     assert "second pass" in printed
-    assert "no mutation won a gate" not in printed, "a step published, so the run must not take the no-publish path"
+    assert (
+        "no change passed the evaluation" not in printed
+    ), "a step published, so the run must not take the no-publish path"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
 
 
@@ -343,7 +348,8 @@ def test_the_native_run_waits_for_every_step_of_an_all_passing_run(
     runner.native_main()
 
     printed = capsys.readouterr().out
-    assert len(client.reports) == 3, "three turns, three scores reported through the wrapper"
+    assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
+    assert client.references == [["r1"], ["r2"], ["r3"]], "each score goes against the receipts its own turn returned"
     assert waits == [3], f"three accepted reports batch three steps; the native runner asked for {waits}"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
     assert "3 report(s) batched (0 of them failing)" in printed

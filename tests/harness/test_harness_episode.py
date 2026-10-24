@@ -23,12 +23,13 @@ from reef.harness.episodes.trajectory import (
     DeepseekSessionReader,
     HermesSessionReader,
     TrajectoryError,
+    final_assistant_text,
     read_opencode_session,
     read_pi_session,
     reader_for,
 )
-from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.evolution import evaluate, final_assistant_text
+from reef.harness.tree import HarnessTree, render_tree
+from reef.recipe.reefine.scorer import AnswerScorer
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -186,7 +187,7 @@ def fake_binary(tmp_path: Path, script: str) -> str:
 
 
 def pi_files() -> dict[str, str]:
-    return render_composition([("rules", {"text": "Answer briefly."})], get_adapter("pi"))
+    return render_tree(HarnessTree({"rules.md": "Answer briefly."}), get_adapter("pi"))
 
 
 def test_pi_episode_collects_exit_stdout_and_trajectory(tmp_path: Path) -> None:
@@ -255,7 +256,7 @@ def test_nonzero_exit_code_is_reported_not_raised(tmp_path: Path) -> None:
 
 
 def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path: Path) -> None:
-    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("opencode"))
+    files = render_tree(HarnessTree({"rules.md": "Answer briefly."}), get_adapter("opencode"))
     result = run_episode(get_adapter("opencode"), files, "list files", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert result.exit_code == 0
     assert [event["role"] for event in result.trajectory] == ["user", "assistant", "assistant"]
@@ -265,14 +266,14 @@ def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path
 
 def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path) -> None:
     """The reader joins each message to its parts, so the grader finds the text of the last assistant turn."""
-    files = render_composition([], get_adapter("opencode"))
+    files = render_tree(HarnessTree({}), get_adapter("opencode"))
     result = run_episode(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert final_assistant_text(result.trajectory) == "reef-ok"
-    assert evaluate("[health] Run the shell command `echo reef-ok`.", result) == 1.0
+    assert AnswerScorer().score("[health] Run the shell command `echo reef-ok`.", result) == 1.0
 
 
 def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
-    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("codex"))
+    files = render_tree(HarnessTree({"rules.md": "Answer briefly."}), get_adapter("codex"))
     result = run_episode(get_adapter("codex"), files, "list files", binary=fake_binary(tmp_path, CODEX_FAKE))
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"
@@ -305,7 +306,7 @@ print("done")
 
 
 def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
-    files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
+    files = render_tree(HarnessTree({"skills/notes/SKILL.md": "Keep notes."}), get_adapter("hermes"))
     result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
     assert result.exit_code == 0
     assert [event["type"] for event in result.trajectory] == ["session", "message"]
@@ -316,7 +317,7 @@ def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_loa
 def test_claude_episode_runs_with_the_updater_and_its_update_commands_off(tmp_path: Path) -> None:
     """The episode env sets both updater switches, and the agent's shell commands inherit them, so a claude update
     or claude install run there keeps the pinned version."""
-    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("claude"))
+    files = render_tree(HarnessTree({"rules.md": "Answer briefly."}), get_adapter("claude"))
     result = run_episode(get_adapter("claude"), files, "list files", binary=fake_binary(tmp_path, CLAUDE_FAKE))
     assert result.exit_code == 0
     assert [event["env"] for event in result.trajectory] == [{"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}]
@@ -420,7 +421,7 @@ def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str 
     expected_reply = None if answer is None else f"Output:\n{answer}"
     assert final_assistant_text(trajectory) == expected_reply
     result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
-    assert evaluate("[health] Reply with the shell command's output", result) == expected_score
+    assert AnswerScorer().score("[health] Reply with the shell command's output", result) == expected_score
     assert trajectory == tuple(events)
 
 

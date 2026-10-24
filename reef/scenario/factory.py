@@ -33,6 +33,7 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
 from reef.recipe.base import Recipe
 from reef.scenario.binding import ScenarioBinding
+from reef.scenario.release_files import ScenarioReleaseFiles
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
@@ -353,6 +354,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
+                releases=ScenarioReleaseFiles(name=name, store=store, repository=repository, surface=surface),
             )
             if any(
                 component_trainer.trainer.candidate_backend is not None
@@ -419,9 +421,6 @@ class ScenarioFactory:
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
                 component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
-            # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
-            # requests extension, for one) until it is republished; every later step builds on what it serves.
-            scenario.publish_shipped_content()
             return scenario
         except BaseException:
             if scenario is not None:

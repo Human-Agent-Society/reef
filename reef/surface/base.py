@@ -148,9 +148,8 @@ class FileTree(ABC):
 
 @dataclass(frozen=True)
 class HarnessInfo:
-    """What the harness routes need beyond the file tree: the seed behind the base release and the served model."""
+    """What the harness routes need beyond the file tree: the served model and how a client may reach it."""
 
-    seed_entries: tuple[Mapping[str, Any], ...] = ()
     served_model: str | None = None
     #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
     served_api: str = "openai"

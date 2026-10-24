@@ -1,11 +1,12 @@
-"""Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the harness
-requests defaults and the evaluation's floor over the one health task, the driver parses, the demo requests and the
-measurement's fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the
-README examples have valid shell syntax and local links resolve."""
+"""Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the text proposer
+and the evaluation's floor over the one health task, the driver parses and installs a source tree locally, the demo
+requests and the measurement's fixed list pass the request screens on POST /reef/train, the bugfix fixture fails its
+one test, and the README examples have valid shell syntax and local links resolve."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -19,9 +20,12 @@ from tests.support.config_helpers import load_harness_deployment as load_config
 from reef.core.plugins import PluginReference
 from reef.dispatcher.ingest import training_request_refusal
 from reef.evaluation.harness import FloorPlugin
-from reef.harness.tree.nodes import directive_shaped, secret_shaped
+from reef.harness.tree import HarnessTree, TreeKind
+from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.recipe import reefine
-from reef.recipe.reefine import ReefineRecipe, evolution
+from reef.recipe.reefine import ReefineRecipe, proposer
+from reef.recipe.reefine.recipe import SEED_DIRECTORY
+from reef.recipe.reefine.scorer import grade_text
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.profiles import profile_path
 
@@ -56,10 +60,10 @@ def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_floor(monkeypatch) -> None:
+def test_deployment_yaml_builds_the_recipe_with_the_text_proposer_and_the_floor(monkeypatch) -> None:
     """The demos use the built-in recipe with tutorial-local state, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
-    so a change publishes when the tree still works and a code_extension still waits."""
+    so a change publishes when the tree still works and an extension still waits."""
     from reef.recipe.registry import build_named_recipe
     from reef.service.assembly import _upstream_runtime
 
@@ -71,21 +75,20 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
     path = TUTORIAL / "configs" / "deployment.yaml"
     config = load_config(path)
     section = config["evolution"]
-    assert section["requests"] is True and section["version_check"] is True
     assert section["review_kinds"] == ["code_extension"]
     assert section["selection"] == "floor"
     assert config["data"]["training_mode"] == "manual"
     # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
     assert section["tasks"] == [HEALTH_TASK]
     assert load_config(profile_path("reefine"))["evolution"]["tasks"] == [HEALTH_TASK]
-    assert evolution.grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
+    assert grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
     assert [service["name"] for service in config["services"]] == ["reef"]
     module_name = section["propose"].partition(":")[0]
-    assert module_name == "reef.recipe.reefine.evolution"
+    assert module_name == "reef.recipe.reefine.proposer"
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
     # The selected module belongs to the active Reef installation, including a wheel outside the checkout.
-    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("evolution.py").resolve()
+    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("proposer.py").resolve()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/reefine/work/")
     assert config["run_dir"].startswith("tutorials/reefine/work/")
@@ -101,17 +104,13 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, ReefineRecipe) and built.adapter == "pi"
-    assert built.review_kinds == ("code_extension",)
-    # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
-    assert built.training_mode == "manual" and built.propose.reads_requests
+    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
+    # Manual mode needs a proposer that reads requests, which Reefine's does; the build refuses otherwise.
+    assert isinstance(built.propose, proposer.TextProposer) and built.training_mode == "manual"
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
     assert built.model_binding().model == "provider/model-a"
-    assert [entry["id"] for entry in built.seed] == [
-        "answer-style",
-        "reef-version-check",
-        "reef-requests",
-        "reef-pi-extension-api",
-    ]
+    # No seed in the deployment: the first tree is the recipe's own, the starter skill.
+    assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 
 
 def test_run_py_help_names_the_modes() -> None:
@@ -137,8 +136,8 @@ def test_run_sh_refuses_an_unknown_mode_before_touching_anything() -> None:
 
 
 def test_the_measurement_requests_pass_the_request_screens(run_module) -> None:
-    """The fixed list becomes proposer input through POST /reef/train: none of it may trip admission's directive
-    or credential screen, and the default --n has that many to file."""
+    """The fixed list becomes proposer input through POST /reef/train: none of it may trip the directive or
+    credential screen, and the default --n has that many to file."""
     requests = run_module.MEASURE_REQUESTS
     assert len(requests) >= 10 and len(set(requests)) == len(requests)
     for text in requests:
@@ -159,22 +158,23 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
     assert "answer with citations" in run_module.request_text("research")
 
 
-def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> None:
-    pending = {
-        "pending": True,
-        "metrics": {"selected": True, "mutation": {"op": "create", "id": "x", "options": {"name": "code_extension"}}},
-    }
+def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> None:
+    patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
+    pending = {"pending": True, "metrics": {"selected": True, "patch": patch}}
     rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
     skipped = {"metrics": {"skipped": "no proposal"}}
     assert run_module.result_of(pending) == "pending"
     assert run_module.result_of(rejected) == "rejected"
     assert run_module.result_of(skipped) == "skipped: no proposal"
     assert run_module.result_of({"operation": "promote"}) == "promote"
-    assert run_module.mutations_of(pending["metrics"]) == ["create x (code_extension)"]
-    assert run_module.kinds_of({"mutations": [{"options": {"name": "rules"}}, {"options": {"name": "skill"}}]}) == [
-        "rules",
-        "skill",
+    assert run_module.changes_of(pending["metrics"]) == [
+        "write extensions/speak.ts",
+        "write notes.txt",
+        "remove rules.md",
     ]
+    # A path off the layout has no kind: the page shows it as "?".
+    assert run_module.kinds_of(pending["metrics"]) == ["?", "code_extension", "rules"]
+    assert run_module.kinds_of(rejected["metrics"]) == []
     assert run_module.tally(rejected["metrics"]) == "0 / 1 / 2"
     assert run_module.tally(skipped["metrics"]) == "-"
     # The floor records how many tasks the candidate passed and failed, and runs no current side.
@@ -204,28 +204,12 @@ def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> 
     both = {"selection": {"evaluation": {"metrics": {"candidate_scores": [None], "current_scores": [None]}}}}
     assert run_module.tally_parts(both) == (0, 0, 1)
     assert run_module.tally_parts({"selection": {"evaluation": {"metrics": {"candidate_scores": [1.0]}}}}) is None
-    turns = [
-        {
-            "response": {
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [{"function": {"name": "bash", "arguments": '{"command": "pytest -q"}'}}]
-                        }
-                    }
-                ]
-            }
-        },
-        {"response": {"choices": [{"message": {"content": "done", "tool_calls": []}}]}},
-    ]
-    assert run_module._tool_calls(turns) == ["bash(pytest -q)"]
-    assert run_module._last_answer(turns) == "done"
 
 
 def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
     """Won is the evaluation's own count: met the floor on a row that carries passed and failed, more wins than losses
     on an older row, where under selection: always a publish said nothing about the evaluation; published is the
-    result. A request that never got a step or a mutation counts as filed only."""
+    result. A request that never got a step or a patch counts as filed only."""
     results = [
         {"request": "a", "filed": False, "result": "the request was not filed"},
         {"request": "b", "filed": True, "result": "no step"},
@@ -242,10 +226,10 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
             "losses": 0,
             "ties": 3,
         },
-        # A refusal at admission or a skip after three failed steps carries no mutation: filed, not answered.
-        {"request": "h", "filed": True, "kinds": "-", "result": "skipped: entry 'x' already exists"},
+        # A refused patch or a skip after three failed steps carries no patch: filed, not answered.
+        {"request": "h", "filed": True, "kinds": "-", "result": "skipped: the patch changes nothing"},
         {"request": "i", "filed": True, "kinds": "-", "result": "skipped: instruction failed"},
-        # Under the floor a row carries passed and failed: met the floor is won, missed is admitted and lost.
+        # Under the floor a row carries passed and failed: met the floor is won, missed is evaluated and lost.
         {"request": "j", "filed": True, "kinds": "rules", "result": "selected", "passed": 1, "failed": 0},
         {"request": "k", "filed": True, "kinds": "skill", "result": "rejected", "passed": 0, "failed": 1},
         {"request": "l", "filed": True, "kinds": "code_extension", "result": "pending", "passed": 1, "failed": 0},
@@ -260,17 +244,31 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
     }
 
 
-def test_the_driver_reads_the_wrapper_as_it_prints_and_spools() -> None:
-    """The acceptance line run.py parses and the spool name it reads are the wrapper's own."""
-    wrapper = (REPO_ROOT / "reef" / "harness" / "client" / "wrapper.py").read_text(encoding="utf-8")
-    driver = (TUTORIAL / "run.py").read_text(encoding="utf-8")
-    assert "training request {record_id} accepted" in wrapper
-    assert r"training request (\S+) accepted" in driver
-    # The phrases of the request store era are gone from both sides: nothing files, nothing reports a batch.
-    for phrase in ("the step runs with this batch", "filed (", "_rearm"):
-        assert phrase not in wrapper and phrase not in driver, phrase
-    assert '"training_request")' in driver and '"request")' not in driver
-    assert "{time.time_ns():020d}" in wrapper and r"-(\d{20})-" in driver
+def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_module, tmp_path, monkeypatch) -> None:
+    """The demo is the client: it pulls the source tree, checks what the release requires on this machine, and
+    renders the tree locally with its own model binding; a release that requires what the machine lacks stops it."""
+    manifest: dict = {"release_id": "r1", "files": {"rules.md": "Answer briefly.\n"}, "requires": []}
+    paths: list[str] = []
+
+    class Client:
+        def get(self, path, extra_headers=None):
+            paths.append(path)
+            return manifest
+
+    monkeypatch.setattr(run_module, "_client", Client)
+    monkeypatch.setattr(run_module, "_ensure_scenario", lambda client: None)
+    monkeypatch.setattr(run_module, "INSTALL_ROOT", tmp_path / "harness")
+    assert run_module.install() == "r1" and paths == ["/reef/harness?form=source"]
+    rendered = tmp_path / "harness" / "pi-agent"
+    assert "Answer briefly." in (rendered / "AGENTS.md").read_text()
+    models = json.loads((rendered / "models.json").read_text())
+    assert run_module.SERVICE_URL in models["providers"]["reef"]["baseUrl"]
+    assert models["providers"]["reef"]["headers"] == {"x-reef-scenario": run_module.SCENARIO}
+    record = json.loads((tmp_path / "harness" / run_module.RELEASE_FILE).read_text())
+    assert record["release_id"] == "r1" and "pi-agent/AGENTS.md" in record["files"]
+    monkeypatch.delenv("REEF_DEMO_PHONE", raising=False)
+    manifest["requires"] = [{"name": "REEF_DEMO_PHONE", "kind": "env", "prompt": "The phone number to text"}]
+    assert run_module.install("r2") is None and paths[-1] == "/reef/harness?form=source&release_id=r2"
 
 
 def test_the_workspace_fixture_fails_exactly_one_test() -> None:
@@ -327,20 +325,18 @@ def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     """run.sh exports REEF_PROPOSER_TIMEOUT_S because the method package's defaults (60 s for a failure step,
     120 s for a request) are short of what a local 26B model needs, and pins REEF_PROPOSER_MAX_TOKENS at the
     package's request default of 16384, the budget a thinking model needs; unset, the defaults stand."""
-    from reef.recipe.reefine import evolution
-
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
-    assert evolution._timeout_s(120.0) == 120.0
+    assert proposer.timeout_s(120.0) == 120.0
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
-    assert evolution._timeout_s(120.0) == 900.0
+    assert proposer.timeout_s(120.0) == 900.0
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", " ")
-    assert evolution._timeout_s(60.0) == 60.0
+    assert proposer.timeout_s(60.0) == 60.0
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
-    assert evolution._max_tokens(16384) == 16384
+    assert proposer.max_tokens(16384) == 16384
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
-    assert evolution._max_tokens(16384) == 32768
+    assert proposer.max_tokens(16384) == 32768
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
-    assert evolution._max_tokens(16384) == 16384
+    assert proposer.max_tokens(16384) == 16384
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
     assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
     assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh

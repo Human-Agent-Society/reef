@@ -1,8 +1,9 @@
-"""What a text proposer is told about each harness it writes entries for, beside pi.
+"""What a text proposer is told about each harness it writes files for, beside pi.
 
-pi's surface is its extension API, which a proposer reads from the tree's own
-reference skill. Every other adapter takes rules, skills, commands and, where
-its config can enforce a behavior, a few config keys. Its directory's
+pi's surface is its extension API, which a proposer reads from the reference
+beside pi's descriptor (``pi_extension_api.md``). Every other adapter takes
+rules, skills, commands and, where its config can enforce a behavior, a few
+config keys. Its directory's
 ``harness_facts.yaml`` says how a person types a command there, what the
 command file holds, which tools the harness has of its own (web search among
 them) and how a mode is built, so a request is answered with that harness's
@@ -31,11 +32,11 @@ from reef.harness.adapters.descriptor import DescriptorError
 class HarnessFacts:
     """One harness's surface as a request prompt and its review describe it.
 
-    ``command`` says how a person invokes an agent_command and what its text
+    ``command`` says how a person invokes a command file and what its text
     holds; ``tools`` names the harness's own tools; ``mode`` says how a mode
     is turned on, shown and turned off there. ``config_keys`` are the top
-    level keys a request's config entry may set in the primary config file,
-    and ``config_example`` shows one. ``machine``, when set, says where the
+    level keys a request may change in the primary config file, and
+    ``config_example`` shows one. ``machine``, when set, says where the
     change runs, for a harness that runs somewhere other than the person's
     machine; the prompt then gives it in place of the client's report."""
 

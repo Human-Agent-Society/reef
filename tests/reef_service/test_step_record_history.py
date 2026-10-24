@@ -3,18 +3,30 @@
 import asyncio
 import io
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_proposals import _dispatcher as _instruction_dispatcher
-from tests.reef_service.test_harness_proposals import _recipe
-from tests.reef_service.test_harness_requests import _request
-from tests.reef_service.test_release_page import FIRST, SCENARIO, _committed, _dispatcher
+from tests.support.harness_service import harness_dispatcher, wait_for_rows
+from tests.support.harness_steps import changed_rules, harness_recipe
 
+from reef.harness.tree import TreePatch
 from reef.service.app import create_app
-from reef.train.cordis_backend.record_history import MAX_RECORD_BYTES, read_step_records
+from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_step_records
+
+SCENARIO = "agents"
+
+
+def train_request(text: str) -> dict:
+    return {"text": text, "session": "3f1c2a9d0b7e", "release_id": "rel-0"}
+
+
+def manual_dispatcher(tmp_path: Path, propose):
+    """A manual pi scenario that keeps every step's record under ``tmp_path / "steps"``."""
+    recipe = harness_recipe(
+        tmp_path, propose, reads_requests=True, training_mode="manual", step_record_dir=str(tmp_path / "steps")
+    )
+    return harness_dispatcher(tmp_path, recipe)
 
 
 def test_record_scope_and_limits(tmp_path: Path) -> None:
@@ -44,7 +56,7 @@ def test_record_scope_and_limits(tmp_path: Path) -> None:
 
 
 def test_step_record_http_contract(tmp_path: Path) -> None:
-    dispatcher = _dispatcher(tmp_path, keep_records=True)
+    dispatcher = manual_dispatcher(tmp_path, lambda context: TreePatch(changed_rules("marker rules\n")))
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
 
@@ -53,19 +65,19 @@ def test_step_record_http_contract(tmp_path: Path) -> None:
         await client.start_server()
         headers = {"Authorization": "Bearer test-token", "x-reef-scenario": SCENARIO}
         try:
-            response = await client.post("/reef/train", json=_request(FIRST), headers=headers)
+            response = await client.post("/reef/train", json=train_request("add a rule"), headers=headers)
             assert response.status == 200
-            await _committed(scenario, 2)
+            await wait_for_rows(scenario, 2)
             url = "/reef/harness/releases/1/records"
             assert (await client.get(url)).status == 401
             response = await client.get(url, headers=headers)
             assert response.status == 200 and response.headers["Cache-Control"] == "no-store"
             inventory = await response.json()
             assert inventory["status"] == "retained"
-            assert "mutations.json" in [entry["path"] for entry in inventory["files"]]
-            response = await client.get(url, params={"path": "mutations.json"}, headers=headers)
+            assert {"patch.json", "proposer.json"} <= {entry["path"] for entry in inventory["files"]}
+            response = await client.get(url, params={"path": "patch.json"}, headers=headers)
             assert response.status == 200
-            assert json.loads((await response.json())["text"])
+            assert json.loads((await response.json())["text"]) == changed_rules("marker rules\n")
             assert (await client.get(url, params={"path": "../secret.json"}, headers=headers)).status == 400
             assert (await client.get(url, params={"path": "absent.json"}, headers=headers)).status == 404
             assert (await client.get("/reef/harness/releases/99/records", headers=headers)).status == 404
@@ -103,24 +115,22 @@ def test_failed_proposer_records_remain_linked_after_reload_and_retry(tmp_path: 
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
-    def propose(nodes, samples, models, *, requests=()):
-        models.served.chat([{"role": "user", "content": requests[0]["text"]}])
-        return
+    def propose(context):
+        context.models.served.chat([{"role": "user", "content": context.request.text}])
 
-    recipe = replace(_recipe(tmp_path, propose), training_mode="manual", step_record_dir=str(tmp_path / "steps"))
-    dispatcher = _instruction_dispatcher(tmp_path, recipe)
-    dispatcher.get_or_create_scenario("s")
+    dispatcher = manual_dispatcher(tmp_path, propose)
+    dispatcher.get_or_create_scenario(SCENARIO)
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher, tokens="test-token")))
         await client.start_server()
-        headers = {"Authorization": "Bearer test-token", "x-reef-scenario": "s"}
+        headers = {"Authorization": "Bearer test-token", "x-reef-scenario": SCENARIO}
         try:
             for step, instruction in enumerate(("fail", "retry"), 1):
-                response = await client.post("/reef/train", json=_request(instruction), headers=headers)
+                response = await client.post("/reef/train", json=train_request(instruction), headers=headers)
                 assert response.status == 200
                 for _ in range(200):
-                    scenario = dispatcher.get_or_create_scenario("s")
+                    scenario = dispatcher.get_or_create_scenario(SCENARIO)
                     if len(scenario.releases()) > step:
                         break
                     await asyncio.sleep(0.05)

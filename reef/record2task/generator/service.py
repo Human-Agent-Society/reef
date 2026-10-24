@@ -47,7 +47,7 @@ from reef_client.client import ReefClientError
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskEpisode, TaskEpisodeError, TaskEpisodeRunner, checked_labels
+from reef.harness.episodes.tasks import TaskEpisode, TaskEpisodeError, TaskEpisodeRunner, checked_labels
 from reef.record2task.generator.designer import (
     Designer,
     DesignerError,

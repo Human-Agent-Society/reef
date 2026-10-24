@@ -13,23 +13,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 from tests.support._trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
 
-from tests.support._strategies import resolve_episode_scorer
-
 from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import EpisodeRunner, Feedback, GEPAProposer, GEPASelectorMixin
-from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from recipes.gepa.proposer import Feedback, GEPAProposer, GEPASettings, archive_for_step, sync
+from recipes.gepa.selection import GEPASelection
+from reef.core.evaluation import EvaluationResult
+from reef.evaluation.harness import HarnessCandidate, ScoredEpisode
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree import HarnessTree, TreeKind
+from reef.train.harness_backend.contract import ProposalContext, SampleSource, StepOutcome, TrialRunner
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]
@@ -109,47 +112,56 @@ def run_upstream(run_dir: Path, budget: int):
     return result, log, GEPAState.load(str(run_dir)).i + 1
 
 
-class ReefEpisodes(EpisodeRunner):
-    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
-        text = files["pi-agent/AGENTS.md"].rstrip("\n")
-        return EpisodeResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
+class ReefTrials(TrialRunner):
+    """The proposer's minibatch episodes: a tree answers with the token its rules text and the task encode."""
+
+    def run(self, tree: HarnessTree, tasks) -> tuple[ScoredEpisode, ...]:
+        text = tree.files["rules.md"]
+        return tuple(
+            ScoredEpisode(score_of(output_for(text, task)), None, reply=output_for(text, task)) for task in tasks
+        )
 
 
-class Reflector:
+class Reflector(ModelBinding):
     def chat(self, messages, **params):
         return reflect(messages[0]["content"])
 
 
-def evaluate(task: str, result: EpisodeResult) -> float:
-    return score_of(result.trajectory[-1]["content"])
+def run_reef(iterations: int) -> tuple[Archive, dict[int, dict[str, Any]]]:
+    """``iterations`` steps the way the backend runs them, and the plan the driver drew for each iteration.
 
-
-def run_reef(tmp_path: Path, iterations: int) -> Archive:
-    archive = Archive(tmp_path / "archive.json")
+    Each step's driver draws the iteration's plan from the committed method
+    state and the latest outcome, as the AIME driver does, and sends the
+    planned training problems as traffic; the proposer draws the same plan.
+    """
     proposer = GEPAProposer(
-        archive=archive,
-        descriptor=get_adapter("pi"),
-        binary=None,
-        score_episode=resolve_episode_scorer(evaluate),
+        GEPASettings(
+            minibatch_size=3,
+            rng_seed=0,
+            skip_perfect_score=True,
+            perfect_score=1.0,
+            max_metric_calls=None,
+            kinds=(TreeKind.RULES,),
+            trainset_size=len(TRAIN),
+        ),
         feedback=ReefFeedback(),
-        minibatch_size=3,
-        rng_seed=0,
-        skip_perfect_score=True,
-        perfect_score=1.0,
-        max_metric_calls=None,
-        kinds=("rules",),
-        valset_size=len(VAL),
-        episode_runner=ReefEpisodes(),
     )
-    selector = GEPASelectorMixin(archive)
+    selection = GEPASelection(None)
     served = ModelBinding("http://model.test", "m", api_key="k")
-    models = ModelBindings(served=served, named={"reflection": Reflector()})
+    models = ModelBindings(served=served, named={"reflection": Reflector("http://model.test", "reflection")})
+    validation = tuple(example["input"] for example in VAL)
     text = SEED_TEXT
-    for iteration in range(iterations):
-        plan = archive.plan(len(TRAIN), len(VAL), 3)
+    method_state: Mapping[str, Any] = {}
+    last_outcome: StepOutcome | None = None
+    plans: dict[int, dict[str, Any]] = {}
+    for step in range(1, iterations + 1):
+        planned = archive_for_step(method_state, last_outcome)
+        sync(planned, {"rules.md": text}, len(VAL))
+        plan = planned.plan(len(TRAIN), len(VAL), 3)
+        plans[plan["iteration"]] = plan
         samples = tuple(
             recorded_trajectory(
-                f"r{iteration}-{index}",
+                f"r{step}-{index}",
                 {
                     "messages": [{"role": "user", "content": TRAIN[index]["input"]}],
                     "response": {"message": {"role": "assistant", "content": output_for(text, TRAIN[index]["input"])}},
@@ -158,30 +170,60 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
             )
             for index in plan["minibatch"]
         )
-        mutations = proposer((("rules", {"text": text}),), samples, models)
-        if not mutations:
-            continue
-        child = str(mutations[0].options["config"]["text"])
-        evaluation = EvaluationResult(
-            evaluator="test",
-            evaluator_version="1",
-            metrics={
-                "candidate_scores": tuple(score_of(output_for(child, v["input"])) for v in VAL),
-                "current_scores": tuple(score_of(output_for(text, v["input"])) for v in VAL),
-            },
+        tree = HarnessTree({"rules.md": text})
+        proposal = proposer.propose(
+            ProposalContext(
+                step=step,
+                tree=tree,
+                descriptor=get_adapter("pi"),
+                samples=samples,
+                sources=tuple(SampleSource(None, "untagged") for _ in samples),
+                request=None,
+                evaluation_tasks=validation,
+                models=models,
+                method_state=method_state,
+                last_outcome=last_outcome,
+                trials=ReefTrials(),
+            )
         )
-        if selector.decide(UpdateCandidate(candidate_id=f"c{iteration}"), evaluation).selected:
+        assert proposal.method_state is not None
+        method_state = proposal.method_state
+        if not proposal.patch.changes:
+            continue
+        child = str(proposal.patch.changes["rules.md"])
+        candidate_scores = tuple(score_of(output_for(child, task)) for task in validation)
+        current_scores = tuple(score_of(output_for(text, task)) for task in validation)
+        decision = selection.decide(
+            HarnessCandidate(
+                candidate_id=f"c{step}",
+                candidate_tree=tree.apply(proposal.patch),
+                current_tree=tree,
+                patch=proposal.patch,
+                evaluation_tasks=validation,
+                method_state=method_state,
+            ),
+            EvaluationResult(
+                evaluator="test",
+                evaluator_version="1",
+                metrics={"candidate_scores": candidate_scores, "current_scores": current_scores},
+            ),
+        )
+        last_outcome = StepOutcome(
+            step, proposal.patch, decision.selected, decision.reason, candidate_scores, current_scores
+        )
+        if decision.selected:
             text = child
-    return archive
+    # The last step's validation folds in as the next step would fold it.
+    return archive_for_step(method_state, last_outcome), plans
 
 
 def test_the_method_walks_upstreams_exact_trajectory(tmp_path: Path) -> None:
     result, log, iterations = run_upstream(tmp_path / "upstream", budget=400)
-    archive = run_reef(tmp_path / "reef", iterations)
+    archive, plans = run_reef(iterations)
 
     # The same candidates, in the same order, from the same parents, with
     # the same validation means.
-    assert [c.texts["rules"] for c in archive.candidates] == [c["rules"] for c in result.candidates]
+    assert [c.texts["rules.md"] for c in archive.candidates] == [c["rules"] for c in result.candidates]
     assert [c.parent for c in archive.candidates] == [None, *(p[0] for p in result.parents[1:])]
     assert [round(archive.mean_val(i), 6) for i in range(len(archive.candidates))] == [
         round(s, 6) for s in result.val_aggregate_scores
@@ -189,7 +231,7 @@ def test_the_method_walks_upstreams_exact_trajectory(tmp_path: Path) -> None:
     # Every accepted iteration showed the reflection model the same problems
     # from the same parent.
     for entry in log:
-        plan = archive.plans[str(entry["i"])]
+        plan = plans[entry["i"]]
         assert plan["minibatch"] == list(entry["subsample_ids"]), entry["i"]
         assert plan["parent"] == entry["selected_program_candidate"], entry["i"]
     assert len(log) >= 3, "the synthetic task must accept several candidates for this check to mean anything"

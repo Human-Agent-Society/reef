@@ -1,6 +1,6 @@
 """opencode adapter quirks: boot mutations, agent and command shapes, and frontmatter.
 
-opencode's boot mutates its own composition directories: it injects a
+opencode's boot mutates its own configuration directories: it injects a
 ``$schema`` key into config files that lack one (an in-place edit of a
 rendered file, invisible to the residue scan), writes a ``.gitignore``, and
 npm-installs ``@opencode-ai/plugin`` with a ``node_modules`` tree and
@@ -197,9 +197,9 @@ def check_binding_shape(config: Mapping[str, object]) -> None:
         return
     if provider is None or model is None:
         key = "model" if provider is None else "provider"
-        raise RenderError(f"opencode composition must not set {key}: Reef's model binding writes provider and model")
+        raise RenderError(f"opencode harness tree must not set {key}: Reef's model binding writes provider and model")
     refusal = (
-        f"opencode composition must not set provider: Reef's model binding writes the only one, {BINDING_PROVIDER!r}"
+        f"opencode harness tree must not set provider: Reef's model binding writes the only one, {BINDING_PROVIDER!r}"
     )
     if not isinstance(provider, dict) or set(provider) != {BINDING_PROVIDER}:
         raise RenderError(refusal)
@@ -212,7 +212,7 @@ def check_binding_shape(config: Mapping[str, object]) -> None:
     if any(entry != {} for entry in models.values()):
         raise RenderError(refusal)
     if not isinstance(model, str) or model.removeprefix(f"{BINDING_PROVIDER}/") not in models:
-        raise RenderError("opencode composition must not set model: Reef's model binding chooses it")
+        raise RenderError("opencode harness tree must not set model: Reef's model binding chooses it")
 
 
 def check_agent_name(where: str, agent: object, agents: Collection[str]) -> None:
@@ -384,7 +384,7 @@ class OpencodeAdapterRenderer(AdapterRenderer):
         elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
             # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
             raise RenderError(
-                "opencode composition leaves no agent that can start a run: every agent it keeps is a subagent or "
+                "opencode harness tree leaves no agent that can start a run: every agent it keeps is a subagent or "
                 "hidden"
             )
         commands = config.get("command")
@@ -434,7 +434,7 @@ class OpencodeAdapterRenderer(AdapterRenderer):
                 where = f"command {command_name!r}"
                 frontmatter = read_frontmatter(where, text)
                 # opencode files a command file under the name in its frontmatter, so another name would put this
-                # file in the place of the command of that name, /reefine included.
+                # file in the place of the command of that name.
                 if "name" in frontmatter and frontmatter["name"] != command_name:
                     raise RenderError(
                         f"opencode {where} frontmatter must not set name {frontmatter['name']!r}: opencode files the "

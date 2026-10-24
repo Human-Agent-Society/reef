@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shlex
 import signal
 import sys
 import tempfile
@@ -26,7 +25,6 @@ from typing import Any
 
 import yaml
 
-from reef.harness.adapters import get_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -268,12 +266,6 @@ class _Stack:
             self.shutdown()
             raise
         _log(f"stack up. logs: {self.run_dir}/*.log")
-        hint = install_hint(self.config)
-        if hint is not None:
-            _log(
-                "install the harness in another terminal; keep its install root, the last argument, outside the "
-                f"project the agent works in: {hint}"
-            )
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -357,37 +349,6 @@ class _Stack:
     @property
     def exit_code(self) -> int:
         return int(self._unexpected_exit.is_set())
-
-
-def install_hint(config: Mapping[str, Any]) -> str | None:
-    """The one line that installs a harness evolution deployment's harness, or None for a deployment without one.
-
-    Printed when the stack is up so nobody copies it from a README: the
-    address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds. The
-    token is exported once, so curl's header and the script, whose binding
-    takes it from ``REEF_TOKEN``, read the same value: a script run without it
-    would install a harness every call of which answers 401. The script
-    installs under ``~/reef-harness/<scenario>`` by default, outside the
-    project the agent works in. An adapter Reef installs nothing for
-    (terminus) gets no line."""
-    adapter = config_value(config, "reef", "evolution", "adapter")
-    if not isinstance(adapter, str) or not adapter or get_adapter(adapter).install is None:
-        return None
-    host = str(config_value(config, "reef", "host", default="127.0.0.1"))
-    if host in ("0.0.0.0", "::", ""):
-        host = "127.0.0.1"
-    port = config_value(config, "reef", "port", default="8900")
-    token = config_value(config, "reef", "token", default=None)
-    if token is None:
-        tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
-        if isinstance(tokens, list) and tokens:
-            token = str(tokens[0])
-    url = f"'http://{host}:{port}/reef/harness/install?adapter={adapter}'"
-    if token:
-        header = '-H "Authorization: Bearer $REEF_TOKEN"'
-        return f"export REEF_TOKEN={shlex.quote(str(token))}; curl -fsS {header} {url} | bash"
-    return f"curl -fsS {url} | bash"
 
 
 def _component_selection(

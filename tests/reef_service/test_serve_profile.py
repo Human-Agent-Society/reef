@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.harness_steps import COMPONENT, TreeReleases
 
 from reef.recipe.reefine import ReefineRecipe
 from reef.service.deploy.cli import build_parser, build_serve_parser
@@ -18,6 +19,7 @@ from reef.service.deploy.orchestrator import _model_overrides, _prepare_profile,
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.backend import ComponentReleases
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -132,7 +134,8 @@ def test_the_reefine_profile_loads_and_boots_its_recipe(monkeypatch, tmp_path) -
     assert isinstance(built, ReefineRecipe) and built.adapter == "pi" and built.training_mode == "manual"
     assert built.model_binding().model == "gemma4:26b"
     records = SQLiteRecordStore()
-    trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
+    releases = ComponentReleases(TreeReleases(built.seed), COMPONENT)
+    trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records, releases=releases)
     assert trainer.pipeline.training_mode == "manual"
     trainer.close()
     records.close()

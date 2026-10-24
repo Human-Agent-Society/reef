@@ -34,6 +34,7 @@ from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree
 from reef.recipe.reefine.agent import launch_pi, rendered_files
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
 from reef.record2task.generator.designer import (
@@ -45,12 +46,13 @@ from reef.record2task.generator.designer import (
 )
 from reef.sandbox.environment import download_directory
 from reef.sandbox.process import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout
-from reef.train.cordis_backend.strategies import AgentHost, ProposerCalls
+from reef.train.harness_backend.contract import ProposerCalls
 
 logger = logging.getLogger(__name__)
 
 TOOLS_EXTENSION = Path(__file__).with_name("author_tools.ts")
-TOOLS_ENTRY_ID = "autoenvscaling-tools"
+#: Where the agent's tools land in its harness tree.
+TOOLS_PATH = "extensions/autoenvscaling-tools.ts"
 # The agent is told to finish, with the best task it has, this long before its time runs out.
 FINISH_SECONDS = 420
 MODEL_CALL_TIMEOUT_SECONDS = 1200.0
@@ -536,26 +538,13 @@ class AgentAuthor(TaskAuthor):
         if stop.is_set():
             raise AuthorError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
-        host = AgentHost(
-            descriptor=self.descriptor,
-            binary=binary,
-            executor=executor,
-            step_dir=None,
-            calls=calls,
-            timeout_s=self.timeout_seconds,
-            # This agent runs no trials of its own.
-            trial_timeout_s=0.0,
-        )
         rules = AGENT_RULES.format(
             system_prompt=SYSTEM_PROMPT,
             rules=rebuild_rules(self.has_behaviour_rule),
             max_checks=tools.checks.max_checks,
             review=REVIEW_TEXT if tools.checks.is_reviewing else "",
         )
-        nodes = (
-            ("rules", {"text": rules}),
-            ("code_extension", {"name": TOOLS_ENTRY_ID, "code": TOOLS_EXTENSION.read_text(encoding="utf-8")}),
-        )
+        agent_tree = HarnessTree({"rules.md": rules, TOOLS_PATH: TOOLS_EXTENSION.read_text(encoding="utf-8")})
         binding = ModelBinding(base_url=gateway.base_url, model=self.upstream.model, api=self.upstream.api)
         env = {
             "REEF_AUTHOR_URL": gateway.base_url,
@@ -575,9 +564,10 @@ class AgentAuthor(TaskAuthor):
                 target=close_when_stopped, args=(stop, finished, session), name="autoenvscaling-stop", daemon=True
             ).start()
             outcome, trajectory = launch_pi(
-                host,
+                self.descriptor,
+                binary,
                 session,
-                rendered_files(nodes, binding, host),
+                rendered_files(agent_tree, binding, self.descriptor),
                 AGENT_PROMPT,
                 env,
                 root=work_dir,

@@ -1,380 +1,140 @@
-"""The native host's registries: what the loop consumes, filled once from files or live by the node plugins.
+"""The native host: the registries the loop reads, filled once from a rendered tree.
 
 The interpreter reads a ``NativeHost`` at every use instead of holding the
-tools, hooks, agents, graphs, loop and prompt it was built with, so a change to the
-registries between two steps is what the next step runs on. The episode form
-fills one at boot and never changes it: from the root's ``tree.json`` through
-the node plugins in ``reef.harness.runners.native.plugins`` when the render carried
-one, else from the rendered files; the plugins fill one entry by entry and
-take each entry out again when it leaves (RFC #269).
+tools, hooks, agents, graphs, loop and prompt it was built with. The episode
+form fills one at boot from the rendered files and never changes it. The
+serve form builds a new host for each tree it mounts and swaps it in between
+two steps, so the next step runs on the new tree.
 """
 
 from __future__ import annotations
 
 import json
-import shutil
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from reef.harness.runners.native import (
     DEFAULT_SYSTEM_PROMPT,
-    TREE_FILE,
     HookModule,
     LoadError,
     LoopModule,
     ToolModule,
     context_window_from,
-    hook_from_module,
-    import_module_file,
     load_agents,
     load_hooks,
     load_loop,
     load_tools,
-    loop_from_module,
-    tool_from_source,
 )
-from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Graph, GraphError, Host
-from reef.harness.runners.native.seed import SEED_GRAPH
-from reef.harness.tree.nodes import NATIVE_EVENTS, flat_entry_refusal
-from reef.harness.tree.render import render_native_module
-
-Remover = Callable[[], None]
-_MODULE_DIRS = {"native_tool": "tools", "native_hook": "hooks", "native_loop": "loops"}
-
-
-def _graph_from_file(path: Path) -> Graph:
-    try:
-        return Graph(json.loads(path.read_text(encoding="utf-8")), source=path.stem)
-    except (OSError, ValueError) as exc:
-        raise GraphError(f"graphs/{path.name} cannot run: {exc}") from exc
-
-
-class TreeOrder(ABC):
-    """The tree's entry ids in tree order, read when order matters, so a reorder without a config change counts."""
-
-    @abstractmethod
-    def ids(self) -> Sequence[str]: ...
+from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, SEED_GRAPH, Graph, GraphError, Host
+from reef.harness.tree.checks import NATIVE_EVENTS
 
 
 class NativeHost(Host):
-    """The registries the loop reads; every ``add`` returns the call that takes the item out again."""
+    """The registries the loop reads.
 
-    def __init__(self, mount_dir: Path | None = None, order: TreeOrder | None = None) -> None:
-        #: Where ``mount_module`` writes tool, hook and loop modules; the episode form loads the rendered files instead.
-        self.mount_dir = mount_dir
-        #: Where rules and windows take their order from; without one, the order they were added in.
-        self.order = order
-        #: The compose loader a tree boot reconciled the entries through, so a later mount is one more
-        #: ``root.update``; None when the host was filled from the rendered files.
-        self.loader: Any = None
-        self._tools: dict[str, ToolModule] = {}
-        self._hooks: dict[str, HookModule] = {}
-        self._graphs: dict[str, Graph] = {}
-        self._agents: dict[str, Mapping[str, Any]] = {}
-        self._loop: LoopModule | None = None
-        self._rules: dict[str, str] = {}
-        self._skills: dict[str, str] = {}
-        self._windows: dict[str, int] = {}
+    Values: tools, hooks, graphs, agents and skills by name, at most one item
+    per name in each; at most one loop; the rules text; and the context
+    window in tokens. Purpose: ``from_root`` fills one from a rendered tree,
+    and the serve form adds its built-in tools; the interpreter reads it at
+    every use.
+    """
 
-    def _ordered(self, keys: Iterable[str]) -> list[str]:
-        """``keys`` in tree order when the host has one, keys the tree does not name last, else as added."""
-        added = list(keys)
-        if self.order is None:
-            return added
-        rank: dict[str, int] = {}
-        for index, id_ in enumerate(self.order.ids()):
-            rank.setdefault(id_, index)  # an id listed twice counts where it first appears
-        return sorted(added, key=lambda key: (rank.get(key, len(rank)), added.index(key)))
+    def __init__(self) -> None:
+        self.tool_modules: dict[str, ToolModule] = {}
+        self.hook_modules: dict[str, HookModule] = {}
+        self.graphs: dict[str, Graph] = {}
+        self.agent_options: dict[str, Mapping[str, Any]] = {}
+        self.loop_module: LoopModule | None = None
+        self.rules = ""
+        self.skills: dict[str, str] = {}
+        self.window = DEFAULT_CONTEXT_WINDOW
 
     # -- what the interpreter reads --------------------------------------------------------------------------
 
     @property
     def tools(self) -> dict[str, ToolModule]:
         """By name, in name order: the order the rendered files load in."""
-        return {name: self._tools[name] for name in sorted(self._tools)}
+        return {name: self.tool_modules[name] for name in sorted(self.tool_modules)}
 
     @property
     def hooks(self) -> dict[str, list[HookModule]]:
         """Every hook under its event in name order, which is the waterfall order and the file name order."""
         hooks: dict[str, list[HookModule]] = {event: [] for event in NATIVE_EVENTS}
-        for name in sorted(self._hooks):
-            hooks[self._hooks[name].event].append(self._hooks[name])
+        for name in sorted(self.hook_modules):
+            hooks[self.hook_modules[name].event].append(self.hook_modules[name])
         return hooks
 
     @property
     def agents(self) -> dict[str, Mapping[str, Any]]:
-        return {name: self._agents[name] for name in sorted(self._agents)}
+        return {name: self.agent_options[name] for name in sorted(self.agent_options)}
 
     @property
     def loop(self) -> LoopModule | None:
         """The loop code that runs the root turn in place of ``graph("main")``; None when the graph runs."""
-        return self._loop
+        return self.loop_module
 
     @property
     def context_window(self) -> int:
-        """The ``context_window`` of the last models config in tree order, else the default; the render merges the same way."""
-        keys = self._ordered(self._windows)
-        return self._windows[keys[-1]] if keys else DEFAULT_CONTEXT_WINDOW
+        return self.window
 
     def graph(self, name: str = "main") -> Graph:
         """``seed`` is the built in loop and ``main`` falls back to it; any other missing name is a GraphError."""
-        if name == "seed" or (name == "main" and "main" not in self._graphs):
+        if name == "seed" or (name == "main" and "main" not in self.graphs):
             return Graph(SEED_GRAPH, source="seed")
-        graph = self._graphs.get(name)
+        graph = self.graphs.get(name)
         if graph is None:
             raise GraphError(f"graph {name!r} is missing")
         return graph
 
     def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str:
-        """Rules in tree order, then every skill in name order (or the named ones), then an agent's own prompt."""
-        parts = [self._rules[key] for key in self._ordered(self._rules)]
-        parts.extend(self._skills[name] for name in sorted(self._skills) if skills is None or name in skills)
+        """The rules, then every skill in name order (or the named ones), then an agent's own prompt."""
+        parts = [self.rules]
+        parts.extend(self.skills[name] for name in sorted(self.skills) if skills is None or name in skills)
         if prompt:
             parts.append(prompt.strip())
         return "\n\n".join(part for part in parts if part) or DEFAULT_SYSTEM_PROMPT
 
-    # -- registration; each call returns its inverse -----------------------------------------------------------
+    # -- registration ------------------------------------------------------------------------------------------
 
-    def add_tool(self, tool: ToolModule) -> Remover:
-        if tool.name in self._tools:
+    def add_tool(self, tool: ToolModule) -> None:
+        if tool.name in self.tool_modules:
             raise LoadError(f"tool {tool.name!r} is already installed; one name, one tool")
-        self._tools[tool.name] = tool
+        self.tool_modules[tool.name] = tool
 
-        def remove() -> None:
-            if self._tools.get(tool.name) is tool:
-                self._tools.pop(tool.name)
-
-        return remove
-
-    def add_hook(self, hook: HookModule) -> Remover:
-        if hook.name in self._hooks:
-            raise LoadError(f"hook {hook.name!r} is already installed; one name, one hook")
-        self._hooks[hook.name] = hook
-
-        def remove() -> None:
-            if self._hooks.get(hook.name) is hook:
-                self._hooks.pop(hook.name)
-
-        return remove
-
-    def add_graph(self, graph: Graph) -> Remover:
-        """Keyed by ``source``: the file stem in the episode form, the node name in the live one."""
-        if graph.source in self._graphs:
-            raise GraphError(f"graph {graph.source!r} is already installed; one name, one graph")
-        self._graphs[graph.source] = graph
-
-        def remove() -> None:
-            if self._graphs.get(graph.source) is graph:
-                self._graphs.pop(graph.source)
-
-        return remove
-
-    def add_agent(self, options: Mapping[str, Any]) -> Remover:
-        name = str(options["name"])
-        if name in self._agents:
-            raise LoadError(f"agent {name!r} is already installed; one name, one agent")
-        self._agents[name] = options
-
-        def remove() -> None:
-            if self._agents.get(name) is options:
-                self._agents.pop(name)
-
-        return remove
-
-    def add_loop(self, module: LoopModule) -> Remover:
-        """The loop replaces the interpreter for the root turn, so a tree has room for one whatever its name."""
-        if self._loop is not None:
-            raise LoadError(
-                f"one loop per tree: {self._loop.name!r} is already installed, so {module.name!r} cannot be"
-            )
-        self._loop = module
-
-        def remove() -> None:
-            if self._loop is module:
-                self._loop = None
-
-        return remove
-
-    def add_rule(self, key: str, text: str) -> Remover:
-        """One rules section under ``key``, the entry id the tree order names; a later add under the same key replaces it."""
-        section = self._rules[key] = text.strip()
-
-        def remove() -> None:
-            if self._rules.get(key) is section:
-                self._rules.pop(key)
-
-        return remove
-
-    def add_skill(self, name: str, text: str) -> Remover:
-        if name in self._skills:
-            raise LoadError(f"skill {name!r} is already installed; one name, one skill")
-        self._skills[name] = text.strip()
-
-        def remove() -> None:
-            self._skills.pop(name, None)
-
-        return remove
-
-    def set_context_window(self, key: str, value: int) -> Remover:
-        """The window under ``key``; the last one set wins while it stands."""
-        self._windows[key] = value
-
-        def remove() -> None:
-            self._windows.pop(key, None)
-
-        return remove
-
-    def mount_module(self, kind: str, options: Mapping[str, Any]) -> Remover:
-        """Write a tool, hook or loop node's module under the mount directory and register it.
-
-        A tool is read from its source and imported only where a call runs;
-        a hook is imported here, since ``listen`` runs in this process. A
-        failure at any step leaves nothing behind; the inverse unregisters
-        the module and removes the file."""
-        if self.mount_dir is None:
-            raise LoadError("the native host has no mount directory to write tool, hook and loop modules under")
-        name = str(options["name"])
-        path = self.mount_dir / _MODULE_DIRS[kind] / f"{name}.py"
-        if path.exists():
-            # The file is the installed module of the entry that owns the name; a twin fails before touching it.
-            raise LoadError(f"{kind} {name!r} is already installed; one name, one module")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_native_module(kind, options), encoding="utf-8")
-        try:
-            if kind == "native_tool":
-                remove = self.add_tool(tool_from_source(path))
-            elif kind == "native_loop":
-                remove = self.add_loop(loop_from_module(path, import_module_file(path, "reef_native_loop"), options))
-            else:
-                remove = self.add_hook(hook_from_module(path, import_module_file(path, f"reef_{kind}")))
-        except BaseException:
-            path.unlink(missing_ok=True)
-            if not any(path.parent.iterdir()):
-                path.parent.rmdir()  # made for this file: an empty directory is a leftover as the file would be
-            raise
-
-        def uninstall() -> None:
-            remove()
-            path.unlink(missing_ok=True)
-            # The execute seed tool imports its siblings in a subprocess, which caches their bytecode beside them.
-            cache = path.parent / "__pycache__"
-            for stale in cache.glob(f"{path.stem}.*.pyc"):
-                stale.unlink(missing_ok=True)
-            for directory in (cache, path.parent):
-                if directory.is_dir() and not any(directory.iterdir()):
-                    directory.rmdir()
-
-        return uninstall
-
-    def dispose(self) -> None:
-        """Take every entry out and remove the mount directory; the episode form calls it when the turn ends."""
-        if self.loader is not None:
-            self.loader.root.update([])
-        self._loop = None
-        if self.mount_dir is not None:
-            shutil.rmtree(self.mount_dir, ignore_errors=True)
-
-    # -- the episode form ----------------------------------------------------------------------------------------
+    # -- the rendered tree -------------------------------------------------------------------------------------
 
     @classmethod
-    def from_root(cls, root: Path, mount_dir: Path | None = None) -> NativeHost:
-        """The rendered root read once at boot: its entries list through the node plugins when it carries one, else its files.
+    def from_root(cls, root: Path) -> NativeHost:
+        """The rendered native directory read once: its tools, hooks, agents, graphs, loop, rules, skills and models.
 
-        A tree boot needs ``mount_dir`` for the tool, hook and loop modules and
-        needs every entry ACTIVE; a file that cannot load raises LoadError or
-        GraphError either way. The pinned model fields stay host state in
-        ``models.json`` whichever way the host was filled."""
-        tree = root / TREE_FILE
-        if tree.is_file():
-            return cls._from_tree(tree, mount_dir)
+        A file that cannot load raises LoadError or GraphError. The pinned
+        model fields stay in ``models.json``, which the loop reads apart.
+        """
         host = cls()
-        for tool in load_tools(root / "tools").values():
-            host.add_tool(tool)
+        host.tool_modules = dict(load_tools(root / "tools"))
         for listeners in load_hooks(root / "hooks").values():
             for hook in listeners:
-                host.add_hook(hook)
-        for options in load_agents(root / "agents").values():
-            host.add_agent(options)
+                if hook.name in host.hook_modules:
+                    raise LoadError(f"two hook files declare the name {hook.name!r}; one name, one hook")
+                host.hook_modules[hook.name] = hook
+        host.agent_options = dict(load_agents(root / "agents"))
         graphs_dir = root / "graphs"
         for path in sorted(graphs_dir.glob("*.json")) if graphs_dir.is_dir() else []:
-            host.add_graph(_graph_from_file(path))
-        loop = load_loop(root / "loops")
-        if loop is not None:
-            host.add_loop(loop)
+            try:
+                host.graphs[path.stem] = Graph(json.loads(path.read_text(encoding="utf-8")), source=path.stem)
+            except (OSError, ValueError) as exc:
+                raise GraphError(f"graphs/{path.name} cannot run: {exc}") from exc
+        host.loop_module = load_loop(root / "loops")
         rules = root / "RULES.md"
         if rules.is_file():
-            host.add_rule("RULES.md", rules.read_text(encoding="utf-8"))
+            host.rules = rules.read_text(encoding="utf-8").strip()
         for path in sorted((root / "skills").glob("*/SKILL.md")):
-            host.add_skill(path.parent.name, path.read_text(encoding="utf-8"))
+            host.skills[path.parent.name] = path.read_text(encoding="utf-8").strip()
         models = root / "models.json"
         if models.is_file():
-            host.set_context_window("models.json", context_window_from(models))
-        return host
-
-    @classmethod
-    def _from_tree(cls, tree: Path, mount_dir: Path | None) -> NativeHost:
-        """One fresh compose context over the entries list; the loader stays on the host for later mounts."""
-        # Late: the training package imports the harness, and the episode form pays for it only on a tree boot.
-        from reef.harness.compose import Context
-        from reef.harness.compose.loader import Loader
-        from reef.harness.runners.native.plugins import NATIVE_PLUGINS
-
-        entries = tree_entries(tree)
-        if mount_dir is None:
-            raise LoadError(f"{tree.name} needs a mount directory for its tool, hook and loop modules")
-        ctx = Context()
-        host = cls(mount_dir=mount_dir)
-        ctx.provide("native", host)
-        loader = Loader(ctx, NATIVE_PLUGINS.get)
-        loader.root.update(entries)
-        failure = tree_failure(loader)
-        if failure is not None:
-            # A boot that fails leaves nothing behind: the siblings that did load come out with their modules.
-            loader.root.update([])
-            raise LoadError(f"{tree.name} entry {failure[0]!r} cannot load: {failure[1]}")
-        host.loader = loader
+            host.window = context_window_from(models)
         return host
 
 
-def tree_entries(path: Path) -> list[dict[str, Any]]:
-    """The entries list a ``tree.json`` carries: a JSON array of objects with a string ``id`` and ``name`` and an object ``config``."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise LoadError(f"{path.name} cannot be read: {exc}") from exc
-    if not isinstance(data, list) or not all(isinstance(entry, dict) for entry in data):
-        raise LoadError(f"{path.name} must be a JSON array of entry objects")
-    seen: set[str] = set()
-    for entry in data:
-        for key in ("id", "name"):
-            if not isinstance(entry.get(key), str) or not entry[key]:
-                raise LoadError(f"{path.name} entry {entry!r} requires a non-empty string {key!r}")
-        refusal = flat_entry_refusal(entry)
-        if refusal is not None:
-            raise LoadError(f"{path.name} entry {entry['id']!r} cannot load: {refusal}")
-        if entry["id"] in seen:
-            # The loader would keep the last one silently; a tree with two entries under one id is not one tree.
-            raise LoadError(f"{path.name} names entry {entry['id']!r} twice")
-        seen.add(entry["id"])
-    return [dict(entry) for entry in data]
-
-
-def tree_failure(loader: Any) -> tuple[str, str] | None:
-    """The first enabled entry that did not end ACTIVE, as (id, what went wrong); None when every entry stands."""
-    from reef.harness.compose import FiberState
-
-    for options in loader.root.data:
-        entry = loader.store.get(str(options.get("id")))
-        if entry is None or entry.disabled:
-            continue
-        kind = str(entry.options.get("name"))
-        if entry.fiber is None:
-            return entry.id, f"no plugin for kind {kind}"
-        if entry.fiber.state is not FiberState.ACTIVE:
-            return (
-                entry.id,
-                f"{kind}: {entry.fiber.error if entry.fiber.error is not None else entry.fiber.state.name}",
-            )
-    return None
+__all__ = ["NativeHost"]

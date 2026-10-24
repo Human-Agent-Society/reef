@@ -40,6 +40,7 @@ from reef.surface.weights import create_weight_surface
 from reef.task2batch import NoBatches
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
@@ -238,6 +239,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -259,6 +261,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
@@ -286,6 +289,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
+                    releases=None if releases is None else ComponentReleases(releases, component),
                 ),
             ),
         )
@@ -352,7 +356,7 @@ class Recipe:
 
     @property
     def harness_adapter(self) -> str | None:
-        """The adapter a client installs this recipe's harness tree with (``reef-<adapter>``).
+        """The adapter this recipe's harness releases render for, as ``GET /reef/harness`` serves them.
 
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
@@ -563,6 +567,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 

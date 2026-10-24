@@ -1,4 +1,4 @@
-// The proposer agent's own tools: its workspace through Reef's admission, and the candidate harness run for real.
+// The proposer agent's own tools: its workspace through Reef's validation, and the candidate harness run for real.
 // Both go to the gateway at REEF_PROPOSER_URL, which holds every credential; this file holds none.
 import { Type } from "typebox";
 import { readFile, writeFile } from "node:fs/promises";
@@ -61,10 +61,10 @@ export default function (pi) {
     name: "harness_check",
     label: "Check the harness",
     description:
-      "Read workspace/harness back into entries and run Reef's admission on them, exactly as the evolve step will: " +
-      "the mutations it would apply, or why it refuses them (a bad name, a reserved id, a credential-shaped text, " +
-      "an extension that does not load). Takes no arguments.",
-    promptSnippet: "Check workspace/harness against Reef's admission",
+      "Read workspace/harness back as a patch against the tree it started from and run Reef's validation on it, " +
+      "exactly as the evolve step will: the files the patch changes, or every problem it has (a path off the " +
+      "layout, a credential-shaped text, an extension that does not load). Takes no arguments.",
+    promptSnippet: "Check workspace/harness against Reef's validation",
     promptGuidelines: ["Run harness_check after every change to workspace/harness and fix what it refuses."],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal) {

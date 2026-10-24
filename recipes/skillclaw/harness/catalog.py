@@ -7,9 +7,8 @@ paper-pinned OpenClaw catalog format, the eligibility rules, and the
 it lives in the method package, not in reef.
 
 The one adaptation is the layer: the artifact this rebuild serves is the
-rendered pi composition tree, so the module owns the ``pi-agent`` layer and
-reads the pool from its ``skills/<name>/SKILL.md`` entries (the render path
-of ``skill`` nodes). The injected section is byte-identical to the sealed
+harness source tree, so the module owns its ``skills`` layer and reads the
+pool from its ``<name>/SKILL.md`` files. The injected section is byte-identical to the sealed
 one: OpenClaw's ``## Skills (mandatory)`` system-prompt section
 (``system-prompt.ts``: ``buildSkillsSection`` wrapping
 ``formatSkillsForPrompt`` or ``formatSkillsCompact``), listing each eligible
@@ -36,8 +35,7 @@ from reef.surface.skills import RequestSkillLayer
 class SkillCatalogModule(RequestSkillLayer):
     """The LLM-read layer for a skill pool: many skills, catalog-injected."""
 
-    layer = "pi-agent"
-    skills_dir = "skills"
+    layer = "skills"
     skill_filename = "SKILL.md"
 
     _NAME_ENTRY = re.compile(r"<skill>\s*<name>(.*?)</name>", re.DOTALL)
@@ -51,21 +49,16 @@ class SkillCatalogModule(RequestSkillLayer):
         self._max_chars = max_chars
 
     def validate(self, files: Mapping[str, str]) -> None:
-        """Every ``skills/`` entry must live in a skill directory with a
-        SKILL.md; the layer's other rendered files (settings.json,
-        models.json, ...) are the adapter's own and pass through."""
+        """Every file of the layer must live in a skill directory with a SKILL.md."""
         directories = set()
-        prefix = f"{self.skills_dir}/"
         for path in files:
-            if not path.startswith(prefix):
-                continue
-            name, separator, rest = path[len(prefix) :].partition("/")
+            name, separator, rest = path.partition("/")
             if not separator or not name or not rest:
                 raise ReefError(f"{self.layer}/{path} is not under a skill directory")
             directories.add(name)
         for name in sorted(directories):
-            if f"{prefix}{name}/{self.skill_filename}" not in files:
-                raise ReefError(f"{self.layer}/{prefix}{name}/ must contain {self.skill_filename}")
+            if f"{name}/{self.skill_filename}" not in files:
+                raise ReefError(f"{self.layer}/{name}/ must contain {self.skill_filename}")
 
     def prepare_request(self, files: Mapping[str, str], path: str, payload: dict[str, Any]) -> dict[str, Any]:
         text = self.served_text(files)
@@ -98,11 +91,11 @@ class SkillCatalogModule(RequestSkillLayer):
         return self._skills_section(catalog)
 
     def _eligible_skills(self, files: Mapping[str, str]) -> list[dict[str, str]]:
-        """Catalog rows in ``skills/<name>/SKILL.md`` path order, ineligible skills dropped."""
+        """Catalog rows in ``<name>/SKILL.md`` path order, ineligible skills dropped."""
         skills = []
         for path in sorted(files):
             parts = path.split("/")
-            if len(parts) != 3 or parts[0] != self.skills_dir or parts[2] != self.skill_filename:
+            if len(parts) != 2 or parts[1] != self.skill_filename:
                 continue
             front = _frontmatter(files[path])
             if front is None:

@@ -1,7 +1,7 @@
 """The trace pipeline: the trace batching half of harness evolution.
 
 The pipeline pairs reports with their inference records and batches every
-valid scored trace; the evolution backend (``CordisBackend``) consumes the
+valid scored trace; the evolution backend (``HarnessBackend``) consumes the
 batch. The stages are built from a ``pipeline`` section, as a deployment
 configures them, rather than through any Recipe wrapper.
 """
@@ -14,9 +14,10 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.pipeline_context import PipelineContext
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
-from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceTasks
+from reef.record2task.traces import InferenceTasks, TraceTasks
+from reef.task2batch.traces import TraceBatches
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import TrainingBatch
 
@@ -45,7 +46,7 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
     "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
-    "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
+    "record2task": {"module": "reef.record2task.traces:InferenceTasks"},
 }
 
 
@@ -54,7 +55,7 @@ def harness_stages(*, inference: bool = False, buffer_size: int | None = None) -
     section: dict = dict(INFERENCE_STAGES) if inference else {}
     if buffer_size is not None:
         section["task2batch"] = {"config": {"buffer_size": buffer_size}}
-    return PipelineConfig.from_setting(section, spec=CordisRecipe.pipeline_spec(), environ={})
+    return PipelineConfig.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
 def reports_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:

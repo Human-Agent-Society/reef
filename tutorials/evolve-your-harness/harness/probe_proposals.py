@@ -1,10 +1,11 @@
-"""Sample the native proposer over one failing task and count what admission lets through.
+"""Sample the native proposer over one failing task and count what validation lets through.
 
 The proposer is ``harness.native_evolution.propose`` with the serve file's
-seed nodes and one recorded failure; each sample is one model call. A sample
-is parsed when it yields a mutation and admitted when that mutation passes
-its node kind's admission rules, the same check the evolve step runs before
-any episode. The table this prints is the one the README's results carry.
+seed tree and one recorded failure; each sample is one model call. A sample
+is parsed when it yields a patch and admitted when the patch passes
+``validate_patch`` for the native adapter, the same check the evolve step
+runs before any episode. The table this prints is the one the README's
+results carry.
 """
 
 import argparse
@@ -23,33 +24,28 @@ sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 from harness import native_evolution
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.runners.native.seed import SEED_NODES
-from reef.harness.tree.nodes import NODE_KINDS
+from reef.harness.tree import HarnessTree, locate, validate_patch
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")
 
 
-class _Models:
+class Models:
     """What ``propose`` reads: ``models.served``, one binding that records its replies."""
 
     def __init__(self, binding: ModelBinding) -> None:
         self.served = binding
 
 
-def _seed(serve: Path) -> tuple[tuple[str, dict], ...]:
+def seed_tree(serve: Path) -> HarnessTree:
+    """The serve file's seed tree; its ``evolution.seed`` path is relative to the tutorial directory."""
     config = yaml.safe_load(serve.read_text())
-    nodes = []
-    for entry in config["recipe"]["config"]["evolution"]["seed"]:
-        if isinstance(entry, str):
-            nodes.extend((node["name"], node["config"]) for node in SEED_NODES)
-        else:
-            nodes.append((entry["name"], entry["config"]))
-    return tuple(nodes)
+    return HarnessTree.read(HERE.parent / config["recipe"]["config"]["evolution"]["seed"])
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sample the native proposer and count admitted mutations by kind.")
+    parser = argparse.ArgumentParser(description="Sample the native proposer and count admitted changes by kind.")
     parser.add_argument("--serve", default=HERE.parent / "configs" / "serve-native.yaml", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="the OpenAI compatible endpoint")
     parser.add_argument("--model", default="qwen2.5:7b")
@@ -60,8 +56,9 @@ def main(argv: list[str] | None = None) -> int:
 
     config = yaml.safe_load(args.serve.read_text())
     task = next(t for t in config["recipe"]["config"]["evolution"]["tasks"] if t.startswith(args.task))
-    nodes = _seed(args.serve)
-    models = _Models(ModelBinding(base_url=args.base_url, model=args.model, api_key="none"))
+    tree = seed_tree(args.serve)
+    descriptor = get_adapter("native")
+    models = Models(ModelBinding(base_url=args.base_url, model=args.model, api_key="none"))
     sample = make_trajectory(
         (
             AgentRecord.create(
@@ -77,17 +74,16 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for i in range(args.samples):
         started = time.time()
-        mutation = native_evolution.propose(nodes, (sample,), models)
-        row = {"i": i, "seconds": round(time.time() - started), "parsed": mutation is not None}
-        if mutation is not None:
-            kind = mutation.options["name"]
-            row["kind"] = kind
-            try:
-                NODE_KINDS[kind](None, mutation.options["config"])
-                row["admitted"] = True
-            except ValueError as exc:
-                row["admitted"] = False
-                row["reason"] = str(exc)[:160]
+        patch = native_evolution.propose(tree, (sample,), models)
+        row = {"i": i, "seconds": round(time.time() - started), "parsed": patch is not None}
+        if patch is not None:
+            # The first path is the proposal's own file; an agent's graph edit rides beside it.
+            location = locate(next(iter(patch.changes)))
+            row["kind"] = "?" if location is None else location.kind.value
+            validation = validate_patch(tree, patch, descriptor)
+            row["admitted"] = validation.passed
+            if not validation.passed:
+                row["reason"] = validation.message()[:160]
         rows.append(row)
         print(json.dumps(row), flush=True)
     if args.rows:

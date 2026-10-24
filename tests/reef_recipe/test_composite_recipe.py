@@ -22,6 +22,8 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.harness.adapters import get_adapter
+from reef.harness.delivery import create_harness_surface
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
@@ -30,7 +32,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
+from reef.surface import Surface, TextFileTree, create_config_surface
 from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
@@ -75,12 +77,14 @@ class _TreeRecipe(Recipe):
     seed: Mapping[str, str] | None = None
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(served_model="served-model")
+        return create_harness_surface(get_adapter("pi"), served_model="served-model")
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         return self.seed
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         return Trainer.build(
             scenario,
             records,
@@ -108,7 +112,9 @@ def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
 class _HybridTreeRecipe(_TreeRecipe):
     """The tree recipe with a pipeline that runs in every mode."""
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         return Trainer.build(
             scenario,
             records,
@@ -478,7 +484,7 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_committed_step"]["step"] == 1
         assert status["components"]["config"]["last_committed_step"] is None
-        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"})
+        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
         assert manifest["components"]["harness"] == result.artifact.ref.content_id
@@ -677,9 +683,9 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     """The harness head of a flat scenario is the served release, found on the chain when the log keeps no rows."""
     tree = tmp_path / "seed"
     tree.mkdir()
-    (tree / "AGENTS.md").write_text("seed")
+    (tree / "rules.md").write_text("seed")
     dispatcher = Dispatcher(
-        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"}),
         InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
@@ -691,13 +697,14 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         headers = {"x-reef-scenario": "agent"}
         evolved = tmp_path / "evolved"
         evolved.mkdir()
-        (evolved / "AGENTS.md").write_text("evolved")
+        (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_artifact_ref().release_id
         assert service.harness_head(headers) == head
-        manifest = service.harness_manifest(headers)
-        assert manifest["release_id"] == head and manifest["files"] == {"AGENTS.md": "evolved"}
-        assert f'"release_id": "{head}"' in service.harness_install_script(headers, adapter="pi")
+        source = service.harness_manifest(headers, form="source")
+        assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
+        # The default form renders the source tree for the adapter.
+        assert service.harness_manifest(headers)["files"]["pi-agent/AGENTS.md"].startswith("evolved")
     finally:
         dispatcher.close()
 
@@ -758,7 +765,9 @@ class _EpisodeTreeRecipe(_TreeRecipe):
     closing: threading.Event = field(default_factory=threading.Event)
     episode_done: threading.Event = field(default_factory=threading.Event)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         return Trainer.build(
             scenario,
             records,

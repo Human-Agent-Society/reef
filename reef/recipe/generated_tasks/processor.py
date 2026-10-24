@@ -47,7 +47,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
-from reef.harness.client.tasks import TaskEpisode
+from reef.harness.episodes.tasks import TaskEpisode
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
 from reef.recipe.generated_tasks.results import (

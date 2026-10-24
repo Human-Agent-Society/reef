@@ -287,7 +287,7 @@ class _TwoComponentRecipe(Recipe):
         )
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, releases=None
     ):
         # One trainer, bound to the harness, publishes whichever component a step names.
         return (

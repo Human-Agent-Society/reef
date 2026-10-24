@@ -1,7 +1,8 @@
 """One HTML page per catalog step: why the version exists, what it changed, the evaluation's result, its setup, its chain.
 
 ``GET /reef/harness/releases/{step}/page`` builds it from the releases row
-plus, for an extension update, the file the release replaced. A step whose
+plus the source files of the release the step ran on, which each updated
+file of the step's patch is read against. A step whose
 method recorded ``proposal_notes`` (Reefine's design, review, refused
 requires and undeclared variables) also gets a Design section after Why and
 a Review section after What changed, and why the proposer produced nothing,
@@ -31,7 +32,6 @@ from reef.harness.step_result import (
     floor_tasks_note,
     missed_episode_text,
     missed_episodes,
-    reef_installs,
     unscored_failures,
 )
 from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span, tone
@@ -108,9 +108,6 @@ def failed_words(metrics: Mapping[str, Any]) -> str:
     return RESULT_WORDS["failed"]
 
 
-#: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
-TEXT_KINDS = ("rules", "skill", "agent_command")
-
 # What the shared layout does not draw: the reading column, the diff, the metric grid and the chain list.
 STYLE = """
 main{max-width:1040px;margin:auto;padding:48px 40px 24px}
@@ -176,17 +173,16 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def mutations_of(metrics: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
-    """The step's mutations: ``mutation`` for one, ``mutations`` for a composite, none for a skip or a recheck."""
-    if not metrics:
-        return []
-    single = metrics.get("mutation")
-    if isinstance(single, Mapping):
-        return [single]
-    many = metrics.get("mutations")
-    if isinstance(many, Sequence) and not isinstance(many, str):
-        return [mutation for mutation in many if isinstance(mutation, Mapping)]
-    return []
+def recorded_patch(metrics: Mapping[str, Any] | None) -> dict[str, str | None]:
+    """The patch a step recorded as ``patch``: tree path to new text, or to ``None`` for a removal.
+
+    Empty for a step that recorded none, such as a skip before a proposal or the creation row. The record clips
+    and redacts long texts, so a text here can differ from the released file.
+    """
+    patch = metrics.get("patch") if metrics else None
+    if not isinstance(patch, Mapping):
+        return {}
+    return {str(path): value for path, value in patch.items() if value is None or isinstance(value, str)}
 
 
 def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
@@ -319,79 +315,34 @@ def _diff_block(path: str, before: str, after: str, before_id: str | None, relea
     return '<pre class="diff">' + "\n".join(rendered) + "</pre>"
 
 
-def _mutation_block(
-    mutation: Mapping[str, Any],
-    row: Mapping[str, Any],
-    before_entries: Mapping[str, Mapping[str, Any]],
-    before_files: Mapping[str, str] | None,
-    node_paths: Mapping[str, str],
+def changed_file_html(
+    path: str, after: str | None, row: Mapping[str, Any], before_files: Mapping[str, str] | None
 ) -> str:
-    op = str(mutation.get("op") or "?")
-    entry_id = str(mutation.get("id") or "?")
-    options = mutation.get("options")
-    options = options if isinstance(options, Mapping) else {}
-    previous = before_entries.get(entry_id, {})
-    kind = str(options.get("name") or previous.get("name") or "?")
-    operation_class = op if op in ("create", "update", "delete", "remove") else "other"
-    head = (
-        f'<div class="change"><div class="change-head">'
-        f'<span class="tag operation-{escape(operation_class)}">{escape(op)}</span>'
-        f'<span class="node-id">{escape(entry_id)}</span><span class="tag">{escape(kind)}</span></div>'
+    """One file of a step's patch: a removal, a diff against the release the step ran on, or the new file's text.
+
+    Without ``before_files`` (the release the step ran on is not restorable), a written file shows its new text
+    under ``write``, since the page cannot tell an update from a new file.
+    """
+    if after is None:
+        operation, body = "remove", ""
+    elif before_files is None:
+        operation, body = "write", f"<pre>{escape(after)}</pre>"
+    elif path in before_files:
+        before = before_files[path]
+        operation, body = "update", _diff_block(path, before, after, before_release_id(row), row.get("release_id"))
+    else:
+        operation, body = "create", f"<pre>{escape(after)}</pre>"
+    return (
+        '<div class="change"><div class="change-head">'
+        f'<span class="tag operation-{operation}">{operation}</span>'
+        f'<span class="node-id">{escape(path)}</span></div>{body}</div>'
     )
-    if op == "remove":
-        return head + "</div>"
-    config = options.get("config")
-    config = config if isinstance(config, Mapping) else {}
-    if kind == "code_extension":
-        code = config.get("code")
-        if not isinstance(code, str):
-            return head + '<p class="empty">this mutation changes no code</p></div>'
-        previous_config = previous.get("config")
-        previous_config = previous_config if isinstance(previous_config, Mapping) else {}
-        name = config.get("name") or previous_config.get("name")
-        template = node_paths.get("code_extension")
-        if op == "update" and before_files is not None and template and name:
-            path = template.format(name=name)
-            before = before_files.get(path)
-            if before is not None:
-                return head + _diff_block(path, before, code, before_release_id(row), row.get("release_id")) + "</div>"
-        return head + f"<pre>{escape(code)}</pre></div>"
-    if kind in TEXT_KINDS and isinstance(config.get("text"), str):
-        rest = {key: value for key, value in options.items() if key not in ("config", "name")}
-        rest.update({key: value for key, value in config.items() if key != "text"})
-        note = f'<p class="note">{escape(json.dumps(rest, sort_keys=True))}</p>' if rest else ""
-        return head + note + f"<pre>{escape(config['text'])}</pre></div>"
-    # A config entry's text values (an opencode agent's prompt, say) read as text under the JSON, not as escapes.
-    texts: list[tuple[str, str]] = []
-    shown = texts_set_apart(options, "", texts)
-    below = "".join(f'<p class="note">{escape(path)}</p><pre>{escape(text)}</pre>' for path, text in texts)
-    return head + f"<pre>{escape(json.dumps(shown, indent=2, sort_keys=True, ensure_ascii=False))}</pre>{below}</div>"
 
 
-def texts_set_apart(value: Any, path: str, texts: list[tuple[str, str]]) -> Any:
-    """``value`` with each string that spans lines put in ``texts`` by its key path, a pointer in its place."""
-    if isinstance(value, str) and "\n" in value:
-        texts.append((path, value))
-        return f"(text below: {path})"
-    if isinstance(value, Mapping):
-        return {
-            key: texts_set_apart(item, f"{path}.{key}" if path else str(key), texts) for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [texts_set_apart(item, f"{path}[{index}]", texts) for index, item in enumerate(value)]
-    return value
-
-
-def _what_changed(
-    row: Mapping[str, Any],
-    metrics: Mapping[str, Any],
-    before_entries: Mapping[str, Mapping[str, Any]],
-    before_files: Mapping[str, str] | None,
-    node_paths: Mapping[str, str],
-) -> str:
-    mutations = mutations_of(metrics)
-    if mutations:
-        return "".join(_mutation_block(m, row, before_entries, before_files, node_paths) for m in mutations)
+def _what_changed(row: Mapping[str, Any], metrics: Mapping[str, Any], before_files: Mapping[str, str] | None) -> str:
+    patch = recorded_patch(metrics)
+    if patch:
+        return "".join(changed_file_html(path, after, row, before_files) for path, after in sorted(patch.items()))
     if declined(metrics):
         return '<p class="empty">nothing: the step answered with no change</p>'
     if metrics.get("skipped"):
@@ -399,10 +350,10 @@ def _what_changed(
     if metrics.get("recheck"):
         return '<p class="empty">nothing new: a recheck of the last good tree against the published one</p>'
     if row.get("operation") == "training":
-        return '<p class="empty">no mutation on record</p>'
+        return '<p class="empty">no patch on record</p>'
     if row.get("operation") == "creation":
-        return '<p class="empty">nothing: the seed as the recipe rendered it</p>'
-    return '<p class="empty">no mutation: the head moved without a step</p>'
+        return '<p class="empty">nothing: this release is the seed tree</p>'
+    return '<p class="empty">nothing: the head moved without a step</p>'
 
 
 def _listed(items: Sequence[str], empty: str) -> str:
@@ -572,14 +523,12 @@ def kept_answer(notes: Mapping[str, Any]) -> str | None:
     return f"Kept answer {kept} of {attempts}" if isinstance(kept, int) and 1 <= kept <= attempts else None
 
 
-def _setup(
-    row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], adapter: str = "pi"
-) -> str:
+def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
     """The step's own ``training_request.requires`` items, then what its release carries from earlier steps.
 
-    The install script, ``reef-<adapter> setup`` and the update notice read
-    the union over the release's chain (``required_by``), so the page lists
-    the same items split by the step that named them. A rejected or skipped
+    ``GET /reef/harness`` answers the union over the release's chain
+    (``required_by``) as ``requires``, so the page lists the same items split
+    by the step that named them. A rejected or skipped
     row carries the head's id and published nothing, so only its own items
     show. The items the step dropped, the backend's under
     ``training_request.refused_requires`` and the method's under
@@ -615,11 +564,7 @@ def _setup(
         parts.append(
             f'<h3>Carried from earlier steps</h3>{_scrolled(requires_table(carried), "Inherited requirements")}'
         )
-    parts.append(
-        f'<p class="note">reef-{escape(adapter)} setup lists these and runs a check only after you confirm it</p>'
-        if reef_installs(adapter)
-        else '<p class="note">these must hold in the Harbor task a run uses; nothing checks them</p>'
-    )
+    parts.append('<p class="note">these must hold where the harness runs; Reef does not check them</p>')
     return "".join(parts) + tail
 
 
@@ -719,27 +664,21 @@ def build_release_page(
     step: int,
     rows: Sequence[Mapping[str, Any]],
     *,
-    before_entries: Sequence[Mapping[str, Any]] = (),
     before_files: Mapping[str, str] | None = None,
-    node_paths: Mapping[str, str] | None = None,
     link_query: Mapping[str, str] | None = None,
-    adapter: str = "pi",
 ) -> str:
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
 
-    ``before_entries`` and ``before_files`` describe the release an update is
-    read against (see ``before_release_id``); ``node_paths`` is the adapter's
-    render template per kind, which names an extension's file. Without them an
-    extension update shows its new text instead of a diff. ``link_query`` is
-    carried to the Chain's links, so a page opened through query parameters
-    links pages that open the same way. Design and Review appear only when the
-    row's ``proposal_notes`` carry them. ``adapter`` names the wrapper the
-    Setup section's commands run.
+    ``before_files`` is the source tree of the release the step ran on (see
+    ``before_release_id``), which each updated file of the patch is read
+    against; without it, a written file shows its new text instead of a diff.
+    ``link_query`` is carried to the Chain's links, so a page opened through
+    query parameters links pages that open the same way. Design and Review
+    appear only when the row's ``proposal_notes`` carry them.
     """
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
-    entries = {str(entry["id"]): entry for entry in before_entries if isinstance(entry, Mapping) and "id" in entry}
     selection_result = result_of(row, rows)
     recorded = row.get("recorded_at")
     headline = [f'<span class="id">{escape(row.get("release_id"))}</span>']
@@ -768,10 +707,10 @@ def build_release_page(
         + '<div class="stack">\n'
         + _card("Why", f"{_why(row, metrics)}\n")
         + _design(metrics)
-        + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
+        + _card("What changed", f"{_what_changed(row, metrics, before_files)}\n")
         + _review(metrics)
         + _card("Result", f"{result_html(row, metrics, rows)}\n")
-        + _card("Setup", f"{_setup(row, metrics, rows, adapter)}\n")
+        + _card("Setup", f"{_setup(row, metrics, rows)}\n")
         + _card("Chain", f"{_chain(step, row, rows, link_query)}\n")
         + "</div>\n",
         tail=f'<script id="data" type="application/json">{data}</script>\n',
@@ -787,7 +726,7 @@ __all__ = [
     "build_running_step_page",
     "declined",
     "failed_words",
-    "mutations_of",
+    "recorded_patch",
     "result_of",
     "served_step",
     "step_href",

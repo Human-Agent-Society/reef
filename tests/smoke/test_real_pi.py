@@ -2,7 +2,7 @@
 real thing. The hermetic suites drive a scripted fake, so every format and
 environment assumption about the real binary lives here: a pinned pi runs one
 episode against a stdlib OpenAI-compatible stub and must read our rendered
-composition, reach the stub with the rules text, write a session our reader
+tree, reach the stub with the rules text, write a session our reader
 parses, and leave no unexplained residue. Skipped unless REEF_REAL_PI_BINARY
 points at an installed pi (.github/workflows/harness-smoke.yml provides one)."""
 
@@ -20,7 +20,7 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree, render_tree
 
 REAL_PI = os.environ.get("REEF_REAL_PI_BINARY", "")
 
@@ -111,8 +111,8 @@ def test_real_pi_episode_renders_runs_and_cleans_up(tmp_path: Path) -> None:
     try:
         # The model comes through Reef's binding, as in every episode: a tree may not name a provider of its own.
         binding = ModelBinding(base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="dummy")
-        nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(get_adapter("pi"))]
-        files = render_composition(nodes, get_adapter("pi"))
+        descriptor = get_adapter("pi")
+        files = render_tree(HarnessTree({"rules.md": RULES_SENTENCE}), descriptor, binding.config_overlays(descriptor))
         capture = Path(os.environ.get("REEF_REAL_PI_SESSION_OUT", tmp_path / "real-pi-session.jsonl"))
         binary = capturing_wrapper(tmp_path, capture)
         result = run_episode(
@@ -124,7 +124,7 @@ def test_real_pi_episode_renders_runs_and_cleans_up(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, (result.stdout, result.stderr)
     # (a) The rendered rules text reached the model: the whole render chain
-    # (composition -> files -> relocation env -> real binary -> request) held.
+    # (tree -> files -> relocation env -> real binary -> request) held.
     assert any(RULES_SENTENCE in body for body in server.bodies), server.bodies
     # (b) The session the real binary wrote parses through our reader and
     # carries an assistant message.

@@ -1,255 +1,127 @@
-"""GEPA's recipe: the config block, and the per-scenario archive binding.
+"""GEPA's recipe: the harness evolution recipe with GEPA's proposer and selection.
 
-``GEPARecipe`` is a ``CordisRecipe`` that supplies its own ``propose`` and
-``selection`` objects instead of asking the config for them. Both halves of
-GEPA share one :class:`~recipes.gepa.archive.Archive`, and an archive is
-per scenario, so the binding cannot happen at config time: ``build`` opens a
-hashed scenario file directly under ``archive``, constructs the proposer and
-the selector against it, and boots the stock backend with those two in place.
-The search state itself travels in Reef's algorithm state; that JSON file is
-only its post-commit mirror.
-
-The config adds one ``gepa:`` block under ``evolution``::
+``GEPARecipe`` reads one ``gepa:`` block under ``evolution``, builds the
+proposer from it, and selects with :class:`~recipes.gepa.selection.GEPASelection`
+unless the deployment names its own ``evolution.selection``. The search state
+(the archive) travels as the method state Reef commits with each step, so
+nothing of it lives in a file of its own::
 
     evolution:
       adapter: pi
+      seed: seed/                         # the first tree
       evaluate: harness.aime:AIMEAnswerScorer
       feedback: harness.aime:AIMEFeedback # optional; the score restated when absent
       tasks: [...]                        # the validation set
       models:
         reflection: {url: ..., model: ..., api_key_env: OPENAI_API_KEY}
       gepa:
-        archive: ${REEF_WORK}/gepa
         minibatch_size: 3
         seed: 0
         skip_perfect_score: true
         perfect_score: 1.0
         max_metric_calls: 150
         components: [rules, skill]
-
-A deployment that names its own ``evolution.propose`` or
-``evolution.selection`` keeps them: the recipe only fills the seams it finds
-empty, so the archive and the reflection loop can be driven from one side
-while the other stays under the operator's control.
+        trainset_size: 45                 # optional; plans GEPA's minibatch order
 """
 
 from __future__ import annotations
 
-import dataclasses
-import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import KW_ONLY, dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
 
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree.mutations import Mutation
-from reef.observability import ExperimentLogger
-from reef.recipe.cordis import CordisRecipe
+from reef.core.plugins import PluginReference
+from reef.harness.tree import TreeKind
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.records import RecordStore
-from reef.storage.tasks import TaskStorage
-from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.trainer import Trainer
-from reef.train.types import TrajectoryItem
+from reef.recipe.harness import HarnessEvolutionRecipe, HarnessEvolutionSpec
 
-from .archive import Archive
-from .backend import ARCHIVE_STATE_KEY, GEPABackend
 from .components import EVOLVABLE_KINDS
-from .method import Feedback, GEPAPlugin, GEPAProposer, ScoreFeedback
-
-#: Node kinds a deployment evolves unless ``gepa.components`` says otherwise.
-#: Rules and skills are the instruction surface both surveyed harnesses
-#: share; agent commands are opt in because they only fire when invoked.
-DEFAULT_KINDS = ("rules", "skill")
-
-#: The seam the seed id convention protects: ``propose`` receives nodes with
-#: entry ids stripped, so a component key can only name the entry it came
-#: from while these ids hold. A seed that breaks the convention would have
-#: every mutation land on the wrong entry, or on none.
-_NAMED_KINDS = ("skill", "agent_command")
+from .proposer import Feedback, GEPAProposer, GEPASettings
+from .selection import GEPASelection
 
 
-class _UnboundProposer(Proposer):
-    """The placeholder ``build`` swaps for a proposer bound to the archive."""
-
-    def propose(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
-        models: Any,
-        *,
-        manifest: FailureManifest | None = None,
-        rejected: Sequence[Mapping[str, Any]] = (),
-        sources: Sequence[Mapping[str, Any]] = (),
-        requests: Sequence[Mapping[str, Any]] = (),
-        entries: Sequence[Mapping[str, Any]] = (),
-        agent_host: AgentHost | None = None,
-    ) -> Mutation | Sequence[Mutation] | None:
-        raise RecipeConfigError("the GEPA proposer is bound by GEPARecipe.build; this recipe was not built")
+#: The keys of the ``evolution.gepa`` section.
+GEPA_KEYS = (
+    "minibatch_size",
+    "seed",
+    "skip_perfect_score",
+    "perfect_score",
+    "max_metric_calls",
+    "components",
+    "trainset_size",
+)
 
 
 @dataclass(frozen=True)
-class GEPARecipe(CordisRecipe):
+class GEPARecipe(HarnessEvolutionRecipe):
     """Harness evolution driven by GEPA's reflective search."""
 
-    _: KW_ONLY
-    archive_dir: Path
-    minibatch_size: int = 3
-    rng_seed: int = 0
-    skip_perfect_score: bool = True
-    perfect_score: float = 1.0
-    max_metric_calls: int | None = None
-    kinds: tuple[str, ...] = DEFAULT_KINDS
-    feedback: Feedback | None = None
-    #: GEPA selects on its archive unless the deployment names an ``evolution.selection``.
-    archive_selection: bool = True
-    name: str = "gepa"
+    name: str = field(default="gepa", kw_only=True)
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.minibatch_size <= 0:
-            raise ValueError("evolution.gepa.minibatch_size must be positive")
-        unknown = [kind for kind in self.kinds if kind not in EVOLVABLE_KINDS]
-        if unknown or not self.kinds:
-            raise ValueError(f"evolution.gepa.components must name kinds from {EVOLVABLE_KINDS}, got {self.kinds}")
+    @classmethod
+    def evolution_spec(cls) -> HarnessEvolutionSpec:
+        return HarnessEvolutionSpec(selection=PluginReference(GEPASelection))
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         evolution = settings.get("evolution")
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("gepa requires an 'evolution' config section")
-        # The base recipe insists on both seams; the placeholders keep it
-        # satisfied and tell build() which of them it may still bind.
-        supplied = dict(evolution)
-        supplied.setdefault("propose", _UnboundProposer())
-        kwargs = super()._recipe_kwargs({**settings, "evolution": supplied}, values)
-        _check_seed_ids(kwargs["seed"])
-
         gepa = evolution.get("gepa")
         if not isinstance(gepa, Mapping):
             raise RecipeConfigError("gepa requires an 'evolution.gepa' config section")
-        archive = gepa.get("archive")
-        if not isinstance(archive, str) or not archive.strip():
-            raise RecipeConfigError("evolution.gepa.archive must be a directory path string")
-        components = gepa.get("components", DEFAULT_KINDS)
+        unknown = sorted(set(gepa) - set(GEPA_KEYS))
+        if unknown:
+            raise RecipeConfigError(f"evolution.gepa has unknown key(s) {', '.join(map(str, unknown))}")
+        components = gepa.get("components", ("rules", "skill"))
         if not isinstance(components, Sequence) or isinstance(components, str) or not components:
-            raise RecipeConfigError(
-                f"evolution.gepa.components must be a non-empty list of kinds from {EVOLVABLE_KINDS}"
-            )
+            evolvable = ", ".join(kind.value for kind in EVOLVABLE_KINDS)
+            raise RecipeConfigError(f"evolution.gepa.components must be a non-empty list of kinds from {evolvable}")
         max_calls = gepa.get("max_metric_calls")
-        feedback = evolution.get("feedback")
-        return {
-            **kwargs,
-            "archive_dir": Path(archive.strip()),
-            "minibatch_size": _int(gepa, "minibatch_size", 3),
-            "rng_seed": _int(gepa, "seed", 0),
-            "skip_perfect_score": _bool(gepa, "skip_perfect_score", True),
-            "perfect_score": _float(gepa, "perfect_score", 1.0),
-            "max_metric_calls": None if max_calls is None else _int(gepa, "max_metric_calls", 0),
-            "kinds": tuple(str(kind) for kind in components),
-            "feedback": (None if feedback is None else Feedback.from_setting(feedback, setting="evolution.feedback")),
-            "archive_selection": "selection" not in evolution,
-        }
-
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-    ) -> Trainer:
-        archive = Archive(scenario_archive_path(self.archive_dir, scenario), autosave=False)
-        archive_state = None if algorithm_state is None else algorithm_state.get(ARCHIVE_STATE_KEY)
-        if archive_state is not None:
-            if not isinstance(archive_state, Mapping):
-                raise RecipeConfigError(f"{ARCHIVE_STATE_KEY} algorithm state must be a mapping")
-            archive.restore(archive_state)
-            # Recovery may follow a crash after the commit record was durable
-            # but before the derived JSON mirror was refreshed.
-            archive.persist()
-        propose = self.propose
-        if isinstance(propose, _UnboundProposer):
-            descriptor = get_adapter(self.adapter)
-            # The minibatch episodes run the harness the evaluation runs, bound as the backend binds it.
-            executor, binary = self.executor.for_program(AdapterProgram(descriptor), binary=self.binary)
-            propose = GEPAProposer(
-                archive=archive,
-                descriptor=descriptor,
-                binary=binary,
-                executor=executor,
-                episode_timeout_s=self.episode_timeout_s,
-                forbid_residue=self.forbid_residue,
-                score_episode=self.score_episode,
-                feedback=self.feedback or ScoreFeedback(),
-                minibatch_size=self.minibatch_size,
-                rng_seed=self.rng_seed,
-                skip_perfect_score=self.skip_perfect_score,
-                perfect_score=self.perfect_score,
-                max_metric_calls=self.max_metric_calls,
-                kinds=self.kinds,
-                valset_size=len(self.tasks),
+        trainset_size = gepa.get("trainset_size")
+        try:
+            gepa_settings = GEPASettings(
+                minibatch_size=integer(gepa, "minibatch_size", 3),
+                rng_seed=integer(gepa, "seed", 0),
+                skip_perfect_score=boolean(gepa, "skip_perfect_score", True),
+                perfect_score=number(gepa, "perfect_score", 1.0),
+                max_metric_calls=None if max_calls is None else integer(gepa, "max_metric_calls", 0),
+                kinds=tuple(TreeKind(str(kind)) for kind in components),
+                trainset_size=None if trainset_size is None else integer(gepa, "trainset_size", 0),
             )
-        bound = dataclasses.replace(self, propose=propose)
-        candidate_backend = GEPABackend(archive=archive, **bound._backend_kwargs(scenario))
-        # GEPA's own selection reads the archive; a deployment's evolution.selection replaces it.
-        selection = (
-            GEPAPlugin(candidate_backend, archive)
-            if self.archive_selection
-            else bound.selection_plugin(candidate_backend)
-        )
-        return bound._build_trainer(
-            scenario,
-            records,
-            candidate_backend,
-            selection,
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            task_storage=task_storage,
-        )
-
-
-def scenario_archive_path(directory: Path, scenario: str) -> Path:
-    """Map an arbitrary scenario name to one file directly under ``directory``."""
-    key = hashlib.sha256(scenario.encode("utf-8")).hexdigest()
-    return Path(directory) / f"{key}.json"
-
-
-def _check_seed_ids(seed: Sequence[Mapping[str, Any]]) -> None:
-    """Every seeded node's entry id must be the id its component key implies."""
-    for entry in seed:
-        kind, entry_id = str(entry.get("name")), str(entry.get("id"))
-        config = entry.get("config")
-        config = config if isinstance(config, Mapping) else {}
-        if kind == "rules" and entry_id != "rules":
-            raise RecipeConfigError(f"a seeded rules node must have entry id 'rules', got {entry_id!r}")
-        if kind in _NAMED_KINDS and entry_id != str(config.get("name")):
-            raise RecipeConfigError(
-                f"seed entry {entry_id!r} must have id equal to its config name {config.get('name')!r}; "
-                "GEPA addresses a node by the name it composes under"
+            feedback_setting = evolution.get("feedback")
+            feedback = (
+                None
+                if feedback_setting is None
+                else Feedback.from_setting(feedback_setting, setting="evolution.feedback")
             )
+        except ValueError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        # A deployment that names its own evolution.propose keeps it; GEPA fills the seam it finds empty.
+        supplied = {key: value for key, value in evolution.items() if key not in ("gepa", "feedback")}
+        supplied.setdefault("propose", GEPAProposer(gepa_settings, feedback=feedback))
+        return super()._recipe_kwargs({**settings, "evolution": supplied}, values)
 
 
-def _int(section: Mapping[str, Any], key: str, default: int) -> int:
-    try:
-        return int(section.get(key, default))
-    except (TypeError, ValueError) as exc:
-        raise RecipeConfigError(f"evolution.gepa.{key} must be an integer") from exc
+def integer(section: Mapping[str, Any], key: str, default: int) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RecipeConfigError(f"evolution.gepa.{key} must be an integer")
+    return value
 
 
-def _float(section: Mapping[str, Any], key: str, default: float) -> float:
-    try:
-        return float(section.get(key, default))
-    except (TypeError, ValueError) as exc:
-        raise RecipeConfigError(f"evolution.gepa.{key} must be a number") from exc
+def number(section: Mapping[str, Any], key: str, default: float) -> float:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RecipeConfigError(f"evolution.gepa.{key} must be a number")
+    return float(value)
 
 
-def _bool(section: Mapping[str, Any], key: str, default: bool) -> bool:
+def boolean(section: Mapping[str, Any], key: str, default: bool) -> bool:
     value = section.get(key, default)
     if not isinstance(value, bool):
         raise RecipeConfigError(f"evolution.gepa.{key} must be a boolean")
     return value
+
+
+__all__ = ["GEPARecipe"]

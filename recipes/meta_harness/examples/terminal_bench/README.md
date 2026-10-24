@@ -4,8 +4,9 @@ Run the [Meta-Harness recipe](../../README.md) on the full pinned
 Terminal-Bench 2 suite. See [Results](#results) for the comparison and
 [RESULTS.md](../../RESULTS.md) for the evaluation configuration and scope.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
-module. The proposer rewrites that module, retains every valid candidate, and
-selects only strict improvements over the best recorded mean score.
+module at `seed/extensions/agent.py`. The proposer rewrites that module,
+retains every valid candidate, and selects only strict improvements over the
+best recorded mean score.
 
 The example uses Reef's shared Meta-Harness recipe and Terminus adapter.
 [Deviations](#deviations) documents the differences between the runnable setup
@@ -115,18 +116,19 @@ Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 SQLite storage, and Git LFS artifacts without an HTTP listener. Terminus calls
 the model endpoint directly.
 
-Each round records one served-harness rollout and its verifier report, rotating
-tasks by committed step. The recipe proposes a candidate, evaluates it and the
-incumbent on the selected suite, then commits the population and serving state
-together. Rollouts and gates use Reef's executor, timeout, residue policy, and
-finite-score checks. Failed gate episodes score zero; rollout launch failures
-stop the run. Infrastructure failures are not automatically replaced.
+Each round renders the head release's tree for Terminus and records one
+rollout of it with its verifier report, rotating tasks by committed step. The
+recipe proposes a candidate, evaluates it and the incumbent on the selected
+suite, then commits the population and serving state together.
+Rollouts and evaluations use Reef's executor, timeout, residue policy, and
+finite-score checks. Failed evaluation episodes score zero; rollout launch
+failures stop the run. Infrastructure failures are not automatically replaced.
 
 Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 1,424 gate episodes
+invalid or duplicate proposals: at most 1,424 evaluation episodes
 (`4 x 2 sides x suite size x 2 repeats`) plus eight feedback rollouts. Smaller
-runs scale the gate budget. Retrying uncommitted work can cost extra; these are
-search limits, not billing caps.
+runs scale the evaluation budget. Retrying uncommitted work can cost extra;
+these are search limits, not billing caps.
 
 ## Resume and output
 
@@ -134,23 +136,23 @@ Repeat the same command to resume `work/<campaign-id>/` (or under `REEF_WORK`).
 Tasks, seed, models, and search settings determine the id. Run only one driver
 per directory.
 
-Committed Reef state is authoritative. Restarts reuse recorded rollouts, replay
-pending reports, and rebuild stale JSON mirrors. Failed commits cannot advance
-search or its summary.
+Committed Reef state is authoritative. Restarts reuse recorded rollouts and
+replay pending reports. Failed commits cannot advance search or its summary.
 
-- `reef-data/`: SQLite records and scenario history.
+- `reef-data/`: SQLite records and scenario history. The history's method
+  state holds the population: candidates, parents, scores, and the hashes of
+  each proposal attempt's prompt and reply.
 - `artifacts.git`, `artifact-work/`, `artifact-cache/`: published harnesses and
   their release chain.
-- `population/<scenario-hash>.json`: post-commit mirror of candidates, parents,
-  scores, and attempt audit hashes.
-- `summary.json`: committed scores, served id, proposer calls, and gate count.
+- `summary.json`: rebuilt from the latest commit: each candidate's scores, the
+  served id, proposer calls, and the evaluation episodes spent.
 
 ## Deviations
 
 - **Suite:** full pinned dataset by default; reported scores use a fixed subset
   at the same revision.
-- **Schedule:** paired gates remeasure the incumbent but select against its
-  previously admitted score. The first baseline score vector arrives after the
+- **Schedule:** paired evaluations remeasure the incumbent but select against
+  its previously admitted score. The first baseline score vector arrives after the
   first proposal. The comparison measures the baseline and each candidate once.
 - **Proposals:** one feedback rollout and the complete population feed the
   recipe's prompt, not an upstream tool-using coding agent inspecting trial files.

@@ -1,15 +1,15 @@
 # SkillClaw reproduction on harness evolution
 
-This example implements the SkillClaw method from [Evolving Skills for Autonomous Agents](https://arxiv.org/abs/2604.08377) using Reef's harness evolution engine (`harness_evolve`). Each day, the agent runs a fixed task list with its current skills. Each night, SkillClaw reviews the day's sessions and proposes skill changes. Every proposed change is accepted unless the method chooses to skip it; the next day measures the updated skills.
+This example implements the SkillClaw method from [Evolving Skills for Autonomous Agents](https://arxiv.org/abs/2604.08377) using Reef's harness evolution engine (`reef.recipe.harness`). Each day, the agent runs a fixed task list with its current skills. Each night, SkillClaw reviews the day's sessions and proposes skill changes. Every proposed change is accepted unless the method chooses to skip it; the next day measures the updated skills.
 
-Reef stores the skill pool as a tree and publishes each night's changes together as a new version that clients can download. The method supplies `propose`, `evaluate`, and a `CandidateSelector`. The engine renders the harness, runs evaluation tasks, records changes, and rolls back rejected changes.
+Reef stores the skill pool as a tree of `skills/<name>/SKILL.md` files and publishes each night's changes together as a new release that clients can pull. The method supplies a `Proposer` and an `EpisodeScorer` and selects with the built-in `selection: always`. The engine validates and evaluates the candidate tree, records each step, and publishes the tree it selects.
 
 ## Directory layout
 
 ```text
 skillclaw/
   skillclaw.yaml      the recipe the driver boots: explicit implementation, selection
-                      always, batch_size 60, probe tasks, seed composition
+                      always, batch_size 60, probe tasks, seed skills
   recipe.py           the Reef recipe subclass: build_surface returns
                       create_skill_surface([SkillCatalogModule(...)]) so every /v1
                       request carries the pool catalog; seed_skills seeds
@@ -32,8 +32,8 @@ skillclaw/
                       the OpenClaw catalog format, eligibility rules, and
                       the catalog_names inverse
     skillclaw.py      the method: propose runs the sealed night flow and
-                      maps its decisions to one composite mutation
-                      sequence; evaluate grades the probe episodes
+                      maps the night's pool changes to one patch;
+                      evaluate grades the probe episodes
     plugins.py        NightProposer and ProbeScorer, the classes
                       skillclaw.yaml names; they call skillclaw.py
     night.py          the sealed night step: one decision per skill group
@@ -60,13 +60,13 @@ skillclaw/
 
 ## The method, mapped onto the mechanism
 
-`propose` is the sealed night, unchanged in shape: rebuild each task's session digest from the recorded traffic, summarize every session, judge the unscored ones, group by referenced skill, then one decision per skill group plus the no-skill bucket - `improve_skill`, `optimize_description`, `create_skill`, or `skip`. The decisions land on a scratch pool (merge and registry semantics included) and the pool diff becomes one composite mutation sequence: one `create` or `update` per changed skill, applied under one snapshot and settled under one gate verdict. The sealed night never removes a skill, so no `remove` is ever proposed. The night's LLM is the served model itself, through the same upstream binding the day uses.
+`propose` is the sealed night, unchanged in shape: rebuild each task's session digest from the recorded traffic, summarize every session, judge the unscored ones, group by referenced skill, then one decision per skill group plus the no-skill bucket - `improve_skill`, `optimize_description`, `create_skill`, or `skip`. The decisions land on a scratch pool (merge and registry semantics included) and the pool diff becomes one patch: one `skills/<name>/SKILL.md` file per added or rewritten skill, evaluated as one candidate tree. The sealed night never removes a skill, so the patch removes no file. The night's LLM is the served model itself, through the same upstream binding the day uses.
 
 The day is the sealed day: each task runs in its WildClawBench container, the agent's model calls go through the embedded Reef service (which injects the served pool's catalog and records the exchange), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
 
 The night trigger is the batch: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day batches - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 
-The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the version metrics, so every published pool version carries a measured before/after record without deciding on those scores.
+The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the release metrics, so every published pool release carries a measured before/after record without deciding on those scores.
 
 ## The two runs and the claim
 
@@ -94,7 +94,7 @@ What a run actually needs, beyond `pip install reef-client` and reef itself:
 - **the WildClawBench dataset**: `run.sh` clones the repo at the pin, but the multi gigabyte task workspaces come from the `internlm/WildClawBench` HuggingFace dataset and must be downloaded into `work/wildclawbench` first; `run.sh` fails fast with that instruction if they are missing.
 - **a provider key** (`REEF_UPSTREAM_API_KEY`, required): the agent sessions, the benchmark judge, and the night's evolve calls all bill against it. A full campaign is two runs (control first) of 7 days x 60 multi-turn agent sessions each, plus judge and night calls - the dominant cost is the agent sessions on the executor model (the paper setting is qwen3-max through OpenRouter; a locally served model through the `serving/` proxy replaces the bill with GPU time). Budget accordingly before starting; there is no dry mode in this script.
 - **a Brave search key** (`BRAVE_API_KEY`, optional): the benchmark's search tasks call the Brave API from inside their containers; without a key those tasks degrade and the rest of the day still runs.
-- **the pi binary** (`REEF_PI_BINARY`): the mechanism's probe episodes run it headless; their scores are recorded, never gating.
+- **the pi binary** (`REEF_PI_BINARY`): the mechanism's probe episodes run it headless; their scores are recorded but do not decide the publish.
 
 ```bash
 pip install reef-client
@@ -106,7 +106,7 @@ REEF_SC_RUN=skillclaw ./run.sh   # then the method run
 python3 run.py report            # the gain table over the sealed rounds
 ```
 
-Each run resumes after its last sealed round, so a crashed or interrupted campaign is rerun with the same command: completed tasks replay from their stored verdicts, already landed reports are skipped, and a night whose trigger report landed before the crash is recovered at boot.
+Each run resumes after its last sealed round, so a crashed or interrupted campaign is rerun with the same command: completed tasks replay from their stored grading results, already landed reports are skipped, and a night whose trigger report landed before the crash is recovered at boot.
 
 ## The Harbor smoke task
 

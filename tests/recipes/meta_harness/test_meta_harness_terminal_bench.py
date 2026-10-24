@@ -12,10 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from recipes.meta_harness.population import content_id
-from recipes.meta_harness.recipe import scenario_population_path
 from reef.harness import EpisodeResult
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree
 from reef.sandbox.process import SandboxExecutor
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/meta_harness/examples/terminal_bench"
@@ -119,11 +118,12 @@ def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch
 
 
 class Proposals(ModelBinding):
-    def __init__(self, seed):
+    """The proposer model: it answers every prompt with the seed's agent improved, the seed as the parent."""
+
+    def __init__(self, seed: HarnessTree):
         super().__init__(base_url="http://127.0.0.1:9", model="proposer")
-        improved = copy.deepcopy(seed)
-        improved[0]["config"]["code"] += "\n# improved\n"
-        object.__setattr__(self, "reply", json.dumps({"parent_id": content_id(seed), "entries": improved}))
+        improved = {**seed.files, "extensions/agent.py": seed.files["extensions/agent.py"] + "\n# improved\n"}
+        object.__setattr__(self, "reply", json.dumps({"parent_id": seed.checksum(), "files": improved}))
         object.__setattr__(self, "prompts", [])
 
     def chat(self, messages, **params):
@@ -140,39 +140,46 @@ def campaign(driver, monkeypatch, tmp_path):
         launches.append(kwargs)
         assert isinstance(kwargs["executor"], SandboxExecutor)
         assert kwargs["timeout"] == 9000
-        return episode(task, int("# improved" in files["terminus/context/agent.py"]))
+        return episode(task, int("# improved" in files.get("terminus/context/agent.py", "")))
 
     monkeypatch.setattr(driver, "run_episode", launch)
     monkeypatch.setattr("reef.evaluation.harness.run_episode", launch)
     config = driver.configuration(("task",), 1, 1)
-    recipe = driver.load_recipe(config, tmp_path)
-    chat = Proposals(driver.benchmark.SEED)
+    recipe = driver.load_recipe(config)
+    chat = Proposals(HarnessTree.read(driver.SEED))
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
     return recipe, chat, launches, tmp_path
 
 
-def test_search_commits_and_restart_repairs_mirrors_without_more_episodes(driver, campaign):
+def test_the_campaign_starts_from_the_seed_tree(driver, campaign):
+    recipe, _, _, directory = campaign
+    dispatcher = driver.open_campaign(recipe, directory)
+    try:
+        assert driver.served_tree(dispatcher.get_or_create_scenario(driver.SCENARIO)) == recipe.seed
+    finally:
+        dispatcher.close()
+
+
+def test_search_commits_and_restart_resumes_from_the_commit_without_more_episodes(driver, campaign):
     recipe, chat, launches, directory = campaign
     dispatcher = driver.open_campaign(recipe, directory)
     try:
         scenario = dispatcher.get_or_create_scenario(driver.SCENARIO)
         summary = driver.search(scenario, recipe, directory)
         assert summary["generated_candidates"] == 1
-        assert summary["gate_episodes"] == 2
-        assert len(launches) == 3  # One recorded rollout and one paired gate.
+        assert summary["evaluation_episodes"] == 2
+        assert len(launches) == 3  # One recorded rollout and one paired evaluation.
         assert len(chat.prompts) == 1 and "terminus_episode" in chat.prompts[0]
         assert "target-test-key" not in chat.prompts[0]
-        assert scenario.trainer.state[driver.POPULATION_STATE_KEY]["served_id"] == summary["served_id"]
+        assert driver.population(scenario).served_id == summary["served_id"]
     finally:
         dispatcher.close()
-    mirror = scenario_population_path(directory / "population", driver.SCENARIO)
-    mirror.write_text("stale")
+    # The summary is disposable: a restart rebuilds it from the latest durable commit.
     (directory / "summary.json").write_text("stale")
     restarted = driver.open_campaign(recipe, directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         assert driver.search(scenario, recipe, directory) == summary
-        assert json.loads(mirror.read_text()) == scenario.trainer.state[driver.POPULATION_STATE_KEY]
         assert json.loads((directory / "summary.json").read_text())["served_id"] == summary["served_id"]
         assert len(launches) == 3 and len(chat.prompts) == 1
     finally:
@@ -195,14 +202,13 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
                 driver.search(scenario, recipe, directory)
         assert scenario.trainer.state == before
         assert not (directory / "summary.json").exists()
-        assert not scenario_population_path(directory / "population", driver.SCENARIO).exists()
     finally:
         dispatcher.close()
     restarted = driver.open_campaign(recipe, directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         assert driver.search(scenario, recipe, directory)["generated_candidates"] == 1
-        assert len(launches) == 5  # The recorded rollout survives; only the gate is retried.
+        assert len(launches) == 5  # The recorded rollout survives; only the evaluation is retried.
         assert len(chat.prompts) == 2
     finally:
         restarted.close()

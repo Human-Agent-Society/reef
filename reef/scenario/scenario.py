@@ -305,10 +305,6 @@ class Scenario:
         """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)
 
-    def publish_shipped_content(self) -> ArtifactRef | None:
-        """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
-        return self._committer.publish_shipped_content()
-
     def close(self) -> None:
         """Tear down what this scenario instance owns: trainers, then its storage session.
 

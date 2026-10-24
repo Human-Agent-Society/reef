@@ -25,7 +25,7 @@ from reef.train.slime_backend.loss_families import register_loss_family
 # is loaded the same way: ``import reef`` does not import it either.
 for _cookbook_package in (
     "reef.recipe.sft",
-    "reef.train.cordis_backend",
+    "reef.train.harness_backend",
     "recipes.openclawrl",
     "recipes.opd",
     "recipes.sao",

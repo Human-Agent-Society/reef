@@ -348,9 +348,9 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
     module = tmp_path / "demo_evolution.py"
     module.write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.cordis_backend.strategies import Proposer\n\n"
+        "from reef.train.harness_backend.contract import Proposer\n\n"
         "class Propose(Proposer):\n"
-        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "    def propose(self, context):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
@@ -363,7 +363,7 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
 
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="reef.recipe.cordis:CordisRecipe",
+            recipe="reef.recipe.harness:HarnessEvolutionRecipe",
             recipe_settings={
                 "evolution": {
                     "propose": "demo_evolution:Propose",

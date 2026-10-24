@@ -13,12 +13,13 @@ import pytest
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
+from reef.harness.tree import HarnessTree, TreeKind
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.reefine import ReefineRecipe
-from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
+from reef.recipe.reefine import AgentProposer, ReefineRecipe
+from reef.recipe.reefine.recipe import SEED_DIRECTORY
+from reef.recipe.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
@@ -32,20 +33,21 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert isinstance(built, ReefineRecipe)
     assert built.name == "reefine"
     assert built.training_mode == "manual"
-    assert built.propose.reads_requests
-    assert built.review_kinds == ("code_extension",)
+    assert isinstance(built.propose, AgentProposer) and built.propose.reads_requests
+    assert built.review_kinds == (TreeKind.CODE_EXTENSION,)
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
-    assert [entry["id"] for entry in built.seed] == [
-        "reef-version-check",
-        "reef-requests",
-        "reef-pi-extension-api",
-    ]
+    # Without evolution.seed the first tree is the packaged one: the starter skill.
+    assert built.seed == HarnessTree.read(SEED_DIRECTORY)
+    assert list(built.seed.files) == ["skills/answer-style/SKILL.md"]
     assert config == original
     assert "training_mode" in {argument.name for argument in config_arguments(ReefineRecipe)}
 
 
-def test_evolution_overrides_and_training_fields_remain_available() -> None:
+def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path) -> None:
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "rules.md").write_text("Answer in one line.\n")
     built = ReefineRecipe.from_environment(
         {},
         config={
@@ -54,23 +56,31 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
             "evolution": {
                 "tasks": ["[fib] Compute fib(90)."],
                 "selection": "score_comparison",
-                "requests": False,
-                "version_check": False,
+                "seed": str(seed),
                 "review_kinds": [],
-                "evaluate": "reef.recipe.reefine.evolution:AnswerScorer",
+                "evaluate": "reef.recipe.reefine.scorer:AnswerScorer",
             },
         },
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.stages().task2batch.config == {"batch_size": 3}
-    assert built.seed == () and built.review_kinds == ()
+    assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"}) and built.review_kinds == ()
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 
 
-@pytest.mark.parametrize("evolution", [None, [], {"tasks": []}, {"tasks": ["task"], "requests": "yes"}])
+@pytest.mark.parametrize(
+    "evolution",
+    [None, [], {"tasks": []}, {"tasks": ["task"], "seed": 3}, {"tasks": ["task"], "seed": "/no/such/seed"}],
+)
 def test_invalid_evolution_config_is_rejected(evolution: object) -> None:
     with pytest.raises(RecipeConfigError):
         ReefineRecipe.from_environment({}, config={"evolution": evolution})
+
+
+def test_a_seed_that_fails_validation_is_refused_at_startup(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("not a harness file")
+    with pytest.raises(RecipeConfigError, match=r"evolution\.seed fails validation: notes\.txt"):
+        ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["task"], "seed": str(tmp_path)}})
 
 
 def test_profile_preparation_needs_no_checkout() -> None:
@@ -135,8 +145,6 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
     evolution = {
         "adapter": "terminus",
         "tasks": ["[health] Run `echo reef-ok` and reply with its output.", "/tasks/own-task"],
-        "requests": False,
-        "version_check": False,
     }
     built = ReefineRecipe.from_environment({}, config={"evolution": evolution})
     assert isinstance(built, ReefineRecipe)
@@ -154,11 +162,12 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
         events = ({"type": "verifier", **{key: value for key, value in row.items() if key != "steps"}},)
         return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
 
-    assert evaluate(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
-    assert evaluate(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
-    assert evaluate(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
+    scorer = AnswerScorer()
+    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
+    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
+    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
     # The reply's last line is not the score of a task directory: a Harbor episode has no assistant reply.
-    assert evaluate("[health] x", ran({"reward": 1.0})) == 0.0
+    assert scorer.score("[health] x", ran({"reward": 1.0})) == 0.0
 
 
 def test_an_unknown_adapter_is_a_config_error() -> None:
@@ -174,42 +183,15 @@ def test_off_pi_no_agent_proposer_is_built_or_warned_about(caplog) -> None:
         built = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config=config)
     assert isinstance(built, ReefineRecipe) and built.agent_executor is None
     assert "sandbox is none" not in caplog.text
-    # The step builds no agent host off pi, so its activity never says the agent proposer is off on this host.
-    assert not built.propose.runs_agent
     with caplog.at_level("WARNING"):
         pi = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config={"evolution": {"tasks": ["x"]}})
     assert isinstance(pi, ReefineRecipe) and pi.agent_executor is not None
     assert "sandbox is none" in caplog.text
-    assert pi.propose.runs_agent
 
 
-def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them(caplog) -> None:
-    """dsh and hermes get the /reefine command file and no update notice; terminus, with no command surface and no
-    install, gets neither and takes requests through POST /reef/train. The pi entries would refuse them at startup."""
-    for adapter in ("dsh", "hermes"):
-        with caplog.at_level("INFO", logger="reef.recipe.reefine"):
-            built = ReefineRecipe.from_environment(
-                {}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}}
-            )
-        assert isinstance(built, ReefineRecipe)
-        assert built.adapter == adapter and built.propose.adapter == adapter
-        assert [(options["id"], options["name"]) for options in built.seed] == [(REQUESTS_ENTRY_ID, "agent_command")]
-        assert f"reef-{adapter} update installs a release" in caplog.text
-    # The profile names both entries; on an adapter that ships none they are off, with a log line for each.
-    caplog.clear()
-    with caplog.at_level("INFO", logger="reef.recipe.reefine"):
-        built = ReefineRecipe.from_environment(
-            {},
-            config={
-                "evolution": {"adapter": "terminus", "tasks": ["[health] x"], "requests": True, "version_check": True}
-            },
-        )
-    assert isinstance(built, ReefineRecipe) and built.seed == ()
-    # terminus has no wrapper, so the log names the routes, never a reef-terminus command that does not exist.
-    assert caplog.text.count("requests come through POST /reef/train; GET /reef/harness serves a published tree") == 2
-    assert "reef-terminus" not in caplog.text
-    # Shown in the startup log, as the docs say: info lines never were.
-    assert {record.levelname for record in caplog.records if "ships no" in record.getMessage()} == {"WARNING"}
-    pi = ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["[health] x"]}})
-    assert isinstance(pi, ReefineRecipe)
-    assert [entry["id"] for entry in pi.seed] == ["reef-version-check", "reef-requests", "reef-pi-extension-api"]
+@pytest.mark.parametrize("adapter", ["pi", "claude", "codex", "opencode", "hermes", "dsh", "terminus"])
+def test_the_packaged_seed_is_the_first_tree_on_every_adapter(adapter: str) -> None:
+    """The recipe validates its seed for the adapter at startup: the starter skill renders everywhere."""
+    built = ReefineRecipe.from_environment({}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}})
+    assert isinstance(built, ReefineRecipe) and built.adapter == adapter
+    assert built.seed == HarnessTree.read(SEED_DIRECTORY)

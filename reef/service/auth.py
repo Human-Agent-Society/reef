@@ -89,9 +89,9 @@ def create_authentication_middleware(
     page key of the query's ``scenario`` (``page_key_for_digest``) for an
     accepted token: it opens those two pages of that scenario alone, a
     request whose ``x-reef-scenario`` header names another scenario is
-    refused, and the token cannot be read back from it, so the links the
-    harness wrapper and pi's extension print, which a session's model reads,
-    carry it. The token itself is never read from a query. Every other route,
+    refused, and the token cannot be read back from it, so a link a client
+    prints where a session's model reads it can carry the key. The token
+    itself is never read from a query. Every other route,
     and any request that carries the header, is judged by the header alone. A
     request with no Authorization header may present the token in
     ``x-api-key`` instead, the header the Anthropic dialect's clients send.

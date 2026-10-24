@@ -1,10 +1,9 @@
-"""What a settled harness step means for the person who asked, as the wrapper and the harness pages say it.
+"""What a settled harness step means for the person who asked, as the harness pages say it.
 
-The wrapper prints one result line and the next commands in a terminal; the
-request and version pages render the same result and next action in HTML.
-Both read a catalog row's metrics through these functions, so a rejected
-step names the same cause and a release offers the same install commands in
-either place.
+The request and version pages read a catalog row's metrics through these
+functions, so a rejected step names the same cause on either page. The
+request page also offers the next action for a release, from
+``next_action``.
 """
 
 from __future__ import annotations
@@ -13,9 +12,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.version_check import ships_version_check
 
 
 def missed_episodes(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -110,7 +106,7 @@ USAGE_HEADING = re.compile(
 def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
     """The design a step recorded as ``proposal_notes.design`` and its How to use section, each stripped, the
     usage starting with a capital; empty where the record has none. The proposer writes the usage under a
-    ``How to use`` heading at the end, which the pages and the wrapper's result lines read."""
+    ``How to use`` heading at the end, which the pages read."""
     design = notes.get("design")
     if not isinstance(design, str) or not design.strip():
         return "", ""
@@ -145,76 +141,41 @@ def rejection_text(metrics: Mapping[str, Any]) -> str:
     return f"did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
 
 
-def reef_installs(adapter: str) -> bool:
-    """Whether Reef installs ``adapter``'s harness with a wrapper that sets up and updates it; terminus, a batch
-    runner, has none: its tree is served by ``GET /reef/harness`` and a run's Harbor task holds what it needs."""
-    return get_adapter(adapter).install is not None
-
-
 @dataclass(frozen=True)
 class NextAction:
-    """What a settled step offers next.
+    """What a settled step offers the person who asked.
 
-    ``commands`` are what the page shows, each runnable as it stands, and
-    ``place`` says where to run them under ``heading``. ``terminal`` are the
-    wrapper commands that take the same step from a terminal, in order;
-    empty where no wrapper runs (terminus). On an adapter with the update
-    notice, ``commands`` is its in-session install and ``terminal`` the
-    wrapper's alternative."""
+    Values: ``heading`` names the action. ``commands`` are calls to this Reef
+    service, in order, each runnable as it stands with the scenario's header.
+    ``place`` says what the calls do.
+    Purpose: ``next_action`` makes it; the request page renders it.
+    """
 
     heading: str
     commands: tuple[str, ...]
     place: str
-    terminal: tuple[str, ...]
 
 
-def next_action(
-    adapter: str, step: int, selection_result: str, record_id: str, requires: Sequence[str]
-) -> NextAction | None:
-    """The next action of a settled step, ``None`` for a rejected or skipped one. ``requires`` names the items the
-    release still needs set up: the install refuses a release whose items are not set up, so setup comes first."""
-    if selection_result not in ("pending", "selected"):
-        return None
-    if not reef_installs(adapter):
-        # A batch runner with no wrapper: nothing to set up or update on this machine.
-        if selection_result != "selected":
-            return None
-        return NextAction(
-            "Run it",
-            ("GET /reef/harness",),
-            "It serves this release's tree now; a run gets it from there. What the release requires must hold in "
-            "the Harbor task the run uses.",
-            (),
-        )
-    install = (f"reef-{adapter} setup", f"reef-{adapter} update") if requires else (f"reef-{adapter} update",)
-    if ships_version_check(adapter):
-        return NextAction(
-            "Read this page, then install" if selection_result == "pending" else "Install when ready",
-            (f"/versions v{step} install",),
-            f"Run this in your reef-{adapter} session. You can keep chatting until you are ready.",
-            install,
-        )
+def next_action(scenario: str, release_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
+    """The next action of a settled step: promote a release held for review, or pull a published one.
+
+    ``requires`` names what the release needs where the harness runs (see
+    ``reef.core.requirements.required_by``). ``None`` for a rejected,
+    skipped, failed or promoted step: nothing waits on the person then.
+    """
     if selection_result == "pending":
-        serve = (f"reef-{adapter} wait {record_id}",)
         return NextAction(
-            "Read this page, then serve it",
-            serve,
-            "Run this in a terminal: it asks whether to serve this release, then installs it.",
-            serve,
+            "Read this page, then promote it",
+            (f'POST /reef/scenarios/{scenario}/promote {{"release_id": "{release_id}"}}',),
+            "The change touches files a person reviews before Reef serves them; promoting it serves it.",
         )
-    if requires:
-        return NextAction(
-            "Set up, then install",
-            install,
-            f"Run these in a terminal, in this order: setup asks for what this release needs ({', '.join(requires)}), "
-            f"update installs it; then start reef-{adapter} again to use the new version.",
-            install,
-        )
+    if selection_result != "selected":
+        return None
+    needs = f" It requires {', '.join(requires)} where the harness runs." if requires else ""
     return NextAction(
-        "Install when ready",
-        install,
-        f"Run this in a terminal, then start reef-{adapter} again to use the new version.",
-        install,
+        "Pull it",
+        ("GET /reef/harness",),
+        f"Reef serves this release's files now; a client gets them from there.{needs}",
     )
 
 
@@ -226,7 +187,6 @@ __all__ = [
     "missed_episode_text",
     "missed_episodes",
     "next_action",
-    "reef_installs",
     "rejection_text",
     "unscored_failures",
 ]

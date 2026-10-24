@@ -116,7 +116,7 @@ Built-in surfaces
 |                                        |             |                    |                         | selecting that scenario's        |                  |
 |                                        |             |                    |                         | adapter revision                 |                  |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
-| ``create_harness_surface()``           | ``harness`` | accepts any        | none                    | none                             | ``TextFileTree`` |
+| ``create_harness_surface(descriptor)`` | ``harness`` | accepts any        | none                    | none                             | ``HarnessFiles`` |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
 | ``create_skill_surface(...)``          | ``skills``  | ``SkillValidator`` | none                    | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
 +----------------------------------------+-------------+--------------------+-------------------------+----------------------------------+------------------+
@@ -142,10 +142,15 @@ recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the training bridge owns one
 ``AdapterResidencyManager`` per engine, and the surface never touches it.
 
-**Harness file trees.** ``create_harness_surface()`` exposes the artifact's
-UTF-8 text files through ``TextFileTree``, excluding repository bookkeeping
-and binary files. Paths and text are otherwise unchanged, because the harness
-client owns how the tree is installed and interpreted.
+**Harness file trees.** ``create_harness_surface(descriptor)``, in
+``reef.harness.delivery``, serves each release of the ``harness`` component
+through ``HarnessFiles``. A release stores the harness source tree, and a read
+renders it for the descriptor's adapter without a model binding, so the
+client gets the files its agent reads and binds its own model.
+``GET /reef/harness?form=source`` reads the stored source tree instead (see
+`Rendering <harness-adapters.rst#rendering>`__). The function lives in
+``reef.harness`` because it renders; the surface contracts it builds on stay
+in ``reef.surface``.
 
 **Configuration.** ``create_config_surface()`` serves the ``config``
 component: one ``config.json`` object whose ``request_defaults`` fill

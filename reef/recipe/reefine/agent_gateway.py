@@ -11,7 +11,7 @@ credential of their own. Behind it:
 - the multimodal routes (images, embeddings, speech, decisions) go to the
   recipe's multimodal provider, and the step record keeps their status only;
 - ``GET /models?modality=`` lists the provider's models, fetched with its key;
-- ``/check`` and ``/trial`` run the agent's workspace through admission and
+- ``/check`` and ``/trial`` run the agent's workspace through validation and
   through a real run of the candidate harness (:class:`WorkspaceTools`);
 - everything else, Reef's own routes included, is 404.
 """
@@ -35,7 +35,7 @@ from reef.harness.episodes.model_binding import ModelBinding, usage_of
 from reef.recipe.reefine.multimodal import MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
-from reef.train.cordis_backend.strategies import ProposerCalls
+from reef.train.harness_backend.contract import ProposerCalls
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class WorkspaceTools(ABC):
 
     @abstractmethod
     def check(self) -> dict[str, Any]:
-        """The workspace through admission, as the step would admit it."""
+        """The workspace through validation, as the step would validate it."""
 
     @abstractmethod
     def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, Any]:

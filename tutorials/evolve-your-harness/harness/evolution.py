@@ -1,25 +1,18 @@
-"""Compatibility entrypoints for the evolve-your-harness tutorial.
+"""The tutorial's grader, shared by both variants and by ``run.py``.
 
-Proposals and the reading of an episode's final answer live in the built-in
-Reefine recipe; the grader and its three arithmetic answers are this
-tutorial's own, since its deployments keep those tasks. The small client
-grader stays dependency-free so run.py still needs only reef-client.
+Proposals on pi come from the built-in Reefine text proposer, which the serve
+file names; the grader and its three arithmetic answers are this tutorial's
+own, since its deployments keep those tasks. The grader stays dependency-free
+so ``run.py`` still needs only reef-client.
 """
 
 import json
-import re
 
 ANSWERS = {
     "[sieve]": "9592",
     "[fib]": "2880067194370816120",
     "[csv]": "30",
 }
-
-
-_ENTRY_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
-
-
-API_SKILL_NAME = "reef-pi-extension-api"
 
 
 def failures_text(samples):
@@ -49,16 +42,8 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-def propose(nodes, samples, models, *, requests=(), entries=(), adapter="pi"):
-    """Delegate service-side proposals to the built-in recipe, the tree's entries included."""
-    from reef.recipe.reefine.evolution import propose as reefine_propose
-
-    return reefine_propose(nodes, samples, models, requests=requests, entries=entries, adapter=adapter)
-
-
 def evaluate(task: str, result) -> float:
-    """Grade the episode's final assistant text, read as the built-in recipe reads it, against this tutorial's
-    own answers."""
-    from reef.recipe.reefine.evolution import final_assistant_text
+    """Grade the episode's final assistant text against this tutorial's own answers."""
+    from reef.harness.episodes.trajectory import final_assistant_text
 
     return grade_text(task, final_assistant_text(result.trajectory))

@@ -86,7 +86,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                                                            | the served harness tree                           |
+| ``GET /reef/harness``                                                            | the served harness tree, rendered for the         |
+|                                                                                  | adapter or as its source tree                     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -103,8 +104,6 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/harness/proposals``                                                 | an agent's proposed tree change, admitted or not  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/install``                                                    | a shell script that installs the tree             |
-+----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/adapters``                                                   | every harness adapter this process resolves       |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/status``                                                             | training, serving, and storage state              |
@@ -117,8 +116,7 @@ Headers
 | Header                            | Required for                                            |
 +===================================+=========================================================+
 | ``x-reef-scenario``               | inference, report, harness manifest, releases and       |
-|                                   | proposals; optional on harness install. Names the       |
-|                                   | workload a record belongs to.                           |
+|                                   | proposals. Names the workload a record belongs to.      |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
 |                                   | configured; with no Authorization header, ``x-api-key`` |
@@ -130,7 +128,7 @@ Headers
 |                                   | release, or the request is HTTP 409. Inference always   |
 |                                   | answers from the scenario's current release; to pull a  |
 |                                   | specific release, use ``?release_id=`` on the harness   |
-|                                   | manifest or install route.                              |
+|                                   | manifest.                                               |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: context stored under             |
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
@@ -147,7 +145,7 @@ Headers
 Client release tags
 ~~~~~~~~~~~~~~~~~~~
 
-``x-reef-tag-release`` identifies the harness release installed by the client.
+``x-reef-tag-release`` names the harness release the client runs.
 Reef uses it as the inference record's ``artifact_ref`` only when all three
 conditions hold:
 
@@ -158,7 +156,7 @@ conditions hold:
 Otherwise the record names the current served release, including when the tag
 is absent or unknown. The tag does not change which release serves inference.
 
-For example, a harness client installed release A before the service published
+For example, a harness client pulled release A before the service published
 B. If these conditions hold, its calls tagged with A are recorded against A;
 an untagged call or a call tagged with an unknown release is recorded against B.
 This tag is separate from ``x-reef-release-id``, which binds a scenario to its
@@ -354,39 +352,45 @@ Manual training
 
 ``POST /reef/train`` queues one training instruction for a scenario in
 ``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
-proposer that accepts ``requests``). It takes the user's ``text``,
+proposer whose ``reads_requests`` is true). It takes the user's ``text``,
 originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
 requires no inference receipts or score.
 
-A request may also carry ``requires``: what the change needs from the
-person's machine, at most 8 ``{name, kind, check, prompt}`` items, default
-none. ``kind`` is ``permission`` (an OS permission the person grants),
-``env`` (a variable the person sets; the extension reads it from the
-environment, and its value never enters a request or the tree) or
-``service`` (an account or endpoint the person connects). ``name`` matches
-the entry name pattern and is what a check off is recorded under.
-``check`` is optional: the variable name for ``env``; for ``permission``
-and ``service`` a shell command whose exit status zero means satisfied.
-For ``env`` the variable named (the check, else the name) is a shell
-identifier, ``^[A-Za-z_][A-Za-z0-9_]*$``. ``prompt`` is optional: one
-sentence telling the person what to enter or grant, at most 200
-characters, stripped and dropped when blank; ``reef-<adapter> setup`` and
-the pages show it beside the item. The credential and directive screens
-run over every ``name``, ``check`` and ``prompt`` as they run over
-``text``, with the same HTTP 400 and a reason that names the rule; a
-malformed list is HTTP 400 naming the first bad item. The method's ``propose`` may add items of its
-own to the mapping it received (an extension that reads a variable, say);
-the backend merges them by name into the commit's
-``training_request.requires`` after the same screens (a bad item of the
-method's is dropped alone, named in the service log), the person's items
-first and the list capped at 8 with the dropped items named in the service
-log, so the releases row and the manifest carry what the person named and
-what the change added. Nothing on the service runs a check:
-``reef-<adapter> setup`` runs one after the person read it and confirmed,
-the install script only reads the check offs, and the update notice prints
-the setup list instead of the update while an item is unmet.
+A request may also carry ``requires``: what the change needs where the
+harness runs, at most 8 ``{name, kind, check, prompt}`` items, default none.
+``kind`` is one of these:
+
+- ``permission``: an OS permission the person grants.
+- ``env``: a variable the person sets. The extension reads it from the
+  environment, and its value never enters a request or the tree.
+- ``service``: an account or endpoint the person connects.
+- ``binary``: a program the person installs. Its ``name`` is the program,
+  looked for on the PATH.
+
+``name`` matches ``^[A-Za-z0-9][A-Za-z0-9._-]*$``, and the pages list the
+item under it. ``check`` is optional. For ``env`` it is the variable name;
+for the other kinds it is a shell command whose exit status zero means
+satisfied. For ``env`` the variable named (the check, else the name) is a
+shell identifier, ``^[A-Za-z_][A-Za-z0-9_]*$``. ``prompt`` is optional: one
+sentence telling the person what to enter or grant, at most 200 characters,
+stripped and dropped when blank; the pages show it beside the item. The
+credential and directive screens run over every ``name``, ``check`` and
+``prompt`` as they run over ``text``, with the same HTTP 400 and a reason
+that names the rule. A malformed list is HTTP 400 naming the first bad item.
+
+The method's proposal may add items of its own (an extension that reads a
+variable, say). The backend runs the same credential and directive screens
+over each added item, and merges the ones that pass by name after the
+person's items into the commit's ``training_request.requires``, so the
+releases row and the manifest carry what the person named and what the change
+added. An added item with a person's item's name is dropped: the person's copy
+wins. ``training_request.refused_requires`` lists each item a screen refused
+as ``{"item": <the item as written>, "reason": "..."}``; the key is absent
+when nothing was refused. A step whose merged list holds more than 8 items is
+skipped. Reef never runs a check: the
+client runs the checks where the harness runs, after the person read them.
 
 The three modes differ in what starts a step. ``auto``, the default,
 batches on traffic and refuses an instruction with HTTP 400. ``manual``
@@ -439,28 +443,30 @@ that answered a request carries, for example:
                          "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID",
                                        "prompt": "The Twilio account SID"}]}}
 
-When the backend dropped an item the method added (malformed, or credential
-or directive shaped), ``training_request.refused_requires`` lists each as
-``{"item": <the item as written>, "reason": "..."}``; the key is absent when
-nothing was dropped. A method may also record notes beside its proposal;
-they land under ``proposal_notes``, a JSON mapping the backend writes as
-given and never reads, present only when non-empty. Reefine writes
-``design`` (the proposer's plan, a few sentences), ``review``
-(``{"result": "complete" | "partial", "covered": [...], "uncovered": [...]}``,
-the proposer's own reading of its entries against the request; absent when
-the review call failed), ``refused_requires`` (the items the method itself
-dropped, in the same ``{item, reason}`` shape) and ``undeclared_env`` (the
-variables a written extension reads through ``process.env`` that no
-``requires`` item names; nothing adds them, the version page shows them).
-A request step that produced nothing records ``failure``, why: the model
-call failed (how long it took, the reply budget and the endpoint's error)
-or the reply held no usable entry. Other methods may write other keys.
+A method may also record notes beside its proposal. They land under
+``proposal_notes``, a JSON mapping the backend writes as given and never
+reads, present only when non-empty. Reefine writes these keys:
+
+- ``design``: the proposer's plan, a few sentences.
+- ``review``: ``{"result": "complete" | "partial", "covered": [...],
+  "uncovered": [...]}``, the proposer's own check of its change against the
+  request; absent when the review call failed.
+- ``refused_requires``: the items the method dropped, each as
+  ``{"item": <the item as written>, "reason": "..."}``.
+- ``undeclared_env``: the variables a written extension reads through
+  ``process.env`` that no ``requires`` item names. Nothing adds them; the
+  version page shows them.
+- ``failure``: why a request step produced nothing. The model call failed
+  (how long it took, the reply budget and the endpoint's error), or the
+  reply held no usable answer.
+
+Other methods may write other keys.
 
 An optional ``client`` reports the requesting machine, so a proposer builds
 for it rather than for the sandbox it tries changes in: ``platform``,
 ``arch`` and ``release`` (short words) and ``commands``, a map of command
-names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
-pi's ``/reefine`` send one, reading the PATH without running anything.
+names to whether each is on the machine's PATH (at most 64). A client fills
+``commands`` by looking each name up on the PATH; it runs nothing.
 It only informs the proposer: what does not fit that shape is dropped, never
 a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
@@ -603,7 +609,7 @@ Before calling the model, Reef reads the scenario's current artifact ref and
 builds the request against that release. The stored exchange normally uses
 that frozen ref, even if an update completes mid-request. For a scenario that
 only delivers files to clients, `Client release tags`_ describes when the
-record instead names the client's installed harness release.
+record instead names the harness release the client runs.
 
 On a weight-serving deployment it adds engine
 bookkeeping keys: ``lora_path`` to address the served adapter and
@@ -761,10 +767,12 @@ inference endpoint and it serves the latest published weights. The artifact
 lives in the inference runtime, so requests reach the new release directly.
 
 A scenario whose artifact is the harness tree works the other way: the client
-pulls. The harness should fetch the currently served tree with
-``GET /reef/harness``, or the install script built on it, and run the agent on
-that release. So the harness it uses is the one whose receipts it will later
-report against.
+pulls. It fetches the served tree with ``GET /reef/harness``, writes the files
+where its agent reads them, binds the agent's model to this Reef, and runs the
+agent on that release. The release it runs is then the one whose receipts it
+reports against. `Use a published tree
+<../user-guide/evolve-your-harness.rst#use-a-published-tree>`__ shows a
+client.
 
 Harness artifacts
 ~~~~~~~~~~~~~~~~~
@@ -782,79 +790,44 @@ Harness artifacts
 |                                | ``page_path``, its step's page with the query a browser opens |
 |                                | it by                                                         |
 +--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
-|                                | binary, writes the tree, and writes the adapter's model       |
-|                                | binding at the address the request reached (a gateway in      |
-|                                | front names it in ``x-forwarded-host`` and                    |
-|                                | ``x-forwarded-proto``), the token filled from ``REEF_TOKEN``  |
-|                                | when the script runs; it records the sha256 of each tree file |
-|                                | it wrote (for pi's ``settings.json``, the value of each key   |
-|                                | but pi's own preferences) and that address in                 |
-|                                | ``~/.reef/installs``, and writes the ``reef-<adapter>``       |
-|                                | wrapper beside that record, which checks it before a session  |
-|                                | starts                                                        |
-+--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
 |                                | ``model_bindings``, and the pinned ``install`` spec           |
 +--------------------------------+---------------------------------------------------------------+
 
-The first three are read-only and take ``x-reef-scenario``. Install also requires
-``?adapter=``, whose value may be ``pi``, ``opencode``, ``claude``, ``codex``,
-``dsh``, ``hermes``, or an external descriptor. Only an adapter whose descriptor
-declares an install section can be named here: ``native`` and ``terminus`` ship
-with reef and pin no vendor binary, so they answer HTTP 400 rather than a
-script, naming ``GET /reef/harness`` for the tree and ``POST /reef/train`` for
-a request. If install omits ``x-reef-scenario``, Reef creates a scenario with a
-generated ``harness-`` name and embeds that assignment in the wrapper script;
-when exactly one configured recipe serves harness files, it selects that recipe
-automatically. With ``reef.allow_implicit_scenario_creation: false``, install
-creates no scenario and returns HTTP 404. Create the scenario first with
-``POST /reef/scenarios``, then name it in ``x-reef-scenario``.
+The first two are read-only and take ``x-reef-scenario``. They never create
+a scenario: a scenario that no request has named yet answers HTTP 404, as
+does a scenario whose recipe serves no harness tree.
 
-Creating that scenario takes a few seconds, and ``curl ... | bash`` shows
-nothing until the first bytes arrive. So when the script is not ready within
-half a second, the response starts at once with a short preamble that shows
-``reef: preparing the harness install`` (a spinner on a terminal). The script
-follows inside one ``{ ... }`` group that first stops the spinner, so a
-connection that drops mid-script runs none of it. In that case the HTTP
-status is already 200: a failure while preparing arrives as a script that
-prints ``reef: the harness install failed (HTTP <status>): <message>`` and
-exits 1. A script ready within the half second is sent as before, with the
-failure's own HTTP status.
+``?form=`` chooses what ``files`` holds, path to text:
 
-``files`` is the rendered tree, path to text. An adapter whose descriptor
-declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
-file: the release's entries list, the same ``{id, name, config}`` objects the
-commit history persists, as one JSON array. A resident ``reef-native serve``
-process mounts that list entry by entry; an older ``reef-native`` ignores the
-file and reads the rendered files as before. ``pi`` declares none: a pi
-release is its rendered files, and the entries stay in the commit history, where
-the proposals route and the evolve step read them.
+- ``rendered`` (the default): the release rendered for the scenario's
+  adapter. These are the paths the agent reads, with the adapter's enforced
+  config defaults merged in (see `Rendering
+  <../developer-guide/harness-adapters.rst#rendering>`__).
+- ``source``: the source tree the release stores. These are the paths of the
+  harness layout, the ones a patch names. A client that renders the tree
+  itself, or proposes a patch, reads this form.
 
-``requires`` is what the release needs from the person who installs it:
-every ``training_request.requires`` item (`Manual training
-<#manual-training>`__ gives the shape) over the release's chain, merged by
-name with the newest definition winning, since a request's items are per
-release and a later release whose request named nothing still carries the
-extension an earlier one added. The chain follows ``parent_release_id``
-through the catalog, a promote or rollback row continuing at the release it
-copied; a releases row carries its own step's list alone. The install
-script embeds the list (the union of a chain is not bounded by one
-request's cap of 8) and refuses, before it installs the binary or makes a
-directory, while an item is not checked off in the ``.reef-harness-release``
-release metadata file on disk: it prints the setup list and the newest release in the
-chain that requires nothing, the one that installs on a machine with
-nothing set up (``?release_id=<id>``), and exits 1. ``reef-<adapter> setup``
-records the check offs; ``--release <id>`` names a pending release so its
-items are checked off before its promote. The release metadata file the script writes
-carries ``requires`` (the list) and ``setup`` (the check offs, ``{name,
-checked_at, check}``, carried over from the previous release metadata file by name; an
-item whose check is not the recorded one counts as unmet); a release metadata file the
-stdlib client pull wrote carries neither, which reads as nothing required.
+Another value is HTTP 400. Neither form carries an endpoint or a
+credential: the client writes its own model binding where its agent reads
+it. A new scenario's base release holds the recipe's ``evolution.seed``, so a
+client can pull before any step publishes. A recipe whose seed is empty
+serves HTTP 404 until a step publishes a tree.
 
-Use ``?release_id=`` on the manifest or install route to request a specific
-catalog release. An unknown or unrestorable release returns HTTP 404.
+``requires`` is what the release needs where the harness runs: every
+``training_request.requires`` item (`Manual training <#manual-training>`__
+gives the shape) over the release's chain, merged by name with the newest
+definition winning. A request's items are per release, so a later release
+whose request named nothing still carries the extension an earlier one
+added. The chain follows ``parent_release_id`` through the catalog, a
+promote or rollback row continuing at the release it copied; a releases row
+carries its own step's list alone. One request's cap of 8 does not bound the
+union of a chain. Reef runs no check: the client checks each item before it
+runs the release.
+
+Use ``?release_id=`` to request a specific catalog release, in either form.
+An unknown or unrestorable release returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's proposer or
 evaluation episodes: they continue serving the existing releases while a
@@ -874,7 +847,7 @@ until paired episodes settle it.
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
-     -d '{"mutations": [{"op": "create", "id": "check", "options": {"name": "rules", "config": {"text": "Run the tests before you answer."}}}],
+     -d '{"patch": {"rules.md": "Run the tests before you answer.\n"},
           "reason": "three of five sessions answered before the tests ran",
           "session": "3f1c2a9d0b7e", "release_id": "rel-12"}' \
      "$REEF_URL/reef/harness/proposals"
@@ -882,9 +855,8 @@ until paired episodes settle it.
 +----------------+----------------------------------------------------------------------+
 | Field          | Meaning                                                              |
 +================+======================================================================+
-| ``mutations``  | a non-empty list of ``{op, id, options}``: ``create`` and ``update`` |
-|                | carry ``options`` (``{name, config, disabled?}``, the entry without  |
-|                | its id), ``remove`` carries none                                     |
+| ``patch``      | a JSON object of source tree path to the file's new text, or to      |
+|                | ``null`` to remove the file; it names at least one path              |
 +----------------+----------------------------------------------------------------------+
 | ``reason``     | the proposer's own account, stored with the proposal                 |
 +----------------+----------------------------------------------------------------------+
@@ -893,51 +865,53 @@ until paired episodes settle it.
 | ``release_id`` | the release the proposer was running                                 |
 +----------------+----------------------------------------------------------------------+
 
-The service admits the mutations against the head release's entries with the
-rules every mutation meets (a create on an existing id, an update on a missing
-id or one that changes the entry's kind, a remove on a missing id, a config the
-kind's admission refuses, a kind the adapter does not render, a tree that does
-not render, any op on one of reef's own entries: ``reef-version-check``,
-``reef-requests`` and ``reef-pi-extension-api`` are reserved ids) and answers
-``{proposal_id, admitted, reason, release_id}``:
-``reason`` is the rule that refused, else ``null``; ``release_id`` is the head
-the proposal was admitted against. An admitted proposal waits in the
-scenario's inbox (``evolution.proposals_dir``) until the next evolve step takes
-it, oldest first, before the method's own ``propose`` is asked; the step admits
-it again against its own entries, since the head may have moved, and the evaluation
-settles it like any mutation. The commit that settles it carries ``proposal:
-{id, session, release_id, reason}`` in its metrics, and the releases row
-carries that commit. When ``evolution.max_pending_proposals`` already
-wait, the answer is ``admitted: false`` with reason ``inbox full``; on a
-scenario in ``data.training_mode: manual`` it is ``admitted: false`` with
-reason ``manual mode takes instructions only``, since no automatic step runs
-there to take the inbox. A malformed
-body is HTTP 400; a scenario whose recipe is not a harness evolution recipe is
-HTTP 404 naming that. `Operate a deployment
+The service validates the patched head tree for the scenario's adapter, the
+same validation an evolve step runs on a method's patch. Every path must be
+on the harness layout and of a kind the adapter renders, each file must pass
+its kind's checks (no credential-shaped literal, for one), and the tree must
+render. A patch that changes no file's text is refused too. The answer is
+``{proposal_id, admitted, reason, release_id}``: ``reason`` lists every
+problem that refused the patch, separated by ``;``, else ``null``;
+``release_id`` is the head the patch was validated against.
+
+An admitted proposal waits in the scenario's inbox
+(``evolution.proposals_dir``) until the next automatic evolve step takes it,
+oldest first, before the method's own ``propose`` is asked. The step
+validates the patch again against its own head, since the head may have
+moved; a patch that no longer passes is refused and the step is skipped.
+Otherwise the evaluation settles it like a patch of the method's. The
+commit that settles it carries ``proposal: {id, session, release_id,
+reason}`` in its metrics, and the releases row carries that commit. When
+``evolution.max_pending_proposals`` already wait, the answer is
+``admitted: false`` with reason ``inbox full``. On a scenario in
+``data.training_mode: manual`` it is ``admitted: false`` with reason
+``manual mode takes instructions only``, since no automatic step runs there
+to take the inbox. A malformed body, or a patch that names no path, is HTTP
+400; a scenario whose recipe is not a harness evolution recipe is HTTP 404
+naming that. `Operate a deployment
 <../user-guide/operate.rst#read-the-proposal-inbox>`__ describes the inbox
 directories.
 
 Harness requests
 ~~~~~~~~~~~~~~~~
 
-``reef-<adapter> harness "<request>"`` and pi's ``/reefine <request>``
-submit the user's instruction through ``POST /reef/train``, described under
-`Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
-(the deployment keeps learning from failures) or ``manual``, or switch an
-existing scenario with ``POST /reef/scenarios/{scenario}/update``.
-The commands send ``text``, ``session`` and the installed ``release_id``;
-HTTP 200 acknowledges durable acceptance and returns ``agent_record_id``.
-They require no inference receipts and leave captured receipts available for
-feedback. A scenario in ``auto`` refuses the request; the commands surface
-that error and leave mode switching to the caller.
+A client submits a person's request for a harness change through
+``POST /reef/train``, described under `Manual training <#manual-training>`__.
+Set ``data.training_mode: hybrid`` (the deployment keeps learning from
+failures) or ``manual``, or switch an existing scenario with
+``POST /reef/scenarios/{scenario}/update``. The client sends ``text``,
+``session`` and the ``release_id`` it runs. HTTP 200 acknowledges durable
+acceptance and returns ``agent_record_id`` and ``page_path``. A request needs
+no inference receipts, so the receipts a client captured stay free for
+feedback. A scenario in ``auto`` refuses the request; the client shows that
+error and leaves the mode switch to the person.
 
-The existing trainer delivers the request to a proposer that explicitly
-accepts ``requests``, then evaluates and publishes under the same policy as
-automatic evolution. Its commit metrics carry ``training_request:
-{id, text, session, release_id, requires}`` (with ``refused_requires`` when
-the backend dropped an item the method added) and, for a method that records
-notes beside its proposal, ``proposal_notes``, both visible through the
-release catalog.
+The trainer delivers the request to a proposer whose ``reads_requests`` is
+true, then evaluates and publishes under the same policy as automatic
+evolution. Its commit metrics carry ``training_request: {id, text, session,
+release_id, requires}`` (with ``client`` when the request sent one) and, for
+a method that records notes beside its proposal, ``proposal_notes``, both
+visible through the release catalog.
 
 Rollback
 ~~~~~~~~
@@ -955,11 +929,12 @@ releases marked ``restorable`` can be rolled back.
 Review before serving
 ~~~~~~~~~~~~~~~~~~~~~
 
-With ``evolution.publish: review``, or when a successful evaluation touches a node kind
-listed in ``evolution.review_kinds``, the winning tree is committed to the
-catalog but not served: its row carries ``pending: true``, the manifest and
-install routes keep serving the previous head, and ``?release_id=`` can pull
-the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote``
+With ``evolution.publish: review``, or when a selected patch changes a file
+of a kind listed in ``evolution.review_kinds`` or a ``native_loop`` file, the
+winning tree is committed to the catalog but not served: its row carries
+``pending: true``, the manifest keeps serving the previous head, and
+``?release_id=`` pulls the pending tree for a trial run.
+``POST /reef/scenarios/{scenario}/promote``
 with ``{"release_id": "..."}`` serves it by the same republish path as
 rollback, so the promotion is itself a commit record with
 ``operation: promote`` and the promoted tree becomes a new release. In a
@@ -978,8 +953,7 @@ nothing, is named by the listed release it ran on (``composed_release_id``
 keeps the combination served then); and a rollback or promote whose target
 is not listed names the listed release that target carried
 (``composed_rollback_target_release_id`` keeps the target). Every release
-stays addressable by id through ``?release_id=`` on the manifest and install
-routes.
+stays addressable by id through ``?release_id=`` on the manifest.
 
 Version page
 ~~~~~~~~~~~~
@@ -993,17 +967,18 @@ it. The page shares its chrome with the request page below: the same branded
 header, palette, card layout, automatic light and dark themes and responsive
 behavior, and one status vocabulary, so a step reads ``Published``,
 ``Ready for review``, ``Not selected`` or ``No changes`` in place of the
-record's own field names. The page has up to seven sections, each its own
-card, in this order: Why (the request the
+record's own field names. The page has these sections, each its own card,
+in this order: Why (the request the
 step read, else the claimed proposal's reason, else a failure in the batch),
-Design (the proposer's plan, ``proposal_notes.design``; only when the method
-recorded one), What changed (the step's mutations, each with its operation,
-node id and kind; an extension's file as text for a create, and for an update
-a line diff against the release the
-candidate ran on when that release is restorable, else the new text), Review
-(``proposal_notes.review``: the proposer's result on its entries against the
-request, ``complete`` or ``partial``, then the points it covered and the ones
-it left uncovered, then ``proposal_notes.undeclared_env``,
+Design (the proposer's plan, ``proposal_notes.design``, and How to use, the
+part of the plan under that heading; only when the method recorded one),
+What changed (the step's patch, file by file: ``create`` with the new text,
+``update`` as a line diff against the release the step ran on, ``remove``;
+when that release cannot be restored, a written file shows as ``write``
+with its new text), Review
+(``proposal_notes.review``: the proposer's own check of its change against
+the request, ``complete`` or ``partial``, then the points it covered and the
+ones it left uncovered, then ``proposal_notes.undeclared_env``,
 the variables a written extension reads that no ``requires`` item names;
 only when the row carries a review or that list), Result (the result and what
 it means, then the evaluation's numbers: ``wins``, ``losses``, ``ties``,
@@ -1016,12 +991,12 @@ record directory when ``evolution.step_record_dir`` is set, and
 ``proposal_notes.failure`` as the proposer failure
 when the step recorded one), Setup (the request's ``requires`` with
 name, kind, check and prompt, then the items the release carries from
-earlier steps in its chain, the same union the install script and
-``reef-<adapter> setup`` read; a rejected or skipped row lists only its own
-items, since its release id is the head's; then, under "Refused by the
-step", the items the step dropped from ``training_request.refused_requires``
-and ``proposal_notes.refused_requires``, each as written with its reason;
-nothing when all are empty) and Chain (the parent release, this release,
+earlier steps in its chain, the same union the manifest's ``requires``
+carries; a rejected or skipped row lists only its own items, since its
+release id is the head's; then, under "Refused by the step", the items the
+step refused, from ``proposal_notes.refused_requires`` and, when the row
+carries it, ``training_request.refused_requires``, each as written with its
+reason; nothing when all are empty) and Chain (the parent release, this release,
 and its children: the steps evaluated on it, won, lost or pending, and a promote
 or rollback made on it, each linking that step's own page; a rejected or
 skipped step published nothing, so its
@@ -1047,19 +1022,14 @@ than nine digits, is HTTP 404 too. The row itself rides in a
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
      "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
 
-On pi, ``/versions`` in a ``reef-pi`` session lists the chain, and
-``/versions v3`` offers to open this page in the browser, printing the URL
-when the offer is declined. ``/versions v3 install`` installs that release,
-promoting it first when it is still held back from the served head.
-
 Request page
 ~~~~~~~~~~~~
 
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/reefine``
-print the link. Until the step settles the page reloads itself every five
+``POST /reef/train`` answered; that answer's ``page_path`` links this page.
+Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop
 and stacks them on narrow screens, with automatic light and dark themes; it
@@ -1071,13 +1041,12 @@ the request's state and what it means: ``queued`` while no step has taken
 the request, ``proposing`` while the served model writes the change,
 ``evaluating`` while the candidate's episodes run (with their count and the
 step record directory when the backend reports them, and the time into the
-step), ``running`` while the trainer holds the request and the backend
-reports no phase, and ``settling`` while the row that consumed the record
-lands. While a step holds the request, Activity lists what the proposer has
+step), and ``running`` while the trainer holds the request and the backend
+reports no phase. While a step holds the request, Activity lists what the proposer has
 done so far, newest first, each line at its time into the step and the
 newest with how long ago it happened: every model call as it starts and
 as it answers (its seconds and tokens, or its error), and for the agent
-proposer each tool the agent calls, each admission check, each trial with
+proposer each tool the agent calls, each validation check, each trial with
 its exit and multimodal calls, and each multimodal call with its status;
 failed lines are marked. The page lists the latest 80; the step record
 keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
@@ -1085,18 +1054,20 @@ id settles the page: the reload stops and Progress gives way to Result
 (the result as the version page words it, what it means and the next
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
-changed (each mutation's op, id and kind; labeled Proposed changes for
-pending, rejected, skipped or failed steps) and, when the step recorded a review,
-Review (its result and the points it left uncovered). Published and pending
-results show the session command to install or promote when the person is
-ready, alongside a link to the version page. An unknown
+changed (each file the patch writes or removes, with its kind in the harness
+layout; labeled Proposed changes for pending, rejected, skipped or failed
+steps), Review (its result and the points it left uncovered, when the step
+recorded a review) and Design (the plan and its How to use part, when the
+step recorded them). A published result names the next action,
+``GET /reef/harness``, with what the release requires where the harness
+runs; a pending result names the promote request. An unknown
 id, or one that is not a training instruction, is HTTP 404 naming it.
 
 ``GET /reef/harness/requests/{record_id}/progress`` answers the same reading
 as JSON (``Cache-Control: no-store``), for a client that polls rather than a
 browser that renders: ``request_id``, ``settled``, ``step`` (the step the
 row landed as once it settles, else null), ``state`` (the page's own
-``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
+``queued``, ``proposing``, ``evaluating`` or ``running``, and
 the settled row's result once a row answers the request, including ``failed``
 when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
@@ -1104,9 +1075,7 @@ step holds this request, ``started_at``, ``episodes_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
 ``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
-empty otherwise) from the backend's progress. The phase is what the pi
-extension's spinner names while the step runs, and opening the spinner lists
-the latest four activity lines. Unlike the two pages this is
+empty otherwise) from the backend's progress. Unlike the two pages this is
 an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.
@@ -1131,8 +1100,8 @@ the scenario alone). The key opens these two pages of that one scenario and
 no other route, a request whose ``x-reef-scenario`` header names another
 scenario is HTTP 401, and the token cannot be read back from it (the
 service derives it as an HMAC SHA-256 of the scenario keyed by the token's
-digest). The links ``reef-<adapter>`` and pi's extension print carry it,
-since a session's model reads them and a session's traffic is captured.
+digest). So a client may print these links where a session's model reads
+them, and a captured session that holds one exposes these two pages alone.
 The token itself is never read from a query: ``?token=`` is HTTP 401 on
 every route, the pages included. Every other route reads the headers alone;
 a ``?key=`` elsewhere is HTTP 401.
@@ -1310,8 +1279,8 @@ first; ``next_after_sequence`` is null at the end. Each row contains
 ``references``, the recorded ``artifact_ref``, and the payload's ``score``
 field. No record payload or learning classification is included. An inference
 record's ``artifact_ref`` names the release that served the call, except when
-the conditions in `Client release tags`_ select the client's installed harness
-release.
+the conditions in `Client release tags`_ select the harness release the client
+runs.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or

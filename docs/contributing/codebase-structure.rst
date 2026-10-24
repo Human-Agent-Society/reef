@@ -8,14 +8,17 @@ Choose a destination
 --------------------
 
 ``reef/`` holds every shared mechanism, including the harness evolution engine
-at ``reef/train/cordis_backend/``. The built-in Reefine recipe lives under
+at ``reef/train/harness_backend/`` and the harness source tree at
+``reef/harness/tree/``. The built-in Reefine recipe lives under
 ``reef/recipe/reefine/``. The built-in SFT recipe lives under
 ``reef/recipe/sft/``, and its Slime loss family is in
 ``reef/train/slime_backend/sft.py``. Paper-backed methods live in separate
-packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
-with that method's recipe, processor, training objective, and, for weight methods,
-the ``slime/`` subpackage only the training plane imports. Nothing under
-``reef/`` imports a method package.
+packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
+``meta_harness``, ``skillclaw``). A weight method holds its recipe, processor
+and training objective, with the ``slime/`` subpackage only the training
+plane imports. A harness method holds its recipe and proposer, and a scorer
+or selection policy when it needs its own. Nothing under ``reef/`` imports a
+method package.
 
 Reef is organized around an application kernel and three capability domains,
 not a strict stack of top-level packages. The arrows below show the primary
@@ -112,8 +115,9 @@ import a concrete integration.
 | ``reef/artifact/``      | artifact bytes, repositories,                            | commit policy or delivery                  |
 |                         | materialization, release heads                           | behavior                                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/harness/``       | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
-|                         | episodes, trajectories                                   |                                            |
+| ``reef/harness/``       | harness descriptors, the source tree (layout,            | recipe policy, the release chain           |
+|                         | patches, validation, rendering), episodes,               |                                            |
+|                         | runners, trajectories                                    |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/sandbox/``       | process execution, isolation, file transfer              | harness rendering, evaluation, recipe      |
 |                         | and environment lifecycle through Harbor                 | policy                                     |
@@ -160,7 +164,7 @@ package's own submodules and third-party libraries):
    * - ``sandbox``
      - ``core``
    * - ``harness``
-     - ``sandbox``, ``runtime``, ``core``
+     - ``sandbox``, ``runtime``, ``surface``, ``artifact``, ``core``
    * - ``evaluation``
      - ``harness``, ``runtime``, ``core``
    * - ``train``
@@ -182,7 +186,7 @@ payloads and holds the queued instruction carried by a training batch. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with surface contracts.
-``recipe/cordis.py`` assembles the harness training backend, and
+``recipe/harness.py`` assembles the harness evolution backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
 ``runtime/`` is a namespace package with exactly seven Python modules and the
@@ -312,10 +316,9 @@ The extension points those packages expose are in `Python API
   Put concrete inference engines and their request/control adapters in
   ``reef/inference/<integration>/``; put implementation tied to a concrete
   training stack in its own ``reef/train/<integration>/`` subtree.
-  ``reef/train/cordis_backend/`` is the general harness evolution engine;
-  the shared composition engine lives in ``reef/harness/compose/``. It derives
-  from cordis 4.0.0-rc.8; see ``reef/harness/compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the
-  weights counterpart.
+  ``reef/train/harness_backend/`` is the general harness evolution engine,
+  and ``reef/harness/tree/`` holds the source tree it evolves.
+  ``reef/train/slime_backend/`` is the weights counterpart.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into tasks? Put the
   shared contract in ``reef/record2task/``. Does it shape tasks into a batch?
@@ -366,10 +369,10 @@ harness wire contract is `HTTP API <../reference/http-api.rst>`__. The
 `top-level README <../../README.md>`__ shows how the cookbook methods sit
 beside ``reef/``.
 
-``reef/train/cordis_backend/`` is the general harness evolution engine; the
-shared composition engine derives from cordis 4.0.0-rc.8 with the conformance
-map in ``reef/harness/compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the weights
-counterpart.
+The harness method contract is in the ``reef/train/harness_backend/``
+package docstring, and `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ explains it.
+``reef/harness/tree/layout.py`` defines the source tree layout.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``
 requires an RFC that states which layer owns the behavior.

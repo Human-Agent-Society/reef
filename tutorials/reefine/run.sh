@@ -1,5 +1,5 @@
 #!/bin/bash
-# Reefine on reef-pi, end to end. Usage: ./run.sh bugfix | research | measure [--n N]
+# Reefine on pi, end to end. Usage: ./run.sh bugfix | research | measure [--n N]
 # Starts reef serve on configs/deployment.yaml, waits for /healthz, installs
 # the served tree under work/harness, runs run.py <mode>, stops the service.
 # State and logs go to ./work. Setup (once): see README.
@@ -28,7 +28,7 @@ export REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"
 
 TUTORIAL="$PWD"
 REPO="$(cd ../.. && pwd)"
-# The install script's import check and reef serve run from this checkout; the wrapper it writes bakes this interpreter.
+# reef serve and run.py run from this checkout.
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 # deployment.yaml listens on 8901; a reef already there would answer for another deployment.
@@ -49,6 +49,6 @@ while ! curl -sf http://127.0.0.1:8901/healthz > /dev/null; do
     sleep 1
 done
 
-# The served tree and the release metadata file land under work/harness, the reef-pi wrapper in ~/.reef/installs.
+# The served tree, rendered for pi with a binding at this Reef, and its release metadata file land under work/harness.
 python3 run.py install
 python3 run.py "$MODE" "$@"

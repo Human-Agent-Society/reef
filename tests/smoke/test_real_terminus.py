@@ -14,14 +14,17 @@ runs in CI.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.trajectory import TerminusAtifReader
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
 TASK = os.environ.get("REEF_REAL_TERMINUS_TASK", "")
@@ -35,15 +38,18 @@ pytestmark = pytest.mark.skipif(
 
 def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path, monkeypatch) -> None:
     descriptor = get_adapter("terminus")
-    nodes = [
-        ("rules", {"text": "Work quickly and stop as soon as the task is done."}),
-        ("config", {"data": {"max_turns": 8, "model_name": MODEL, "api_base": BASE_URL}}),
-    ]
+    # The model comes through Reef's binding, as in every episode: a tree may not name a model or an endpoint.
+    binding = ModelBinding(
+        base_url=BASE_URL.removesuffix("/v1"), model=MODEL, api_key=os.environ.get("OPENAI_API_KEY") or None
+    )
+    tree = HarnessTree(
+        {
+            "rules.md": "Work quickly and stop as soon as the task is done.",
+            "config/primary.json": json.dumps({"max_turns": 8}),
+        }
+    )
     root = tmp_path / "root"
-    for path, text in render_composition(nodes, descriptor).items():
-        target = root / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+    write_rendered(root, tree, descriptor, binding)
 
     sessions = root / "terminus" / "sessions"
     monkeypatch.setenv("REEF_TERMINUS_DIR", str(root))

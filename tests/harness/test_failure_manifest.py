@@ -1,39 +1,45 @@
 """Guard tests for the failure manifest (issue #475): the state schema is
 pinned field by field, fingerprints are stable across processes and temp
-directories, the diff classes follow the streak rules, every pre-manifest
-proposer shape keeps working, and the manifest rides the committer
-from one step's settlement to the next step's propose."""
+directories, the diff classes follow the streak rules, the proposer reads the
+committed manifest from its context, and the manifest rides the committer
+from one step's settlement to the next step's proposal."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.reef_service.test_harness_recipe import MODEL, RULES, batch, evaluate, make_binary, run_backend_step
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_recipe
 
 from reef.artifact import ArtifactRef
 from reef.evaluation.harness import FailureObservation
-from reef.harness.adapters import get_adapter
+from reef.harness.tree import TreePatch
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
-from reef.train.cordis_backend.manifest import MANIFEST_KIND, advance, fingerprint, normalize_cause
+from reef.train.backend import ComponentReleases
+from reef.train.harness_backend import FailureManifest, FailureRecord
+from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.manifest import MANIFEST_KIND, advance, fingerprint, normalize_cause
+from reef.train.types import TrainingBatch, TrainStepResult
 
 LAUNCH_CAUSE = "harness binary '/tmp/pytest-123/no-such-binary' not found"
 LAUNCH_FINGERPRINT = "75b82de293902cee"
 
 
-def backend(binary: str, propose) -> CordisBackend:
-    return CordisBackend(
-        descriptor=get_adapter("pi"),
-        propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(evaluate),
-        tasks=("task one",),
-        models=MODEL,
-        binary=binary,
-    )
+def backend(tmp_path: Path, propose, binary: str | None = None) -> HarnessBackend:
+    """A pi backend over the fake binary, or over ``binary`` when given, whose head is the seed tree."""
+    recipe = harness_recipe(tmp_path, propose)
+    if binary is not None:
+        recipe = replace(recipe, binary=binary)
+    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+
+
+def batch() -> TrainingBatch:
+    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # -- schema pin ------------------------------------------------------------
@@ -138,58 +144,43 @@ def test_entries_serialize_sorted_by_fingerprint() -> None:
     assert fingerprints == sorted(fingerprints)
 
 
-# -- proposer compatibility ------------------------------------------------
+# -- the proposer's view ---------------------------------------------------
 
 
 def manifest_state() -> dict:
     return advance(None, 1, (observation("task one"),)).to_state()
 
 
-def test_three_argument_function_and_lambda_run_against_manifest_state(tmp_path: Path) -> None:
-    def propose(nodes, samples, models):
-        return None
-
-    for proposer in (propose, lambda nodes, samples, models: None):
-        b = backend(str(make_binary(tmp_path)), proposer)
-        result = run_backend_step(b, batch(), {"steps": 1, "entries": [], "failure_manifest": manifest_state()})
-        assert result.metrics["skipped"] == "no proposal"  # the callable ran
-        assert result.state["failure_manifest"] == manifest_state()  # a skip carries the manifest untouched
-
-
-def test_manifest_keyword_receives_none_when_the_state_has_no_key(tmp_path: Path) -> None:
+def test_the_proposer_reads_the_committed_manifest_from_its_context(tmp_path: Path) -> None:
     received = []
 
-    def propose(nodes, samples, models, *, manifest=None):
-        received.append(manifest)
+    def propose(context):
+        received.append(context.manifest)
         return
 
-    b = backend(str(make_binary(tmp_path)), propose)
-    result = run_backend_step(b, batch(), b.initial_state())
+    b = backend(tmp_path, propose)
+    first = backend_step(b, batch(), b.initial_state())
     assert received == [None]
-    assert "failure_manifest" not in result.state  # absence stays unknown, never an empty manifest
-
-
-def test_var_keyword_proposer_receives_the_manifest(tmp_path: Path) -> None:
-    received = []
-
-    def propose(nodes, samples, models, **kwargs):
-        received.append(kwargs["manifest"])
-        return
-
-    b = backend(str(make_binary(tmp_path)), propose)
-    run_backend_step(b, batch(), {"steps": 1, "entries": [], "failure_manifest": manifest_state()})
-    assert received == [FailureManifest.from_state(manifest_state())]
+    assert first.state["failure_manifest"] is None  # absence stays unknown, never an empty manifest
+    result = backend_step(b, batch(), {"steps": 1, "failure_manifest": manifest_state()})
+    assert received[1] == FailureManifest.from_state(manifest_state())
+    assert result.metrics["skipped"] == "no proposal"
+    assert result.state["failure_manifest"] == manifest_state()  # a skip carries the manifest untouched
 
 
 # -- the manifest through steps, the committer, and recovery ---------
 
 
-def failing_step(binary: str, received: list[FailureManifest | None], state: dict):
-    def propose(nodes, samples, models, *, manifest=None):
-        received.append(manifest)
-        return Mutation("create", f"r{len(received)}", RULES)
+def failing_step(
+    tmp_path: Path, binary: str | None, received: list[FailureManifest | None], state: dict
+) -> TrainStepResult:
+    """One step whose proposal rewrites the rules, over ``binary`` (the fake pi when ``None``)."""
 
-    return run_backend_step(backend(binary, propose), batch(), state)
+    def propose(context):
+        received.append(context.manifest)
+        return TreePatch(changed_rules(f"rules {len(received)}\n"))
+
+    return backend_step(backend(tmp_path, propose, binary), batch(), state)
 
 
 def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -> None:
@@ -198,7 +189,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
     # Step 1: both sides fail at launch, the step is rejected, and the
     # retained current side's failure becomes the manifest.
-    first = failing_step(missing, received, {"steps": 0, "entries": []})
+    first = failing_step(tmp_path, missing, received, {"steps": 0})
     assert received == [None]
     assert first.metrics["failures"] == {"new": 1, "persisting": 0, "fixed": 0}
     entry = FailureManifest.from_state(first.state["failure_manifest"]).entries[0]
@@ -209,7 +200,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
     # Step 2 on the committed state: propose observes the failure, and the
     # unchanged failure persists with its streak extended.
-    second = failing_step(missing, received, dict(first.state))
+    second = failing_step(tmp_path, missing, received, dict(first.state))
     assert isinstance(received[1], FailureManifest)
     assert received[1].entries[0].count == 1
     assert second.metrics["failures"] == {"new": 0, "persisting": 1, "fixed": 0}
@@ -217,7 +208,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
     assert (persisted.count, persisted.first_seen_step, persisted.last_seen_step) == (2, 1, 2)
 
     # Step 3 with a working binary: no episode fails, so the entry is fixed.
-    third = failing_step(str(make_binary(tmp_path)), received, dict(second.state))
+    third = failing_step(tmp_path, None, received, dict(second.state))
     assert received[2] == FailureManifest.from_state(second.state["failure_manifest"])
     assert third.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 1}
     settled = FailureManifest.from_state(third.state["failure_manifest"])
@@ -227,7 +218,7 @@ def test_manifest_settles_persists_and_fixes_across_real_steps(tmp_path: Path) -
 
 def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
     received: list[FailureManifest | None] = []
-    first = failing_step(str(tmp_path / "no-such-binary"), received, {"steps": 0, "entries": []})
+    first = failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, {"steps": 0})
 
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         log = records.commit_history()
@@ -248,12 +239,12 @@ def test_manifest_recovers_through_the_commit_history(tmp_path: Path) -> None:
     assert recovered is not None
     assert recovered["failure_manifest"] == first.state["failure_manifest"]
 
-    failing_step(str(tmp_path / "no-such-binary"), received, dict(recovered))
+    failing_step(tmp_path, str(tmp_path / "no-such-binary"), received, dict(recovered))
     assert received[1] == FailureManifest.from_state(first.state["failure_manifest"])
 
 
 def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Path) -> None:
-    # Algorithm state may carry only the lineage keys. It must parse and step,
+    # Algorithm state may carry only the step counter. It must parse and step,
     # delivering no previous failure manifest.
     line = json.dumps(
         {
@@ -267,7 +258,7 @@ def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Pa
                 "parent_release_id": "base",
             },
             "checkpoint": False,
-            "algorithm_state": {"steps": 1, "entries": []},
+            "algorithm_state": {"steps": 1},
             "record_progress": {
                 "high_water_sequence": 1,
                 "high_water_offset": 1,
@@ -280,7 +271,7 @@ def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Pa
     record = CommitRecord.from_dict(json.loads(line))
     assert record.algorithm_state is not None
     received: list[FailureManifest | None] = []
-    result = failing_step(str(make_binary(tmp_path)), received, dict(record.algorithm_state))
+    result = failing_step(tmp_path, None, received, dict(record.algorithm_state))
     assert received == [None]
     assert isinstance(FailureManifest.from_state(result.state["failure_manifest"]), FailureManifest)
 

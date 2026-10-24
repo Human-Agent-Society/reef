@@ -14,8 +14,8 @@ computation no matter which backend executes it; the recipe's ``StepScheduling``
 steps. ``Trainer`` runs the recipe's candidate evaluation (``reef.evaluation``)
 between prepare and settle.
 
-The package does not import recipes or service assembly. ``CordisRecipe``
-lives in ``reef.recipe.cordis``. Slime component preparation lives in
+The package does not import recipes or service assembly. The harness
+evolution recipe lives in ``reef.recipe.harness``. Slime component preparation lives in
 ``reef.train.slime_backend.driver``; Reef's service layer assembles components
 and ``reef.runtime.deployment`` owns their lifecycle. ``tinker_backend`` owns
 remote LoRA training, immutable samplers, and checkpoint manifests as a

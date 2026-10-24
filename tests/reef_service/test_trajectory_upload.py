@@ -82,7 +82,9 @@ class UploadRecipe(Recipe):
     batch_stage: type[Task2Batch] = UploadBatches
     batches: list[TrainingBatch] = field(default_factory=list)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         return Trainer.build(
             scenario,
             records,

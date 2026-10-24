@@ -13,7 +13,7 @@ from pathlib import Path
 import aiohttp
 
 from reef.core.tasks import HarborTask
-from reef.harness.client.tasks import TaskEpisode
+from reef.harness.episodes.tasks import TaskEpisode
 from reef.record2task.generator.designer import DesignerRequest
 from reef.record2task.generator.harbor import OracleResult
 from reef.record2task.generator.inputs import read_asset_files

@@ -2,10 +2,10 @@
 
 One episode is one process of the harness binary inside a throwaway root:
 the rendered files land under the root, the descriptor's relocation
-environment points the binary's entire composition at it, the binary runs
+environment points the binary's whole configuration at it, the binary runs
 headless in an empty ``workspace/`` working directory, and the trajectory is
-read back before the root is removed. Both surveyed harnesses re-read their
-whole composition at process start and accept environment variables that
+read back before the root is removed. The bundled harnesses re-read their
+whole configuration at process start and accept environment variables that
 relocate their config and session roots, so the inverse of an episode is
 exactly "delete the root" - no shared state survives.
 

@@ -45,10 +45,10 @@ if [ "$MODE" != native ] && [ "$MODE" != self ]; then
     exit 0
 fi
 
-# The serve form: pull the seed tree, then one resident process follows the
-# head while run.py sends the tasks to it as turns. The receipts of every
-# turn spool under work/captures, where run.py's report command claims them.
-export REEF_HARNESS_CAPTURES_DIR="$PWD/work/captures"
+# The serve form: name the scenario and write the binding, then one resident
+# process pulls the served tree and follows the head while run.py sends the
+# tasks to it as turns. Each turn returns its receipts, which run.py reports
+# its score against.
 python3 run.py pull
 SELF_TOOLS=""
 [ "$MODE" = self ] && SELF_TOOLS="--self-tools"

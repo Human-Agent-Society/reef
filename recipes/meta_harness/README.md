@@ -1,15 +1,27 @@
 # Meta-Harness
 
 Meta-Harness is full-history search over a fixed model's harness. This method
-represents every candidate as a complete Reef composition, so the same search
+represents every candidate as a complete Reef harness tree, so the same search
 works with any Reef adapter and any episode scorer. It has no Harbor,
 Terminal-Bench, Terminus, or coding-agent dependency.
 
-The implementation is a specialization of Reef's existing harness-evolution
-recipe. Reef still owns node validation, adapter rendering, model binding,
-episode execution, timeouts, residue policy, finite-score checks, selection
-settlement, artifact publication, and scenario commits. Meta-Harness adds only
-the population-aware proposal and selection policies.
+The implementation is a specialization of Reef's harness evolution recipe, in
+the standard method layout:
+
+```text
+meta_harness/
+  recipe.py       MetaHarnessRecipe: the evolution.meta_harness section, the proposer and the selection
+  proposer.py     MetaHarnessProposer: one complete tree per step from the retained population
+  selection.py    MetaHarnessSelection: a strict mean-score improvement over the committed incumbent
+  population.py   every candidate tree, its scores and the budgets, committed as method state
+  examples/terminal_bench/
+                  the runnable Terminal-Bench search
+```
+
+Reef still owns tree validation, adapter rendering, model binding, episode
+execution, timeouts, residue policy, finite-score checks, publication, and
+scenario commits. Meta-Harness adds only the population-aware proposer and
+selection.
 
 ## Configuration
 
@@ -19,32 +31,28 @@ recipe:
   config:
     evolution:
       adapter: pi
+      seed: seed                 # the first tree, a directory
       evaluate: my_harness.scoring:EpisodeScore
       tasks:
         - First validation task
         - Second validation task
-      seed:
-        - id: rules
-          name: rules
-          config:
-            text: Work carefully and verify the result.
       models:
         proposer:
           url: https://api.openai.com
           model: gpt-5
           api_key_env: OPENAI_API_KEY
       meta_harness:
-        archive: ${REEF_WORK}/meta-harness
         mode: full_history
         max_candidates: 20
         max_target_episodes: 200
-        max_nodes: 32
+        max_files: 32
 
 inference:
   upstream-model: model-under-test
 ```
 
-`evaluate` names a standard Reef episode scorer class:
+`seed` is a directory of tree files, such as `rules.md` with the starting
+rules. `evaluate` names a standard Reef episode scorer class:
 
 ```python
 class EpisodeScore(EpisodeScorer):
@@ -52,57 +60,70 @@ class EpisodeScore(EpisodeScorer):
         ...
 ```
 
-The built-in proposal policy is a standard Reef `Proposer`: its
-`propose(nodes, samples, models, *, manifest, rejected, ...)` receives every
-proposer keyword.
+The `meta_harness` section takes these keys:
 
-It calls `evolution.models.proposer`, and refuses to run when
-that name is not configured. The model sees all retained candidate
-compositions and scores, the parent each came from, the current trace batch, the
-validation task names, and the adapter's Reef node vocabulary. It returns one
-parent id and one complete composition. In `full_history` mode the parent may
-be any retained candidate; `incumbent_only` is the greedy control.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `full_history` | `full_history` lets the proposer branch from any retained candidate; `incumbent_only`, the greedy control, from the served one only |
+| `model` | `proposer` | the `evolution.models` binding that proposes |
+| `components` | every kind the adapter renders | the tree kinds the proposer may change |
+| `max_candidates` | `0` (no limit) | new candidates to evaluate |
+| `max_target_episodes` | `0` (no limit) | evaluation episodes to spend |
+| `max_files` | `32` | files in one proposed tree |
 
-`components` can narrow what the proposer may change. Other nodes from the
-selected parent must remain byte-for-byte equivalent in the proposed
-composition:
+The proposer is a standard Reef `Proposer`: `propose(context)` reads the
+population from the method state of the latest commit. It calls the binding
+`meta_harness.model` names and refuses to run when `evolution.models` does
+not declare it: the harness under test must not propose its own
+improvements. The model sees every retained candidate's files and scores
+(the served candidate's alone in `incumbent_only` mode), the parent each
+came from, the current trace batch, the validation task names, and a guide
+to the files the adapter takes. It returns one parent id and one complete
+tree as `files`, path to text. Reef validates the tree and states it as a
+patch against the served tree. A tree the population already
+holds is recorded as a duplicate and the step proposes nothing.
+
+`components` can narrow what the proposer may change. Files of other kinds
+must stay byte-for-byte equal to the selected parent's:
 
 ```yaml
       meta_harness:
-        archive: ${REEF_WORK}/meta-harness
         components: [rules, skill]
 ```
 
-With no `components` setting, every node kind the selected adapter exposes is
-eligible. The adapter's own render/finalization checks remain authoritative;
-for example, an adapter may still reject an otherwise valid Reef node kind.
+With no `components` setting, every kind the selected adapter renders is
+eligible. The adapter's own validation remains authoritative; for example,
+an adapter may still refuse an otherwise valid file.
 
 ### Terminus 2 code evolution
 
-Use Reef's `terminus` adapter and its `code_extension` node to evolve Python
-behavior. It accepts one self-contained module defining `Agent(Terminus2)`.
-Start from a no-op subclass so the proposer sees the adapter contract:
+Use Reef's `terminus` adapter and its `code_extension` kind to evolve Python
+behavior. It accepts one self-contained module defining `Agent(Terminus2)`,
+at `extensions/<name>.py` in the tree. Start from a no-op subclass so the
+proposer sees the adapter contract: a seed directory holding
+`extensions/agent.py` with
+
+```python
+from harbor.agents.terminus_2 import Terminus2
+
+
+class Agent(Terminus2):
+    pass
+```
+
+and this configuration:
 
 ```yaml
 recipe:
   config:
     evolution:
       adapter: terminus
+      seed: seed
       executor: sandbox
       sandbox:
         egress_hosts: [api.e2b.dev, api.openai.com]
         env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
-      seed:
-        - id: agent
-          name: code_extension
-          config:
-            name: agent
-            code: |
-              from harbor.agents.terminus_2 import Terminus2
-              class Agent(Terminus2):
-                  pass
       meta_harness:
-        archive: ./meta-harness
         components: [code_extension]
 ```
 
@@ -123,13 +144,14 @@ stock Terminus 2 locally with Docker.
 ## Population and commits
 
 Every unique valid candidate is retained, including non-winners, and can be a
-future parent. Selection is a strict improvement in mean validation score over
-the score the incumbent was admitted on, which reproduces upstream's frontier:
-it keeps the highest recorded score. Reef's paired gate
-still measures both sides, so this method spends two evaluations per iteration
-where upstream spends one; budgets expressed in episodes are not directly
-comparable to upstream's iteration counts. Failed episodes count as zero; a
-non-finite score is rejected by Reef before settlement.
+future parent; a candidate's id is its tree's checksum. Selection is a strict
+improvement in mean validation score over the score the incumbent was admitted
+on, which reproduces upstream's frontier: it keeps the highest recorded score.
+Reef's paired evaluation still measures both sides, so this method spends two
+evaluations per iteration where upstream spends one; budgets expressed in
+episodes are not directly comparable to upstream's iteration counts. Failed
+episodes count as zero; a non-finite score is rejected by Reef before
+selection.
 
 The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
 recipe on the full pinned dataset. The [results](RESULTS.md) compare a matched
@@ -139,21 +161,18 @@ campaign tooling is separate from this reusable recipe.
 
 The evaluation suite must stay fixed so historical scores remain comparable.
 Task promotion, periodic rechecks, and review-only publication are therefore
-rejected by this method. Selection and automatic publication commit together.
+rejected by this method, and so is an `evolution.selection` setting: the
+method owns the selection. Selection and automatic publication commit
+together.
 
 The complete population, parents, scores, served id, proposal attempts, and
-budget counters live under `meta_harness_population` in Reef's algorithm
-state. Proposal and selection changes are staged until the scenario commit is
-durable. Evaluation, settlement, activation, publication, or commit failures
-cannot advance the committed population.
+budget counters live under `population` in the method state Reef commits with
+each step. A step reads the population from the latest commit and folds in
+the evaluation of the candidate the previous step proposed, so evaluation,
+publication, or commit failures cannot advance the committed population.
 
-The file under `archive` is only a human-readable post-commit mirror. Scenario
-names are SHA-256 encoded into filenames so they cannot escape the directory.
-On restart Reef ignores the file as input and rewrites a stale mirror from the
-committed algorithm state.
-
-`max_target_episodes` counts both sides of Reef's paired gate: candidate and
-incumbent, multiplied by `episode_repeats`. A proposal is not started unless
-the complete next gate fits. Zero disables a budget; Reef's shared
+`max_target_episodes` counts both sides of Reef's paired evaluation: candidate
+and incumbent, multiplied by `episode_repeats`. A proposal is not started
+unless the complete next evaluation fits. Zero disables a budget; Reef's shared
 `max_steps`, `max_model_calls_per_step`, executor, timeout, and residue options
 remain available as usual.

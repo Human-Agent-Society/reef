@@ -15,21 +15,23 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 from tests.support._trajectories import recorded_trajectory
-from tests.train.test_harness_evolve_processor import harness_stages
+from tests.support.harness_steps import TreeReleases
 
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
-from reef.train.cordis_backend import Mutation
+from reef.train.backend import ComponentReleases
+from reef.train.pipeline import PipelineConfig
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 
@@ -50,14 +52,12 @@ event = {"type": "agent_end", "rules": rules_path.read_text() if rules_path.exis
 (session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
 """
 
-_STARTER_TEXT = "---\nname: answer-style\ndescription: How to format answers\n---\n\nAnswer briefly.\n"
+STARTER_TEXT = "---\nname: answer-style\ndescription: How to format answers\n---\n\nAnswer briefly.\n"
 
-#: The composition the night reads: one skill, as (kind, config) pairs
-#: exactly like the backend passes. No provider node: the model binding the
-#: driver hands the recipe is the only endpoint in play.
-NODES = (("skill", {"name": "answer-style", "text": _STARTER_TEXT}),)
-
-SEED = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": _STARTER_TEXT}},)
+#: The tree the night reads: one skill, as the backend passes the head tree's files. No provider: the model
+#: binding the driver hands the recipe is the only endpoint in play.
+FILES = {"skills/answer-style/SKILL.md": STARTER_TEXT}
+SEED = HarnessTree(FILES)
 
 #: The deployment's model binding, as reef passes it to propose and renders
 #: it into probe episodes. Tests stub the evolver's chat loop, so no call
@@ -112,7 +112,7 @@ def example(monkeypatch: pytest.MonkeyPatch) -> dict[str, ModuleType]:
     # example's cached import so this file's syspath entry wins.
     for name in [name for name in sys.modules if name == "harness" or name.startswith("harness.")]:
         del sys.modules[name]
-    names = ("skillclaw", "evolver", "prompts", "night")
+    names = ("skillclaw", "evolver", "prompts", "night", "plugins")
     modules = {name: importlib.import_module(f"harness.{name}") for name in names}
     modules["skillclaw_recipe"] = importlib.import_module("recipes.skillclaw.recipe")
     return modules
@@ -159,10 +159,15 @@ def night_llm(
     monkeypatch.setattr(example["evolver"], "chat_client", lambda model: chat)
 
 
+def harness_stages() -> PipelineConfig:
+    """The harness evolution stages with the deployment's default ``pipeline`` section."""
+    return PipelineConfig.from_setting({}, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
+
+
 # -- the night flow as the proposer ----------------------------------------
 
 
-def test_propose_maps_the_no_skill_bucket_to_a_create_mutation(skillclaw, example, monkeypatch) -> None:
+def test_propose_maps_the_no_skill_bucket_to_a_new_skill_file(skillclaw, example, monkeypatch) -> None:
     night_llm(
         example,
         monkeypatch,
@@ -173,18 +178,17 @@ def test_propose_maps_the_no_skill_bucket_to_a_create_mutation(skillclaw, exampl
         },
     )
     samples = (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),)
-    mutations = skillclaw.propose(NODES, samples, MODEL)
-    assert mutations is not None
-    (mutation,) = mutations
-    assert (mutation.op, mutation.id) == ("create", "csv-median")
-    text = mutation.options["config"]["text"]
+    patch = skillclaw.propose(FILES, samples, MODEL)
+    assert patch is not None
+    assert list(patch.changes) == ["skills/csv-median/SKILL.md"]
+    text = patch.changes["skills/csv-median/SKILL.md"]
     assert text.startswith("---\nname: csv-median\ndescription: Median of a csv\n")
     assert "Sort, take the middle." in text
 
 
-def test_propose_maps_a_group_decision_to_an_update_mutation(skillclaw, example, monkeypatch) -> None:
+def test_propose_maps_a_group_decision_to_a_rewrite_of_that_skill(skillclaw, example, monkeypatch) -> None:
     """A session that read a skill lands in that skill's group, and the
-    group's improve_skill decision becomes an update of that node."""
+    group's improve_skill decision rewrites that skill's file."""
     night_llm(
         example,
         monkeypatch,
@@ -201,11 +205,10 @@ def test_propose_maps_a_group_decision_to_an_update_mutation(skillclaw, example,
         },
     )
     samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),)
-    mutations = skillclaw.propose(NODES, samples, MODEL)
-    assert mutations is not None
-    (mutation,) = mutations
-    assert (mutation.op, mutation.id) == ("update", "answer-style")
-    assert "bare number on the last line" in mutation.options["config"]["text"]
+    patch = skillclaw.propose(FILES, samples, MODEL)
+    assert patch is not None
+    assert list(patch.changes) == ["skills/answer-style/SKILL.md"]
+    assert "bare number on the last line" in patch.changes["skills/answer-style/SKILL.md"]
 
 
 def test_propose_optimize_description_keeps_the_body(skillclaw, example, monkeypatch) -> None:
@@ -220,17 +223,16 @@ def test_propose_optimize_description_keeps_the_body(skillclaw, example, monkeyp
             }
         },
     )
-    mutations = skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL)
-    assert mutations is not None
-    (mutation,) = mutations
-    text = mutation.options["config"]["text"]
+    patch = skillclaw.propose(FILES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL)
+    assert patch is not None
+    text = patch.changes["skills/answer-style/SKILL.md"]
     assert "description: Only for numeric final answers" in text
     assert "Answer briefly." in text  # the incumbent body survives
 
 
 def test_propose_returns_none_when_every_decision_skips(skillclaw, example, monkeypatch) -> None:
     night_llm(example, monkeypatch)
-    assert skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL) is None
+    assert skillclaw.propose(FILES, (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),), MODEL) is None
     audit = json.loads((skillclaw.WORKDIR / "dry" / "round-0" / "night" / "audit.json").read_text())
     assert audit["advanced"] is False
 
@@ -240,12 +242,12 @@ def test_propose_returns_none_on_an_empty_day(skillclaw, example, monkeypatch) -
         raise AssertionError("no samples, no model call")
 
     monkeypatch.setattr(example["evolver"], "chat_client", lambda model: never)
-    assert skillclaw.propose(NODES, (), MODEL) is None
+    assert skillclaw.propose(FILES, (), MODEL) is None
 
 
-def test_propose_never_proposes_remove(skillclaw, example, monkeypatch) -> None:
+def test_propose_never_removes_a_skill(skillclaw, example, monkeypatch) -> None:
     """The sealed night only adds or rewrites skills; whatever the decisions
-    are, the mapped mutations are creates and updates only."""
+    are, the patch writes files and removes none."""
     night_llm(
         example,
         monkeypatch,
@@ -263,15 +265,15 @@ def test_propose_never_proposes_remove(skillclaw, example, monkeypatch) -> None:
         },
     )
     samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0), recorded_trajectory("a2", PAYLOAD_PLAIN, -1.0))
-    mutations = skillclaw.propose(NODES, samples, MODEL)
-    assert mutations is not None
-    assert {mutation.op for mutation in mutations} <= {"create", "update"}
-    assert sorted(mutation.id for mutation in mutations) == ["answer-style", "fresh"]
+    patch = skillclaw.propose(FILES, samples, MODEL)
+    assert patch is not None
+    assert all(text is not None for text in patch.changes.values())
+    assert sorted(patch.changes) == ["skills/answer-style/SKILL.md", "skills/fresh/SKILL.md"]
 
 
-def test_propose_maps_a_remove_requesting_decision_to_no_remove(skillclaw, example, monkeypatch) -> None:
+def test_propose_maps_a_remove_requesting_decision_to_no_removal(skillclaw, example, monkeypatch) -> None:
     """An LLM decision naming an unknown action (here a removal request) flows
-    through the sealed parser; the mapped mutations still never remove."""
+    through the sealed parser; the patch still never removes a file."""
     night_llm(
         example,
         monkeypatch,
@@ -284,9 +286,9 @@ def test_propose_maps_a_remove_requesting_decision_to_no_remove(skillclaw, examp
         },
     )
     samples = (recorded_trajectory("a1", PAYLOAD_WITH_READ, 0.0),)
-    mutations = skillclaw.propose(NODES, samples, MODEL)
-    assert mutations is not None  # the request still materializes, as an edit
-    assert all(mutation.op in ("create", "update") for mutation in mutations)
+    patch = skillclaw.propose(FILES, samples, MODEL)
+    assert patch is not None  # the request still materializes, as an edit
+    assert all(text is not None for text in patch.changes.values())
 
 
 def test_the_day_reports_feed_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
@@ -338,7 +340,7 @@ def test_driver_preserves_executor_profiles(driver, monkeypatch):
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
     through reef's config loader and build the explicit implementation - selection
-    always, evolution.batch_size 60, the seed composition plus the seed_skills pool."""
+    always, evolution.batch_size 60, the seed tree holding the seed_skills pool."""
     from reef.service.deploy.config_utils import load_config
     from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
@@ -362,41 +364,41 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert built.name == "skillclaw"
     assert built.selection.plugin_class is BackendAlwaysSelectPlugin
     assert built.batch_size == 60
-    assert [entry["id"] for entry in built.seed] == ["alpha"]
-    assert built.seed[0]["config"]["name"] == "alpha"
+    assert built.seed == HarnessTree({"skills/alpha/SKILL.md": "---\nname: alpha\ndescription: d\n---\n\nBody.\n"})
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in example["skillclaw"].ANSWERS) for task in built.tasks)
 
     surface = built.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.inference, SkillInferenceHooks)
-    assert [layer.layer for layer in surface.inference.layers] == ["pi-agent"]
-    assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["pi-agent"]
+    assert [layer.layer for layer in surface.inference.layers] == ["skills"]
+    assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["skills"]
     # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
-    trainer = built.build("demo", SQLiteRecordStore())  # loads the seed; no episodes
+    # The backend reads its head from the committed releases, here the seed alone; no episodes run.
+    trainer = built.build("demo", SQLiteRecordStore(), releases=ComponentReleases(TreeReleases(built.seed), "skills"))
     assert isinstance(trainer, Trainer) and trainer.batch_size == 60
 
 
 def test_seed_skills_must_name_an_existing_directory(example, tmp_path) -> None:
     recipe_module = example["skillclaw_recipe"]
     with pytest.raises(RecipeConfigError, match="seed_skills"):
-        recipe_module.seed_skill_entries(tmp_path / "missing")
+        recipe_module.seed_skills(tmp_path / "missing")
 
 
 def test_seed_skill_directory_names_land_verbatim(example, tmp_path) -> None:
     """The benchmark's bootstrap copy keeps directory names as shipped, dots
-    included; the seeded composition renders the same tree."""
+    included; the seeded tree renders them under the same names."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.tree import render_tree
+
     skill = tmp_path / "pool" / "self-improving-agent-3.0.5"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text("---\nname: self-improvement\n---\nbody\n", encoding="utf-8")
-    (entry,) = example["skillclaw_recipe"].seed_skill_entries(tmp_path / "pool")
-    assert entry["id"] == "self-improving-agent-3.0.5"
-    assert entry["config"]["name"] == "self-improving-agent-3.0.5"
-    from reef.harness.adapters import get_adapter
-    from reef.harness.tree.render import render_composition
-
-    files = render_composition((("skill", entry["config"]),), get_adapter("pi"))
+    (tmp_path / "pool" / "notes.md").write_text("not a skill", encoding="utf-8")
+    patch = example["skillclaw_recipe"].seed_skills(tmp_path / "pool")
+    assert patch.changes == {"skills/self-improving-agent-3.0.5/SKILL.md": "---\nname: self-improvement\n---\nbody\n"}
+    files = render_tree(HarnessTree({}).apply(patch), get_adapter("pi"))
     assert "pi-agent/skills/self-improving-agent-3.0.5/SKILL.md" in files
 
 
@@ -453,11 +455,11 @@ def _stub_backend() -> Any:
     return StubModel()
 
 
-def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int) -> Any:
-    skillclaw = example["skillclaw"]
+def dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int) -> Any:
+    plugins = example["plugins"]
     return example["skillclaw_recipe"].SkillClawRecipe(
-        resolve_proposer(skillclaw.propose),
-        resolve_episode_scorer(skillclaw.evaluate),
+        plugins.NightProposer(),
+        plugins.ProbeScorer(),
         ("[sieve] probe",),
         binary=str(make_binary(tmp_path)),
         seed=SEED,
@@ -493,12 +495,12 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
     night_input: dict[str, Any] = {}
     real_propose = skillclaw.propose
 
-    def spying_propose(nodes, samples, model):
+    def spying_propose(files, samples, models):
         night_input["samples"] = samples
-        return real_propose(nodes, samples, model)
+        return real_propose(files, samples, models)
 
     monkeypatch.setattr(skillclaw, "propose", spying_propose)
-    recipe = _dry_recipe(example, tmp_path, batch_size=2)
+    recipe = dry_recipe(example, tmp_path, batch_size=2)
     service = driver.RunService(
         scenario="dry",
         recipe=recipe,
@@ -560,11 +562,11 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         service.wait_for_training_step(step_before)
         assert service.training_versions() == 1
         manifest = driver.pull_pool(client, service, tmp_path / "pulled")
-        assert manifest["evaluation"]["published"] is True
-        mutation = manifest["evaluation"]["mutation"]
-        assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("create", "csv-median", "skill")
-        assert "Sort, take the middle." in mutation["options"]["config"]["text"]
-        assert "Sort, take the middle." in manifest["files"]["pi-agent/skills/csv-median/SKILL.md"]
+        assert manifest["evaluation"]["selected"] is True
+        patch = manifest["evaluation"]["patch"]
+        assert list(patch) == ["skills/csv-median/SKILL.md"]
+        assert "Sort, take the middle." in patch["skills/csv-median/SKILL.md"]
+        assert "Sort, take the middle." in manifest["files"]["skills/csv-median/SKILL.md"]
 
         # The served pool's catalog section appears in the recorded request
         # payload - the batch the night received is those recorded payloads,
@@ -599,7 +601,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
 def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
     night_llm(example, monkeypatch)  # every decision skips: the night commits without an artifact
     run_dir = tmp_path / "run"
-    recipe = _dry_recipe(example, tmp_path, batch_size=1)
+    recipe = dry_recipe(example, tmp_path, batch_size=1)
     service = driver.RunService(
         scenario="dry2",
         recipe=recipe,
@@ -646,7 +648,7 @@ def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
     from reef.storage.sqlite import SQLiteScenarioStorage
 
     run_dir = tmp_path / "run"
-    version_dir = run_dir / "artifacts" / "v-night-1" / "pi-agent" / "skills" / "alpha"
+    version_dir = run_dir / "artifacts" / "v-night-1" / "skills" / "alpha"
     version_dir.mkdir(parents=True)
     (version_dir / "SKILL.md").write_text("body")
 
@@ -656,7 +658,7 @@ def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
 
     driver._persist_pool(FakeService(), run_dir)
     driver._persist_pool(FakeService(), run_dir)  # idempotent under the double rename
-    assert (run_dir / "pool-current" / "pi-agent" / "skills" / "alpha" / "SKILL.md").read_text() == "body"
+    assert (run_dir / "pool-current" / "skills" / "alpha" / "SKILL.md").read_text() == "body"
 
     assert driver._committed_pool(run_dir, "dry") is None  # no commit yet
     with (
@@ -693,7 +695,7 @@ def test_the_recipe_yaml_is_valid_yaml_after_interpolation(monkeypatch) -> None:
     assert config["recipe"]["config"]["evolution"]["seed_skills"] == ""  # unset env seeds no skills
 
 
-def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> None:
+def test_the_night_returns_a_tree_patch(skillclaw, example, monkeypatch) -> None:
     night_llm(
         example,
         monkeypatch,
@@ -703,9 +705,8 @@ def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> Non
             "skill": {"name": "fresh", "description": "d", "content": "body"},
         },
     )
-    mutations = skillclaw.propose(NODES, (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),), MODEL)
-    assert mutations is not None
-    assert all(isinstance(mutation, Mutation) for mutation in mutations)
+    patch = skillclaw.propose(FILES, (recorded_trajectory("a1", PAYLOAD_PLAIN, -1.0),), MODEL)
+    assert isinstance(patch, TreePatch) and list(patch.changes) == ["skills/fresh/SKILL.md"]
 
 
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:

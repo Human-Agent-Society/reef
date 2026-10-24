@@ -20,12 +20,14 @@ from reef.artifact import (
 from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.harness.adapters import get_adapter
+from reef.harness.delivery import create_harness_surface
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_harness_surface, create_weight_surface
+from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
 from reef.train.types import TrainingBatch
 
@@ -147,7 +149,9 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
 
     @dataclass(frozen=True)
     class RecordingRecipe(Recipe):
-        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+        def build(
+            self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        ):
             selected.append(self.name)
             return super().build(
                 scenario,
@@ -1307,7 +1311,7 @@ class HarnessRecipe(Recipe):
     """A recipe whose clients pull a file tree: the served exchange is the same on every release."""
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
+        return create_harness_surface(get_adapter("pi"))
 
 
 @pytest.mark.unit
@@ -1325,7 +1329,7 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
 
         initial = tmp_path / "initial"
         initial.mkdir()
-        (initial / "AGENTS.md").write_text("first")
+        (initial / "rules.md").write_text("first")
         dispatcher = Dispatcher(
             recipe,
             InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
@@ -1339,7 +1343,7 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
             else:
                 candidate = tmp_path / f"candidate-{version}"
                 candidate.mkdir()
-                (candidate / "AGENTS.md").write_text(f"v{version}")
+                (candidate / "rules.md").write_text(f"v{version}")
                 dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
             releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
         assert len(set(releases)) == 3

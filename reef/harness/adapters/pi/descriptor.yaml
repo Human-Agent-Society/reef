@@ -1,14 +1,14 @@
 # The pi coding agent, driven headless per episode.
 #
-# PI_CODING_AGENT_DIR relocates the whole composition root (settings.json,
+# PI_CODING_AGENT_DIR relocates the whole configuration directory (settings.json,
 # models.json, AGENTS.md, prompts/, skills/, extensions/), so nothing is
 # rendered into a project-local .pi/ and the trust gate never fires.
 # PI_OFFLINE kills all startup network work and PI_SKIP_VERSION_CHECK pins
 # the self-updater; both keep episodes deterministic and hermetic.
 name: pi
 binary: pi
-# The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script and harness evolution startup.
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the episodes unless evolution.binary names a binary.
 install:
   kind: npm
   package: "@earendil-works/pi-coding-agent"
@@ -20,42 +20,6 @@ env:
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
   PI_OFFLINE: "1"
   PI_SKIP_VERSION_CHECK: "1"
-# An interactive run through reef-pi: online (it talks to reef), but reef pins
-# pi's version, so pi's own update notice would only mislead.
-client_env:
-  PI_SKIP_VERSION_CHECK: "1"
-# pi saves sessions under its agent dir, which reef-pi points at a temp copy
-# of the installed tree; kept in the installed tree, --resume and --continue
-# find them in a later run. pi also writes settings.json in place: the first
-# interactive session records lastChangelogVersion there, and /model and the
-# /settings choices except Default project trust save theirs. These preference
-# keys load no code, nested fields included (numbers, booleans and strings pi
-# 0.84.2 only displays), so a session may change them. Every other key must
-# keep the value the install wrote: the ones pi install and pi config write
-# (packages, extensions, skills, prompts, themes), defaultProjectTrust, which
-# the Default project trust choice writes and which decides whose code loads,
-# and the rest, such as shellCommandPrefix. The render writes the old keys pi
-# rewrites on load (queueMode and the like) in their new form. Review the
-# list, nested fields too, at each pin bump.
-client_state:
-  - path: "pi-agent/sessions"
-    kind: directory
-  - path: "pi-agent/settings.json"
-    kind: file
-    preference_keys: [
-      lastChangelogVersion, defaultProvider, defaultModel, defaultThinkingLevel, enabledModels, theme,
-      steeringMode, followUpMode, transport, compaction, retry, httpIdleTimeoutMs, hideThinkingBlock,
-      showCacheMissNotices, quietStartup, collapseChangelog, enableInstallTelemetry, enableSkillCommands,
-      terminal, images, markdown, warnings, tuiMode, fullscreenExitOutput, fullscreenScrollbar,
-      doubleEscapeAction, treeFilterMode, showHardwareCursor, editorPaddingX, outputPad, autocompleteMaxVisible,
-    ]
-# pi wants these on PATH at first start and otherwise downloads them from
-# GitHub releases, which rate-limits unauthenticated clients.
-client_tools:
-  - command: rg
-    package: ripgrep
-  - command: fd
-    package: fd
 files:
   config:
     primary:

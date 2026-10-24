@@ -19,7 +19,7 @@ from reef.core.batches import TaskItem
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
+from reef.harness.episodes.tasks import EpisodeTurn, TaskEpisode
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe

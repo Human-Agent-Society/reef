@@ -7,10 +7,10 @@ harness form an agent. Harness evolution improves the harness tree while the
 model weights stay fixed. Reef needs no GPU for this. The model stays a fixed
 endpoint, hosted or local, and the agent stays online throughout.
 
-Reef supplies the mechanism: it snapshots the tree, applies a mutation, runs
-the paired episodes, and publishes or reverts. You supply two Python
-classes: a ``Proposer`` (which edit to try) and an ``EpisodeScorer`` (how an
-episode scored). The deployment names them in ``evolution.propose`` and
+Reef supplies the mechanism: it reads the head tree, asks for a patch, runs
+the candidate and the head on the same tasks, and publishes a win as a new
+release. You supply two Python classes: a ``Proposer`` (which change to try)
+and an ``EpisodeScorer`` (how an episode scored). The deployment names them in ``evolution.propose`` and
 ``evolution.evaluate``. `Write a harness method <../developer-guide/write-a-harness-method.rst>`__ documents the
 contract.
 
@@ -31,7 +31,7 @@ At a glance
 |                   | fresh roots. The candidate is published only when it wins    |
 |                   | more tasks than it loses, by more than a margin you set.     |
 +-------------------+--------------------------------------------------------------+
-| What holds it     | A rejected candidate reverts to the snapshot. A failing      |
+| What holds it     | A rejected candidate publishes nothing. A failing            |
 |                   | prompt joins the task suite only after a credential and an   |
 |                   | instruction override screen, with a cap per client. Wins     |
 |                   | that touch code can wait for a person before they are        |
@@ -50,113 +50,102 @@ At a glance
 The harness tree
 ----------------
 
-Reef stores the mutable, versioned files of one harness in a single object
-called the tree. A tree is a flat list of entries, and each entry has three
-fields: ``id`` is unique within the tree, ``name`` selects one of the node
-kinds below, and ``config`` holds that kind's own fields. For the named kinds
-(``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
-``native_hook``, ``native_loop``), ``config.name`` is the file name the entry
-renders to. Ten node kinds are registered in
-`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__.
+A harness tree is one directory of text files: the mutable, versioned part of
+one harness. Each release in the scenario's git history holds one tree, and
+each step changes it with a patch, a set of paths mapped to their new text, or
+to ``null`` for a removal. The layout fixes where each kind of file lives, so
+the same tree means the same thing to every adapter
+(`reef/harness/tree/layout.py <../../reef/harness/tree/layout.py>`__):
 
-A node kind states what an entry contains, not where it lands. That is decided
-by an adapter, which maps each kind to a concrete file for one agent. The
-process of turning the entries into those files is called rendering, and it is
-more than a copy: ``config`` entries merge into one file and ``rules`` entries
-concatenate. See the adapter guide's `Rendering
-<../developer-guide/harness-adapters.rst#rendering>`__ section for more details
-of this process.
++------------------------------+--------------------+-----------------------------------------------+
+| Path                         | Kind               | Holds                                         |
++==============================+====================+===============================================+
+| ``rules.md``                 | ``rules``          | the text every session reads                  |
++------------------------------+--------------------+-----------------------------------------------+
+| ``config/<target>.json``     | ``config``         | a JSON object deep-merged into one of the     |
+|                              |                    | agent's config files                          |
++------------------------------+--------------------+-----------------------------------------------+
+| ``skills/<name>/SKILL.md``   | ``skill``          | an Agent Skill                                |
++------------------------------+--------------------+-----------------------------------------------+
+| ``commands/<name>.md``       | ``agent_command``  | a prompt template a person types as a command |
++------------------------------+--------------------+-----------------------------------------------+
+| ``extensions/<name>.<ext>``  | ``code_extension`` | code the harness loads in process; the        |
+|                              |                    | adapter names the suffix                      |
++------------------------------+--------------------+-----------------------------------------------+
+| ``native/tools/<name>.py``   | ``native_tool``    | a tool of the native loop                     |
++------------------------------+--------------------+-----------------------------------------------+
+| ``native/hooks/<name>.py``   | ``native_hook``    | a listener at one event of the native loop    |
++------------------------------+--------------------+-----------------------------------------------+
+| ``native/graphs/<name>.json``| ``native_graph``   | the native loop's control flow                |
++------------------------------+--------------------+-----------------------------------------------+
+| ``native/agents/<name>.json``| ``native_agent``   | one agent the native loop delegates to        |
++------------------------------+--------------------+-----------------------------------------------+
+| ``native/loops/<name>.py``   | ``native_loop``    | the native loop itself as code                |
++------------------------------+--------------------+-----------------------------------------------+
+
+A path off this layout is refused. An adapter maps each kind to a concrete
+file for one agent. Turning the tree into those files is called rendering,
+and it is more than a copy: each config file merges over the adapter's
+enforced defaults, and the adapter's quirks rewrite some files (a skill's
+frontmatter, say). See the adapter guide's `Rendering
+<../developer-guide/harness-adapters.rst#rendering>`__ section for the
+details.
 
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)), for ``terminus``, Terminal-Bench's Terminus 2 run through a
 Reef-owned Harbor runner, and for ``native``, Reef's own agent.
 
-An adapter need not map every kind, and a kind it leaves out is refused at
-admission and at render rather than dropped, so the adapter decides which kinds
-a tree may use. The ten node kinds fall into two groups.
+An adapter need not render every kind, and a file of a kind it leaves out is
+refused at validation and at render rather than dropped, so the adapter decides
+which files a tree may hold. Every bundled adapter renders ``rules``, ``config``
+and ``skill``, so a change to one of those renders under any harness.
 
-General node kinds
-~~~~~~~~~~~~~~~~~~
-
-These five configure an agent whose control loop its vendor owns: its
-configuration, the text it reads, and the commands and code it loads.
-
-+--------------------+----------------------------------------------------------+
-| ``name``           | Renders as                                               |
-+====================+==========================================================+
-| ``config``         | a JSON object deep-merged into one of the agent's config |
-|                    | files                                                    |
-+--------------------+----------------------------------------------------------+
-| ``rules``          | text appended to the agent's rules file                  |
-+--------------------+----------------------------------------------------------+
-| ``skill``          | a named ``SKILL.md``                                     |
-+--------------------+----------------------------------------------------------+
-| ``agent_command``  | a named prompt template                                  |
-+--------------------+----------------------------------------------------------+
-| ``code_extension`` | a named code file the harness loads in process           |
-+--------------------+----------------------------------------------------------+
-
-Every bundled adapter renders ``config``, ``rules``, and ``skill``, so a
-mutation of one of those three renders under any harness. The other two are
-narrower.
-
-Every adapter except ``native`` renders ``agent_command``; a Codex
-``agent_command`` is a skill invoked as ``$name``. ``native`` renders neither
-``agent_command`` nor ``code_extension``, because the two presuppose a vendor
-binary: its loop reads no prompt directory and loads no vendor plugin. The
-other three kinds it does render.
+Every adapter except ``native`` renders ``agent_command``; a Codex command is a
+skill invoked as ``$name``. ``native`` renders neither ``agent_command`` nor
+``code_extension``, because the two presuppose a vendor binary: its loop reads
+no prompt directory and loads no vendor plugin.
 
 ``code_extension`` is narrower still. Codex rejects it because lifecycle hooks
-run outside its command sandbox; see `Run a Codex session`_ for approvals and
-network access. Terminus accepts one Python module defining
+run outside its command sandbox. Terminus accepts one Python module defining
 ``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
 Harbor uses remote E2B tasks; see the adapter guide for the required
 deployment settings.
 
-Native node kinds
-~~~~~~~~~~~~~~~~~
+Native files
+~~~~~~~~~~~~
 
-``native`` is a loop inside the Reef tree rather than a vendor binary, so
-these five kinds are the loop itself: its tools are ``native_tool`` nodes, its
-loop events listen to ``native_hook`` nodes, its control flow is a
-``native_graph`` node, its helpers are ``native_agent`` nodes a graph can
-call, and the loop can be a ``native_loop`` node written as code. The agent
-can therefore evolve the tools it runs, how its loop reacts, the loop itself,
-and who it delegates to, not only the text around a vendor binary. No other
+``native`` is a loop inside Reef rather than a vendor binary, so its five kinds
+are the loop itself: its tools, the listeners at its loop events, its control
+flow, the agents it delegates to, and the loop as code. The agent can
+therefore evolve the tools it runs, how its loop reacts, the loop itself, and
+who it delegates to, not only the text around a vendor binary. No other
 adapter renders these kinds.
 
-+--------------------+----------------------------------------------------------+
-| ``name``           | Renders as                                               |
-+====================+==========================================================+
-| ``native_tool``    | a named tool the native harness loads (schema and code)  |
-+--------------------+----------------------------------------------------------+
-| ``native_hook``    | a named listener at one event of the native loop (code)  |
-+--------------------+----------------------------------------------------------+
-| ``native_graph``   | the native loop's control flow: stages and edges (data)  |
-+--------------------+----------------------------------------------------------+
-| ``native_agent``   | one agent of the native loop: its prompt, graph, tools,  |
-|                    | skills, budget, and the agents it hands its text to      |
-+--------------------+----------------------------------------------------------+
-| ``native_loop``    | the native loop itself as code: ``run_turn(ctx)`` over   |
-|                    | the context API; always reviewed                         |
-+--------------------+----------------------------------------------------------+
+A tool file defines ``run(args, workdir) -> str`` and ends with the constants
+``NAME``, ``DESCRIPTION``, ``PARAMETERS`` (a JSON schema) and ``CAPABILITIES``;
+a hook file defines ``listen(payload, next)`` and ends with ``NAME`` and
+``EVENT``. The loop reads those constants without running the module, and
+``NAME`` must be the file name. A graph or agent file is a JSON object whose
+``name`` is the file name, and validation refuses a graph or an agent that
+names a tool, skill, graph or agent the tree does not hold, or agents that
+delegate in a cycle.
 
-A ``native_loop`` node goes one step past a graph: its ``code`` defines
+A ``native_loop`` file goes one step past a graph: it defines
 ``run_turn(ctx)``, and that function runs the root turn in place of the graph
 interpreter. ``ctx`` is the context API Reef owns: ``ctx.model()`` takes one
 model step, ``ctx.run_tools()`` runs the last message's tool calls,
-``ctx.agent(name)`` hands text to a ``native_agent`` and returns its answer,
+``ctx.agent(name)`` hands text to an agent and returns its answer,
 ``ctx.say(text)`` adds a user message, ``ctx.end(reason)`` ends the turn, and
 ``ctx.log(event, data)`` writes a ``loop/<event>`` line to the session. Hooks,
 tools, budgets, the session log and the sandbox stay Reef's; a loop that
 raises, or calls the context past its budget of transitions, ends the turn
 with ``LOOP_ERROR`` and fails the checks, and the first end of a turn is final
-whatever the loop code catches. Loop code runs inside the loop's own
-process, so a win that creates, changes or removes a ``native_loop`` is always
-a pending release a person promotes, whether or not ``evolution.review_kinds``
-names the kind, and ``harness_try`` refuses to mount one on a serving process:
-the model proposes a loop, a person serves it.
+whatever the loop code catches. A tree holds at most one loop. Loop code runs
+inside the loop's own process, so a win that creates, changes or removes a
+loop is always a pending release a person promotes, whether or not
+``evolution.review_kinds`` names the kind, and ``harness_try`` refuses to
+mount one on a serving process: the model proposes a loop, a person serves it.
 
 Rendered paths
 ~~~~~~~~~~~~~~
@@ -166,44 +155,46 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
 .. code:: text
 
    pi-agent/
-     settings.json             <- config, target "primary"
-     models.json               <- config, target "models"
-     AGENTS.md                 <- rules
-     prompts/<name>.md         <- agent_command
-     skills/<name>/SKILL.md    <- skill
-     extensions/<name>.ts      <- code_extension
+     settings.json             <- config/primary.json
+     models.json               <- config/models.json
+     AGENTS.md                 <- rules.md
+     prompts/<name>.md         <- commands/<name>.md
+     skills/<name>/SKILL.md    <- skills/<name>/SKILL.md
+     extensions/<name>.ts      <- extensions/<name>.ts
 
-The adapter guide gives the paths each other adapter renders to.
+``GET /reef/harness?form=source`` serves the tree itself. The adapter guide
+gives the paths each other adapter renders to.
 
 Model endpoints stay outside the tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A tree does not choose where model calls go. Reef's model binding writes the
-endpoint, the key and the model when it renders an episode or an install,
-and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
-adapters, render refuses a ``config`` entry, a command or a skill that sets
-them or names another provider, a transport, a proxy, a credential helper,
-a fallback or another model, also inside a request body the tree passes to
-the endpoint. These checks read the config the tree renders, not the
-requests a run sends, so a request that a tool or a plugin builds itself can
-still name another model. The adapter guide lists the keys for each adapter.
+endpoint, the key and the model when it renders an episode, and with the
+``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus`` adapters, render
+refuses a config file, a command or a skill that sets them or names another
+provider, a transport, a proxy, a credential helper, a fallback or another
+model, also inside a request body the tree passes to the endpoint. These
+checks read the config the tree renders, not the requests a run sends, so a
+request that a tool or a plugin builds itself can still name another model.
+The adapter guide lists the keys for each adapter.
 
 The loop
 --------
 
 Harness evolution advances one step at a time. A step is a single pass of
-the cycle described above: Reef snapshots the tree, asks ``propose`` for a
-mutation, applies it, runs the candidate tree and the current tree over the
-same tasks, and then publishes the winner or restores the snapshot. The
-step is the unit the rest of this page counts in.
+the cycle described above: Reef reads the head tree from git, asks
+``propose`` for a patch, applies it to get the candidate tree, runs the
+candidate and the head over the same tasks, and publishes the candidate as a
+new release when it wins. The step is the unit the rest of this page counts
+in.
 
 .. flow::
-   :loop: publish the winner, or restore the snapshot
+   :loop: publish the winner; the head stays otherwise
 
    Batch :: a batch of units, or a queued request, or both
-   ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
-   Episodes* :: run the candidate and current tree on the same tasks
-   Result :: publish the candidate or restore the snapshot
+   ``propose`` :: one patch to the head tree, or ``None``
+   Episodes* :: run the candidate and the head on the same tasks
+   Result :: publish the candidate as a new release, or keep the head
 
 A step begins either from a batch of recorded traffic or from a training
 request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the recipe config
@@ -237,10 +228,9 @@ The recipe's default stages count reports. Every valid scored report with
 at least one unique inference reference counts as one trace, including
 successful outcomes. A report over one receipt batches as that exchange. A
 report over several receipts batches as one trajectory sample that carries
-every referenced exchange in order. ``reef-pi report`` sends this kind of
-report for a whole run (``--per-receipt`` fans the score across the receipts
-as separate reports instead). Reports that reference inferences trained in
-earlier batches are dropped.
+every referenced exchange in order, which is how a client reports a whole
+run. Reports that reference inferences trained in earlier batches are
+dropped.
 
 To count recorded inference traffic instead, name the inference stages.
 Every inference then counts as one trace. No report is necessary: recorded
@@ -256,7 +246,7 @@ traffic alone batches, unscored, for methods that judge for themselves.
      record2record:
        module: reef.record2record:InferenceRecord2Record
      record2task:
-       module: reef.train.cordis_backend.processor:InferenceTasks
+       module: reef.record2task.traces:InferenceTasks
 
 Reef holds the traces that wait for a step in a buffer. The buffer keeps at
 most ``pipeline.task2batch.config.buffer_size`` traces (default four times
@@ -292,16 +282,17 @@ next step. Reef builds one step that uses both, whether or not
 ``batch_size`` is met. The proposer then
 receives the training request and the traces that an automatic batch would
 take next. It gets up to ``batch_size`` traces, or none, and uses both
-to make a mutation.
+to make a patch.
 
-Propose: mutation to the harness tree
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Propose: a patch to the head tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reef calls the proposer once per step, with the current tree, the step's
-trace samples, and the model bindings it may call. It may return one or
-multiple mutations or a ``None`` to skip it. Anything but ``None`` becomes
-the step's proposal, and the episodes and comparison that follow are what
-test it.
+Reef calls the proposer once per step, with the head tree, the step's trace
+samples, the request when the step answers one, and the model bindings it may
+call. It returns a patch, or ``None`` to skip the step. Reef validates the
+patched tree for the adapter; a patch with problems gets one retry with the
+problems in hand, and a second failure skips the step. The episodes and
+comparison that follow are what test a valid patch.
 
 For more detail, refer to `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__.
@@ -310,9 +301,9 @@ Evaluation: selection of the better tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Reef runs episodes for the prompts from the evaluation suite (seeded from
-``evolution.tasks``) on both the mutated tree (the candidate tree) and the
-current tree, and asks the episode scorer to score the results. The harness tree
-with the better result is selected to become the next harness tree.
+``evolution.tasks``) on both the candidate tree (the head with the patch
+applied) and the head, and asks the episode scorer to score the results. The
+tree with the better result is selected to become the next head.
 
 Running episodes
 ^^^^^^^^^^^^^^^^
@@ -336,12 +327,12 @@ local executor enforces none of this.
 
 ``evolution.sandbox.env_from`` explicitly lists deployment environment variables
 to forward, and missing variables fail configuration. This keeps remote sandbox
-credentials out of candidate compositions. ``egress_hosts`` currently enables
+credentials out of candidate episodes. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
 
 On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
-evaluation episodes in disposable cloud sandboxes. Cordis evaluations and GEPA
-minibatches use the same episode runner and trajectory readers::
+evaluation episodes in disposable cloud sandboxes. The evaluation and a
+method's trial episodes use the same episode runner and trajectory readers::
 
     evolution:
       adapter: pi
@@ -404,17 +395,15 @@ Two settings shape the evaluation result:
   losses, so on a stochastic episode a single lucky flip does not publish.
 - ``evolution.max_rejected_history: N`` (25 by default, 0 off) keeps the
   last ``N`` rejected proposals in the scenario state, each with its step,
-  its mutations with the options they carried, and the result's reason. The
-  proposer receives them as ``rejected`` and can stop re-proposing what the
-  evaluation already refused.
+  its patch, and the result's reason. The proposer receives them as
+  ``rejected`` and can stop re-proposing what the evaluation already refused.
 
 By default a successful evaluation is served at once.
 ``evolution.publish: review`` holds every win as a pending release instead,
-and ``evolution.review_kinds`` (a
-list of node kinds, empty by default) holds only the wins that touch those
-kinds, so ``[code_extension]`` lets rules and config auto publish while code
-waits for a person; a win that touches a ``native_loop`` waits whether or not
-the list names it. A pending release sits in the catalog with its evaluation
+and ``evolution.review_kinds`` (a list of tree kinds, empty by default) holds
+only the wins whose patch touches those kinds, so ``[code_extension]`` lets
+rules and config auto publish while code waits for a person; a win that
+touches a ``native_loop`` waits whether or not the list names it. A pending release sits in the catalog with its evaluation
 metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
 names it; the loop keeps evolving from it in the meantime, so promoting the
 latest pending release serves everything accumulated since the head.
@@ -484,8 +473,8 @@ Commit history
 Every result is recorded in the scenario's commit history, whether the candidate
 was published or rejected. A commit carries:
 
-- its mutation: op, id and the full options, so a rejected rewrite is
-  readable too;
+- its patch: each changed path with its new text, or ``null`` for a removal,
+  so a rejected rewrite is readable too;
 - both score vectors;
 - what the proposer cost: ``proposer_calls``, ``proposer_seconds``,
   ``proposer_input_tokens`` and ``proposer_output_tokens`` (the tokens are
@@ -511,8 +500,8 @@ A step writes three things:
   ``chat`` or the ``body`` of a ``complete``, then the ``reply`` and
   provider ``response`` for a built-in ``chat`` binding, the ``response``
   for ``complete``, or the ``error``, and the ``seconds`` it took.
-- ``<scenario>/<step>/mutations.json`` holds the parsed proposal with its
-  options, written before admission so a refused proposal is on file.
+- ``<scenario>/<step>/patch.json`` holds the proposal's patch, written before
+  validation decides, so a refused proposal is on file.
 - ``<scenario>/<step>/episodes/<side>-<task index>/`` holds each evaluation
   episode's trajectory files as the adapter writes them (``session.jsonl``
   and ``agents/*.jsonl`` on native, the vendor's own session tree on pi and
@@ -567,8 +556,8 @@ publishes accidentally.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
   text.
-- When the result is a rejection, Reef restores the snapshot it took before
-  the mutation.
+- When the result is a rejection, the head stays as it was: the candidate
+  never became a release.
 
 When it fits
 ------------
@@ -588,8 +577,7 @@ Before you start
   ``REEF_UPSTREAM_URL`` takes no ``/v1`` suffix.
 - Node and ``npm``: deployment startup installs the adapter
   descriptor's pinned ``pi`` under ``~/.local/share/reef-harness/pi`` through
-  npm, the same install the served harness script runs on a client.
-  ``REEF_HARNESS_PREFIX`` moves that root, and ``evolution.binary`` in
+  npm. ``REEF_HARNESS_PREFIX`` moves that root, and ``evolution.binary`` in
   ``serve.yaml`` overrides the whole step with a path of your own. A missing
   ``npm`` or failed vendor install refuses startup with the tool's error.
   Sandboxed episodes mount the adapter's install prefix read-only.
@@ -632,16 +620,15 @@ the step records ``skipped: no proposal``. The provider key is the one value
 
 `evolve-your-harness.ipynb
 <../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ is the same
-pass as a notebook, cell by cell, with the service managed as a subprocess;
-its committed outputs are a full local run on ollama with no GPU.
+pass as a notebook, cell by cell, with the service managed as a subprocess.
 
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
 graded, and every result is reported against its receipt. Every valid scored
 report batches, a passing one included, and ``evolution.batch_size: 1`` makes each
 report its own batch, so every report this run submits triggers one evolve
-step. In this example the served model is its own proposer, and it answers
-with one skill mutation.
+step. In this example the served model is its own proposer, through Reefine's
+text proposer, and it answers with one skill file.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
@@ -670,12 +657,11 @@ service then requires that token, and every ``curl`` on this page needs
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one reported trace filled the
 batch, the served model proposed a new skill beside the starter, and the evaluation
-scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
-notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
-tied the current tree on every task and lost the gate. The run has succeeded when one
-step wins its gate and ``GET /reef/harness`` serves a release other than the seed.
+scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The run has
+succeeded when one step's candidate is selected and ``GET /reef/harness``
+serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
-``published: true`` in its metrics.
+``selected: true`` in its metrics.
 
 If ``/reef/harness`` still serves the seed after a few minutes, the run has
 failed. A server without tool calling can start but fails every episode:
@@ -698,128 +684,51 @@ or skipped steps leave the served tree unchanged. ``run.py`` counts all
 submitted reports, waits for the steps they triggered up to its deadline,
 and prints how many reports it batched and how many of them failed.
 
-Install the published tree
---------------------------
+Use a published tree
+--------------------
 
-Clients pull an evolved harness the way they install any coding agent. A
-fresh scenario already serves the recipe's seed as its first release, so
-the install works before any step has run:
-
-.. code:: bash
-
-   curl -fsS -H "x-reef-scenario: harness-evolve-demo" \
-     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
-
-   reef-pi doctor
-   reef-pi -p "fix the failing test in auth.py"
-   reef-pi report --score 0 --feedback "missed the empty-token case"
-
-The script installs into ``~/reef-harness/<scenario>``, here
-``~/reef-harness/harness-evolve-demo``; ``bash -s -- <dir>`` names another
-install root. Keep any install root outside the project the agent works in.
-An agent can write files in its project, also from a sandbox such as
-Codex's ``workspace-write``, so with the install root there a session can
-change the files the next session runs, for example rewrite the agent's
-config so that the next session runs without approvals. For ``reef-codex``
-and ``reef-dsh``, also keep it out of ``/tmp`` and ``$TMPDIR``: the Codex and
-dsh sandboxes let a command write there too, so an install root there is as
-open to a session as one in the project. The default is outside all of
-these, unless the agent's project is your home directory itself.
-
-The script installs the pinned agent, writes the tree and its model binding,
-and writes a ``reef-<adapter>`` wrapper (here ``reef-pi``) outside the tree,
-in ``~/.reef/installs``, with ``~/.local/bin/reef-pi`` linked to it. With
-a token on the service, the exported ``REEF_TOKEN`` also reaches the script,
-which writes it into the binding. Later sessions read the token from that
-binding, and the wrapper keeps each run's receipts for ``report``.
-
-The binding points to the address that served the script. Behind a gateway,
-Reef uses ``x-forwarded-host`` and ``x-forwarded-proto`` when the proxy sets
-them. The published tree itself contains no endpoint or credential.
-
-The wrapper uses the interpreter that imported Reef during installation:
-``REEF_PYTHON`` when set, otherwise ``python3`` on PATH. Wrapper updates pass
-their own interpreter as ``REEF_PYTHON``. Install from a Python environment
-outside the project the agent works in: a session can write a virtual
-environment in its project, and code there runs as you when ``reef-pi``
-starts, before its check.
-
-``reef-pi doctor`` checks the interpreter and imports, service authentication,
-agent binary, tools on PATH, and installed release against the served head.
-It exits 0 when all checks pass and lists releases awaiting review, using the
-same descriptions as ``reef-pi evolve --wait``.
-
-``reef-pi --help`` (also ``-h`` or ``help``) lists wrapper subcommands before
-pi's help: ``report``, ``evolve``, ``wait``, ``page``, ``doctor``, ``setup``,
-and ``update``. Other arguments run pi. For pinning, rollback, and raw manifest
-routes, see `HTTP API <../reference/http-api.rst#harness-artifacts>`__.
-
-Reef pins Claude Code's version, so ``reef-claude`` runs Claude Code with
-``DISABLE_UPDATES=1`` unless your shell sets it. ``reef-claude upgrade`` and
-``reef-claude install`` reach Claude Code's own update and install commands,
-which print that updates are disabled, and ``reef-claude update`` is Reef's
-own command, which installs the served release. Reef refuses a harness tree
-whose ``settings.json`` sets ``DISABLE_UPDATES``, but a ``.claude/settings.json``
-of your own in the project folder can still turn those commands back on:
-Claude Code applies that file's ``env`` over the environment, and it reads
-``DISABLE_UPDATES`` as on only for ``1``, ``true``, ``yes`` or ``on``.
-
-Recover a changed installation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Before starting an agent, the wrapper checks the installed release's files
-against its install record. If a checked file changed, the wrapper names it,
-prints ``cannot start agent``, and exits with status 3. Restore the files with:
+``GET /reef/harness`` serves the head release as a JSON manifest: ``files``
+maps each path the deployment's adapter renders to its text, beside the
+``release_id``, its parent, the ``evaluation`` metrics of the step that
+published it, and ``requires``, what the release needs where the harness
+runs. A fresh scenario serves the recipe's seed as its first release, so a
+client can pull before any step has run:
 
 .. code:: bash
 
-   reef-pi update
-   reef-pi doctor
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
+     http://127.0.0.1:8900/reef/harness | python3 -m json.tool | head
 
-Then start ``reef-pi`` again. If ``update`` names a link outside the install
-root or a non-regular file at a destination, remove that named entry before
-retrying. The installer refuses to write through it. Session state is not
-checked. pi's ``settings.json``, which the model binding writes, is checked,
-except the preferences pi saves itself (the model, the theme and the other
-``/settings`` choices but Default project trust, which decides whose code
-loads). ``reef-pi install``, ``reef-pi remove`` and ``reef-pi config``, and
-that one ``/settings`` choice, change keys the check covers, so the next start
-names them, for example ``pi-agent/settings.json (keys: packages)``, until
-``reef-pi update``, which rewrites ``settings.json`` as the install wrote it
-and so also resets the preferences pi saved there.
+``?release_id=<id>`` serves an older release, which pins or rolls back one
+client without moving the head. ``?form=source`` serves the release's source
+tree instead: the paths a patch names, for a client that renders the tree
+itself or proposes changes to it.
 
-The check stops a session that can write only its project, ``/tmp`` and
-``$TMPDIR``, as commands inside the Codex and dsh sandboxes can. A session
-that can write your home directory can also change the record in
-``~/.reef/installs`` and the wrapper, and then the check passes: pi, opencode
-and Hermes run commands with no sandbox, and Claude Code, and Codex outside
-its sandbox, run the commands you approve.
+The served files carry no endpoint and no credential. A client writes them
+where its agent reads them and binds the agent's model to this Reef. Reef
+serves and records a model call that carries the ``x-reef-scenario`` header
+and the token, and answers with the receipt a report references. Two ways
+reach that today: a harness whose provider config sends custom headers (pi
+sends ``providers.reef.headers`` from ``pi-agent/models.json``), or a local
+proxy in front of Reef that adds them, as
+``reef.harness.capture.CaptureProxy`` does for the native serve process. A
+packaged client for each adapter, one command that pulls, binds, reports and
+asks, is part of the client design in RFC #918.
 
-Upgrade an older installation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-An install made before Reef recorded file checksums, or one whose record was
-removed, prints ``<install root> has no install record`` at each session
-start. Run ``reef-pi update`` once to write the record and enable the check.
-The update also moves the wrapper out of the tree, beside the record, and
-removes the ``reef-pi`` in the install root: run ``reef-pi`` from your PATH,
-or ``~/.local/bin/reef-pi``, which links to the latest install's wrapper. For
-another install of the same adapter, run the ``wrapper:`` path its install
-printed.
-
-Keep the install root, and the Python environment the wrapper runs, outside
-the project and, for Codex and dsh, outside ``/tmp`` and ``$TMPDIR``.
-See `Installed session files
-<../developer-guide/harness-adapters.rst#installed-session-files>`__ for the
-check's scope, state handling, and cleanup behavior.
+Report how a run went with ``POST /reef/report``: a score and feedback over
+the receipts of its model calls. A release's ``requires`` items say what the
+machine must provide (an ``env`` variable, a ``permission``, a ``service``, a
+``binary``), each with an optional ``check`` and a ``prompt`` sentence; the
+client checks them before it runs the release. ``tutorials/reefine/run.py``
+is a worked client: it pulls the source tree, checks ``requires``, renders the
+tree for pi with its own binding at Reef, and runs a session on it.
 
 Ask for a harness change
-~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~
 
-You can also ask for a harness change in plain words. The tutorial's
-``deployment.yaml`` runs in ``data.training_mode: hybrid``, so an ask needs
-no mode switch there; a scenario in ``auto`` takes asks after a switch to
-``hybrid`` or ``manual``:
+You can also ask for a harness change in plain words. A scenario in ``manual``
+or ``hybrid`` takes training requests; the tutorial's ``deployment.yaml``
+runs in ``hybrid``, and a scenario in ``auto`` takes them after a switch:
 
 .. code:: bash
 
@@ -827,261 +736,61 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
      -H "Content-Type: application/json" \
      -d '{"training_mode": "hybrid"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
-   reef-pi evolve "run the tests before you report a fix as done"
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
+     -d '{"text": "run the tests before you report a fix as done", "session": "me", "release_id": ""}' \
+     "$REEF_URL/reef/train"
 
-``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
+The answer carries the training record id and ``page_path``, the request's
+page (``GET /reef/harness/requests/<id>/page`` with the scenario and its page
+key as query parameters, so a browser opens it as is). Acceptance does not
+mean the change passed the evaluation: the page follows the step while it
+runs, then shows the result, what the patch changed, the review, and the next
+action. ``GET /reef/harness/requests/<id>/progress`` gives the same state as
+JSON for a client without a browser. See the `manual training API
+<../reference/http-api.rst#manual-training>`__ for the fields a request
+carries and the screens its text passes.
 
-The wrapper submits to ``POST /reef/train`` with the installed release id
-from the release metadata file and a session id: inside a session the
-wrapper started, that session's (``REEF_HARNESS_SESSION``, the tag every
-call of the run carries); outside one, the oldest pending session's, or a
-fresh session id when nothing is spooled. A request can execute without inference receipts;
-captured receipts remain available for a later feedback report. Acceptance
-returns a training record id and does not mean the change has passed the
-evaluation: the wrapper prints ``watch it here: <link>``, the request's page
-(``GET /reef/harness/requests/<id>/page`` with the scenario and its page
-key as query parameters, so a browser opens it as is; the key opens this
-scenario's two pages alone and never carries the token, since a session's
-model reads the link), and says ``reef is
-running the step; add --wait to stay here, or check /versions later``.
-With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
-release catalog every 5 s for the step that consumed the request, says
-``the step started; usually a few minutes`` once the request's
-progress (``GET /reef/harness/requests/<id>/progress``) shows a step took it,
-and prints one line with the result and the
-next action, quoting the request: a selected release to restart ``reef-pi``
-for; a pending one with ``This release changes an extension, so read it before
-it runs: /versions <version> opens the page, /versions <version> install
-serves it. Page: <link>``; a rejected step with the evaluation's reason and
-the first task it missed, with why the episode failed or its score and the
-reply that was graded (``no transcript was read from the episode's session
-log`` when the harness's log could not be read, which is no failure: a grader
-that reads files still judged the run), and ``rephrase or split the request``
-only when the episodes ran, left a transcript and scored low; a skipped step with
-why (the proposer's own reason when the step recorded one, such as a failed
-model call); ``not covered: ...`` follows when the step's review lists
-points the change left out, and after a rejection the same points read as
-``review notes (they did not decide this result)``. The exit status is 0 for a selected or pending
-release, 1 for a rejected or skipped step, 2 when the timeout passes first.
-On a terminal the wrapper then hands you the next step: a selected release
-asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
-then ``reef-pi update``, closing with ``Installed release <id>. Restart
-reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
-read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
-the new head the same way. Declined, or in a script without a terminal,
-it prints the commands to run instead: ``reef-pi update``, with ``reef-pi
-setup`` first only while the release requires something this machine has
-not met. ``update`` keeps the binary where the first install put it.
-``reef-pi wait <request id> [--timeout SECONDS] [--poll]`` waits for a
-request that ``evolve`` already filed and reports it the same way, with the
-same exit statuses; a harness whose shell tool stops a command after a few
-minutes files with ``evolve`` and calls ``wait --poll`` until it stops
-printing ``no result yet``: ``--poll`` exits 0 while the step still runs,
-where a plain ``wait`` exits 2, since such a tool counts a nonzero exit as a
-failed call. On an
-adapter other than pi, which has no ``/versions`` and no update notice, the
-lines name ``reef-<adapter> wait`` and ``reef-<adapter> update`` instead.
-To return to failure driven
-evolution alone, use the same update endpoint with
-``{"training_mode": "auto"}``. The commands surface an error when the
-scenario is in ``auto``.
+The proposer's ``reads_requests`` must be true. A request may carry
+``requires``; the proposer adds items of its own when the change it wrote
+needs them, and the backend records ``training_request: {id, session,
+release_id, text, requires}`` in the step's commit metrics. A releases row
+carries what its own change named; the manifest carries what the release
+needs over its whole chain, so a later change that names nothing still needs
+what an earlier one added.
 
-With ``evolution.requests: true``, a tree that boots from the seed also
-carries the pi ``/reefine <request>`` command, which uses the same manual
-training API with pi's current session id. In the session the model first
-thinks the request through and asks what is unclear, a few options plus a
-typed answer per question, then files the request with the answers. Every
-question also offers ``Cancel this request``, and Escape does the same: it
-drops the whole request rather than skipping the question, so nothing is
-filed and the agent is told you backed out.
-``/reefine --direct <request>`` files it as is, and either way the
-filing answers with the link to the request's page. A spinner then sits just
-above your input box with the step's phase (writing the change, checking the
-harness) and how long it has run; ``ctrl+q`` expands it in place with
-the request, the evaluation's episode count and step record when reef reports
-them, and the page link for the full detail, and ``ctrl+q`` closes it
-again.
-The step runs in the background the whole time, so you can keep typing. The
-result is reported when it settles, with the same next actions as
-``--wait`` and the step whose page has the details, as a message the chat
-keeps beside a notice. If the step settles while you are between turns, the
-session offers its install right there; while you are mid turn it stays a
-report, so your input is never taken away, and the next session start offers
-the same release. ``/versions <version> install`` starts the same install
-whenever you are ready, after a confirmation linking the step's page. A
-release still held back from the served head is served as part of installing
-it, so installing is the one decision. Installation runs ``reef-pi update`` for that release, collects
-its setup items and ends with ``Installed release <id8>. Type /reload to
-load it now.`` You can also use ``reef-pi update`` and ``reef-pi setup``
-from a separate terminal. A request filed before a restart, or settled
-while you were away, is
-reported at the next session start, where the update notice offers the
-install. A session start also says the commands exist and counts the
-releases ready to install, with the ``/versions <version> install`` that
-installs one. Recovered trees keep their
-existing entries, as with ``version_check``. The proposer's
-``reads_requests`` must be true. The tutorial's proposer asks the served model for a
-skill, rules entry, command, or extension, using the bundled
-``reef-pi-extension-api`` skill as its extension reference. The native trainer
-owns request persistence, scheduling, retry and acknowledgement, and records
-``training_request: {id, session, release_id, text, requires}`` in commit
-metrics.
-
-Admission screens the proposed mutations and the evaluation evaluates them.
-Reef's entries (``reef-version-check``, ``reef-requests``,
-``reef-pi-extension-api``) are reserved ids no proposal may change. An
-evolved extension runs in pi's process with your privileges, so the
-tutorial's ``configs/deployment.yaml`` sets
-``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
-``version_check: true``: a release that touches one waits for
-``POST /reef/scenarios/{scenario}/promote`` before any session installs it;
-promote it as shown below. ``configs/serve.yaml`` and
-``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
-set none of the three. The built-in ``reef.recipe.reefine:ReefineRecipe`` is available through
-``reef serve --recipe reefine``. ``tutorials/reefine/`` runs this path end to
+An evolved extension runs in the harness's process with your privileges, so
+the tutorial's ``configs/deployment.yaml`` sets
+``evolution.review_kinds: [code_extension]``: a release that changes one waits
+as pending until a person promotes it. ``configs/serve.yaml`` and
+``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused. The
+built-in ``reef.recipe.reefine:ReefineRecipe`` is available through
+``reef serve --recipe reefine``; ``tutorials/reefine/`` runs this path end to
 end on one machine, from the ask to the install and a session on the new
-tree, with a bug fix flow demo, a research loop demo and a measurement of
-which requests passed the checks (``./run.sh bugfix``, ``./run.sh research``,
+tree, with a bug fix demo, a research demo and a measurement of which
+requests passed the checks (``./run.sh bugfix``, ``./run.sh research``,
 ``./run.sh measure``).
 
-A release can need something from you before it runs. A request may carry
-``requires``, a list of ``{name, kind, check, prompt}`` items:
-``permission`` (an OS permission you grant), ``env`` (a variable you set;
-the extension reads it from the environment, and its value never goes to
-reef) or ``service`` (an account or endpoint you connect), each with an
-optional ``check``, the variable name for ``env`` and a shell command that
-exits 0 once satisfied for the other two, and an optional ``prompt``, one
-sentence saying what to enter or grant. The proposer adds items of its own
-when the extension it wrote needs them. A releases row carries what its
-own change named; the manifest carries what the release needs over its
-whole chain, so a later change that names nothing still needs what an
-earlier one added. The install script refuses a release with an item you
-have not checked off: it prints the setup list and the newest release in
-the chain that requires nothing, the one that installs on a machine with
-nothing set up (``?release_id=<id>``), and exits 1 before it installs or
-writes anything. ``reef-pi setup`` is the one place a check runs: it lists
-the newest release's items with each check as written and its prompt,
-asks ``run it? [y/N]`` before running a command (``--yes`` answers for
-scripts), records what passed in the ``.reef-harness-release`` release
-metadata file under ``setup`` with the check it stood for, and exits 0
-once every item is met; ``reef-pi setup --mark <name>`` checks an item off
-by hand, and ``reef-pi setup --release <id>`` reads a pending release's
-items, so you check them off before you promote it. An item whose check
-changed since its check off is asked again.
-
-An ``env`` item is met when its variable (the check, else the name) is set
-in your environment or in the env file, ``<install root>/.reef-harness-env``
-beside the release metadata file. When it is set in neither, ``reef-pi
-setup`` shows the prompt and asks you for the value (without echo when the
-name contains TOKEN, KEY, SECRET or PASSWORD; ``--yes`` asks nothing) and
-stores it there: ``NAME=VALUE`` lines, readable by you alone (mode 0600),
-written by ``setup`` only, never in the tree and never sent anywhere. Every
-``reef-pi`` session gets each stored variable an ``env`` item of the
-installed release names (every stored variable on an install with no
-record in ``~/.reef/installs``) in its environment unless your shell
-already sets it (the shell wins), so an evolved extension reads
-``process.env.NAME`` and keeps no file of its own. Three more forms take
-one item at a time, for scripts and for the session's extensions:
-``reef-pi setup --json`` prints the release to set up and its items as one
-JSON object, ``{"release_id": ..., "items": [{name, kind, check, prompt,
-met}, ...]}``, and runs nothing; ``reef-pi setup --set NAME=VALUE`` stores
-the value of the ``env`` item NAME and checks it off (exit 2 for an
-unknown or non-env name; the value is an argument, never shell source);
-``reef-pi setup --run NAME`` runs that item's check without asking and
-checks it off when it passes (exit 0 when met, 1 otherwise, 2 for an
-unknown name). ``reef-pi update`` fetches the install script for the
-served head (``--release <id>`` for another release) with your token and
-runs it for your install root, printing the installed release; while the
-release requires an item you have not met, it prints the items and exits
-3 without installing. On a fresh machine install the release the refusal
-names first (it requires nothing, so ``reef-pi`` exists), run ``reef-pi
-setup`` for the head's list, then ``reef-pi update``. Until every item is
-met the update notice, in a session with the ``reef-pi`` wrapper on disk,
-asks ``Set up release <id8> now?`` with the list and collects what is
-missing the same way (each item once, a check only after your yes), then
-offers the install, which runs ``reef-pi update`` and ends with
-``Installed release <id8>. Type /reload to load it now.``; without the
-wrapper, or headless, it prints the setup list instead of offering the
-install. Starting a session on a tree with an unmet item prints the list
-and each item's setup hint, then exits 3 before starting the proxy or agent.
-A ``binary`` requirement is checked against the current PATH on every
-start, even if setup previously checked it off. Install missing programs
-using the release's hints and make sure they are on PATH, run
-``reef-pi setup --release <installed-release-id>``, then start the agent
-again. A program with an optional ``check`` also needs that check completed
-through setup. No check or installation command runs at session start.
-
-See what a version is with ``/versions`` in a ``reef-pi`` session: an
-aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
-row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
-``pending``, ``promoted at vN`` once a later promote serves a pending
-release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
-``recovery``), and a separate status column marking ``installed`` on the
-version this tree runs and ``current`` on the served head. Each request
-summary appears below its row, with line breaks collapsed to spaces. The
-footer explains the status markers and lists the details and install commands.
-``/versions <version>`` prints the link to that step's page,
-``GET /reef/harness/releases/<step>/page`` with the scenario and the token
-as query parameters so a browser opens it as is, one self contained HTML
-page that reads like the request page, light or dark with the system and
-usable on a phone, with
-five sections: Why (the request, else the proposal's reason, else a failure
-in the batch), What changed (the mutations; an extension update as a line
-diff against the release it ran on), Result (the evaluation's result and numbers,
-and the step record directory when ``evolution.step_record_dir`` is set),
-Setup (what the release needs from you: the step's own items, then those
-carried from earlier steps) and Chain (the parent, this release, and its
-children: the steps evaluated on it and any promote or rollback made on it,
-each a link to its own page; for
-a rejected or skipped step, the head it ran on). The line under the title
-carries the release id, the commit time and ``Currently served`` on the head.
-``/versions <version> install`` runs the install and setup flow for that
-step after you confirm it, serving a release still held back from the head
-first. The page holds the proposer's plan, its review and the numbers, so
-``/versions <version>`` offers to open it rather than reprinting it. The
-page itself can also be fetched with a curl that carries the
-scenario header and the token into a file, for a hosted deployment where
-the link is not enough, and ``reef-pi page <version>`` fetches it the same way
-into ``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html``
-(``~/.cache`` by default), prints the path and opens it with ``open`` or
-``xdg-open``; ``--print`` prints the path and opens nothing.
-
-The native adapter's binary is ``reef-native``, which ships with reef, so
-the install route serves no script for it. Pull the tree with the client,
-name your Reef URL in its ``native/models.json``, and run the wrapper module
-with the same five settings the script bakes into ``reef-pi``:
-
-.. code:: bash
-
-   python3 -c 'import os; from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token=os.environ.get("REEF_TOKEN")).harness_pull("harness-evolve-demo", "./reef-harness")'
-   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
-   export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
-   export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
-   python3 -m reef.harness.client.wrapper -p "fix the failing test in auth.py"
-   python3 -m reef.harness.client.wrapper report --score 0 --feedback "missed the empty-token case"
-
-The wrapper points the loop at its capture proxy through a temp copy of
-the tree, keeps the loop's session log under ``native/sessions`` beside
-the installed tree, and ``report`` works as for any adapter.
+Each step has a page, ``GET /reef/harness/releases/<step>/page``, one self
+contained HTML page with five sections: Why (the request, else the
+proposal's reason), What changed (the patch, file by file; an updated file as
+a line diff against the release the step ran on), Result (the evaluation's
+result and numbers, and the step record directory when
+``evolution.step_record_dir`` is set), Setup (what the release needs: the
+step's own items, then those carried from earlier steps) and Chain (the
+parent, this release, and its children). ``GET /reef/harness/releases``
+lists every row, oldest last, with a ``page_path`` for each.
 
 Promote a pending release
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A win that touches a kind in ``evolution.review_kinds`` (``code_extension``
 in the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the
-catalog with ``pending: true`` and is served to no session on its own. In a
-``reef-pi`` session it is offered like any other release, because installing
-one is your decision: taking the offer names it to ``POST
-/reef/scenarios/{scenario}/promote`` and installs what that answers. The
-answer is the new head with a fresh release id, because a promote republishes
-the tree as a commit of its own. By hand, find its id in ``GET
-/reef/harness/releases`` (the newest row marked ``pending``), read the change
-(``?release_id=<id>`` on the install route installs that tree without moving
-the head), and name it to the promote route yourself. Both
-calls name the scenario your install used: the ``x-reef-scenario`` header
-you gave the install command or, without one, the generated name the script
-baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
-``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi`` prints it. The
+catalog with ``pending: true`` and is served to no client. Find its id in
+``GET /reef/harness/releases`` (the newest row marked ``pending``), read the
+change on its page or with ``GET /reef/harness?release_id=<id>``, and name it
+to the promote route. The answer is the new head with a fresh release id,
+because a promote republishes the tree as a commit of its own. The tutorial's
 deployment listens on port 8901.
 
 .. code:: bash
@@ -1092,86 +801,48 @@ deployment listens on port 8901.
      -d '{"release_id": "<the pending release id>"}' \
      http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
 
-Run a Codex session
--------------------
-
-Install a Codex harness with ``adapter=codex`` and run ``reef-codex`` from
-its project directory. Codex 0.153.4 exposes commands as skills: type
-``$reefine`` or another ``$name`` in the session, rather than ``/name``.
-
-.. list-table::
-   :header-rows: 1
-
-   * - Run mode
-     - Shell access to Reef
-     - Web search
-   * - Interactive ``reef-codex``
-     - The shell has no network by default. A wrapper command that calls Reef
-       needs an escalation request and your approval.
-     - The tree may enable it through ``web_search``.
-   * - ``reef-codex exec``
-     - Approval is ``never``, so the shell cannot call Reef.
-     - Controlled by the installed tree and command-line options.
-   * - Evaluation episode
-     - No approval prompts; the shell cannot call Reef.
-     - Always disabled by the episode arguments.
-
-For a single wrapper call, choose "Yes, proceed". "Yes, and don't ask again"
-saves an execution rule; later matching calls need no new approval. An approved
-call runs the wrapper as it is at that moment. The install writes it in
-``~/.reef/installs``, outside the project, where a command inside the Codex
-sandbox cannot rewrite it.
-
-Trust and saved approvals
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Codex asks whether you trust the project folder. ``reef-codex`` keeps that
-answer for the folder, or its repository, in ``~/.reef/trust``, readable by
-you alone and outside the install root. It does not change the installed
-``codex/config.toml``. Delete the corresponding trust file to be asked again.
-
-Execution rules normally last only until the temporary session copy is removed.
-If the installed tree contains ``codex/rules``, the session links that directory
-and rules persist there. The adapter guide's `Codex CLI
-<../developer-guide/harness-adapters.rst#codex-cli>`__ section describes how
-command text and ``prefix_rule`` determine which calls a saved rule allows.
-
 Serve the harness as a resident process
 ---------------------------------------
 
 The native adapter has a second form. ``reef-native -p`` is the episode
 form: one process, one turn, what the evaluation runs. ``reef-native serve`` is
-the serve form: one resident process per installed tree that holds the tree
-as a live composition and follows the release Reef serves while it runs. A
-publish reaches the process as a mount between two steps of the open turn,
-or at once when no turn is open. No reinstall, no restart.
+the serve form: one resident process that runs a scenario's release and
+follows the head while it runs. A publish reaches the process between two
+steps of the open turn, or at once when no turn is open. No reinstall, no
+restart.
 
 .. code:: bash
 
+   mkdir -p reef-harness/native
+   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' \
+     "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
    reef-native serve --tree ./reef-harness --scenario harness-evolve-demo &
    reef-native turn --tree ./reef-harness -p "fix the failing test in auth.py"
    reef-native turn --tree ./reef-harness -p "now add a test for it" --session 3f9a1c2b7d4e
    reef-native status --tree ./reef-harness
-   python3 -m reef.harness.client.wrapper report --score 1 --feedback "fixed"
 
-``--tree`` names the pulled tree, the directory that holds ``native/`` and
-the ``.reef-harness-release`` metadata file. The process boots from ``native/tree.json``, the
-entries list Reef renders into every native release (a tree pulled before
-that file existed runs in the episode form only). It reads the Reef URL and
-the token from ``native/models.json``; ``--reef-url`` and ``REEF_TOKEN``
-override them. It starts the wrapper's capture proxy in process and listens
-on ``native/serve.sock``; ``status`` prints the socket, which moves under
-``/tmp`` when the tree's path is too long for a socket address. The receipts
-of each turn are spooled as a run of their own, so ``report`` works per
-turn, with the wrapper's five settings in the environment as above.
+``--tree`` names the process's directory. ``native/models.json`` there binds
+the model: the process reads the Reef URL and the token from it
+(``--reef-url`` and ``REEF_TOKEN`` override them). At boot the process reads
+the source tree of the release it ran last from ``source/`` beside the
+``.reef-harness-release`` metadata file, else it pulls the head's source tree
+with ``GET /reef/harness?form=source``. Each mount renders a tree for the
+native adapter into its own directory under ``native/mounts/`` and builds the
+loop's host from those files. The process starts a capture proxy in process,
+so its model calls carry the scenario and the token, and listens on
+``native/serve.sock``; ``status`` prints the socket, which moves under
+``/tmp`` when the directory's path is too long for a socket address.
 
 ``turn`` prints every event of the turn as one JSON line each, then
-``turn/result`` with the exit status, the session id, the turn number and
-the last assistant text; ``--quiet`` prints the text alone. A turn without
-``--session`` starts a new session. A session keeps its messages across
-turns, its log lands under ``native/sessions/<session>/session.jsonl``,
-and every turn runs on the graph's step budget and on ``--turn-timeout``
-seconds of wall clock (600), checked before each model call.
+``turn/result`` with the exit status, the session id, the turn number, the
+last assistant text and ``receipts``, the receipts of the turn's model calls
+on the served tree (a trial's calls are left out), which a
+``POST /reef/report`` for that turn references; ``--quiet`` prints the
+text alone. A turn without ``--session`` starts a new session. A session keeps
+its messages across turns, its log lands under
+``native/sessions/<session>/session.jsonl``, and every turn runs on the
+graph's step budget and on ``--turn-timeout`` seconds of wall clock (600),
+checked before each model call.
 
 With ``--follow head``, the default, the process polls
 ``GET /reef/harness/releases`` every ``--poll-interval`` seconds (60) and
@@ -1183,17 +854,16 @@ is idle. The mount is one line in the open turn's session, else in
 
 .. code:: text
 
-   {"type": "harness/mount", "seq": 41, "time": 1788600000000, "data": {"release_id": "6f1c...", "parent_release_id": "2a9b...", "source": "release", "entries": 8}}
+   {"type": "harness/mount", "seq": 41, "time": 1788600000000, "data": {"release_id": "6f1c...", "parent_release_id": "2a9b...", "source": "release", "files": 8}}
 
 The next step runs on the new tools, hooks, rules, skills and window, and
 writes a new ``request/header`` when what the model sees changed; the next
-turn runs the new graph. A mount that leaves an entry FAILED (a tool whose
-module binds no ``run`` at its top level, a hook whose code does not
-import, a kind this reef has no plugin for, a name a self tool owns) is
-rolled back whole before the next step: ``harness/mount-failed`` names the
-release, the entry and the error, and the previous composition keeps
-serving. On success the release metadata file and ``native/tree.json`` name the new
-release, so a restart boots from it with ``source: boot``.
+turn runs the new graph. A tree that does not render or load (a tool whose
+module binds no ``run``, a hook whose code does not import, a name a self
+tool owns) leaves the current host in place: ``harness/mount-failed`` names
+the release and the error. On success the process stores the release's source
+tree under ``source/`` and names it in the release metadata file, so a restart
+boots from it with ``source: boot``.
 
 With ``--follow pinned`` the process logs ``release/available`` with the
 new head and waits for a person. ``reef-native mount <release_id> --tree
@@ -1204,29 +874,27 @@ hand stands until the head moves again. A Reef that does not answer logs
 ten minutes, and the process keeps serving. A Reef that is busy is polled
 again at the interval: a catalog read waits behind a running evolve step,
 so a poll that times out during one retries at the interval and the head
-lands as soon as the step ends. A manifest read that times out the same way
-logs ``harness/mount-failed`` and is retried by the next poll that names
-the head, so a release published between two steps mounts once the steps
-are over.
+lands as soon as the step ends.
 
-``--self-tools`` gives the model three built-in tools. The tree cannot
-remove them or take their names, and they are absent in the episode form,
-so a candidate cannot pass the checks by calling them:
+``--self-tools`` gives the model three built-in tools. The tree cannot take
+their names, and they are absent in the episode form, so a candidate cannot
+pass the checks by calling them:
 
-- ``harness_inspect(what)``: ``tree`` is the live entries and the mounted
-  release; ``graph`` is ``main`` and every named graph; ``results`` is the
-  newest releases with the evaluation metrics that admitted each, and the
-  rejected proposals when Reef exposes them; ``status`` is the status above.
-- ``harness_try(mutations)``: mounts the served entries plus the mutations
-  on this process for the rest of the turn. The change applies from the
-  next step, the model calls carry ``x-reef-tag-trial`` so ``report`` skips
-  their receipts, and at ``turn/end`` the served entries are mounted back
+- ``harness_inspect(what)``: ``tree`` is every file of the live tree and the
+  mounted release; ``graph`` is ``main`` and every named graph; ``results``
+  is the newest releases with the evaluation metrics that admitted each, and
+  the rejected proposals when Reef exposes them; ``status`` is the status
+  above.
+- ``harness_try(patch)``: mounts the served tree with the patch applied on
+  this process for the rest of the turn. The patch passes validation first;
+  the change applies from the next step, the model calls carry
+  ``x-reef-tag-trial``, and at ``turn/end`` the served tree is mounted back
   (``harness/unmount``). Nothing is published.
-- ``harness_propose(mutations, reason)``: sends ``POST
-  /reef/harness/proposals`` with the mounted release and the session id.
-  Reef admits or refuses at once, and an admitted proposal goes through the
-  evaluation like the method's own before it is served. A Reef without the route
-  answers a tool error and the turn continues.
+- ``harness_propose(patch, reason)``: sends ``POST /reef/harness/proposals``
+  with the mounted release and the session id. Reef validates the patch at
+  once, and an admitted proposal goes through the evaluation like the
+  method's own before it is served. A Reef without the route answers a tool
+  error and the turn continues.
 
 The order is inspect, then try, then propose. Every call is a ``tool/call``
 and ``tool/result`` pair in the session log, so what the model learned about
@@ -1236,9 +904,8 @@ The serve process runs on your machine with your privileges and runs tree
 code in process, as the episode form does: every hook imports and listens
 there, and a tool call runs there unless ``REEF_NATIVE_ENFORCE=bwrap`` is
 set; the evaluation's sandbox does not apply to it. Under ``--follow head``,
-whoever can publish to the scenario
-runs code on the machine the process serves on. ``--follow pinned`` keeps a
-person in that loop.
+whoever can publish to the scenario runs code on the machine the process
+serves on. ``--follow pinned`` keeps a person in that loop.
 
 Write a method
 --------------
@@ -1250,9 +917,9 @@ Reef ships no general proposer and no general episode scorer. You supply a
 Connect a different agent
 -------------------------
 
-An adapter is one descriptor: where each node kind is written, which kinds
-the agent accepts, how the binary is launched, and where the proxy captures
-the model calls. The bundled descriptors cover these agents:
+An adapter is one descriptor: where each kind of tree file is written, which
+kinds the agent accepts, how the binary is launched, and how a model binds to
+it. The bundled descriptors cover these agents:
 
 +---------------+----------------------------------+----------------------------------------+
 | Adapter       | Agent                            | Kinds it renders                       |
@@ -1277,7 +944,7 @@ the model calls. The bundled descriptors cover these agents:
 | ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill,   |
 |               |                                  | code_extension (sandbox + E2B)         |
 +---------------+----------------------------------+----------------------------------------+
-| ``native``    | Reef's own loop                  | the five above plus native_tool,       |
+| ``native``    | Reef's own loop                  | config, rules, skill, native_tool,     |
 |               |                                  | native_hook, native_graph,             |
 |               |                                  | native_agent, native_loop              |
 +---------------+----------------------------------+----------------------------------------+

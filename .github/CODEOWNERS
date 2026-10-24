@@ -28,9 +28,8 @@
 /recipes/sao/ @Benjamin-eecs @MikeZheng777
 /recipes/tttd/ @Benjamin-eecs @MikeZheng777
 /recipes/openclawrl/ @Benjamin-eecs @MikeZheng777
-/reef/train/cordis_backend/ @Benjamin-eecs @hanfeiyu
+/reef/train/harness_backend/ @Benjamin-eecs @hanfeiyu
 /reef/surface/ @Benjamin-eecs @quao627
-/third_party/cordis/ @Benjamin-eecs @quao627
 /tutorials/evolve-your-harness/ @Benjamin-eecs @quao627
 /recipes/skillclaw/ @Benjamin-eecs @quao627
 /recipes/gepa/ @simonucl @Benjamin-eecs
