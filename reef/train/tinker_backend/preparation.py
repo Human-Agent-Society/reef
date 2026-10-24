@@ -27,15 +27,13 @@ def prepare_tinker_step(
     *,
     batch_size: int,
     kl_coef: float,
-    runtime_load_id: str | None = None,
 ) -> PreparedTrainingStep:
     """Shape one batch into Tinker optimizer batches under the recipe's ``scheduling``.
 
     The job trains ``method``'s objective with that objective's Tinker loss,
     which must be registered in this process and accept ``kl_coef``; the
-    payload records the method.
-    With ``runtime_load_id`` the payload also records the version that the
-    job trains from. The record-to-record stage already dropped stale samples.
+    payload records the method. The record-to-record stage already dropped
+    stale samples.
     """
     objective = resolve_objective(method.objective)
     objective.validate_scheduling(scheduling)
@@ -75,7 +73,6 @@ def prepare_tinker_step(
             "loss": objective.loss_family,
             "method": method.to_dict(),
             "batches": batches,
-            **({"source_runtime_load_id": runtime_load_id} if runtime_load_id is not None else {}),
         },
     )
 

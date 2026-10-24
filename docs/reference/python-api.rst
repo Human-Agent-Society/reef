@@ -1605,8 +1605,8 @@ classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
 unchanged. Adding another backend combination still requires compatible native
 weight transport and recovery behavior.
 
-``reef.runtime`` is a namespace package without an import facade. Its five modules
-are ``interfaces``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
+``reef.runtime`` is a namespace package without an import facade. Its six modules
+are ``interfaces``, ``jobs``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
 ``executor/`` contains worker transports. Import the ABCs and shared values from
 ``reef.runtime.interfaces`` and the factory registry from
 ``reef.runtime.deployment``. Concrete scheduling connections live in their owning
@@ -1615,17 +1615,46 @@ integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` an
 distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
 Reef's coordinator.
 
+Training jobs and components
+----------------------------
+
+``reef.runtime.jobs`` defines bounded training jobs. A ``TrainingJob`` is a data
+snapshot (``data``, a ``TrainingBatch``), the directory of the weights it starts
+from (``start``, or ``None`` for the backend's base model), and the backend's
+``parameters``. Reef reads none of the parameters; they override the backend's
+own configuration. ``job_id_for`` names a job by its backend, start, data and
+parameters, so a retry of the same request is the same job.
+
+A ``TrainingComponent`` runs whole jobs with its framework's own training loop.
+``submit`` starts a job and does nothing for a job ID it already has;
+``status`` returns a ``JobStatus`` (``running``, ``finished`` or ``failed``,
+the ``SavedCheckpoint`` values so far, the backend's metrics, and, once
+finished, the algorithm state the job proposes); ``cancel`` stops a job; and
+``check_start`` refuses weights that a job cannot start from. A component that
+runs a job inside ``submit`` raises from ``submit`` when the job fails.
+
+``reef.train.job_runtime.JobTrainingRuntime`` is the ``TrainingRuntime`` over
+one component. Each training step submits one job with the step's batch and
+the parameters ``method``, ``scheduling`` and ``algorithm_state``, and waits for
+it to end. A job that saved no checkpoint is a state-only skip; otherwise its
+last checkpoint is the step's candidate. The runtime keeps the start of the next
+job in its state directory: committing a candidate makes its checkpoint the
+start, a rollback copies the restored release there, and rejecting a candidate
+keeps the start.
+
 Tinker integration
 ------------------
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
 ``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
-after deployment selection, a ``TinkerTrainingRuntime`` and, through the
-``tinker`` inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``.
-The two hold no shared object: the training runtime branches every candidate
-from the incumbent it remembers on disk, learning commits through
-``TrainingRuntime.commit_candidate`` and rollbacks through
-``restore_checkpoint``; the inference runtime reads each candidate's or
+after deployment selection, a training runtime and, through the ``tinker``
+inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``. The training
+runtime is ``reef.train.job_runtime.JobTrainingRuntime`` over
+``reef.train.tinker_backend.component.TinkerTrainingComponent``, a training
+component (below). The two runtimes hold no shared object: every job branches
+from the start checkpoint the training runtime remembers on disk, which commits
+(``TrainingRuntime.commit_candidate``) and rollbacks (``restore_checkpoint``)
+move; the inference runtime reads each candidate's or
 artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
 sampler it names, activates selected candidates and binds the head Reef
 publishes through ``activate_checkpoint``. With a local inference engine the
