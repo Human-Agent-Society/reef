@@ -48,6 +48,10 @@ supported way to get them is the image:
 how to start the container; `Evolve your model <../user-guide/evolve-your-model.rst>`__
 picks up from there.
 
+The vLLM training engine (``inference.backend: vllm`` with Slime) needs a
+different image, built by ``docker/build-reef-vllm.sh``; the same README
+describes it.
+
 Inside the container, to install from source instead of using what the image
 already carries:
 
