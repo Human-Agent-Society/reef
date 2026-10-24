@@ -12,6 +12,7 @@ from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
 from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
+from reef.runtime.interfaces import inference_aborted
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
 
@@ -972,6 +973,55 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
             {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
         ]
         assert recorded["stream_delivery"]["complete"] is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            event = {
+                "text": "ans",
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": {"type": "abort", "message": "Aborted"},
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "engine:6",
+                    "_reef_token_runtime_load_ids": ["engine:6"],
+                },
+            }
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            stream = await backend.inference_stream(
+                _live_artifact(),
+                path,
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+            [chunk async for chunk in stream.chunks]
+        finally:
+            await server.close()
+
+        assert inference_aborted(stream.record_response)
 
     asyncio.run(run())
 

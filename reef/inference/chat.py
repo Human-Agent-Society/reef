@@ -662,10 +662,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         message, parsed_tool_calls = self._assistant_message(
             text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
+        # Tool parsing must not hide an engine abort from receipt and training checks.
+        if parsed_tool_calls and captured.finish_reason != "abort":
+            finish_reason = "tool_calls"
+        else:
+            finish_reason = captured.finish_reason
         choice: dict[str, Any] = {
             "index": 0,
             "message": message,
-            "finish_reason": "tool_calls" if parsed_tool_calls else captured.finish_reason,
+            "finish_reason": finish_reason,
             "meta_info": dict(captured.public_meta),
         }
         if call.request.get("logprobs") is True:

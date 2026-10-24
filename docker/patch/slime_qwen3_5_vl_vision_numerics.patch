@@ -1,0 +1,20 @@
+--- a/slime_plugins/models/qwen3_5_vl.py
++++ b/slime_plugins/models/qwen3_5_vl.py
+@@ -10,6 +10,7 @@
+ from transformers import AutoConfig
+ 
+ from .qwen3_5 import get_qwen3_5_spec
++from .qwen3_5_vision_numerics import match_sglang_vision_numerics
+ from .qwen3_5_vl_utils import build_packed_mrope_position_ids, gather_packed_input_ids, get_packed_cp_local_indices
+ 
+ 
+@@ -67,6 +68,9 @@
+         parameter.tensor_model_parallel = False
+         parameter.partition_dim = -1
+         parameter.partition_stride = 1
++    if hf_config.model_type == "qwen3_5":
++        # Compute the ViT with SGLang's kernels, so training sees the rollout's image features.
++        match_sglang_vision_numerics(vision_model)
+     return vision_model
+ 
+ 

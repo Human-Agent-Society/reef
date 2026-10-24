@@ -1465,8 +1465,8 @@ The following names are relative to ``operations/``:
    * - ``serve/request/*``
      - Inference requests after scenario resolution, including admission,
        backend calls, retries, and record acceptance. Streaming requests remain
-       active until their completion record is accepted; an incomplete stream
-       or cancelled request counts as failed.
+       active until their completion record is accepted; an incomplete or
+       engine-aborted stream, or a cancelled request, counts as failed.
    * - ``serve/admission/*``
      - Time acquiring runtime admission. ``active`` is the number waiting for
        admission; immediate admissions also contribute to count and duration.

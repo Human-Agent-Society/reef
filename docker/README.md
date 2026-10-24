@@ -26,6 +26,36 @@ vision-language models rotate image tokens (sgl-project/sglang#34446). It
 skips the patch when the revision already has the fix. If the revision has
 no fix and the patch does not apply to it, the build fails.
 
+The build also changes Slime's Qwen3.5 trainer so that its vision tower
+computes the same image features as SGLang. It copies
+`docker/patch/slime_qwen3_5_vision_numerics.py` into Slime and applies
+`docker/patch/slime_qwen3_5_vl_vision_numerics.patch`. The features are
+bit-identical to the engine's only when all of these are true:
+
+* The engine uses the sdpa vision attention backend. On CUDA, SGLang uses
+  another backend by default. For an engine that Slime starts, pass
+  `--sglang-mm-attention-backend sdpa`. For an engine that Reef starts, set
+  `mm-attention-backend: sdpa` under `inference.options`. The engine log shows
+  the backend in the line `Using <backend> as multimodal attention backend`.
+* Each request has at most one image that misses the engine's embedding
+  cache. The engine encodes those images of one request together, and the
+  trainer encodes each image alone. The engine encodes per request only when it
+  encodes images itself: with no `encoder` worker (EPD) and with
+  `mm-enable-dp-encoder` off. The EPD encoder merges the images of up to
+  `SGLANG_ENCODER_MAX_BATCH_SIZE` (default 8) requests in one call.
+* SGLang is the default pin. With another `SGLANG_COMMIT`, check the features
+  again.
+
+The change was tested with transformers 5.12.1 and 5.13.0. The image
+installs 5.12.1. The build fails if the image has a version outside 5.12 and
+5.13, because the change then does nothing.
+
+The build also applies `docker/patch/slime_thd_cp1_indices.patch`. Without it,
+Slime's Qwen3.5 vision-language trainer fails in the first training step when
+the context parallel size is 1 and a packed sequence has an odd length.
+THUDM/slime#2376 fixes the call site. This patch is a helper-side variant
+with the same result.
+
 The image also replaces the base's FlashInfer with 0.7.0. Earlier releases
 can compute wrong attention in SGLang's default `flashinfer` backend (upstream
 FlashInfer issue #2896), so rollout log-probs drift from the trained policy.
