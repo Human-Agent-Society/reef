@@ -478,6 +478,17 @@ class _StubTrainingRuntime(WeightRuntime):
         return artifact.ref.release_id
 
 
+class _StubAdapterRuntime(_StubTrainingRuntime, AdapterWeightRuntime):
+    """Serves one adapter version per scenario, from ``adapters``."""
+
+    def __init__(self, served: str | None, adapters: dict[str, str]):
+        super().__init__(served)
+        self._adapters = adapters
+
+    def serving_adapter_runtime_load_id(self, scenario):
+        return self._adapters.get(scenario)
+
+
 def _checkpoint_ref(version: str = "checkpoint:step-7"):
     from reef.artifact import ArtifactRef
 
@@ -489,7 +500,9 @@ def test_a_live_release_serves_under_the_version_that_published_it() -> None:
     runtime = _StubTrainingRuntime("e:2", published="e:2")
     assert create_weight_surface().served_runtime_load_id(_live_artifact("e:1"), runtime) == "e:1"
     # A per-scenario adapter is named after the version of the committed release.
-    assert create_weight_surface(scenario="math").served_runtime_load_id(_live_artifact("e:3"), runtime) == "e:3"
+    adapters = _StubAdapterRuntime("e:2", {"math": "e:2"})
+    surface = create_weight_surface(scenario="math", runtime=adapters)
+    assert surface.served_runtime_load_id(_live_artifact("e:3"), adapters) == "e:3"
 
 
 def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
@@ -501,6 +514,13 @@ def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_p
     assert create_weight_surface().served_runtime_load_id(restored, runtime) == "e:5"
     # A release that no version published, such as the initial one, has no served version.
     assert create_weight_surface().served_runtime_load_id(Artifact.local(tmp_path), runtime) is None
+    # A per-scenario adapter serves a durable release under the version the engine holds for the scenario.
+    adapters = _StubAdapterRuntime("e:6", {"math": "e:4"})
+    surface = create_weight_surface(scenario="math", runtime=adapters)
+    assert surface.served_runtime_load_id(restored, adapters) == "e:4"
+    assert surface.served_runtime_load_id(Artifact.local(tmp_path), adapters) is None
+    # An engine that holds no adapter for the scenario leaves the served version unknown.
+    assert surface.served_runtime_load_id(restored, _StubAdapterRuntime("e:6", {})) is None
 
 
 def test_recover_keeps_the_live_head_the_engine_still_holds() -> None:
@@ -535,7 +555,7 @@ def test_recover_short_circuits_when_already_at_the_head() -> None:
 def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision() -> None:
     from reef.surface import adapter_name
 
-    hooks = WeightInferenceHooks(scenario="math")
+    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {}))
     live = _live_artifact(runtime_load_id="engine:7")
     served = hooks.prepare_request(live, "/v1/chat/completions", {"messages": []})
     assert served["lora_path"] == adapter_name("math", "engine:7")
@@ -545,7 +565,7 @@ def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision() -> None:
 
 
 def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> None:
-    hooks = WeightInferenceHooks(scenario="math")
+    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {}))
     checkpoint = _checkpoint_artifact(tmp_path)
     assert "lora_path" not in hooks.prepare_request(checkpoint, "/v1/chat/completions", {"messages": []})
     with pytest.raises(ReefError, match="published no adapter yet"):
@@ -554,7 +574,9 @@ def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> N
 
 def test_weight_hooks_refuse_both_a_shared_and_a_scenario_adapter() -> None:
     with pytest.raises(ValueError, match="either one shared adapter or per-scenario"):
-        WeightInferenceHooks("shared", scenario="math")
+        WeightInferenceHooks("shared", scenario="math", runtime=_StubAdapterRuntime(None, {}))
+    with pytest.raises(ValueError, match="both the scenario and the runtime"):
+        WeightInferenceHooks(scenario="math")
 
 
 def test_weight_loader_recovers_against_the_scenarios_own_adapter_version(tmp_path) -> None:

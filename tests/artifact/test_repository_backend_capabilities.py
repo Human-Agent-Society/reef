@@ -1,4 +1,4 @@
-"""Commit-log capability is checked before scenario registration or recovery."""
+"""Commit-history capability is checked before scenario registration or recovery."""
 
 from collections.abc import Mapping
 
@@ -87,7 +87,7 @@ def test_factory_capabilities_are_declared_independently(tmp_path):
 
 @pytest.mark.parametrize("backend_type", [BasicBackend, UndeclaredStagedBackend])
 @pytest.mark.parametrize("registered", [False, True])
-def test_commit_log_rejects_basic_backend_before_reading_or_changing_registration(
+def test_commit_history_rejects_basic_backend_before_reading_or_changing_registration(
     tmp_path, monkeypatch, registered, backend_type
 ):
     backend = backend_type(InMemoryRepositoryBackend("math", tmp_path))

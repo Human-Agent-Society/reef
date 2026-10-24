@@ -230,7 +230,7 @@ class TestTopkTestObjective:
                 _sample(-1.0),
             ),
         )
-        step = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"))
+        step = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"), step_size=2)
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
         # The family's wire row: policy 5-tuple + the three top-K channels.
@@ -253,6 +253,7 @@ class TestTopkTestObjective:
             "rollout_ids": [0],
             "loss": "openclawrl",
             "advantages": [1.0],
+            "external_step_sizes": [1],
         }
         with pytest.raises(ValueError, match="top-K"):
             build_openclawrl_rollout_data(payload, payload["samples"], spec)
@@ -280,6 +281,7 @@ class TestTopkTestObjective:
                 "rollout_ids": [0],
                 "loss": "openclawrl",
                 "advantages": [1.0],
+                "external_step_sizes": [1],
             }
 
         good = payload([{"hint": "h", "teacher_tokens": [9, 9, 3, 4, 5]}])
@@ -443,7 +445,7 @@ def _judge_one_turn(judge, teacher, *, next_state_role="user", settings=None):
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=1), stage),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(), stage),
     )
     job = TurnJob(
         receipt="r1",
@@ -594,13 +596,13 @@ def test_processor_attaches_topk_and_candidates() -> None:
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=2), stage),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(), stage),
     )
     # Two sessions with distinct prefixes; each first turn gets a successor.
     for index, opening in enumerate(["q-alpha", "q-beta"]):
         first = [{"role": "user", "content": opening}]
-        processor.ingest(turn(index, first))
-        processor.ingest(
+        processor.push(turn(index, first))
+        processor.push(
             turn(
                 index + 10,
                 [*first, {"role": "assistant", "content": "a"}, {"role": "user", "content": "next"}],
@@ -613,7 +615,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
     # The RL-only turn ships the un-enhanced anchor: the native ids verbatim.
     worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(2)
     by_source = {source_record_id(sample): sample for sample in batch.items}
     sample = by_source["i0"]
     assert tuple(tuple(row) for row in sample.training.get("topk_indices", [])) == ((1, 2), (3, 4), (5, 6))

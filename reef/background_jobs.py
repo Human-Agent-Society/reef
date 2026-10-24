@@ -1,7 +1,8 @@
 """Asynchronous jobs off the trainer thread: a job runner and the worker that runs it.
 
 Pipeline stages use the worker for slow work that must not block the trainer,
-such as judge calls or task-generation rounds. The module uses only the standard
+such as judge calls or task-generation rounds. The generator service runs its
+proposals, checks and plays on one worker, so they do not wait for each other. The module uses only the standard
 library, so every package can depend on it.
 """
 

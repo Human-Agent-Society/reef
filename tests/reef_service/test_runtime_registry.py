@@ -8,9 +8,11 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.artifact import Artifact, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
+from reef.inference.null import NULL_INFERENCE_URL
 from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
 from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.runtime.executor.connection import CoordinatorClient
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -30,12 +32,28 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "executor_training",
         "inference_proxy",
         "mlx",
+        "none",
         "ray_training",
+        "remote",
         "sglang",
         "slime_training",
         "tinker",
         "vllm",
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("option", ["inference_url", "type", "control"])
+def test_coordinator_runtime_refuses_inference_options_it_sets_itself(option) -> None:
+    with pytest.raises(RuntimeConfigError, match=f"inference_runtime_options cannot set {option}"):
+        RuntimeRegistry().build(
+            {
+                "type": "coordinator_training",
+                "inference_runtime": "remote",
+                "inference_runtime_options": {option: "x", "engine": "sglang"},
+            },
+            model_path="Qwen/Qwen3-8B",
+        )
 
 
 @pytest.mark.unit
@@ -159,6 +177,58 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 assert await response.json() == {"runtime": recipe}
             finally:
                 await client.close()
+
+    asyncio.run(run())
+
+
+class NullInferenceCoordinator(CoordinatorClient):
+    """The coordinator of an ``inference.backend: none`` deployment, as its health reports it."""
+
+    def health(self):
+        return {
+            "ok": True,
+            "phase": "serving",
+            "inference_url": NULL_INFERENCE_URL,
+            "training_job": {"deferred_weight_update": True, "status": "IDLE"},
+        }
+
+    def prepare_training_step(self, batch, method, algorithm_state, scheduling):
+        raise AssertionError("unused")
+
+    def execute_training_job(self, payload):
+        raise AssertionError("unused")
+
+    def update_serving_weights(self, training_job_id):
+        raise AssertionError("unused")
+
+    def acknowledge_training_commit(self, training_job_id):
+        raise AssertionError("unused")
+
+    def reject_training_candidate(self, training_job_id):
+        raise AssertionError("unused")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "/v1/messages"])
+def test_a_deployment_without_an_inference_engine_answers_inference_with_503(tmp_path, path) -> None:
+    async def run() -> None:
+        runtime = RuntimeRegistry().build({"type": "none", "control": NullInferenceCoordinator()}, model_path="model")
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        dispatcher = Dispatcher(
+            Recipe(name="sft", runtime=runtime),
+            InMemoryRepositoryBackend.factory(initial),
+            scenario_storage=SQLiteScenarioStorage(),
+        )
+        dispatcher.get_or_create_scenario("roleplay")
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            response = await client.post(path, headers={"x-reef-scenario": "roleplay"}, json={"messages": []})
+            assert response.status == 503
+            assert "inference.backend: none" in await response.text()
+        finally:
+            await client.close()
 
     asyncio.run(run())
 

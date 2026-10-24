@@ -338,7 +338,7 @@ def test_driver_preserves_executor_profiles(driver, monkeypatch):
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
     through reef's config loader and build the explicit implementation - selection
-    always, batch_size 60, the seed composition plus the seed_skills pool."""
+    always, evolution.batch_size 60, the seed composition plus the seed_skills pool."""
     from reef.service.deploy.config_utils import load_config
     from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
@@ -361,7 +361,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert type(built).__name__ == "SkillClawRecipe"
     assert built.name == "skillclaw"
     assert built.selection.plugin_class is BackendAlwaysSelectPlugin
-    assert built.stages().task2batch.config == {"batch_size": 60}
+    assert built.batch_size == 60
     assert [entry["id"] for entry in built.seed] == ["alpha"]
     assert built.seed[0]["config"]["name"] == "alpha"
     assert len(built.tasks) == 3
@@ -374,7 +374,8 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["pi-agent"]
     # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
-    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
+    trainer = built.build("demo", SQLiteRecordStore())  # loads the seed; no episodes
+    assert isinstance(trainer, Trainer) and trainer.batch_size == 60
 
 
 def test_seed_skills_must_name_an_existing_directory(example, tmp_path) -> None:
@@ -426,15 +427,15 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
             agent_record_id=agent_record_id,
         )
 
-    processor = harness_stages(3).build(PipelineContext("s"))
+    processor = harness_stages().build(PipelineContext("s"))
     for index, score in enumerate((1.0, 0.0), start=1):
-        processor.ingest(_inference(f"inf-{index}"))
-        processor.ingest(_report(f"rep-{index}", score, f"inf-{index}"))
-    assert not processor.ready()  # two of three reports: the day is not done
-    processor.ingest(_inference("inf-3"))
-    processor.ingest(_report("rep-3", 1.0, "inf-3"))
-    assert processor.ready()
-    batch = processor.build_batch()
+        processor.push(_inference(f"inf-{index}"))
+        processor.push(_report(f"rep-{index}", score, f"inf-{index}"))
+    assert not processor.ready(3)  # two of three reports: the day is not done
+    processor.push(_inference("inf-3"))
+    processor.push(_report("rep-3", 1.0, "inf-3"))
+    assert processor.ready(3)
+    batch = processor.build_batch(3)
     assert sorted(sample.metadata.get("reward") for sample in batch.items) == [0.0, 1.0, 1.0]
 
 
@@ -461,7 +462,8 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
         binary=str(make_binary(tmp_path)),
         seed=SEED,
         selection=PluginReference(BackendAlwaysSelectPlugin),
-        pipeline_stages=harness_stages(batch_size),
+        batch_size=batch_size,
+        pipeline_stages=harness_stages(),
         runtime=runtime(),
     )
 
@@ -635,9 +637,13 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
 
 
 def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
-    """pool-current survives via the double rename, and the commit log's last
-    version wins as the restart bootstrap when its tree is still on disk."""
-    import hashlib
+    """pool-current survives via the double rename, and the release of the last
+    commit wins as the restart bootstrap when its tree is still on disk."""
+    from contextlib import closing
+
+    from reef.artifact import ArtifactRef
+    from reef.storage.commits import CommitRecord
+    from reef.storage.sqlite import SQLiteScenarioStorage
 
     run_dir = tmp_path / "run"
     version_dir = run_dir / "artifacts" / "v-night-1" / "pi-agent" / "skills" / "alpha"
@@ -652,16 +658,24 @@ def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
     driver._persist_pool(FakeService(), run_dir)  # idempotent under the double rename
     assert (run_dir / "pool-current" / "pi-agent" / "skills" / "alpha" / "SKILL.md").read_text() == "body"
 
-    assert driver._committed_pool(run_dir, "dry") is None  # no commit log yet
-    key = hashlib.sha256(b"dry").hexdigest()
-    log = run_dir / "reef-data" / f"{key}.commits.jsonl"
-    log.parent.mkdir(parents=True)
-    log.write_text(
-        json.dumps({"artifact_ref": {"version": "v-gone"}})
-        + "\n"
-        + json.dumps({"artifact_ref": {"version": "v-night-1"}})
-        + "\n"
-    )
+    assert driver._committed_pool(run_dir, "dry") is None  # no commit yet
+    with (
+        closing(SQLiteScenarioStorage(run_dir / "reef-data")) as storage,
+        closing(storage.open("dry")) as store,
+    ):
+        for step, release_id in enumerate(("v-gone", "v-night-1"), start=1):
+            store.commit_step(
+                expected_step=step - 1,
+                commit=CommitRecord(
+                    scenario="dry",
+                    step=step,
+                    artifact_ref=ArtifactRef(f"content-{step}", release_id, None),
+                    checkpoint=False,
+                    algorithm_state=None,
+                    high_water_sequence=0,
+                    high_water_offset=0,
+                ),
+            )
     committed = driver._committed_pool(run_dir, "dry")
     assert committed == run_dir / "artifacts" / "v-night-1"
 

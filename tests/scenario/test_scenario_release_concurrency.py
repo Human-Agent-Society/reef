@@ -17,7 +17,7 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
 from reef.scenario import Scenario
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 
@@ -284,8 +284,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     assert version.ref == previous_ref
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scenario, monkeypatch, checkpoint):
+def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scenario, monkeypatch):
     scenario, _ = local_scenario
     backend = scenario.repository.backend
     first = _prepare(scenario)
@@ -304,7 +303,6 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         second = _prepare(scenario)
-        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
 
         def unexpected_publish(*args, **kwargs):
             pytest.fail("a new release must not publish while its committed parent is unsynchronized")
@@ -385,17 +383,14 @@ def test_rollback_exposes_pointer_failure_after_its_commit(local_scenario, monke
 def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
     scenario, _ = local_scenario
     result = _prepare(scenario)
-    assert isinstance(scenario.store, CommitHistoryScenarioStore)
-    journal = scenario.store.commit_history
-    assert journal is not None
-    append = journal.append
+    commit_step = scenario.store.commit_step
 
-    def lose_ack(record):
-        append(record)
+    def lose_ack(**keywords):
+        commit_step(**keywords)
         raise OSError("commit acknowledgment lost")
 
     with monkeypatch.context() as patch:
-        patch.setattr(journal, "append", lose_ack)
+        patch.setattr(scenario.store, "commit_step", lose_ack)
         with pytest.raises(OSError, match="acknowledgment lost"):
             scenario.commit(result)
     committed = scenario.store.history()[-1]

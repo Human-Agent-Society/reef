@@ -21,6 +21,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.storage.trajectories import TrajectoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,10 @@ class ObservedScenarioStore(ScenarioStore):
     @property
     def tasks(self) -> TaskStorage:
         return self._inner.tasks
+
+    @property
+    def trajectories(self) -> TrajectoryStore:
+        return self._inner.trajectories
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

@@ -20,8 +20,7 @@ from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface, create_weight_surface
@@ -37,16 +36,6 @@ class ContractInferenceHandler(InferenceHandler):
         return await self._handler(artifact, path, payload)
 
 
-def dispatcher_with_checkpoint_strategy(strategy, *, backend_factory, local_artifact_dir):
-    recipe = Recipe(checkpoint_strategy=strategy)
-    return Dispatcher(
-        recipe,
-        backend_factory,
-        local_artifact_dir=local_artifact_dir,
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-
-
 class WeightRecipe(Recipe):
     """A recipe whose scenarios commit live weights, so serving-version
     verification applies (the core ``recipe`` implementation serves a plain
@@ -58,7 +47,7 @@ class WeightRecipe(Recipe):
 
 def weight_dispatcher(tmp_path, initial):
     return Dispatcher(
-        WeightRecipe(checkpoint_strategy=EveryNVersions(3)),
+        WeightRecipe(),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
@@ -700,61 +689,6 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-
-    class CountingBackend(InMemoryRepositoryBackend):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs)
-            self.publish_count = 0
-            self.expected_parents = []
-
-        def publish(self, candidate, *, expected_parent, advance_head=True):
-            self.publish_count += 1
-            self.expected_parents.append(expected_parent)
-            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
-
-    backend = CountingBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-    original_checkpoint = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-
-    for version in (1, 2, 3):
-        candidate = tmp_path / f"candidate-{version}"
-        candidate.mkdir()
-        (candidate / "model.txt").write_text(f"v{version}")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
-
-        runtime = dispatcher.get_or_create_scenario("chat")
-        selected = dispatcher.current_artifact("chat")
-        assert selected.local_path is None
-        materialized = selected.materialize()
-        assert materialized.local_path.joinpath("model.txt").read_text() == f"v{version}"
-        assert runtime.scenario_step == version
-        if version < 3:
-            assert runtime.repository.current_artifact.release_id.startswith("local:")
-            assert runtime.repository.checkpoint_artifact == original_checkpoint
-            assert backend("chat").publish_count == 0
-
-    runtime = dispatcher.get_or_create_scenario("chat")
-    assert not runtime.repository.current_artifact.release_id.startswith("local:")
-    assert runtime.repository.checkpoint_artifact == runtime.repository.current_artifact
-    assert backend("chat").publish_count == 1
-    assert backend("chat").expected_parents == [original_checkpoint]
-    assert backend("chat").current() == runtime.repository.current_artifact
-    recovered = build_default_dispatcher(
-        backend_factory=backend, scenario_storage=SQLiteScenarioStorage()
-    ).get_or_create_scenario("chat")
-    assert recovered.scenario_step == 3
-
-
-@pytest.mark.unit
 def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
     async def run() -> None:
         async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
@@ -846,6 +780,248 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert len(recorded) == 1
         assert recorded[0].artifact_ref == calls[-1]
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+class StreamRecordHandler(InferenceHandler):
+    """Streams fixed frames and the record response of one turn.
+
+    ``frames`` is a nonempty tuple of byte frames, sent in order; the constructor rejects an
+    empty tuple. With ``record_before_terminal`` the record response is set after every frame
+    but the last is sent, as SGLang's token-by-token stream does. Otherwise it is set when the
+    stream is created, as a stream served from a buffered result (vLLM) is.
+    """
+
+    def __init__(
+        self,
+        record_response: dict,
+        frames: tuple[bytes, ...],
+        *,
+        record_before_terminal: bool,
+        content_type: str = "text/event-stream",
+    ) -> None:
+        if not frames:
+            raise ValueError("StreamRecordHandler needs at least one frame")
+        self.record_response = record_response
+        self.frames = frames
+        self.record_before_terminal = record_before_terminal
+        self.content_type = content_type
+        self.calls = 0
+
+    async def inference(self, artifact, path, payload):
+        raise AssertionError("a streamed request must not call the buffered route")
+
+    async def inference_stream(self, artifact, path, payload):
+        self.calls += 1
+
+        async def chunks():
+            for frame in self.frames[:-1]:
+                yield frame
+            if self.record_before_terminal:
+                stream.record_response = self.record_response
+            yield self.frames[-1]
+
+        stream = InferenceStream(
+            status=200,
+            headers={"Content-Type": self.content_type},
+            chunks=chunks(),
+            record_response=None if self.record_before_terminal else self.record_response,
+            record_response_pending=self.record_before_terminal,
+        )
+        return stream
+
+
+STREAM_TRAINING = {"tokens": [10, 11, 20, 21], "loss_mask": [1, 1], "rollout_log_probs": [-0.5, -0.5]}
+CHAT_STREAM_FRAMES = (b'data: {"choices":[{"delta":{"content":"a b"}}]}\n\n', b"data: [DONE]\n\n")
+MESSAGES_STREAM_FRAMES = (
+    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"a b"}}\n\n',
+    b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+)
+
+
+def chat_stream_record(finish_reason: str) -> dict:
+    return {
+        "choices": [{"index": 0, "message": {"content": "a b"}, "finish_reason": finish_reason}],
+        "training": STREAM_TRAINING,
+    }
+
+
+#: An Anthropic record shows an abort only in its private training block: stop_reason maps abort to end_turn.
+ABORTED_MESSAGES_RECORD = {
+    "type": "message",
+    "role": "assistant",
+    "content": [{"type": "text", "text": "a b"}],
+    "stop_reason": "end_turn",
+    "training": {**STREAM_TRAINING, "finish_reason": "abort"},
+}
+
+
+async def post_stream(dispatcher, handler, path: str):
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
+    await client.start_server()
+    try:
+        response = await client.post(
+            path,
+            headers={"x-reef-scenario": "chat"},
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+        return response.status, dict(response.headers), await response.read()
+    finally:
+        await client.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+@pytest.mark.parametrize(
+    ("path", "record_response", "frames"),
+    [
+        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
+        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
+    ],
+    ids=["chat", "messages"],
+)
+def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
+    tmp_path, path, record_response, frames, record_before_terminal
+) -> None:
+    """A stream cannot restart after it sent frames, so an aborted stream ends like an incomplete one."""
+
+    async def run() -> None:
+        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, _, body = await post_stream(dispatcher, handler, path)
+            assert status == 200
+            assert body == b"".join(frames)
+            assert handler.calls == 1
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == record_response["training"]
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/completed_total"] == 0
+            assert metrics["serve/request/active"] == 0
+            assert metrics["ingest/accepted_total"] == 1
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_stream_record_handler_needs_a_frame() -> None:
+    with pytest.raises(ValueError, match="at least one frame"):
+        StreamRecordHandler(chat_stream_record("stop"), (), record_before_terminal=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+@pytest.mark.parametrize(
+    ("path", "record_response", "frames"),
+    [
+        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
+        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
+    ],
+    ids=["chat", "messages"],
+)
+def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
+    tmp_path, path, record_response, frames, record_before_terminal
+) -> None:
+    """An engine abort before the first sampled token reports no runtime-load ID; it is not a 409."""
+
+    async def run() -> None:
+        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        (initial / "model.txt").write_text("base")
+        dispatcher = weight_dispatcher(tmp_path, initial)
+        try:
+            dispatcher.get_or_create_scenario("chat")
+            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+            status, _, body = await post_stream(dispatcher, handler, path)
+            assert status == 200
+            assert body == b"".join(frames)
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == record_response["training"]
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/version_mismatch_total"] == 0
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/active"] == 0
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_aborted_non_sse_stream_has_no_receipt_header(tmp_path) -> None:
+    async def run() -> None:
+        body = json.dumps(chat_stream_record("abort")).encode()
+        handler = StreamRecordHandler(
+            chat_stream_record("abort"), (body,), record_before_terminal=False, content_type="application/json"
+        )
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, headers, received = await post_stream(dispatcher, handler, "/v1/chat/completions")
+            assert status == 200
+            assert received == body
+            assert "x-reef-agent-record-id" not in headers
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == STREAM_TRAINING
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/active"] == 0
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_before_terminal) -> None:
+    async def run() -> None:
+        handler = StreamRecordHandler(
+            chat_stream_record("stop"), CHAT_STREAM_FRAMES, record_before_terminal=record_before_terminal
+        )
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, _, body = await post_stream(dispatcher, handler, "/v1/chat/completions")
+            assert status == 200
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            assert record.agent_record_id.encode() in body
+            recorded = record.payload["response"]
+            assert recorded["training"] == STREAM_TRAINING
+            assert recorded["stream_delivery"]["complete"] is True
+            assert "error" not in recorded["stream_delivery"]
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/completed_total"] == 1
+            assert metrics["serve/request/failed_total"] == 0
+        finally:
+            dispatcher.close()
 
     import asyncio
 
@@ -989,22 +1165,20 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
     initial.mkdir()
     (initial / "model.txt").write_text("base")
     backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first_dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
+    first_dispatcher = Dispatcher(
+        WeightRecipe(),
+        backend,
         local_artifact_dir=tmp_path / "first-local",
         scenario_storage=SQLiteScenarioStorage(),
     )
     checkpoint = first_dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
-    candidate = tmp_path / "candidate"
-    candidate.mkdir()
-    (candidate / "model.txt").write_text("v1")
-    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+    # Live weights have no checkpoint bytes, so a new dispatcher cannot serve them.
+    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
     assert first_dispatcher.get_or_create_scenario("chat").repository.current_artifact != checkpoint
 
-    second_dispatcher = build_default_dispatcher(
-        backend_factory=backend,
-        checkpoint_strategy=EveryNVersions(3),
+    second_dispatcher = Dispatcher(
+        WeightRecipe(),
+        backend,
         local_artifact_dir=tmp_path / "second-local",
         scenario_storage=SQLiteScenarioStorage(),
     )
@@ -1038,17 +1212,11 @@ def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> 
 def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    decisions = []
-
-    class RecordingStrategy:
-        def should_checkpoint(self, scenario, version, result):
-            decisions.append((scenario, version, result.state))
-            return False
-
-    dispatcher = dispatcher_with_checkpoint_strategy(
-        RecordingStrategy(),
-        backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+    dispatcher = Dispatcher(
+        Recipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     dispatcher.get_or_create_scenario("math")
@@ -1056,11 +1224,9 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
     dispatcher.registry.get("math").commit(TrainStepResult(state="no artifact"))
     # A no-artifact commit advances the step (the trainer consumed records and
-    # state) but does not move the serving head or consult the checkpoint
-    # strategy: there is no candidate to checkpoint.
+    # state) but does not move the serving head: there is no candidate to publish.
     assert dispatcher.get_or_create_scenario("math").scenario_step == 1
     assert dispatcher.get_or_create_scenario("math").repository.require_current_artifact() == math_head
-    assert decisions == []
 
     for scenario in ("math", "code", "math", "code"):
         version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
@@ -1070,44 +1236,29 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
 
     assert dispatcher.get_or_create_scenario("math").scenario_step == 3
     assert dispatcher.get_or_create_scenario("code").scenario_step == 2
-    assert decisions == [
-        ("math", 2, 2),
-        ("code", 1, 1),
-        ("math", 3, 3),
-        ("code", 2, 2),
-    ]
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_source", ["strategy", "repository"])
-def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path, failure_source) -> None:
+def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
 
     class FailingBackend(InMemoryRepositoryBackend):
         def publish(self, candidate, *, expected_parent, advance_head=True):
-            if failure_source == "repository":
-                raise ArtifactPublicationError("repository failed")
-            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
+            raise ArtifactPublicationError("repository failed")
 
-    class FailingStrategy:
-        def should_checkpoint(self, scenario, version, result):
-            if failure_source == "strategy":
-                raise RuntimeError("strategy failed")
-            return True
-
-    dispatcher = dispatcher_with_checkpoint_strategy(
-        FailingStrategy(),
-        backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
+    dispatcher = Dispatcher(
+        Recipe(),
+        FailingBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     runtime = dispatcher.get_or_create_scenario("chat")
     previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.scenario_step)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
 
-    error = RuntimeError if failure_source == "strategy" else ArtifactPublicationError
-    with pytest.raises(error, match=f"{failure_source} failed"):
+    with pytest.raises(ArtifactPublicationError, match="repository failed"):
         dispatcher.registry.get("chat").commit(TrainStepResult(state="new", artifact=Artifact.local(candidate)))
 
     assert (
@@ -1258,9 +1409,7 @@ class HarnessRecipe(Recipe):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "recipe", [HarnessRecipe(), WeightRecipe(checkpoint_strategy=EveryNVersions(3))], ids=["harness", "weights"]
-)
+@pytest.mark.parametrize("recipe", [HarnessRecipe(), WeightRecipe()], ids=["harness", "weights"])
 def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_it(tmp_path, recipe) -> None:
     """A session still on an older release records against it, from its x-reef-tag-release; a tag the catalog does not
     have, and every call on a scenario that serves weights, records against the served release."""

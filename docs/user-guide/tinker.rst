@@ -55,9 +55,14 @@ Reef schedules. They share nothing in process: each candidate's artifact
 carries a ``tinker-checkpoint.json`` manifest naming its remote training
 state and sampler, the inference side serves the sampler an artifact names,
 and the training side branches from the checkpoint Reef last committed,
-which ``state-dir`` remembers across restarts. Backend-neutral step scheduling retains comparison sets, explicit
-batch sizes, shuffling, epochs, and partial/drop/error remainder policies.
-``training.options.batch-size`` supplies the configured optimizer batch size.
+which ``state-dir`` remembers across restarts.
+
+``training.options.batch-size`` (default 1) is the batch size: the samples in
+one optimizer step. The training pipeline makes a batch when it holds this
+many samples. A batch takes whole record sets, so it can hold more; Reef then
+cuts it into optimizer steps of the batch size. Backend-neutral step
+scheduling retains comparison sets, shuffling, epochs, and
+partial/drop/error remainder policies for the last step.
 
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``
@@ -123,10 +128,8 @@ Already admitted requests retain their immutable sampler snapshot. The weight
 loader binds the materialized, recovered artifact before serving a scenario;
 restart creates a fresh runtime-load incarnation and starts subsequent training
 from that artifact's optimizer state. Rollback binds the republished older
-snapshot, including its optimizer. The default checkpoint cadence of one is
-recommended: non-checkpoint live releases can only be served during their
-original runtime incarnation and fall back to the last durable checkpoint on
-restart, following Reef's normal weight recovery contract.
+snapshot, including its optimizer. Each Tinker version is a durable
+checkpoint, so a restart does not lose a version.
 
 Serve with a local SGLang engine
 --------------------------------
@@ -155,7 +158,7 @@ starts the SGLang engines with LoRA serving enabled (``max-lora-rank`` from
 ``max-loaded-adapters``, ``lora-target-modules`` defaulting to ``all``), and
 runs Reef's training coordinator with Tinker as its training backend. The
 trainer reserves no GPU. Each scenario trains its own adapter: a training job
-runs one optimizer step on Tinker from the scenario's published checkpoint,
+runs the batch's optimizer steps on Tinker from the scenario's published checkpoint,
 downloads the result and converts it with ``tinker-cookbook`` into a PEFT
 adapter directory under the job's checkpoint, and publication has Reef ask
 every engine to load that directory under the adapter name it records for
@@ -184,6 +187,80 @@ engine that accepts Reef's adapter-file transfer in place of SGLang, and the
 Tinker SDK faked on the driver's path. With ``REEF_TEST_TINKER_REAL=1`` and
 ``TINKER_API_KEY`` set it trains, downloads and converts a real checkpoint.
 
+Serve from a remote GPU host
+----------------------------
+
+The SGLang engines can also run on another host, such as a rented GPU machine
+or a managed GPU platform, while Reef, its coordinator and the Tinker trainer
+stay on a CPU host. No tensors cross the network. After each training step, the
+coordinator uploads the scenario's PEFT adapter directory to the GPU host, and
+the GPU host loads it into its engines.
+
+On the GPU host, install Reef with SGLang, as for a local engine. Set two
+different tokens and start the remote inference component:
+
+.. code:: bash
+
+   export REEF_REMOTE_CONTROL_TOKEN=...    # starts engines and replaces weights
+   export REEF_REMOTE_INFERENCE_TOKEN=...  # sends inference requests
+   python -m reef.inference.remote --port 8000
+
+The component starts its own Ray session and no engines. Its control routes
+answer ``409`` until a model driver starts the engines. It starts only the
+engine backend that ``--engine`` names (default ``sglang``) and refuses any
+other backend that a control plane asks for.
+``python -m reef.inference.remote --help`` lists the bind address, the upload
+directory and the Ray options.
+
+On the Reef host, set the same two variables. Keep ``inference.backend:
+sglang`` and add an ``inference.remote`` section with the component's URL:
+
+.. code:: yaml
+
+   inference:
+     model-path: Qwen/Qwen3-8B
+     backend: sglang
+     num-gpus: 2
+     remote:
+       url: https://gpu-host.example.com
+   training:
+     backend: tinker
+     options:
+       state-dir: /var/lib/reef/tinker
+       lora-rank: 32
+
+When the model driver starts, it asks the component to start the SGLang
+engines with the settings a local engine gets: ``inference.num-gpus``,
+``inference.tensor-parallel-size``, ``inference.options`` and the LoRA
+settings from ``training.options``. The GPU host downloads ``model-path``. The
+Reef host keeps it as a remote identifier and loads only the tokenizer.
+
+The HTTP service sends inference requests to the component, and the component
+forwards each request and its answer unchanged. Token capture and version stamps
+therefore come from the engines, as with a local engine. Publication uses the
+same coordinator steps as a local engine; only the adapter files travel over
+HTTP. When the driver stops, the component stops its engines and keeps running.
+The next driver start replaces them and reloads each scenario's committed
+adapter before it serves.
+
+The control token gives its holder control of the GPU host. Its holder
+chooses the model, the engine options and the served weights, and the engines
+run a model's own code (``trust_remote_code``). Protect it like a login to
+that host: serve the component over HTTPS, keep the token out of logs and
+deployment files, and keep it separate from the inference token.
+
+Each publication uploads one adapter directory, so its time grows with the
+adapter size and the network path. The component serves one control plane at
+a time: a second start replaces the first one's engines.
+`The inference section <../reference/configuration.rst#the-inference-section>`__
+lists the ``inference.remote`` settings.
+
+``tests/tinker_backend/test_tinker_local_engine_ray.py`` also runs this
+topology on a CPU: the component runs stub engines in a separate process with
+its own Ray session, and the adapter reaches them over HTTP. The test also
+restarts the driver and checks that the component serves the committed adapter
+again.
+
 Verification scope
 -------------------
 
@@ -191,6 +268,7 @@ CPU tests exercise data alignment and loss math, SDK call ordering, rejected and
 uncertain candidates, commit admission, request capture and SSE, deployment,
 scenario commit/restart/rollback, and the coordinator path with a local engine
 (publication, rejection, restart recovery, adapter reload) against engine and
-SDK doubles. A live Tinker run is additionally needed
+SDK doubles. The remote topology is tested with stub engines only; real SGLang
+engines on a remote GPU host have not been run. A live Tinker run is additionally needed
 to verify account model availability, remote persistence, and training quality.
 No live training or performance result is claimed by this implementation.

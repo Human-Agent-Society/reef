@@ -9,7 +9,7 @@ One round is one GEPA step: pull the served tree, run the next epoch-shuffled
 minibatch of three training problems as Pi episodes against it with a model
 binding pointed back at this service, report each score against the request
 that episode recorded, and wait. The third report closes the batch
-(``pipeline.task2batch.config.batch_size: 3``), which is what schedules the step where the method
+(``evolution.batch_size: 3``), which is what schedules the step where the method
 proposes, evaluates on the 45 validation problems, and publishes on a strict
 mean improvement. Rounds stop at ``--budget`` metric calls; then the seed and
 the served compositions are each scored on the sealed 150-problem test split
@@ -17,7 +17,7 @@ through per-example checkpoints and ``summary.json`` puts those numbers beside
 the retained official record.
 
 The work directory resumes: the archive, the checkpoints, the round counter,
-and the scenario's own commit log all survive a restart. ``--dry-run`` boots
+and the scenario's own commit history all survive a restart. ``--dry-run`` boots
 the recipe and prints the plan without a model call.
 """
 
@@ -217,7 +217,7 @@ class RunService:
         self._runner: web.AppRunner | None = None
 
     def start(self) -> None:
-        # Scenario creation (or durable recovery from the commit log) happens
+        # Scenario creation (or durable recovery from the commit history) happens
         # before any request lands.
         self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()

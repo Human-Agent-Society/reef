@@ -20,7 +20,7 @@ from tests.recipes.meta_harness.test_meta_harness import (
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
-from reef.storage.commit_log import CommitHistoryScenarioStore
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -166,28 +166,21 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
         dispatcher.close()
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(
-    publication_case, monkeypatch, checkpoint
-):
+def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
     dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records))
     try:
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
-        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
         _report_once(scenario, "lost-journal-ack", "1")
         result = scenario.prepare_training_step()
-        assert isinstance(scenario.store, CommitHistoryScenarioStore)
-        journal = scenario.store.commit_history
-        assert journal is not None
-        append = journal.append
+        commit_step = scenario.store.commit_step
 
-        def lose_ack(record):
-            append(record)
+        def lose_ack(**keywords):
+            commit_step(**keywords)
             raise OSError("journal acknowledgment lost")
 
         with monkeypatch.context() as patch:
-            patch.setattr(journal, "append", lose_ack)
+            patch.setattr(scenario.store, "commit_step", lose_ack)
             with pytest.raises(OSError, match="acknowledgment lost"):
                 scenario.commit(result)
         committed = scenario.store.history()[-1]

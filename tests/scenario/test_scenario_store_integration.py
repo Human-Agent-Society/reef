@@ -19,12 +19,13 @@ from reef.storage.records import RecordRetention, RecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.storage.trajectories import TrajectoryStore
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
 
 class OpaqueStore(ScenarioStore):
-    """Delegate storage while exposing no SQLite paths or commit-log attribute."""
+    """Delegate storage while exposing no SQLite paths or commit-history attribute."""
 
     def __init__(self, scenario: str, inner: ScenarioStore, events: list[tuple[str, str]], *, fail_recovery: bool):
         self.scenario = scenario
@@ -44,6 +45,10 @@ class OpaqueStore(ScenarioStore):
     @property
     def tasks(self) -> TaskStorage:
         return self._inner.tasks
+
+    @property
+    def trajectories(self) -> TrajectoryStore:
+        return self._inner.trajectories
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

@@ -109,6 +109,25 @@ class SGLangWorker:
         if runtime_load_id is not None:
             ray.get([engine.set_runtime_load_id.remote(runtime_load_id) for engine in engines])
 
+    def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> None:
+        """Reload every updatable engine's weights from a Hugging Face directory and serve them as ``runtime_load_id``.
+
+        The trainer that wrote the files is elsewhere; the engines read the
+        directory themselves. Generation is already paused by the publisher.
+        """
+        engines = self.updatable_rollout_engines
+        if not engines:
+            raise RuntimeError("no updatable SGLang engines can load weights")
+        results = ray.get(
+            [
+                engine.update_weights_from_disk.remote(model_path=model_path, runtime_load_id=runtime_load_id)
+                for engine in engines
+            ]
+        )
+        for result in results:
+            if isinstance(result, dict) and result.get("success") is False:
+                raise RuntimeError(f"SGLang refused weights from {model_path!r}: {result.get('message', result)}")
+
     def inference_url(self) -> str | None:
         return self._cluster.endpoint
 

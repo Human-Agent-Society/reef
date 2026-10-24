@@ -413,26 +413,18 @@ wheel suites on Python 3.12, including the combined coverage check. Documentatio
 builds and real-harness smoke tests run automatically when their files change.
 Run relevant checks locally and batch each round of review fixes before pushing.
 
-Before merging, run the complete Python 3.10/3.11/3.12 test and package matrices
-on the final revision. Any contributor with repository write access can request
-this by rerunning the entire latest `ci` workflow:
+Before merging, the required checks must pass on the latest revision:
+`lint`, `test (3.12)`, and `package (3.12)`. Reef supports Python 3.12 only, so
+every run tests the same version. A new push cancels older runs. To retry a
+failed check, any contributor with repository write access can rerun the latest
+`ci` run of the pull request:
 
 ```bash
 gh run rerun RUN_ID --repo Human-Agent-Society/reef
 ```
 
-The Actions UI equivalent is **Re-run all jobs**. Rerunning the entire workflow
-recalculates the matrix for full validation; **Re-run failed jobs** may reuse the
-previous matrix and is intended for retrying failures, not expanding coverage.
-No separate maintainer approval is needed. Authors without repository write
-access can ask a collaborator to request the final full run.
-
-Routine runs leave the required Python 3.10/3.11 checks pending. These checks
-must pass on the latest revision before merging; the Python 3.12 routine run
-alone is insufficient. A new push cancels older runs and returns to the routine
-matrix. Full reruns reject closed, draft, or superseded PR revisions. Main-branch
-pushes and manual workflow dispatches run all supported Python versions;
-use the PR's `ci` rerun to satisfy its merge checks.
+A rerun fails if the pull request is closed, is a draft, or has newer commits.
+Authors without repository write access can ask a collaborator to rerun it.
 
 ## Review and acceptance
 

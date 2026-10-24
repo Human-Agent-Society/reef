@@ -12,6 +12,7 @@ from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact, LiveWeightArtifactRef
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
+from reef.runtime.interfaces import inference_aborted
 
 
 class FakeTokenizer:
@@ -324,7 +325,24 @@ def test_vllm_facade_streams_anthropic_messages_from_the_buffered_turn() -> None
 
 
 @pytest.mark.unit
-def test_vllm_tool_call_parser_adapts_vllm_extraction_without_changing_training_tokens() -> None:
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_vllm_facade_streams_an_engine_abort_that_the_service_detects(path) -> None:
+    async def run(base_url, received):
+        backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
+        stream = await backend.inference_stream(
+            _live_artifact(),
+            path,
+            {"model": "served-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 2},
+        )
+        [frame async for frame in stream.chunks]
+        assert inference_aborted(stream.record_response)
+
+    asyncio.run(_serve(_generate_response(stamps=["engine:6", "engine:6"], finish_reason="abort"), run))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("finish_reason", ["stop", "abort"])
+def test_vllm_tool_call_parser_adapts_vllm_extraction_without_changing_training_tokens(finish_reason: str) -> None:
     class FakeVLLMParser:
         def __init__(self) -> None:
             self.calls = 0
@@ -365,10 +383,28 @@ def test_vllm_tool_call_parser_adapts_vllm_extraction_without_changing_training_
         assert [call["function"] for call in message["tool_calls"]] == [
             {"name": "read", "arguments": '{"path":"README.md"}'}
         ]
-        assert response["choices"][0]["finish_reason"] == "tool_calls"
+        expected_finish_reason = "abort" if finish_reason == "abort" else "tool_calls"
+        assert response["choices"][0]["finish_reason"] == expected_finish_reason
         assert response["training"]["tokens"] == [10, 11, 20, 21]
 
-    asyncio.run(_serve(_generate_response(stamps=["engine:6", "engine:6"]), run))
+        stream = await backend.inference_stream(
+            _live_artifact(),
+            "/v1/messages",
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "read it"}],
+                "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+                "max_tokens": 2,
+                "stream": True,
+            },
+        )
+        frames = [frame async for frame in stream.chunks]
+        assert b"message_stop" in frames[-1]
+        assert stream.record_response["training"]["finish_reason"] == expected_finish_reason
+        assert inference_aborted(stream.record_response) is (finish_reason == "abort")
+        assert stream.record_response["content"][0]["type"] == "tool_use"
+
+    asyncio.run(_serve(_generate_response(stamps=["engine:6", "engine:6"], finish_reason=finish_reason), run))
 
 
 @pytest.mark.unit

@@ -30,7 +30,7 @@ import skills
 
 TASK = json.loads((Path(__file__).with_name("task.json")).read_text())["task"]
 EPOCHS = int(os.environ.get("SDFT_EPOCHS", "2"))
-# MUST equal serve.yaml's pipeline.task2batch.config.batch_size.
+# MUST equal serve.yaml's training.config.global_batch_size.
 PROMPTS_PER_STEP = int(os.environ.get("SDFT_PROMPTS_PER_STEP", "32"))
 SEED = int(os.environ.get("SDFT_SEED", "42"))
 MAX_TOKENS = int(os.environ.get("SDFT_MAX_TOKENS", "2048"))

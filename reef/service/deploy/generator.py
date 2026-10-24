@@ -51,7 +51,7 @@ class GeneratorSettings(Settings):
     harbor: str | None = config_option(
         None, help="The harbor command line for the oracle check; found on PATH by default."
     )
-    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight per play request.")
+    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all play requests.")
     designer_url: str | None = config_option(
         None, help="A Reef service the designer calls go to instead of this deployment's."
     )

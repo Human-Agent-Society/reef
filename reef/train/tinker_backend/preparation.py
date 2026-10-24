@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from typing import Any
 
 from reef.core.batches import StepScheduling, TrainingBatch, trajectories
@@ -53,15 +53,11 @@ def prepare_tinker_step(
         rows.append(asdict(TokenRow.from_item(item, advantage)))
         key = f"group:{item.group_id}" if item.group_id is not None else f"row:{index}"
         rollout_ids.append(index if scheduling.unit == "sample" else groups.setdefault(key, len(groups)))
-    if scheduling.batch_size == "configured":
-        if scheduling.remainder == "error" and batch_size > len(set(rollout_ids)):
-            raise ValueError("Tinker configured batch_size exceeds the available comparison sets")
-        scheduling = replace(scheduling, batch_size=min(batch_size, len(set(rollout_ids))))
-    schedule = materialize_schedule(rollout_ids, scheduling, seed=batch_schedule_seed(batch))
+    schedule = materialize_schedule(rollout_ids, scheduling, step_size=batch_size, seed=batch_schedule_seed(batch))
     batches: list[list[dict[str, Any]]] = []
     cursor = 0
     next_rollout = 0
-    for size in schedule.step_sizes or ():
+    for size in schedule.step_sizes:
         next_rollout += size
         indices = []
         while cursor < len(schedule.row_indices) and schedule.rollout_ids[cursor] < next_rollout:

@@ -1,6 +1,7 @@
 """The record-to-record stage: records in, record sets out, for one pipeline.
 
-``Record2Record`` is the interface. ``PassThroughRecord2Record`` is the default implementation.
+``Record2Record`` is the interface. ``NoRecordSets`` is the default of a pipeline
+that trains nothing.
 """
 
 from __future__ import annotations
@@ -13,42 +14,58 @@ from typing import Any, Self
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
-from reef.record2record.pool import RecordSetPool
+from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.selection import SelectionPolicy
-from reef.record2record.sets import RecordSet, SingleRecordSet
-from reef.record2record.staleness import canonical_runtime_load_id, stale_sets
+from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
+from reef.record2record.staleness import canonical_runtime_load_id, stale_units
+from reef.runtime.interfaces import inference_aborted
 
 
 class TaskStatus(Enum):
-    """What the record-to-task stage made of a formed record set."""
+    """What the record-to-task stage made of a record set. The status settles all records of the set together."""
 
-    #: The set has tasks. The stage holds the set until a batch uses it.
+    #: The set has one or more tasks. Its records wait in one batch unit until a batch uses it.
     READY = "ready"
-    #: The set cannot train. The stage ends its records.
+    #: The set has no task and cannot train. The stage ends its records.
     SKIPPED = "skipped"
-    #: The set makes no task, as in a pipeline that trains no weights. The stage forgets the set and keeps its records.
-    INGESTED = "ingested"
-    #: The record-to-task stage still works on the set. Its ``take_finished`` hands back the result later.
-    PENDING = "pending"
+
+
+class UnitDropReason(Enum):
+    """Why an unreserved unit ends without training.
+
+    Values are BUFFER_LIMIT (the sample buffer exceeded its limit) and STALE
+    (the unit failed the serving-version check). The pipeline and record
+    stage pass these values to ``drop_held_unit`` so stages can distinguish
+    capacity eviction from obsolete training data. Neither value confirms training.
+    """
+
+    BUFFER_LIMIT = "buffer_limit"
+    STALE = "stale"
 
 
 class Record2Record(ABC, Plugin):
-    """Turn records into record sets for one pipeline, and decide which sets train and in what order.
+    """Turn records into record sets for one pipeline, and decide which batch units train and in what order.
 
-    The pipeline gives the stage every record that it reads, except training
-    instructions, in append order. The stage forms record sets
-    (``take_formed``). The pipeline makes tasks from each formed set and gives
-    the result back (``settle``). The stage holds each set that has tasks in
-    its ``pool`` until the pipeline reserves it for a batch; the pipeline
-    reserves and consumes through the pool, and the stage ends the consumed
-    sets (``consume``). The pool applies the stage's selection policy. The
-    stage never calls the pipeline.
+    The pipeline pushes every record that it reads, except training
+    instructions, in append order (``push``). It pulls the record sets that
+    the stage formed (``pull``). When the pipeline looks for a batch, it first
+    advances the stage to the current time (``advance``): the stage takes in
+    background work that ended, such as judgments, and starts work that is due. No record is in two record sets of one stage:
+    ``form`` refuses a set that holds a record of another set. The pipeline
+    makes tasks from each set and gives the result back (``settle``). Before
+    exposing a set, ``form`` rejects it if any inference response reports an
+    engine abort. Rejection ends the whole set through the stage's lifecycle,
+    including reports that reference an aborted inference. The stage
+    holds the sets that have tasks in batch units in its ``pool`` until the
+    pipeline reserves them for a batch; the pipeline reserves and consumes
+    through the pool, and the stage ends the consumed units (``consume``). The
+    pool applies the stage's selection policy. The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
     each version that the scenario serves (``observe_serving_runtime_load_id``).
-    Then it tells the stage to drop the held sets that are too many versions
-    behind (``drop_stale_sets``).
+    Then it tells the stage to drop the held units that are too many versions
+    behind (``drop_stale_units``).
 
     A record that the stage ends, for example a record that can no longer
     train, appears in ``releasable_record_ids``. The trainer adds those IDs to
@@ -73,34 +90,61 @@ class Record2Record(ABC, Plugin):
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
     def __init__(self, selection: SelectionPolicy | None = None) -> None:
-        #: The held sets. The pipeline reserves a batch from it and consumes the reservation.
-        self.pool = RecordSetPool(selection)
-        #: Formed sets that ended after the task stage saw them. The pipeline forgets their tasks.
+        #: The held batch units. The pipeline reserves a batch from it and consumes the reservation.
+        self.pool = RecordSetUnitPool(selection)
+        #: Record sets that ended after the task stage saw them. The pipeline forgets their tasks.
         self.ended_set_ids: set[Hashable] = set()
         #: Records that ended and that no live set references, until their release.
         self.terminal: set[str] = set()
-        #: Sets formed since the last ``take_formed``, in the order they formed.
+        #: Sets formed since the last ``pull``, in the order they formed.
         self.formed: list[RecordSet] = []
-        #: The runtime load IDs that produced each held formed set's training data, by formed set ID.
+        #: The set ID of each record that a formed set holds, until the record's release.
+        self.set_of_record: dict[str, Hashable] = {}
+        #: The runtime load IDs that produced each held record set's training data, by set ID.
         self.producing_runtime_load_ids: dict[Hashable, frozenset[str | None]] = {}
         #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
         self.served_runtime_load_ids: list[str] = []
 
     @abstractmethod
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         """Read one record. The stage must not block on network or model calls."""
 
-    def take_formed(self) -> tuple[RecordSet, ...]:
+    def form(self, record_set: RecordSet) -> None:
+        """Form ``record_set`` for the pipeline. Raises ``ValueError`` if a record of it is in another set.
+
+        A set with the ID of an earlier set takes its records again, as a retry does.
+        An engine-aborted inference rejects the whole set before task creation.
+        Replaying retained records applies the same check.
+        """
+        record_ids = record_set.record_ids()
+        taken = [
+            record_id
+            for record_id in record_ids
+            if self.set_of_record.get(record_id, record_set.set_id) != record_set.set_id
+        ]
+        if taken:
+            raise ValueError(f"records {taken!r} are in another record set and cannot join {record_set.set_id!r}")
+        self.set_of_record.update(dict.fromkeys(record_ids, record_set.set_id))
+        for record in record_set.records():
+            if record.request_type is not RequestType.INFERENCE:
+                continue
+            response = record.payload.get("response")
+            if isinstance(response, Mapping) and inference_aborted(response):
+                self.reject(record_set)
+                return
+        self.formed.append(record_set)
+
+    def advance(self, now: float) -> None:
+        """Take in the background work that ended by ``now``, a monotonic time, and start the work that is due."""
+        return
+
+    def pull(self) -> tuple[RecordSet, ...]:
         """Return the record sets formed since the last call, in the order they formed."""
         formed, self.formed = tuple(self.formed), []
         return formed
 
-    def poll(self, now: float) -> None:
-        """Absorb background work, such as finished judgments. ``now`` is a monotonic time."""
-        return
-
     def context_changed(self, context: PipelineContext) -> None:
-        """The pipeline's context changed: its training mode, held-set limit, or admitted report type."""
+        """The pipeline's context changed: its training mode or admitted report type."""
         return
 
     def settle(
@@ -109,7 +153,7 @@ class Record2Record(ABC, Plugin):
         status: TaskStatus,
         producing_runtime_load_ids: frozenset[str | None] = frozenset(),
     ) -> None:
-        """Keep or end a formed set from what the task stage made of it.
+        """Keep a READY record set in the pool, or end a SKIPPED one.
 
         ``producing_runtime_load_ids`` are the versions that produced the
         training data of the set. The staleness check reads them.
@@ -117,14 +161,12 @@ class Record2Record(ABC, Plugin):
         if status is TaskStatus.READY:
             self.producing_runtime_load_ids[record_set.set_id] = producing_runtime_load_ids
             self.accept(record_set)
-        elif status is TaskStatus.SKIPPED:
+        else:
             self.reject(record_set)
-        elif status is not TaskStatus.INGESTED:
-            raise TypeError("a task result must have a TaskStatus")
 
     def accept(self, record_set: RecordSet) -> None:
-        """Hold a set that has tasks in the pool."""
-        self.pool.put(record_set)
+        """Hold a set that has tasks in the pool, as a batch unit by itself."""
+        self.pool.put(SingleSetUnit.of(record_set))
 
     def reject(self, record_set: RecordSet) -> None:
         """End a set that cannot train."""
@@ -132,7 +174,7 @@ class Record2Record(ABC, Plugin):
         self.ended_set_ids.add(record_set.set_id)
 
     def take_ended(self) -> frozenset[Hashable]:
-        """Return the IDs of the formed sets that ended since the last call. The pipeline forgets their tasks."""
+        """Return the IDs of the record sets that ended since the last call. The pipeline forgets their tasks."""
         ended, self.ended_set_ids = frozenset(self.ended_set_ids), set()
         for set_id in ended:
             self.producing_runtime_load_ids.pop(set_id, None)
@@ -155,33 +197,37 @@ class Record2Record(ABC, Plugin):
             served.clear()
         served.append(runtime_load_id)
 
-    def drop_stale_sets(self, max_staleness: int) -> None:
-        """End the held sets whose training data is more than ``max_staleness`` versions behind.
+    def drop_stale_units(self, max_staleness: int) -> None:
+        """End the held units whose training data is more than ``max_staleness`` versions behind.
 
-        The check does not run while a batch is reserved, because the batch refers to held sets.
+        The check does not run while a batch is reserved, because the batch refers to held units.
         """
         if self.pool.reserved is not None:
             return
-        for record_set in stale_sets(
-            self.pool.sets(), self.producing_runtime_load_ids, self.served_runtime_load_ids, max_staleness
+        for unit in stale_units(
+            self.pool.units(), self.producing_runtime_load_ids, self.served_runtime_load_ids, max_staleness
         ):
-            self.drop_held_set(record_set)
+            self.drop_held_unit(unit, reason=UnitDropReason.STALE)
 
-    def drop_held_set(self, record_set: RecordSet) -> None:
-        """End a held set that can no longer train. A stage that holds combined sets overrides it."""
-        self.pool.remove(record_set.set_id)
-        self.reject(record_set)
-        self.ended_set_ids.update(record_set.formed_set_ids())
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
+        """End an unreserved unit without training for the given reason.
 
-    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
-        """End the sets that an acknowledged batch consumed, and return the IDs of their consumed records.
+        A stage that holds groups overrides this operation to end the whole
+        group. The reason does not change the default record cleanup.
+        """
+        self.pool.remove(unit.unit_id)
+        for record_set in unit.record_sets():
+            self.reject(record_set)
+
+    def consume(self, units: tuple[RecordSetUnit, ...], *, trained: bool) -> frozenset[str]:
+        """End the units that an acknowledged batch consumed, and return their keys.
 
         ``trained`` is False when the backend dropped the batch as stale: its
-        sets are consumed all the same, but nothing trained on them.
+        units are consumed all the same, but nothing trained on them.
         """
-        consumed = frozenset(record_id for record_set in record_sets for record_id in record_set.record_ids())
+        consumed = frozenset(key for unit in units for key in unit.consumed_ids())
         self.terminal |= consumed
-        self.ended_set_ids.update(record_set.set_id for record_set in record_sets)
+        self.ended_set_ids.update(set_id for unit in units for set_id in unit.set_ids())
         return consumed
 
     # ------------------------------------------------------------- lifecycle
@@ -193,6 +239,8 @@ class Record2Record(ABC, Plugin):
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         """Forget released records. Stored records do not change."""
         self.terminal -= agent_record_ids
+        for record_id in agent_record_ids:
+            self.set_of_record.pop(record_id, None)
 
     def background_jobs_running(self) -> bool:
         """Return True while background jobs run. A finished job can form sets without a new record."""
@@ -211,11 +259,11 @@ class Record2Record(ABC, Plugin):
         return
 
 
-class PassThroughRecord2Record(Record2Record):
-    """Hand each record to the pipeline by itself, in arrival order, and decide nothing.
+class NoRecordSets(Record2Record):
+    """Form no record set: the default of a pipeline that trains nothing.
 
-    With ``NoTasks`` each set is ``TaskStatus.INGESTED``: the stage forgets it.
-    The stage holds no set, so it refuses a task stage that makes tasks.
+    The stage reads each record and keeps nothing. The pipeline then makes no
+    task and no batch, and the records stay stored for audit.
     """
 
     @classmethod
@@ -223,19 +271,8 @@ class PassThroughRecord2Record(Record2Record):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def ingest(self, record: AgentRecord) -> None:
-        self.formed.append(
-            SingleRecordSet(set_id=record.agent_record_id, arrival_index=self.pool.next_arrival_index(), record=record)
-        )
-
-    def accept(self, record_set: RecordSet) -> None:
-        raise TypeError(f"{type(self).__name__} holds no set: pair it with NoTasks, or hold sets in another stage")
-
-    def reject(self, record_set: RecordSet) -> None:
-        raise TypeError(f"{type(self).__name__} ends no set: pair it with NoTasks, or hold sets in another stage")
-
-    def consume(self, record_sets: tuple[RecordSet, ...], *, trained: bool) -> frozenset[str]:
-        raise TypeError(f"{type(self).__name__} holds no set, so no batch can consume one")
+    def push(self, record: AgentRecord) -> None:
+        return
 
 
 class InferenceRecord2Record(Record2Record):
@@ -246,11 +283,11 @@ class InferenceRecord2Record(Record2Record):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         # A record that is not an inference ends at once.
         if record.request_type is not RequestType.INFERENCE:
             self.terminal.add(record.agent_record_id)
             return
-        self.formed.append(
+        self.form(
             SingleRecordSet(set_id=record.agent_record_id, arrival_index=self.pool.next_arrival_index(), record=record)
         )

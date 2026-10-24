@@ -3,8 +3,7 @@
 Artifact storage and head movement live in ``reef.artifact``; the durable
 record values and checkpoint metadata formats live in ``commits``. This
 module owns the scenario-specific ordering across trainer state, store
-settlement, checkpoint policy, surfaces, and artifact
-operations.
+settlement, surfaces, and artifact operations.
 """
 
 from __future__ import annotations
@@ -31,10 +30,15 @@ from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, Releas
 from reef.core.errors import ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
-from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.releases import ScenarioReleases
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitRecord,
+    RecordProgress,
+    scenario_metadata_for,
+    to_json_value,
+)
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import (
@@ -65,7 +69,6 @@ class ScenarioCommitter:
         name: str,
         binding: ScenarioBinding,
         artifacts: ArtifactReleaseChain,
-        checkpoint_strategy: CheckpointStrategy,
         trainers: tuple[ComponentTrainer, ...],
         scenario_step: int = 0,
         store: ScenarioStore,
@@ -81,7 +84,6 @@ class ScenarioCommitter:
         self._name = name
         self._binding = binding
         self._artifacts = artifacts
-        self._checkpoint_strategy = checkpoint_strategy
         self.trainers = trainers
         # The first trainer answers commits made on the scenario's behalf, such as rollback.
         self._trainer = trainers[0].trainer
@@ -148,17 +150,17 @@ class ScenarioCommitter:
         self._step = step
         self._commit_status = (step, self._latest_training_record, self._artifact_head_sync)
 
-    def bound_trainer(self, component: str | None) -> ComponentTrainer:
-        """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
+    def component_trainer(self, component: str | None) -> ComponentTrainer:
+        """Return the component trainer of ``component``. ``None`` selects the first, for scenario-wide operations."""
         if component is None:
             return self.trainers[0]
-        for bound in self.trainers:
-            if bound.component == component:
-                return bound
+        for component_trainer in self.trainers:
+            if component_trainer.component == component:
+                return component_trainer
         raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
 
     def trainer_for(self, component: str | None) -> Trainer:
-        return self.bound_trainer(component).trainer
+        return self.component_trainer(component).trainer
 
     def component_on_record(self, component: str | None) -> str | None:
         """The trainer a record or receipt names: ``component`` with several, none with one.
@@ -178,13 +180,15 @@ class ScenarioCommitter:
     def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
         """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
         with self._lock:
-            bound = self.bound_trainer(component)
-            bound.trainer.reject_pending(metrics, component=self.component_on_record(bound.component))
+            component_trainer = self.component_trainer(component)
+            component_trainer.trainer.reject_pending(
+                metrics, component=self.component_on_record(component_trainer.component)
+            )
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
-        name = self.bound_trainer(component).component
+        name = self.component_trainer(component).component
         return next((record for record in reversed(records) if self.own_record(record, name)), None)
 
     def record_is_current(self, record: CommitRecord) -> bool:
@@ -328,7 +332,7 @@ class ScenarioCommitter:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
-            if any(bound.trainer.pending_batch is not None for bound in self.trainers):
+            if any(component_trainer.trainer.pending_batch is not None for component_trainer in self.trainers):
                 raise ReefError("cannot rollback while a training result is pending commit")
 
             artifacts = self._artifacts
@@ -505,9 +509,7 @@ class ScenarioCommitter:
             prepared = replace(
                 trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
             )
-            self.commit_saved_artifact(
-                result, publication, prepared, trainer, component, checkpointed=self._should_checkpoint(result)
-            )
+            self.commit_saved_artifact(result, publication, prepared, trainer, component)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
 
@@ -525,10 +527,10 @@ class ScenarioCommitter:
         """
         with self._lock:
             with self._publication_lock:
-                bound = self.bound_trainer(component)
-                trainer, component = bound.trainer, bound.component
+                component_trainer = self.component_trainer(component)
+                trainer, component = component_trainer.trainer, component_trainer.component
                 next_step = self._step + 1
-                # A step that is in the log already is a retry after a lost acknowledgment.
+                # A step that is in the commit history already is a retry after a lost acknowledgment.
                 records = self._store.history()
                 retrying = bool(records) and records[-1].step == next_step
             # The operation lock keeps the step and source stable while tracker
@@ -549,31 +551,21 @@ class ScenarioCommitter:
                     self.commit_without_artifact(prepared, trainer, component)
                     return result.state
 
-                # Resolve checkpoint policy once; held artifacts always retain their bytes.
-                checkpointed = (
-                    isinstance(publication, SavedArtifactPublication) and result.pending
-                ) or self._should_checkpoint(result)
                 surface = self._binding.surface
                 if isinstance(publication, DurableWeightsPublication):
-                    if checkpointed:
-                        publication = SavedArtifactPublication(
-                            Artifact.local(
-                                Path(publication.checkpoint_path),
-                                metadata={"runtime_load_id": publication.runtime_load_id},
-                            ),
-                            surface.loader_component,
-                        )
-                    else:
-                        publication = LiveWeightPublication(publication.runtime_load_id)
+                    # Saved weights always become an artifact version; only a job that saved nothing is live.
+                    publication = SavedArtifactPublication(
+                        Artifact.local(
+                            Path(publication.checkpoint_path),
+                            metadata={"runtime_load_id": publication.runtime_load_id},
+                        ),
+                        surface.loader_component,
+                    )
                 if isinstance(publication, LiveWeightPublication):
                     if not surface.single:
                         raise ReefError(
                             f"scenario {self._name!r} serves components {list(surface.names)}: "
                             "live weights cannot be published without a checkpoint"
-                        )
-                    if checkpointed:
-                        raise ReefError(
-                            "checkpoint-selected training results must include the artifact returned by execute_training_job"
                         )
                     if result.pending:
                         raise ReefError(
@@ -581,9 +573,7 @@ class ScenarioCommitter:
                         )
                     self.commit_live_weights(publication, prepared, trainer)
                 else:
-                    self.commit_saved_artifact(
-                        result, publication, prepared, trainer, component, checkpointed=checkpointed
-                    )
+                    self.commit_saved_artifact(result, publication, prepared, trainer, component)
                 return result.state
 
     def prepare_experiment(
@@ -621,9 +611,6 @@ class ScenarioCommitter:
             except RuntimeError:
                 logger.exception("experiment correlation could not annotate the pending result")
         return result
-
-    def _should_checkpoint(self, result: TrainStepResult) -> bool:
-        return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)
 
     def commit_live_weights(
         self,
@@ -665,8 +652,6 @@ class ScenarioCommitter:
         prepared: PreparedCommit,
         trainer: Trainer,
         component: str | None,
-        *,
-        checkpointed: bool,
     ) -> None:
         artifacts = self._artifacts
         next_step = self._step + 1
@@ -684,25 +669,18 @@ class ScenarioCommitter:
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
-            if checkpointed:
-                published_ref = artifacts.publish(
-                    local_artifact,
-                    expected_parent=checkpoint,
-                    metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
-                    advance_heads=not pending and not durable,
-                )
-                if not pending:
-                    self._activate(artifacts.resolve(published_ref), source=local_artifact)
-            else:
-                published_ref = local_artifact.ref
-                if not durable:
-                    # Without a durable commit point, reject a changed serving
-                    # head before recording the prepared step.
-                    artifacts.advance(published_ref, expected=head)
+            published_ref = artifacts.publish(
+                local_artifact,
+                expected_parent=checkpoint,
+                metadata=self.release_metadata(local_artifact, prepared, next_step, component=component),
+                advance_heads=not pending and not durable,
+            )
+            if not pending:
+                self._activate(artifacts.resolve(published_ref), source=local_artifact)
             record = self._append_commit_record(
                 step=next_step,
                 artifact_ref=published_ref,
-                checkpoint=checkpointed,
+                checkpoint=True,
                 prepared=prepared,
                 pending=pending,
                 component=component,
@@ -897,12 +875,13 @@ class ScenarioCommitter:
 
     @staticmethod
     def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
+        # A record holds JSON values, where the prepared commit can hold tuples.
         return (
-            record.algorithm_state == prepared.algorithm_state
+            record.algorithm_state == to_json_value(prepared.algorithm_state)
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
             and record.consumed_ids == prepared.consumed_ids
-            and record.metrics == prepared.metrics
+            and record.metrics == to_json_value(prepared.metrics)
             and record.training_job_id == prepared.training_job_id
         )
 

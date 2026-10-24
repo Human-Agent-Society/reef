@@ -9,7 +9,8 @@ Who implements what:
 - A training integration *implements* ``TrainingBackend`` (with
   ``PreparedTrainingJob``) so Reef's coordinator can drive it.
 - An inference integration *implements* ``InferenceHandler`` for requests,
-  ``InferenceBackend`` for weight receipt, and ``InferenceMemoryOperations``
+  ``InferenceBackend`` for weight receipt (``InferenceMemoryHandoffBackend`` when
+  it can share GPUs with a trainer), and ``InferenceMemoryOperations``
   and ``AdapterEngine`` for the memory and adapter operations ``scheduler``
   and ``publication`` call back into. The engine supervision hooks live in
   ``recovery`` next to the objects that drive them.
@@ -553,6 +554,41 @@ class InferenceAdmissionController:
 # -- Request handling ---------------------------------------------------------
 
 
+#: Delivery diagnostic retained by older records that stripped the abort finish reason.
+#: Stored records keep this text and ``inference_aborted`` compares it exactly. Do not change it.
+INFERENCE_ABORT_ERROR = "upstream engine aborted the generation"
+
+
+def inference_aborted(response: Mapping[str, object]) -> bool:
+    """Whether a native, provider, or stored response reports an engine abort.
+
+    Read finish reasons without requiring training tensors. Older stored
+    Anthropic aborts kept only the stream-delivery error after stripping tensors.
+    """
+    delivery = response.get("stream_delivery")
+    if isinstance(delivery, Mapping) and delivery.get("error") == INFERENCE_ABORT_ERROR:
+        return True
+
+    def aborted(value: object) -> bool:
+        return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
+
+    meta = response.get("meta_info")
+    if aborted(response.get("finish_reason")) or (isinstance(meta, Mapping) and aborted(meta.get("finish_reason"))):
+        return True
+    training = response.get("training")
+    if isinstance(training, Mapping) and aborted(training.get("finish_reason")):
+        return True
+    choices = response.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(choice, Mapping)
+        and (
+            aborted(choice.get("finish_reason"))
+            or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
+        )
+        for choice in choices
+    )
+
+
 class InferenceStream:
     """One open provider response whose bytes can be forwarded incrementally."""
 
@@ -800,6 +836,16 @@ class TrainingRuntime(ABC):
     """
 
     @property
+    @abstractmethod
+    def batch_size(self) -> int:
+        """The rollouts in one optimizer step, a positive int: the samples in one training batch.
+
+        The deployment reads it from the training options (Slime's
+        ``--global-batch-size``, Tinker's ``batch_size``) and gives it to the
+        runtime; a recipe passes it to ``Trainer.build``.
+        """
+
+    @property
     def concurrent_training_scenarios(self) -> bool:
         """Whether several scenarios may train on this runtime at once.
 
@@ -902,7 +948,7 @@ class PreparedTrainingJob(ABC):
 class TrainingCoordinationConfig:
     """Deployment policy interpreted only by Reef's coordinator."""
 
-    save_hf_template: str | None
+    save_hf_template: str
     colocate: bool = False
     lora: bool = False
     adapter_capacity: int | None = None
@@ -920,6 +966,27 @@ class TrainingContext:
     next_rollout_id: int = 0
     runtime_load_id: str = field(default_factory=_initial_runtime_load_id)
     history: ScenarioHistoryStore | None = None
+
+
+@dataclass(frozen=True)
+class WeightFiles:
+    """Weights that a trainer wrote as files, for Reef to deliver to the receiver.
+
+    ``path`` is a directory on the coordinator's node. ``layout`` names what it
+    holds: ``"full"`` is a Hugging Face checkpoint of every model weight, and
+    ``"adapter"`` is a PEFT adapter directory. ``TrainingBackend.weight_files``
+    makes the values; ``BackendWeightPublisher`` passes them to
+    ``InferenceBackend.load_weight_files``.
+    """
+
+    path: Path
+    layout: Literal["full", "adapter"]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise TypeError("weight files path must be a Path")
+        if self.layout not in ("full", "adapter"):
+            raise ValueError(f"weight files layout must be full or adapter, got {self.layout!r}")
 
 
 class TrainingBackend(ABC):
@@ -992,12 +1059,13 @@ class TrainingBackend(ABC):
     @abstractmethod
     def send_adapter(self, scenario: str, name: str) -> None: ...
 
-    def adapter_files(self, scenario: str, runtime_load_id: str) -> Path | None:
-        """The adapter directory to serve as ``runtime_load_id`` when this trainer delivers files.
+    def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
+        """The weights to serve as ``runtime_load_id`` when this trainer delivers files.
 
-        A trainer that produces adapters as PEFT directories instead of
-        sending tensors returns the directory; Reef then asks the receiver to
-        load it and never calls the sender methods. The default, None,
+        ``scenario`` names a per-scenario adapter, whose files have the
+        ``"adapter"`` layout; ``None`` names the shared model, whose files have
+        the ``"full"`` layout. Reef then asks the receiver to load the files and
+        never calls the sender methods for that transfer. The default, None,
         selects the native sender path.
         """
         return None
@@ -1009,13 +1077,16 @@ class TrainingBackend(ABC):
 class InferenceBackend(ABC):
     """Receiver operations with acknowledged completion and no commit policy."""
 
-    def load_adapter_files(self, name: str, path: Path, runtime_load_id: str | None) -> None:
-        """Load a PEFT adapter directory under ``name``, serving it as ``runtime_load_id`` when given.
+    def load_weight_files(self, files: WeightFiles, *, adapter_name: str | None, runtime_load_id: str | None) -> None:
+        """Load ``files`` into every engine and return once they serve them.
 
-        Reef calls this for trainers that deliver adapter files; a receiver
-        that can only accept native tensor transfers keeps the default.
+        An ``"adapter"`` layout is loaded under ``adapter_name``, which is then
+        given; a ``"full"`` layout replaces the served weights, and
+        ``adapter_name`` is None. When ``runtime_load_id`` is given, every
+        engine reports it afterwards. Reef calls this for trainers that deliver
+        files; a receiver that only accepts native transfers keeps the default.
         """
-        raise ReefError(f"{type(self).__name__} does not load adapter files")
+        raise ReefError(f"{type(self).__name__} does not load weight files")
 
     @abstractmethod
     def initialize_version(self, runtime_load_id: str) -> None: ...
@@ -1039,6 +1110,22 @@ class InferenceBackend(ABC):
     def abort(self) -> None: ...
 
     @abstractmethod
+    def unload_adapter(self, name: str) -> None: ...
+
+
+class InferenceMemoryHandoffBackend(InferenceBackend):
+    """An ``InferenceBackend`` that can also release its GPU memory to a trainer and take it back.
+
+    This is a capability, not a deployment mode: the same receiver serves
+    colocated and separate deployments. Reef's coordinator requires it only
+    when the training backend's ``TrainingCoordinationConfig.colocate`` is set,
+    and calls these operations only then. ``offload`` releases the regions that
+    ``tags`` names (``None`` releases every region); ``onload_weights`` and
+    ``onload_kv`` restore the weight and KV-cache regions. Each returns only
+    after every engine changed.
+    """
+
+    @abstractmethod
     def offload(self, tags: tuple[str, ...] | None) -> None: ...
 
     @abstractmethod
@@ -1046,9 +1133,6 @@ class InferenceBackend(ABC):
 
     @abstractmethod
     def onload_kv(self) -> None: ...
-
-    @abstractmethod
-    def unload_adapter(self, name: str) -> None: ...
 
 
 class AdapterEngine(ABC):

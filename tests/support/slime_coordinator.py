@@ -28,7 +28,7 @@ class FixtureInferenceBackend(SGLangInferenceBackend):
 
 
 def build_slime_coordinator(actor_group, inference, **kwargs) -> TrainingCoordinator:
-    training = SlimeTrainingBackend(actor_group, **{"args": SlimeArguments(), **kwargs})
+    training = SlimeTrainingBackend(actor_group, **{"args": SlimeArguments(global_batch_size=1), **kwargs})
     training.context.runtime_load_id = training.current_runtime_load_id()
     receiver = FixtureInferenceBackend(RayExecutor.from_workers([inference]))
     with patch("reef.runtime.scheduler.BackendWeightPublisher", FixtureWeightPublisher):

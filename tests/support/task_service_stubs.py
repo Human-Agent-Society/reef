@@ -7,7 +7,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, HarborTaskConflict, read_harbor_task, write_harbor_task
+from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.record2task.generator import (
     DesignerRequest,
@@ -60,6 +60,14 @@ def task_for(name: str, record_id: str, port: int, *, skill: str | None = None, 
         metadata=metadata,
         source_agent_record_ids=(record_id,),
     )
+
+
+def staged_digest(path: Path) -> str | None:
+    """The digest of a staged task, None for a copy that cannot be read, as the service treats one."""
+    try:
+        return read_harbor_task(path).digest
+    except HarborTaskError:
+        return None
 
 
 class StandInGenerator(Generator):
@@ -124,6 +132,9 @@ class StandInGenerator(Generator):
 
     async def write_task(self, task: HarborTask) -> WrittenTask:
         self.writes.append(task.name)
+        staged = self.root / task.name
+        if (staged / "task.toml").is_file() and staged_digest(staged) == task.digest:
+            return WrittenTask(path=staged, name=task.name, digest=task.digest, created=False)
         known = (
             {
                 content_hash(read_harbor_task(entry))

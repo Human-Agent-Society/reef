@@ -75,12 +75,12 @@ def report(context: str = "", score: float = 0.0) -> AgentRecord:
 @pytest.mark.unit
 @pytest.mark.parametrize("score", [0.0, 1.0])
 def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: TrainingPipeline, score: float) -> None:
-    processor.ingest(inference())
-    processor.ingest(report(score=score))
-    batch = processor.build_batch()
+    processor.push(inference())
+    processor.push(report(score=score))
+    batch = processor.build_batch(1)
     assert isinstance(batch, TrainingBatch)
     assert batch.batch_id == "math:batch:1"
-    prepared = prepare_slime_step(batch, TrainingMethod("opd"), {}, StepScheduling(unit="sample", batch_size="actual"))
+    prepared = prepare_slime_step(batch, TrainingMethod("opd"), {}, StepScheduling(unit="sample"), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
@@ -93,9 +93,9 @@ def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: Traini
 
 @pytest.mark.unit
 def test_privileged_teacher_context_is_rejected(processor: TrainingPipeline) -> None:
-    processor.ingest(inference())
+    processor.push(inference())
     with pytest.raises(ValueError, match="teacher_context must be empty"):
-        processor.ingest(report(context="The answer is 2."))
+        processor.push(report(context="The answer is 2."))
 
 
 @pytest.mark.unit
@@ -115,7 +115,7 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, OPDTasks)
     assert isinstance(pipeline.task2batch, DistillBatches)
-    assert spec.scheduling == StepScheduling(unit="sample", batch_size="actual")
+    assert spec.scheduling == StepScheduling(unit="sample")
     with pytest.raises(ValueError, match="epochs"):
         OpdObjective().validate_scheduling(StepScheduling(unit="sample", epochs=2))
 
@@ -152,9 +152,9 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
 @pytest.mark.unit
 def test_overflow_report_does_not_fill_the_batch() -> None:
     limited = opd_pipeline(max_teacher_tokens=5)
-    limited.ingest(inference())
-    limited.ingest(report())
-    assert not limited.ready()
+    limited.push(inference())
+    limited.push(report())
+    assert not limited.ready(1)
     assert limited.operational_metrics()["teacher_overflow_reports"] == 1
     # The skipped report and its inference are released.
     assert {"r1", "i1"} <= limited.releasable_record_ids()

@@ -8,6 +8,7 @@ from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.scenarios import register_scenario_routes
 from reef.service.routes.system import register_health_route, register_system_routes
+from reef.service.routes.trajectories import register_trajectory_routes
 
 
 def register_routes(
@@ -25,6 +26,7 @@ def register_routes(
     register_scenario_routes(app, request_service=request_service)
     register_system_routes(app, request_service=request_service)
     register_record_routes(app, request_service=request_service)
+    register_trajectory_routes(app, request_service=request_service)
 
 
 __all__ = ["register_routes"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,24 +15,24 @@ from reef.core import AgentRecord
 from reef.record2record import (
     GroupDecision,
     InferenceRecord2Record,
-    PassThroughRecord2Record,
+    NoRecordSets,
     RecordSet,
+    RecordSetUnit,
     ReportContext,
     ReportGrouping,
     ReportRecord2Record,
-    SingleRecordSet,
-    TaskStatus,
+    UnitDropReason,
 )
-from reef.record2task import Record2Task, ReportTasks, SkippedReport, TaskResult
+from reef.record2task import ImmediateRecord2Task, Record2Task, ReportTasks, SkippedReport, TaskResult
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import Task2Batch
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch
+from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 
-class WithholdingRecord2Record(PassThroughRecord2Record):
-    """Passes records through, except records whose ID starts with ``drop``: it ends those itself."""
+class WithholdingRecord2Record(InferenceRecord2Record):
+    """Forms a set of each inference record, except records whose ID starts with ``drop``: it ends those itself."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -40,11 +41,11 @@ class WithholdingRecord2Record(PassThroughRecord2Record):
         self.pending = False
         self.closed = False
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         if record.agent_record_id.startswith("drop"):
             self.ended.add(record.agent_record_id)
             return
-        super().ingest(record)
+        super().push(record)
 
     def releasable_record_ids(self) -> frozenset[str]:
         return frozenset(self.ended)
@@ -63,15 +64,16 @@ class WithholdingRecord2Record(PassThroughRecord2Record):
         self.closed = True
 
 
-class RecordingTasks(Record2Task):
-    """Keeps the record IDs of every set that it sees, and makes no tasks."""
+class RecordingTasks(ImmediateRecord2Task):
+    """Keeps the record IDs of every set that it sees, and skips the set."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.assembled: list[str] = []
 
     def make_tasks(self, record_set: RecordSet) -> TaskResult:
         self.assembled.extend(record_set.record_ids())
-        return TaskResult(TaskStatus.INGESTED)
+        return TaskResult.skipped()
 
 
 class RecordingBatches(Task2Batch):
@@ -80,7 +82,7 @@ class RecordingBatches(Task2Batch):
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
     def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, 1)
+        super().__init__(context, None)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
@@ -96,43 +98,43 @@ class RecordingPipeline(TrainingPipeline):
         super().__init__(context, record2record=self.stage, record2task=self.recording, task2batch=self.batches)
 
 
-class PendingTasks(Record2Task):
-    """Returns pending for every set; ``finish`` queues a result that ``take_finished`` hands back."""
+class LaterTasks(Record2Task):
+    """Returns no result when a set arrives; ``finish`` queues a result that ``pull`` returns."""
 
     def __init__(self) -> None:
         self.finished: list[tuple[Hashable, TaskResult]] = []
 
-    def make_tasks(self, record_set: RecordSet) -> TaskResult:
-        return TaskResult.pending()
+    def push(self, record_set: RecordSet) -> None:
+        return
 
     def finish(self, set_id: Hashable, result: TaskResult) -> None:
         self.finished.append((set_id, result))
 
-    def take_finished(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
         finished, self.finished = tuple(self.finished), []
         return finished
 
 
-class PendingPipeline(TrainingPipeline):
-    """Holds each inference record as one set whose tasks ``PendingTasks`` makes later."""
+class WaitingPipeline(TrainingPipeline):
+    """Holds each inference record as one set whose tasks ``LaterTasks`` makes later."""
 
     def __init__(self, context: PipelineContext | None = None) -> None:
         context = PipelineContext("s") if context is None else context
-        self.pending_tasks = PendingTasks()
+        self.later_tasks = LaterTasks()
         self.batches = RecordingBatches(context)
         super().__init__(
-            context, record2record=InferenceRecord2Record(), record2task=self.pending_tasks, task2batch=self.batches
+            context, record2record=InferenceRecord2Record(), record2task=self.later_tasks, task2batch=self.batches
         )
 
 
 class DroppingReportRecord2Record(ReportRecord2Record):
     """A report stage that ends every record whose ID starts with ``drop``, so the record is releasable."""
 
-    def ingest(self, record: AgentRecord) -> None:
+    def push(self, record: AgentRecord) -> None:
         if record.agent_record_id.startswith("drop"):
             self.end_report(record)
             return
-        super().ingest(record)
+        super().push(record)
 
 
 def dropping_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -154,6 +156,7 @@ class PairTasks(ReportTasks):
     """Each report becomes a task named after it. Reports whose ID starts with ``skip`` cannot train."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.fail_assembly = False
 
     def make_sample(self, context: ReportContext) -> TrainDataItem | SkippedReport:
@@ -179,7 +182,7 @@ class PairPipeline(TrainingPipeline):
             context,
             record2record=ReportRecord2Record(context, PairGrouping(), exclusive_sources=True),
             record2task=self.pair_tasks,
-            task2batch=PairBatches(context, 1),
+            task2batch=PairBatches(context, None),
         )
 
 
@@ -188,23 +191,24 @@ def slotted(record_id: str, reference: str, slot: str) -> AgentRecord:
 
 
 @pytest.mark.unit
-def test_the_pass_through_stage_forms_one_set_per_record_in_arrival_order() -> None:
-    stage = PassThroughRecord2Record()
-    for record_id in ("i1", "r1", "i2"):
-        stage.ingest(inference(record_id))
-    formed = stage.take_formed()
-    assert [record_set.record_ids() for record_set in formed] == [("i1",), ("r1",), ("i2",)]
-    assert [record_set.arrival_index for record_set in formed] == [1, 2, 3]
-    assert stage.take_formed() == ()
-    assert stage.releasable_record_ids() == frozenset() and not stage.background_jobs_running()
+def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order() -> None:
+    stage = InferenceRecord2Record()
+    for record_id in ("i1", "i2"):
+        stage.push(inference(record_id))
+    stage.push(report("r1", "i1"))
+    formed = stage.pull()
+    assert [record_set.record_ids() for record_set in formed] == [("i1",), ("i2",)]
+    assert [record_set.arrival_index for record_set in formed] == [1, 2]
+    assert stage.pull() == ()
+    assert stage.releasable_record_ids() == {"r1"} and not stage.background_jobs_running()
 
 
 @pytest.mark.unit
 def test_the_pipeline_keeps_instructions_and_sends_other_records_through_its_stage() -> None:
     processor = RecordingPipeline(PipelineContext("s", training_mode="hybrid"))
-    processor.ingest(inference("i1"))
-    processor.ingest(inference("drop-1"))
-    processor.ingest(instruction("train-1"))
+    processor.push(inference("i1"))
+    processor.push(inference("drop-1"))
+    processor.push(instruction("train-1"))
     assert processor.recording.assembled == ["i1"]
     assert processor.buffered_requests() == 1
     assert processor.releasable_record_ids() == {"drop-1"}
@@ -217,8 +221,8 @@ def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them
     processor.stage.pending = True
     assert processor.background_jobs_running()
     assert processor.status() == {
-        "ready_units": 0,
-        "batch_size": 1,
+        "ready_samples": 0,
+        "buffer_size": None,
         "buffered_requests": 0,
         "ended_records": 0,
     }
@@ -262,11 +266,11 @@ def test_the_trainer_reports_the_stages_background_work() -> None:
 def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2", "i3"):
-        processor.ingest(inference(record_id))
-    processor.ingest(slotted("r1", "i1", "a"))
-    processor.ingest(slotted("r2", "i2", "a"))
-    processor.ingest(slotted("r3", "i3", "b"))
-    batch = processor.build_batch()
+        processor.push(inference(record_id))
+    processor.push(slotted("r1", "i1", "a"))
+    processor.push(slotted("r2", "i2", "a"))
+    processor.push(slotted("r3", "i3", "b"))
+    batch = processor.build_batch(1)
     assert [str(item.task_path) for item in batch.items] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
     assert "r2" not in processor.tasks
@@ -276,34 +280,34 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
 def test_a_failed_assembly_keeps_the_report_and_leaves_its_slot_free() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2"):
-        processor.ingest(inference(record_id))
+        processor.push(inference(record_id))
     processor.pair_tasks.fail_assembly = True
     with pytest.raises(ValueError, match="broken training data"):
-        processor.ingest(slotted("r1", "i1", "a"))
+        processor.push(slotted("r1", "i1", "a"))
     assert not processor.releasable_record_ids() & {"r1", "i1"}
     processor.pair_tasks.fail_assembly = False
-    processor.ingest(slotted("r1", "i1", "a"))
-    processor.ingest(slotted("r2", "i2", "b"))
-    assert [str(item.task_path) for item in processor.build_batch().items] == ["r1", "r2"]
+    processor.push(slotted("r1", "i1", "a"))
+    processor.push(slotted("r2", "i2", "b"))
+    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["r1", "r2"]
 
 
 @pytest.mark.unit
 def test_a_skipped_report_is_released_and_never_batched() -> None:
     processor = PairPipeline()
-    processor.ingest(inference("i1"))
-    processor.ingest(slotted("skip-1", "i1", "a"))
+    processor.push(inference("i1"))
+    processor.push(slotted("skip-1", "i1", "a"))
     assert {"skip-1", "i1"} <= processor.releasable_record_ids()
-    assert not processor.ready()
+    assert not processor.ready(1)
 
 
 @pytest.mark.unit
 def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -> None:
     processor = PairPipeline()
     for record_id in ("i1", "i2"):
-        processor.ingest(inference(record_id))
-    processor.ingest(slotted("r2", "i2", "b"))
-    processor.ingest(slotted("r1", "i1", "a"))
-    batch = processor.build_batch()
+        processor.push(inference(record_id))
+    processor.push(slotted("r2", "i2", "b"))
+    processor.push(slotted("r1", "i1", "a"))
+    batch = processor.build_batch(1)
     assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
     assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
     assert not processor.tasks
@@ -313,12 +317,12 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
 def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
     processor = threshold_pipeline(PipelineContext("s"))
     processor.observe_serving_runtime_load_id("e:1")
-    processor.ingest(inference("i1", version="e:1"))
-    processor.ingest(report("r1", "i1"))
+    processor.push(inference("i1", version="e:1"))
+    processor.push(report("r1", "i1"))
     processor.observe_serving_runtime_load_id("e:2")
-    processor.ingest(inference("i2", version="e:2"))
-    processor.ingest(report("r2", "i2"))
-    batch = processor.build_batch()
+    processor.push(inference("i2", version="e:2"))
+    processor.push(report("r2", "i2"))
+    batch = processor.build_batch(1)
     assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
@@ -326,58 +330,299 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
 
 
 @pytest.mark.unit
-def test_the_default_pipeline_makes_no_tasks_and_no_batch() -> None:
+def test_the_default_pipeline_forms_no_record_set_and_makes_no_batch() -> None:
     processor = TrainingPipeline(PipelineContext("s"))
-    record_set = SingleRecordSet(set_id="i1", arrival_index=1, record=inference("i1"))
-    assert processor.record2task.make_tasks(record_set) == TaskResult(TaskStatus.INGESTED)
-    processor.ingest(inference("i1"))
-    assert not processor.ready() and not processor.releasable_record_ids()
+    assert isinstance(processor.record2record, NoRecordSets)
+    processor.push(inference("i1"))
+    processor.push(report("r1", "i1"))
+    assert processor.record2record.pull() == ()
+    assert not processor.ready(1) and not processor.releasable_record_ids()
 
 
 @pytest.mark.unit
-def test_a_pending_set_holds_its_records_and_settles_when_its_result_comes_back() -> None:
-    processor = PendingPipeline()
-    processor.ingest(inference("i1"))
-    processor.ingest(inference("i2"))
-    assert not processor.ready() and processor.background_jobs_running()
-    processor.pending_tasks.finish("i2", TaskResult.skipped())
-    assert not processor.ready() and processor.releasable_record_ids() == {"i2"}
-    processor.pending_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
-    assert processor.ready(), "the result alone makes a batch, without another record"
+def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back() -> None:
+    processor = WaitingPipeline()
+    processor.push(inference("i1"))
+    processor.push(inference("i2"))
+    assert not processor.ready(1) and processor.background_jobs_running()
+    processor.later_tasks.finish("i2", TaskResult.skipped())
+    assert not processor.ready(1) and processor.releasable_record_ids() == {"i2"}
+    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    assert processor.ready(1), "the result alone makes a batch, without another record"
     assert not processor.background_jobs_running()
-    assert [str(item.task_path) for item in processor.build_batch().items] == ["t1"]
+    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["t1"]
 
 
 @pytest.mark.unit
 def test_a_second_result_for_a_settled_set_is_refused() -> None:
-    processor = PendingPipeline()
-    processor.ingest(inference("i1"))
+    processor = WaitingPipeline()
+    processor.push(inference("i1"))
     result = TaskResult.ready((TaskItem(Path("t1")),))
-    processor.pending_tasks.finish("i1", result)
-    assert processor.ready()
-    processor.pending_tasks.finish("i1", result)
-    with pytest.raises(ValueError, match="set 'i1', which is not pending"):
-        processor.ready()
+    processor.later_tasks.finish("i1", result)
+    assert processor.ready(1)
+    processor.later_tasks.finish("i1", result)
+    with pytest.raises(ValueError, match="set 'i1', which no set waits for"):
+        processor.ready(1)
 
 
 @pytest.mark.unit
-def test_take_finished_must_not_hand_back_a_pending_result() -> None:
-    processor = PendingPipeline()
-    processor.ingest(inference("i1"))
-    processor.pending_tasks.finish("i1", TaskResult.pending())
-    with pytest.raises(ValueError, match="returned a pending result"):
-        processor.ready()
-
-
-@pytest.mark.unit
-def test_the_trainer_reserves_a_batch_when_a_pending_set_finishes() -> None:
+def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     records = SQLiteRecordStore()
     records.append(inference("i1"))
-    trainer = Trainer.build("s", records, pipeline_factory=PendingPipeline, candidate_backend=CountingBackend())
+    trainer = Trainer.build("s", records, pipeline_factory=WaitingPipeline, candidate_backend=CountingBackend())
     assert trainer.reserve_training_batch() is None
-    assert trainer.holds_untrained_records(), "the trainer keeps polling while the set is pending"
+    assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
-    assert isinstance(processor, PendingPipeline)
-    processor.pending_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    assert isinstance(processor, WaitingPipeline)
+    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
     batch = trainer.reserve_training_batch()
     assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
+
+
+class InferenceTasks(ImmediateRecord2Task):
+    """Each inference set becomes one task named after its record."""
+
+    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+        record_ids = record_set.record_ids()
+        return TaskResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
+
+
+class UploadBatches(PairBatches):
+    accepts_trajectories = True
+
+
+TRAJECTORY = TrajectoryItem({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
+
+
+@pytest.mark.unit
+def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=UploadBatches(context, None),
+    )
+    processor.push(inference("i1"))
+    assert not processor.ready(2)
+    processor.push_trajectory("t1", TRAJECTORY)
+    processor.push_trajectory("t2", TRAJECTORY)
+    assert processor.status()["ready_samples"] == 3
+
+    batch = processor.build_batch(2)
+    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    processor.release_batch(batch.batch_id)
+    batch = processor.build_batch(2)
+    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    assert processor.acknowledge(batch.batch_id) == {"trajectory:t1", "trajectory:t2"}
+
+    # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
+    processor.push_trajectory("t1", TRAJECTORY)
+    processor.push_trajectory("t3", TRAJECTORY)
+    batch = processor.build_batch(2)
+    assert batch.items == (TRAJECTORY, TaskItem(Path("i1"), source_agent_record_ids=("i1",)))
+    assert processor.acknowledge(batch.batch_id) == {"trajectory:t3", "i1"}
+    consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
+    assert consumed <= processor.releasable_record_ids()
+    processor.release_records(consumed)
+    assert not processor.consumed_trajectory_ids
+
+
+@pytest.mark.unit
+def test_a_pipeline_refuses_a_trajectory_that_its_batch_stage_does_not_accept() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(context, task2batch=PairBatches(context, None))
+    with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
+        processor.push_trajectory("t1", TRAJECTORY)
+
+
+def ready_tasks(*names: str) -> TaskResult:
+    return TaskResult.ready(tuple(TaskItem(Path(name)) for name in names))
+
+
+class DropRecordingRecords(InferenceRecord2Record):
+    """Inference sets with an ordered history of units dropped without training.
+
+    ``dropped`` contains unit IDs and their supplied reasons, appended before
+    normal cleanup. Pipeline tests read it to check discard notifications.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dropped: list[tuple[Hashable, UnitDropReason]] = []
+
+    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
+        self.dropped.append((unit.unit_id, reason))
+        super().drop_held_unit(unit, reason=reason)
+
+
+@pytest.mark.unit
+def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch() -> None:
+    processor = WaitingPipeline(PipelineContext("s"))
+    processor.push(inference("i1"))
+    processor.later_tasks.finish("i1", ready_tasks("a", "b"))
+    processor.advance()
+    assert processor.status()["ready_samples"] == 2
+    assert processor.record2record.pool.reserved is None
+    assert not processor.ready(3)
+    batch = processor.build_batch(2)
+
+    processor.push(inference("i2"))
+    processor.later_tasks.finish("i2", ready_tasks("c"))
+    processor.advance()
+    assert processor.build_batch(2) is batch
+    assert processor.acknowledge(batch.batch_id) == {"i1"}
+    assert processor.status()["ready_samples"] == 1
+    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["c"]
+
+
+@pytest.mark.unit
+def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -> None:
+    context = PipelineContext("s", max_staleness=0)
+    records = DropRecordingRecords()
+    later_tasks = LaterTasks()
+    processor = TrainingPipeline(
+        context,
+        record2record=records,
+        record2task=later_tasks,
+        task2batch=UploadBatches(context, 1),
+    )
+    processor.push(inference("i1"))
+    processor.push(inference("i2"))
+    later_tasks.finish("i1", TaskResult.ready((TRAJECTORY,)))
+    later_tasks.finish("i2", TaskResult.ready((TRAJECTORY,)))
+    processor.advance()
+    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT)]
+    # Trajectories without a producing version become stale once the serving version is known.
+    processor.observe_serving_runtime_load_id("e:1")
+    processor.advance()
+    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT), ("i2", UnitDropReason.STALE)]
+    assert processor.status()["ready_samples"] == 0
+    assert processor.releasable_record_ids() == {"i1", "i2"}
+
+
+@pytest.mark.unit
+def test_the_pipeline_is_ready_when_its_held_units_hold_the_asked_sample_count() -> None:
+    processor = WaitingPipeline(PipelineContext("s"))
+    for record_id in ("i1", "i2", "i3"):
+        processor.push(inference(record_id))
+    processor.later_tasks.finish("i1", ready_tasks("a", "b"))
+    processor.later_tasks.finish("i2", TaskResult.skipped())
+    assert not processor.ready(3), "one unit of two tasks and one skipped set hold two samples"
+    assert processor.status()["ready_samples"] == 2
+    processor.later_tasks.finish("i3", ready_tasks("c"))
+    assert processor.ready(3)
+    assert processor.status()["ready_samples"] == 3
+
+
+@pytest.mark.unit
+def test_a_batch_takes_whole_units_in_selection_order_until_it_holds_the_sample_count() -> None:
+    processor = WaitingPipeline(PipelineContext("s"))
+    for record_id in ("i1", "i2", "i3"):
+        processor.push(inference(record_id))
+    processor.later_tasks.finish("i3", ready_tasks("c"))
+    processor.later_tasks.finish("i2", ready_tasks("b1", "b2"))
+    processor.later_tasks.finish("i1", ready_tasks("a1", "a2"))
+    batch = processor.build_batch(3)
+    # The second unit passes the sample count; the batch keeps it whole and leaves the third unit held.
+    assert [str(item.task_path) for item in batch.items] == ["a1", "a2", "b1", "b2"]
+    assert processor.acknowledge(batch.batch_id) == {"i1", "i2"}
+    assert processor.status()["ready_samples"] == 1
+
+
+@pytest.mark.unit
+def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size() -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=InferenceTasks(),
+        task2batch=UploadBatches(context, 2),
+    )
+    processor.push(inference("i1"))
+    reserved = processor.build_batch(1)
+    for record_id in ("i2", "i3", "i4"):
+        processor.push(inference(record_id))
+    for trajectory_id in ("t1", "t2", "t3"):
+        processor.push_trajectory(trajectory_id, TRAJECTORY)
+    processor.push(inference("i5"))
+    # The reserved batch stays, and uploaded trajectories do not count toward the buffer.
+    assert [unit.unit_id for unit in processor.record2record.pool.units()] == ["i1", "i4", "i5"]
+    assert {"i2", "i3"} <= processor.releasable_record_ids()
+    assert processor.status()["ready_samples"] == 6
+    assert processor.acknowledge(reserved.batch_id) == {"i1"}
+
+
+@pytest.mark.unit
+def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffer_size() -> None:
+    context = PipelineContext("s")
+    later_tasks = LaterTasks()
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2task=later_tasks,
+        task2batch=UploadBatches(context, 2),
+    )
+    processor.push(inference("i1"))
+    later_tasks.finish("i1", ready_tasks("a", "b", "c"))
+    assert processor.ready(1)
+    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["a", "b", "c"]
+
+
+@pytest.mark.unit
+def test_the_batch_stage_buffer_size_is_its_own_or_else_the_context_default() -> None:
+    assert PairBatches(PipelineContext("s", default_buffer_size=12), None).buffer_size == 12
+    assert PairBatches(PipelineContext("s", default_buffer_size=12), 3).buffer_size == 3
+    assert PairBatches(PipelineContext("s"), None).buffer_size is None, "no default holds every sample"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("legacy_stripped", [False, True], ids=["captured", "legacy-stripped"])
+@pytest.mark.parametrize("replay_before_commit", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize("references", [("aborted",), ("aborted", "other")], ids=["single", "mixed"])
+def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
+    replay_before_commit: bool, references: tuple[str, ...], legacy_stripped: bool
+) -> None:
+    records = SQLiteRecordStore()
+    aborted = inference("aborted")
+    aborted = replace(
+        aborted,
+        payload={
+            **aborted.payload,
+            "response": {"training": {"finish_reason": "abort", "tokens": [10, 20], "loss_mask": [1]}},
+        },
+    )
+    if legacy_stripped:
+        aborted = replace(
+            aborted,
+            payload={
+                "response": {
+                    "stop_reason": "end_turn",
+                    "stream_delivery": {"complete": False, "error": "upstream engine aborted the generation"},
+                }
+            },
+        )
+    rejected_report = report("aborted-report", *references)
+    for record in (aborted, inference("other"), rejected_report, inference("valid"), report("valid-report", "valid")):
+        records.append(record)
+    trainer = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    if replay_before_commit:
+        trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
+    batch = trainer.reserve_training_batch()
+    assert batch is not None
+    assert len(batch.items) == 1
+    assert batch.items[0].source_agent_record_ids == ("valid", "valid-report")
+    execution = trainer.execute_reserved_step(0)
+    assert execution.result is not None
+    prepared = trainer.prepare_commit(execution.result)
+    assert prepared.consumed_ids == {"valid", "valid-report", "aborted-report", *references}
+    trainer.commit(prepared)
+    assert not trainer.pipeline.releasable_record_ids()
+
+    restored = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
+    records.append(report("later-report", "aborted"))
+    assert restored.reserve_training_batch() is None
+    assert "later-report" in restored.skipped_record_ids
+    # Consumption changes training eligibility, not the stored diagnostic payload.
+    assert records.get("s", "aborted") == aborted

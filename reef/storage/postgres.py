@@ -8,7 +8,6 @@ alone holds a scenario's state; the local directory holds no scenario state.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import time
@@ -45,19 +44,14 @@ from sqlalchemy.schema import CreateSchema
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
-from reef.storage.commit_log import (
-    CommitHistory,
-    CommitHistoryScenarioStore,
-    CommitLog,
-    same_commit,
-    training_run_position,
-)
-from reef.storage.commits import CommitLogError, CommitRecord
+from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
+from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 logger = logging.getLogger(__name__)
@@ -174,14 +168,8 @@ class PostgresRecordDatabase:
         version = Table("schema_version", metadata, Column("version", Integer, primary_key=True))
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
-        #: One row per committed step, as the JSON object a commit log line holds.
-        self.commits = Table(
-            "scenario_commit",
-            metadata,
-            Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-            Column("step", BigInteger, primary_key=True),
-            Column("commit_json", Text, nullable=False),
-        )
+        self.trajectory_table = trajectory_table(metadata, foreign_key="record_store.storage_id")
+        self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
             self._engine = create_engine(postgres_url(database_url), pool_pre_ping=True, hide_parameters=True)
         except ModuleNotFoundError:
@@ -196,18 +184,20 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
-                # create_all adds them to an older schema.
+                # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
+                # generated_task with candidate_task and published_task, which keep each task by the digest
+                # of its directory, and no longer uses task_store. create_all adds them to an older schema.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [5]:
-                    connection.execute(version.update().values(version=5))
+                if versions and versions != [7]:
+                    connection.execute(version.update().values(version=7))
                 elif not versions:
-                    connection.execute(version.insert().values(version=5))
+                    connection.execute(version.insert().values(version=7))
         except BaseException:
             self._engine.dispose()
             raise
@@ -377,6 +367,21 @@ class PostgresRecordStore(SQLRecordStore):
         tables = replace(self._database.task_tables, scope={"storage_id": self.storage_id})
         return SQLTaskStorage(self, tables, files, scenario)
 
+    def trajectory_store(self) -> SQLTrajectoryStore:
+        """Open the uploaded trajectories of this store generation."""
+        return SQLTrajectoryStore(
+            self, ScopedTable(self._database.trajectory_table, scope={"storage_id": self.storage_id})
+        )
+
+    def commit_history(self) -> SQLCommitHistory:
+        """Open the commit history of this store generation."""
+        return SQLCommitHistory(
+            self,
+            ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
+            label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
+            durable=True,
+        )
+
     def close(self) -> None:
         with self._lock:
             if not self._closed:
@@ -384,93 +389,6 @@ class PostgresRecordStore(SQLRecordStore):
                 self._live_records.clear()
                 if self._owns_database:
                     self._database.close()
-
-
-class PostgresCommitTable(CommitHistory):
-    """The commits of one store generation, in the ``scenario_commit`` table.
-
-    ``locked`` holds an advisory lock in one transaction. The reads and appends
-    of the locking thread use that transaction, so an append is durable when
-    the locked block ends. Outside a locked block, each call uses its own
-    transaction. Commits are append-only, so a read gets only the steps after
-    the cached ones.
-    """
-
-    def __init__(self, database: PostgresRecordDatabase, storage_id: str) -> None:
-        self._database = database
-        self._storage_id = storage_id
-        self._lock = RLock()
-        self._connection: Connection | None = None
-        self._cached: tuple[CommitRecord, ...] = ()
-        self._lock_key = int.from_bytes(
-            hashlib.sha256(f"reef-commit:{database.schema}:{storage_id}".encode()).digest()[:8], "big", signed=True
-        )
-
-    @property
-    def label(self) -> str:
-        return f"postgres://{self._database.schema}/record-store/{self._storage_id}/commits"
-
-    @contextmanager
-    def locked(self) -> Iterator[None]:
-        with self._lock:
-            try:
-                with self._database.transaction() as connection:
-                    connection.execute(select(func.pg_advisory_xact_lock(self._lock_key)))
-                    self._connection = connection
-                    try:
-                        yield
-                    finally:
-                        self._connection = None
-            except BaseException:
-                # The transaction rolled back, so the cache may hold a step that was never stored.
-                self._cached = ()
-                raise
-
-    def records(self) -> tuple[CommitRecord, ...]:
-        with self._lock, self._transaction(write=False) as connection:
-            return self._read(connection)
-
-    def append(self, record: CommitRecord) -> None:
-        with self._lock, self._transaction(write=True) as connection:
-            self._database.check_store(connection, self._storage_id, write=True)
-            records = self._read(connection)
-            existing = next((item for item in records if item.step == record.step), None)
-            if existing is not None:
-                if same_commit(existing, record):
-                    return
-                raise CommitLogError(f"commit step {record.step} conflicts with its existing record")
-            if records and record.step < records[-1].step:
-                raise CommitLogError(f"commit step {record.step} precedes existing step {records[-1].step}")
-            encoded = json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            connection.execute(
-                self._database.commits.insert().values(
-                    storage_id=self._storage_id, step=record.step, commit_json=encoded
-                )
-            )
-
-    def training_run_position(self) -> tuple[int, int]:
-        return training_run_position(self.records())
-
-    @contextmanager
-    def _transaction(self, *, write: bool) -> Iterator[Connection]:
-        if self._connection is not None:
-            yield self._connection
-            return
-        with self._database.transaction(read_only=not write) as connection:
-            yield connection
-
-    def _read(self, connection: Connection) -> tuple[CommitRecord, ...]:
-        commits = self._database.commits
-        last_step = self._cached[-1].step if self._cached else 0
-        rows = connection.execute(
-            select(commits.c.commit_json)
-            .where(commits.c.storage_id == self._storage_id, commits.c.step > last_step)
-            .order_by(commits.c.step)
-        ).scalars()
-        added = tuple(CommitRecord.from_dict(json.loads(row)) for row in rows)
-        if added:
-            self._cached = (*self._cached, *added)
-        return self._cached
 
 
 @dataclass(frozen=True)
@@ -484,7 +402,7 @@ class PostgresStorageSettings(PluginSettings):
 class PostgresScenarioStorage(ScenarioStorage):
     """Keep every scenario's records, commits, settings and tasks in one PostgreSQL schema.
 
-    On start, it imports the commit logs and model configuration files that
+    On start, it imports the model configuration files that
     older versions kept under ``directory`` and moves them under
     ``directory/archived``. After that it keeps no scenario state in files.
     ``task_files`` keeps the files of published tasks. The default is a
@@ -526,9 +444,12 @@ class PostgresScenarioStorage(ScenarioStorage):
             self._ensure_open()
             records = PostgresRecordStore(self._database, name=scenario)
             try:
-                commits = PostgresCommitTable(self._database, records.storage_id)
                 return CommitHistoryScenarioStore(
-                    scenario, records, commits, tasks=records.task_storage(self.task_files, scenario)
+                    scenario,
+                    records,
+                    records.commit_history(),
+                    tasks=records.task_storage(self.task_files, scenario),
+                    trajectories=records.trajectory_store(),
                 )
             except BaseException:
                 records.close()
@@ -572,20 +493,14 @@ class PostgresScenarioStorage(ScenarioStorage):
                     self.task_files.close()
 
     def _import_local_files(self) -> None:
-        """Import the commit logs and model configuration files of older versions, then move them aside.
+        """Import the model configuration files of older versions, then move them aside.
 
         Only files of this schema's active store generations are imported;
         files of another schema that shares the directory stay in place.
         """
         model_configs = legacy_model_configs(self._directory)
         imported = []
-        for storage_id, name in self._database.active_stores():
-            log_path = self._directory / f"postgres-{storage_id}.commits.jsonl"
-            if log_path.exists():
-                commits = PostgresCommitTable(self._database, storage_id)
-                for record in CommitLog(log_path).records():
-                    commits.append(record)
-                imported.append(log_path)
+        for _, name in self._database.active_stores():
             model_config = model_configs.get(hashlib.sha256(name.encode("utf-8")).hexdigest())
             if model_config is not None:
                 value, model_path = model_config

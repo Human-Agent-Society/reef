@@ -15,7 +15,6 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
@@ -37,7 +36,6 @@ class Scenario:
         name: str,
         binding: ScenarioBinding,
         repository: Repository,
-        checkpoint_strategy: CheckpointStrategy,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
         model_config: ModelConfig | None = None,
@@ -75,7 +73,6 @@ class Scenario:
             name=name,
             binding=binding,
             artifacts=self._artifact_chain,
-            checkpoint_strategy=checkpoint_strategy,
             trainers=self.trainers,
             scenario_step=scenario_step,
             store=store,
@@ -161,7 +158,14 @@ class Scenario:
     @property
     def dispatched_component(self) -> str | None:
         """The component whose trainer runs a dispatched backend on the training runtime, if any."""
-        return next((bound.component for bound in self.trainers if bound.trainer.dispatched), None)
+        return next(
+            (
+                component_trainer.component
+                for component_trainer in self.trainers
+                if component_trainer.trainer.dispatched
+            ),
+            None,
+        )
 
     @property
     def scenario_step(self) -> int:
@@ -179,7 +183,11 @@ class Scenario:
 
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
         """The trainers with a candidate backend; the first trainer when none has one."""
-        stepping = tuple(bound for bound in self.trainers if bound.trainer.candidate_backend is not None)
+        stepping = tuple(
+            component_trainer
+            for component_trainer in self.trainers
+            if component_trainer.trainer.candidate_backend is not None
+        )
         return stepping or self.trainers[:1]
 
     def set_training_mode(self, training_mode: str) -> None:
@@ -194,14 +202,14 @@ class Scenario:
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         stepping = self.stepping_trainers()
         unsupported = [
-            f"{bound.component} ({type(bound.trainer.pipeline.task2batch).__name__})"
-            for bound in stepping
-            if training_mode not in bound.trainer.pipeline.supported_training_modes
+            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.task2batch).__name__})"
+            for component_trainer in stepping
+            if training_mode not in component_trainer.trainer.pipeline.supported_training_modes
         ]
         if unsupported:
             raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
-        for bound in stepping:
-            bound.trainer.set_training_mode(training_mode)
+        for component_trainer in stepping:
+            component_trainer.trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare one local-backend step.
@@ -238,10 +246,12 @@ class Scenario:
         """Drop the reserved batch and persist its consumption."""
         self._committer.reject_pending(component, metrics)
 
-    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
+    def replay_retained(
+        self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
+    ) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
         with self._committer.lock:
-            self.trainer_for(component).reingest(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
+            self.trainer_for(component).replay_retained(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
         """Resume record consumption at a recovered commit's high-water mark."""
@@ -266,21 +276,12 @@ class Scenario:
                 return None
             return record.training_job_id
 
-    @property
-    def committed_training_without_job_id(self) -> bool:
-        """Whether the dispatched component's newest commit is a pre-identity training commit."""
-        with self._committer.lock:
-            record = self._committer.last_record_for(self.dispatched_component)
-            if record is None or not self._committer.record_is_current(record):
-                return False
-            return record.operation == "training" and record.operation_verified and record.training_job_id is None
-
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
-        """The newest durable commit made by ``component``'s trainer, read from the log without waiting on a commit."""
+        """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
-        """Committed releases, newest first; the scenario step is read under the same lock as the log."""
+        """Committed releases, newest first; the scenario step is read under the same lock as the commit history."""
         with self.release_queries.publication_lock:
             return self.release_queries.releases(self._committer.step)
 
@@ -312,8 +313,8 @@ class Scenario:
                 return
             self._closed = True
             try:
-                for bound in self.trainers:
-                    bound.trainer.close()
+                for component_trainer in self.trainers:
+                    component_trainer.trainer.close()
             finally:
                 self._store.close()
 
@@ -323,9 +324,9 @@ def validate_component_trainers(
 ) -> tuple[ComponentTrainer, ...]:
     """Check that the trainers match the surface: each names a component it serves, and a surface serving
     no component has exactly one trainer, bound to ``records``."""
-    if not trainers or any(not isinstance(bound, ComponentTrainer) for bound in trainers):
+    if not trainers or any(not isinstance(component_trainer, ComponentTrainer) for component_trainer in trainers):
         raise ReefError("a scenario requires at least one ComponentTrainer")
-    names = [bound.component for bound in trainers]
+    names = [component_trainer.component for component_trainer in trainers]
     if len(set(names)) != len(names):
         raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
     if not surface.names:
@@ -337,7 +338,9 @@ def validate_component_trainers(
     unknown = [name for name in names if name not in surface.names]
     if unknown:
         raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
-    dispatched = [bound.component for bound in trainers if bound.trainer.dispatched]
+    dispatched = [
+        component_trainer.component for component_trainer in trainers if component_trainer.trainer.dispatched
+    ]
     if len(dispatched) > 1:
         raise ReefError(f"at most one component runs on the training runtime, not {dispatched}")
     return trainers

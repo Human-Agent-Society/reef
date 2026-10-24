@@ -32,6 +32,10 @@ class CheckpointTrainer(TrainingRuntime):
     def __init__(self, checkpoint: Path) -> None:
         self.checkpoint = checkpoint
 
+    @property
+    def batch_size(self) -> int:
+        return 1
+
     def prepare_training_step(
         self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
     ):
@@ -70,7 +74,7 @@ def test_training_exports_checkpoint_without_inference_or_aggregate_runtime(tmp_
 def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(colocate):
     async def run():
         control = Coordinator(colocate=colocate)
-        training, inference = connect_executor_runtimes(train_group_handle=control)
+        training, inference = connect_executor_runtimes(train_group_handle=control, batch_size=1)
         backend = RuntimeCandidateBackend(
             training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
         )
@@ -101,7 +105,7 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
 
 
 def test_training_adapter_never_constructs_an_inference_component():
-    training = ExecutorTrainingRuntime(Coordinator(inference_url=None))
+    training = ExecutorTrainingRuntime(Coordinator(inference_url=None), batch_size=1)
     candidate = training.train_candidate({"scenario_step": 0})
     assert candidate.checkpoint_path == "/checkpoint"
     assert not hasattr(training, "inference_runtime")
@@ -110,9 +114,16 @@ def test_training_adapter_never_constructs_an_inference_component():
     training.shutdown()
 
 
+def test_executor_training_runtime_keeps_a_positive_batch_size_and_refuses_another() -> None:
+    assert ExecutorTrainingRuntime(Coordinator(), batch_size=4).batch_size == 4
+    for batch_size in (0, -1, True, "4"):
+        with pytest.raises(ValueError, match="batch_size must be a positive int"):
+            ExecutorTrainingRuntime(Coordinator(), batch_size=batch_size)
+
+
 def test_receiver_shutdown_does_not_stop_training_workers():
     control = Coordinator()
-    training, inference = connect_executor_runtimes(train_group_handle=control)
+    training, inference = connect_executor_runtimes(train_group_handle=control, batch_size=1)
     inference.shutdown()
     assert control.shutdown_events == []
     training.train_candidate({"scenario_step": 0})
@@ -122,7 +133,7 @@ def test_receiver_shutdown_does_not_stop_training_workers():
 
 def test_recovery_retargets_only_the_inference_component():
     control = Coordinator(inference_url="http://old-engine")
-    training, inference = connect_executor_runtimes(train_group_handle=control)
+    training, inference = connect_executor_runtimes(train_group_handle=control, batch_size=1)
     backend = RuntimeCandidateBackend(
         training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
     )
@@ -139,18 +150,20 @@ def test_assembly_returns_two_components_and_rejects_conflicting_inference_selec
 
     chosen = InferenceProxyRuntime(base_url="http://chosen-engine")
     control = Coordinator(inference_url=None)
-    training, inference = connect_executor_runtimes(train_group_handle=control, inference=chosen)
+    training, inference = connect_executor_runtimes(train_group_handle=control, batch_size=1, inference=chosen)
     assert isinstance(training, TrainingRuntime)
     assert inference is chosen
     with pytest.raises(ValueError, match="pass inference or inference_url"):
-        connect_executor_runtimes(train_group_handle=control, inference=chosen, inference_url="http://other-engine")
+        connect_executor_runtimes(
+            train_group_handle=control, batch_size=1, inference=chosen, inference_url="http://other-engine"
+        )
     training.shutdown()
     inference.shutdown()
 
 
 def test_attached_receiver_waits_for_coordinator_recovery():
     control = Coordinator()
-    training, inference = connect_executor_runtimes(train_group_handle=control)
+    training, inference = connect_executor_runtimes(train_group_handle=control, batch_size=1)
     assert not inference.inference_admission_status["open"]
     RuntimeCandidateBackend(
         training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference

@@ -16,6 +16,9 @@ recipe:
   config:
     evolution:
       adapter: native
+      # The default pipeline stages batch every valid scored report, a passing one included.
+      # batch_size 1 makes each report one evolve step.
+      batch_size: 1
       # The native variant of the method beside this file (harness/): the same
       # grader, a proposer whose vocabulary is skills, tools and hooks.
       propose: tutorials.evolve-your-harness.harness.plugins:NativeSelfProposer
@@ -61,13 +64,6 @@ recipe:
 
     # The default: nobody asks in this demo, and auto refuses POST /reef/train.
     training-mode: auto
-
-# The harness evolution pipeline: its default stages batch every valid scored report, a passing one
-# included. batch_size 1 makes each report one evolve step.
-pipeline:
-  task2batch:
-    config:
-      batch_size: 1
 
 inference:
   upstream-url: http://127.0.0.1:8000

@@ -17,35 +17,29 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import (
-    GeneratedTask,
-    HarborTask,
-    PlayArm,
-    TaskGenerationRequest,
-    TaskGenerator,
-    TaskPlayResult,
-    TaskValidationResult,
-)
+from reef.core.tasks import HarborTask, write_harbor_task
 from reef.harness.client.tasks import TaskPlay
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
 from reef.recipe.generated_tasks.processor import (
     GeneratedTaskRecord2Record,
     GeneratedTaskTasks,
     RoundJob,
     RoundSettings,
-    TaskBatchSettings,
     TaskGroupSettings,
     episode_assembly,
     reported_task_name,
     rewards_of,
 )
 from reef.record2record import GroupDecision, ReportContext
+from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
+from reef.task2batch import BufferSettings
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrainingBatch, trajectory_groups
@@ -88,46 +82,52 @@ def report(
     )
 
 
-def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, RoundSettings, TaskBatchSettings]:
+def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, RoundSettings, BufferSettings]:
     """Split one flat config, as a test writes it, into the settings of the three stages."""
     group_names = {field.name for field in dataclasses.fields(TaskGroupSettings)}
     round_names = {field.name for field in dataclasses.fields(RoundSettings)}
-    batch_names = {field.name for field in dataclasses.fields(TaskBatchSettings)}
+    batch_names = {field.name for field in dataclasses.fields(BufferSettings)}
     unknown = sorted(set(config) - group_names - round_names - batch_names)
     if unknown:
         raise ValueError(f"unknown stage settings: {', '.join(unknown)}")
     return (
         TaskGroupSettings(**{key: value for key, value in config.items() if key in group_names}),
         RoundSettings(**{key: value for key, value in config.items() if key in round_names}),
-        TaskBatchSettings(**{key: value for key, value in config.items() if key in batch_names}),
+        BufferSettings(**{key: value for key, value in config.items() if key in batch_names}),
     )
+
+
+#: The episodes that a test asks for in one batch: two task groups of two plays.
+BATCH_SIZE = 4
 
 
 def processor(**config: object) -> TrainingPipeline:
+    """A pipeline whose task groups hold two plays unless ``plays_per_task`` says otherwise."""
     context = PipelineContext("tasks")
-    group_settings, round_settings, batch_settings = stage_settings(
-        {"tasks_per_step": 2, "plays_per_task": 2, **config}
-    )
+    group_settings, round_settings, buffer_settings = stage_settings({"plays_per_task": 2, **config})
     stage = GeneratedTaskRecord2Record(context, group_settings)
     return TrainingPipeline(
         context,
         record2record=stage,
         record2task=GeneratedTaskTasks(context, round_settings, stage),
-        task2batch=GeneratedTaskBatches(context, batch_settings),
+        task2batch=GeneratedTaskBatches(context, buffer_settings.buffer_size),
     )
 
 
 def played(processor: TrainingPipeline, task: str, index: int, score: float, **fields: Any) -> None:
-    processor.ingest(inference(f"rec-{task}-{index}"))
-    processor.ingest(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
+    processor.push(inference(f"rec-{task}-{index}"))
+    processor.push(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
 
 
-def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
-    def play(reward: float | None, error: str = "") -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
+def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
+    def episode(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
-    assert rewards_of((play(1.0), play(None), play(None, "the trial raised"))) == (1.0, 0.0)
-    assert rewards_of((play(0.5, "a late error"),)) == (0.5,)
+    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
+    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
+    assert (
+        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
+    )
 
 
 def test_reported_task_name_reads_the_task_players_metadata() -> None:
@@ -138,13 +138,13 @@ def test_reported_task_name_reads_the_task_players_metadata() -> None:
 def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_only() -> None:
     p = processor()
     played(p, "harbor-00000-000", 0, 1.0)
-    assert not p.ready(), "one episode of a task is not a group"
+    assert not p.ready(BATCH_SIZE), "one episode of a task is not a group"
     played(p, "harbor-00000-001", 0, 0.0)
     played(p, "harbor-00000-000", 1, 0.0)
-    assert not p.ready(), "one complete group is not a batch of two"
+    assert not p.ready(BATCH_SIZE), "one complete group is not a batch of two"
     played(p, "harbor-00000-001", 1, 1.0)
-    assert p.ready()
-    batch = p.build_batch()
+    assert p.ready(BATCH_SIZE)
+    batch = p.build_batch(BATCH_SIZE)
     assert isinstance(batch, TrainingBatch) and batch.batch_id == "tasks:batch:1"
     groups = trajectory_groups(batch)
     assert [[sample.group_id for sample in group] for group in groups] == [
@@ -156,27 +156,27 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
 
 def test_a_training_report_without_a_task_is_refused_and_keeps_its_report_retryable() -> None:
     p = processor()
-    p.ingest(inference("rec-x"))
+    p.push(inference("rec-x"))
     with pytest.raises(ValueError, match=r"requires metadata\.task\.name"):
-        p.ingest(report("rep-x", "rec-x", None, 1.0))
+        p.push(report("rep-x", "rec-x", None, 1.0))
 
 
-def test_measurement_arms_and_reports_without_an_arm_are_released_not_trained() -> None:
+def test_reports_of_other_arms_and_without_an_arm_are_released_not_trained() -> None:
     p = processor()
     played(p, "harbor-00000-000", 0, 0.0, arm="hint")
     played(p, "harbor-00000-000", 1, 1.0, arm="hint")
-    assert not p.ready(), "measurement episodes never form a group"
-    p.ingest(inference("rec-generator"))
-    p.ingest(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
-    assert not p.ready()
+    assert not p.ready(BATCH_SIZE), "episodes of another arm never form a group"
+    p.push(inference("rec-generator"))
+    p.push(report("rep-generator", "rec-generator", "harbor-00000-000", 0.5, arm=None))
+    assert not p.ready(BATCH_SIZE)
     released = p.releasable_record_ids()
     assert {"rep-generator", "rec-generator"} <= released
-    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the measurement arm's calls too"
+    assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the other arm's calls too"
     played(p, "harbor-00000-000", 2, 1.0)
     played(p, "harbor-00000-000", 3, 0.0)
     played(p, "harbor-00000-001", 0, 1.0)
     played(p, "harbor-00000-001", 1, 0.0)
-    assert p.ready() and len(p.build_batch().items) == 4
+    assert p.ready(BATCH_SIZE) and len(p.build_batch(BATCH_SIZE).items) == 4
 
 
 def test_a_task_group_waits_for_plays_per_task_episodes() -> None:
@@ -210,16 +210,16 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
             agent_record_id=record_id,
         )
 
-    p = processor(tasks_per_step=1)
-    p.ingest(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
-    p.ingest(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
+    p = processor()
+    p.push(turn("rec-0", [1, 2, *scaffold, *response], len(response)))
+    p.push(turn("rec-1", [1, 2, *response, 3, *scaffold, 4], 1))
     payload = {**report("rep-0", "rec-0", "harbor-00000-000", 1.0).payload, "references": ["rec-0", "rec-1"]}
-    p.ingest(
+    p.push(
         AgentRecord.create(scenario="tasks", request_type=RequestType.REPORT, payload=payload, agent_record_id="rep-0")
     )
     played(p, "harbor-00000-000", 1, 0.0)
-    assert p.ready()
-    assert [sample.training.get("turn_count", 1) for sample in p.build_batch().items] == [2, 1]
+    assert p.ready(2)
+    assert [sample.training.get("turn_count", 1) for sample in p.build_batch(2).items] == [2, 1]
 
 
 def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
@@ -230,7 +230,7 @@ def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> No
         played(p, "harbor-00000-001", index, score)
     objective = resolve_objective("task_group")
     assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
-    signal = objective.prepare(p.build_batch(), {})
+    signal = objective.prepare(p.build_batch(BATCH_SIZE), {})
     assert signal.action == "train"
     assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
     assert signal.metrics["constant_groups"] == 1
@@ -241,7 +241,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
     for task in ("harbor-00000-000", "harbor-00000-001"):
         for index in range(2):
             played(p, task, index, 1.0)
-    signal = resolve_objective("task_group").prepare(p.build_batch(), {"steps": 3})
+    signal = resolve_objective("task_group").prepare(p.build_batch(BATCH_SIZE), {"steps": 3})
     assert signal.action == "skip" and signal.advantages is None
     assert signal.next_algorithm_state == {"steps": 3}
     assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
@@ -253,14 +253,9 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
 @pytest.mark.parametrize(
     ("build", "message"),
     [
-        (lambda: PlayArm("Hint", 1), "arm name must match"),
-        (lambda: PlayArm("hint", 0), "positive integer"),
-        (lambda: PlayArm("hint", 1, ("../hint.txt",)), "inside the task"),
-        (lambda: PlayArm("hint", 1, ("/hint.txt",)), "inside the task"),
-        (lambda: GeneratedTask(task_for("t-a", "r", 1), (PlayArm("hint", 1), PlayArm("hint", 2))), "unique"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
         (lambda: TaskPlayResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
-        (lambda: TaskPlayResult(task_for("t-a", "r", 1), (), {"hint": [1.0]}), "tuples"),
+        (lambda: TaskPlayResult(task_for("t-a", "r", 1), [1.0]), "tuple"),
         (lambda: TaskPlayResult(task=task_for("t-a", "r", 1), training_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
@@ -277,7 +272,7 @@ class ScriptedGenerator(TaskGenerator):
 
     def __init__(
         self,
-        rounds: list[tuple[GeneratedTask, ...]] | None = None,
+        rounds: list[tuple[HarborTask, ...]] | None = None,
         *,
         invalid: Mapping[str, str] | None = None,
         failing: str | None = None,
@@ -296,7 +291,7 @@ class ScriptedGenerator(TaskGenerator):
         cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
         return cls()
 
-    async def generate(self, request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]:
+    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         self.requests.append(request)
         if not self.rounds:
             return ()
@@ -315,14 +310,10 @@ class ScriptedGenerator(TaskGenerator):
             raise RuntimeError("the generator lost its state directory")
 
 
-def generated(round_number: int, *indices: int, hint: bool = True) -> tuple[GeneratedTask, ...]:
-    """Tasks of one round; each asks for a hint arm of one play unless ``hint`` is off."""
-    arms = (PlayArm("hint", 1, ("solution/hint.txt",)),) if hint else ()
+def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
+    """Tasks of one round."""
     return tuple(
-        GeneratedTask(
-            task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index),
-            arms,
-        )
+        task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index)
         for index in indices
     )
 
@@ -412,9 +403,8 @@ def rounds(
     player = player if player is not None else StandInGenerator(tmp_path / "tasks")
     worker = worker if worker is not None else InlineWorker()
     context = PipelineContext("tasks", task_storage=task_storage(tmp_path))
-    group_settings, round_settings, batch_settings = stage_settings(
+    group_settings, round_settings, buffer_settings = stage_settings(
         {
-            "tasks_per_step": 2,
             "plays_per_task": 2,
             "rounds": 3,
             "description": DESCRIPTION,
@@ -431,7 +421,7 @@ def rounds(
         context,
         record2record=stage,
         record2task=generation,
-        task2batch=GeneratedTaskBatches(context, batch_settings),
+        task2batch=GeneratedTaskBatches(context, buffer_settings.buffer_size),
     )
     worker.generation = generation
     return built, player
@@ -439,8 +429,8 @@ def rounds(
 
 def looked(p: TrainingPipeline) -> bool:
     """Look for a batch twice: the inline worker's outcome lands on the look after the one that submitted it."""
-    p.ready()
-    return p.ready()
+    p.ready(BATCH_SIZE)
+    return p.ready(BATCH_SIZE)
 
 
 def summary(tmp_path: Path, round_number: int) -> dict[str, Any]:
@@ -448,7 +438,7 @@ def summary(tmp_path: Path, round_number: int) -> dict[str, Any]:
 
 
 def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -> None:
-    task_generator = ScriptedGenerator([generated(0, 0, 1) + generated(0, 2, hint=False)])
+    task_generator = ScriptedGenerator([generated(0, 0, 1, 2)])
     p, player = rounds(tmp_path, task_generator)
     status = p.status()["task_generation"]
     assert status["generator"] == "ScriptedGenerator" and (status["next"], status["completed"], status["of"]) == (
@@ -465,29 +455,20 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
     assert task_generator.validated == names and player.writes == names
     arms = [(call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in player.plays]
-    assert arms == [
-        (names[0], "plain", 2, True, ()),
-        (names[0], "hint", 1, True, ("solution/hint.txt",)),
-        (names[1], "plain", 2, True, ()),
-        (names[1], "hint", 1, True, ("solution/hint.txt",)),
-        (names[2], "plain", 2, True, ()),
-    ]
+    assert arms == [(name, "plain", 2, True, ()) for name in names]
     assert all(call["tags"] == {"round": "0"} and call["model"] == "Qwen/Qwen3-8B" for call in player.plays)
 
     (results,) = task_generator.results
     assert [result.task.name for result in results] == names
-    assert results[0].training_rewards == (0.25, 0.25) and results[0].measurement_rewards == {"hint": (0.75,)}
-    assert results[2].training_rewards == (0.25, 0.25) and results[2].measurement_rewards == {}
-    assert results[2].is_played
+    assert all(result.training_rewards == (0.25, 0.25) and result.is_played for result in results)
     document = summary(tmp_path, 0)
     assert document["error"] == "" and [task["name"] for task in document["tasks"]] == names
     assert document["tasks"][0]["training_rewards"] == [0.25, 0.25]
-    assert document["tasks"][0]["measurement_rewards"] == {"hint": [0.75]}
     assert p.operational_metrics()["rounds_completed"] == 1
 
 
 @pytest.mark.unit
-def test_eval_tasks_are_saved_without_training_or_measurement_plays(tmp_path: Path) -> None:
+def test_eval_tasks_are_saved_without_plays(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     pipeline, player = rounds(tmp_path, task_generator, eval_fraction=1.0)
     assert not looked(pipeline)
@@ -515,11 +496,11 @@ def test_a_round_retry_uses_saved_candidates_and_validation_outcomes(tmp_path: P
     pipeline.close()
 
 
-def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> GeneratedTask:
+def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
     """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
     task = task_for(name, record_ids[0], port)
     metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
-    return GeneratedTask(dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata))
+    return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
 
 
 @pytest.mark.unit
@@ -536,7 +517,9 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
         sourced("eval-task", "eval-source", port=9101),
     )
     store.begin_generation(generation=100, source_record_ids=())
-    store.save_candidates(generation=100, candidates=earlier)
+    store.save_candidates(
+        generation=100, directories=tuple(write_harbor_task(task, tmp_path / "earlier") for task in earlier)
+    )
     store.publish_task(generation=100, index=0, split="train")
     store.publish_task(generation=100, index=1, split="eval")
     store.complete_generation(generation=100)
@@ -548,12 +531,12 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     assert "split conflict" in results["bridge"].error
     assert "other files" in results["train-task"].error
     assert player.writes == []
-    assert {task.generated.task.name: task.split for task in store.tasks()} == {
+    assert {task.name: task.split for task in store.tasks()} == {
         "train-task": "train",
         "eval-task": "eval",
         "follower": "eval",
     }
-    assert store.path(store.tasks(split="train")[0]).joinpath("instruction.md").is_file()
+    assert store.path(store.tasks(split="train")[0].files_digest).joinpath("instruction.md").is_file()
     assert pipeline.status()["task_store"] == {"train": 1, "eval": 2, "rejected": 2, "pending": 0}
     pipeline.close()
 
@@ -571,16 +554,6 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert p.status()["task_generation"]["tasks_played"] == 1
 
 
-def test_a_measurement_arm_with_the_training_arms_name_is_refused_unplayed(tmp_path: Path) -> None:
-    clashing = GeneratedTask(task_for("harbor-00000-000", "designer-0", 9000), (PlayArm("plain", 1),))
-    task_generator = ScriptedGenerator([(clashing, *generated(0, 1))])
-    p, player = rounds(tmp_path, task_generator)
-    assert not looked(p)
-    assert task_generator.validated == ["harbor-00000-001"] and player.writes == ["harbor-00000-001"]
-    (results,) = task_generator.results
-    assert results[0].error == "the measurement arm 'plain' has the name of the training arm"
-
-
 def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp_path: Path) -> None:
     taken = StandInGenerator(tmp_path / "tasks", taken=("harbor-00000-000",))
     task_generator = ScriptedGenerator([generated(0, 0)])
@@ -593,8 +566,8 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     task_generator = ScriptedGenerator([generated(0, 0)])
     p, _ = rounds(tmp_path / "second", task_generator, unplayable)
     assert not looked(p)
-    assert [call["arm"] for call in unplayable.plays] == ["plain"], "no measurement arm for a task that cannot run"
-    assert unplayable.deleted == ["harbor-00000-000"]
+    assert [call["arm"] for call in unplayable.plays] == ["plain"]
+    assert unplayable.deleted == [], "the staged copy stays for the next play"
     assert task_generator.results[0][0].error == "the agent could not play the task: Failed to start tmux session."
 
 
@@ -619,31 +592,29 @@ def test_a_task_group_completes_at_the_episodes_its_plays_reported(
 ) -> None:
     worker = DeferredWorker()
     player = PartlyReported(tmp_path / "tasks", reported=reported)
-    p, _ = rounds(
-        tmp_path, ScriptedGenerator([generated(0, 0)]), player, worker=worker, plays_per_task=4, tasks_per_step=1
-    )
-    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), player, worker=worker, plays_per_task=4)
+    assert not p.ready(2) and [job.round_number for job in worker.submitted] == [0]
     for index in range(reported):
         played(p, "harbor-00000-000", index, float(index % 2))
-    assert not p.ready(), "the plays are still out, so the group waits for all four"
+    assert not p.ready(2), "the plays are still out, so the group waits for all four"
     worker.finish()
-    assert p.ready() is is_trained
+    assert p.ready(2) is is_trained
     if is_trained:
-        assert len(p.build_batch().items) == 2
+        assert len(p.build_batch(2).items) == 2
     else:
         assert {"rep-harbor-00000-000-0", "rec-harbor-00000-000-0"} <= p.releasable_record_ids()
 
 
 def test_a_restarted_processor_closes_a_group_at_the_count_its_round_summary_kept(tmp_path: Path) -> None:
     player = PartlyReported(tmp_path / "tasks", reported=2)
-    config: dict[str, Any] = {"plays_per_task": 4, "tasks_per_step": 1, "rounds": 1}
+    config: dict[str, Any] = {"plays_per_task": 4, "rounds": 1}
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), player, **config)
     assert not looked(first)
     first.close()
     restarted, _ = rounds(tmp_path, ScriptedGenerator(), player, **config)
     for index in range(2):
         played(restarted, "harbor-00000-000", index, float(index % 2))
-    assert restarted.ready() and len(restarted.build_batch().items) == 2
+    assert restarted.ready(2) and len(restarted.build_batch(2).items) == 2
 
 
 def test_the_next_round_waits_for_batches_per_round(tmp_path: Path) -> None:
@@ -656,7 +627,7 @@ def test_the_next_round_waits_for_batches_per_round(tmp_path: Path) -> None:
         for task in (f"t-{batch}-0", f"t-{batch}-1"):
             played(p, task, 0, 1.0)
             played(p, task, 1, 0.0)
-        p.acknowledge(p.build_batch().batch_id)
+        p.acknowledge(p.build_batch(BATCH_SIZE).batch_id)
         looked(p)
     assert len(task_generator.requests) == 2 and p.status()["task_generation"]["completed"] == 2
     assert sorted(entry.name for entry in (tmp_path / "state" / "tasks").iterdir()) == [
@@ -669,16 +640,16 @@ def test_batches_trained_while_a_round_runs_count_toward_the_next_one(tmp_path: 
     worker = DeferredWorker()
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, worker=worker, batches_per_round=2)
-    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    assert not p.ready(BATCH_SIZE) and [job.round_number for job in worker.submitted] == [0]
     assert p.background_jobs_running() and p.status()["task_generation"]["in_flight"] == 0
     for batch in range(2):
         for task in (f"t-{batch}-0", f"t-{batch}-1"):
             played(p, task, 0, 1.0)
             played(p, task, 1, 0.0)
-        p.acknowledge(p.build_batch().batch_id)
-        assert not p.ready() and [job.round_number for job in worker.submitted] == [0], "one round at a time"
+        p.acknowledge(p.build_batch(BATCH_SIZE).batch_id)
+        assert not p.ready(BATCH_SIZE) and [job.round_number for job in worker.submitted] == [0], "one round at a time"
     worker.finish()
-    assert not p.ready(), "round 0 lands on this look and round 1 starts on it"
+    assert not p.ready(BATCH_SIZE), "round 0 lands on this look and round 1 starts on it"
     assert [job.round_number for job in worker.submitted] == [0, 1]
     status = p.status()["task_generation"]
     assert (status["in_flight"], status["next"], status["completed"]) == (1, 2, 1)
@@ -687,36 +658,36 @@ def test_batches_trained_while_a_round_runs_count_toward_the_next_one(tmp_path: 
 def test_a_dropped_batch_does_not_count_toward_the_next_round(tmp_path: Path) -> None:
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
-    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    assert not p.ready(BATCH_SIZE) and [job.round_number for job in worker.submitted] == [0]
     for task in ("t-0", "t-1"):
         played(p, task, 0, 1.0)
         played(p, task, 1, 0.0)
-    batch_id = p.build_batch().batch_id
+    batch_id = p.build_batch(BATCH_SIZE).batch_id
     p.acknowledge(batch_id, trained=False)
     worker.finish()
-    assert not p.ready(), "round 0 lands; the dropped batch trained nothing"
+    assert not p.ready(BATCH_SIZE), "round 0 lands; the dropped batch trained nothing"
     assert [job.round_number for job in worker.submitted] == [0]
     for task in ("t-2", "t-3"):
         played(p, task, 0, 1.0)
         played(p, task, 1, 0.0)
-    p.acknowledge(p.build_batch().batch_id)
-    assert not p.ready(), "a trained batch counts"
+    p.acknowledge(p.build_batch(BATCH_SIZE).batch_id)
+    assert not p.ready(BATCH_SIZE), "a trained batch counts"
     assert [job.round_number for job in worker.submitted] == [0, 1]
 
 
 def test_a_round_that_played_no_task_does_not_block_the_next_one(tmp_path: Path) -> None:
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, ScriptedGenerator([]), worker=worker)
-    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    assert not p.ready(BATCH_SIZE) and [job.round_number for job in worker.submitted] == [0]
     worker.finish()
-    assert not p.ready(), "round 0 lands without a task and round 1 starts on the same look"
+    assert not p.ready(BATCH_SIZE), "round 0 lands without a task and round 1 starts on the same look"
     assert [job.round_number for job in worker.submitted] == [0, 1], "no batch can come; none was acknowledged"
 
 
 def test_a_round_whose_job_failed_waits_for_batches_instead_of_starting_the_next_one(tmp_path: Path) -> None:
     worker = DeferredWorker()
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker)
-    assert not p.ready() and [job.round_number for job in worker.submitted] == [0]
+    assert not p.ready(BATCH_SIZE) and [job.round_number for job in worker.submitted] == [0]
     worker.finished.append(Failed("round-00000"))
     assert not looked(p) and [job.round_number for job in worker.submitted] == [0]
     assert (
@@ -780,14 +751,14 @@ def test_the_real_worker_runs_a_round_off_the_trainers_thread(tmp_path: Path) ->
         context,
         record2record=stage,
         record2task=generation,
-        task2batch=GeneratedTaskBatches(context, TaskBatchSettings()),
+        task2batch=GeneratedTaskBatches(context, None),
     )
     try:
-        assert not p.ready()
+        assert not p.ready(BATCH_SIZE)
         deadline = time.monotonic() + 10.0
         while p.background_jobs_running() and time.monotonic() < deadline:
             time.sleep(0.02)
-            p.ready()
+            p.ready(BATCH_SIZE)
         assert not p.background_jobs_running() and p.status()["task_generation"]["completed"] == 1
         assert (tmp_path / "state" / "tasks" / "round-00000.json").is_file()
     finally:
@@ -814,7 +785,7 @@ def session(name: str, tags: Mapping[str, str]) -> tuple[AgentRecord, AgentRecor
 def sessions(p: TrainingPipeline, *names: str, tags: Mapping[str, str] | None = None) -> None:
     for name in names:
         for record in session(name, {"source": "session"} if tags is None else tags):
-            p.ingest(record)
+            p.push(record)
 
 
 def source_ids(request: TaskGenerationRequest) -> list[str]:
@@ -847,11 +818,11 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     assert {"rec-untagged", "rep-untagged"} <= p.releasable_record_ids(), "an untagged session is released"
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids()
     assert p.operational_metrics()["waiting_source_sessions"] == 1
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert [record.agent_record_id for record in worker.submitted[0].source_records] == ["rec-a", "rep-a"]
     assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the round runs"
     worker.finish()
-    p.ready()
+    p.ready(BATCH_SIZE)
     assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
 
 
@@ -877,7 +848,7 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        ({"tasks_per_step": 0}, "tasks_per_step must be positive"),
+        ({"buffer_size": 0}, "buffer_size must be positive"),
         ({"plays_per_task": 1}, "at least two"),
         ({"rounds": 1, "description": "x", "state_dir": "s"}, "pipeline.record2task.config.generator"),
         ({"source_records_per_round": 1}, "needs a source_tag"),
@@ -918,12 +889,13 @@ def test_the_recipe_binds_the_objective_its_schedule_and_its_stages() -> None:
     spec = GeneratedTaskRecipe.training_spec()
     assert GeneratedTaskRecipe.pipeline_spec().task2batch is GeneratedTaskBatches and spec.objective == "task_group"
     assert spec.loss_family == "importance_sampling"
-    assert spec.scheduling.unit == "sample" and spec.scheduling.batch_size == "actual"
+    assert spec.scheduling.unit == "sample"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
-    built = training_recipe().build_pipeline(PipelineContext("one"))
+    built = training_recipe().build_pipeline(PipelineContext("one", default_buffer_size=32))
     assert isinstance(built.record2record, GeneratedTaskRecord2Record)
     assert isinstance(built.record2task, GeneratedTaskTasks) and built.record2task.worker is None, "no round runs"
-    assert isinstance(built.task2batch, GeneratedTaskBatches) and built.batch_size == 4
+    assert isinstance(built.task2batch, GeneratedTaskBatches)
+    assert built.buffer_size == 32, "the buffer holds the trainer's default"
     built.close()
 
 
@@ -960,7 +932,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
             },
             "task2batch": {
                 "module": "reef.recipe.generated_tasks:GeneratedTaskBatches",
-                "config": {"tasks_per_step": 2},
+                "config": {"buffer_size": 16},
             },
         },
     )
@@ -971,9 +943,24 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
     assert built.record2task.plays_per_task == 3, "the plays come from the record stage's groups"
     assert built.record2task.state_dir == tmp_path / "state" / "one"
-    assert built.batch_size == 2
+    assert built.buffer_size == 16
     assert recipe.scenario_state_dirs("one") == (tmp_path / "state" / "one",)
     built.close()
+
+
+def test_the_batch_stage_refuses_the_removed_tasks_per_step() -> None:
+    # The trainer's batch size of episodes makes a batch; the stage takes no group count.
+    recipe = generated_pipeline_recipe(
+        {},
+        {
+            "task2batch": {
+                "module": "reef.recipe.generated_tasks:GeneratedTaskBatches",
+                "config": {"tasks_per_step": 2},
+            }
+        },
+    )
+    with pytest.raises(RecipeConfigError, match="unknown config fields: tasks_per_step"):
+        recipe.build_pipeline(PipelineContext("one"))
 
 
 @pytest.mark.parametrize(
@@ -993,7 +980,7 @@ def test_a_pipeline_section_that_names_no_usable_stage_is_refused(pipeline: Mapp
     [
         (f"{MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2task.config.generator"),
         ("reef.recipe.generated_tasks:GeneratedTaskRecipe", "must name a class that inherits TaskGenerator"),
-        ("reef.core.tasks:TaskGenerator", "names an abstract class"),
+        ("reef.recipe.generated_tasks:TaskGenerator", "names an abstract class"),
     ],
 )
 def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator: str, message: str) -> None:

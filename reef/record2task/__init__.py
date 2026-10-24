@@ -44,11 +44,12 @@ The modules in this directory depend only on ``reef.core``,
 them without the generator service.
 """
 
-from reef.record2task.base import NoTasks, Record2Task, TaskResult
+from reef.record2task.base import ImmediateRecord2Task, NoTasks, Record2Task, TaskResult
 from reef.record2task.judged import JudgedTasks
 from reef.record2task.reports import ReportTasks, SkippedReport
 
 __all__ = [
+    "ImmediateRecord2Task",
     "JudgedTasks",
     "NoTasks",
     "Record2Task",

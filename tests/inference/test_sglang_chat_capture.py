@@ -12,6 +12,7 @@ from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
 from reef.core.chat_protocol import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
+from reef.runtime.interfaces import inference_aborted
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
 
@@ -167,6 +168,63 @@ def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, te
         assert response["choices"][0]["message"] == message
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("request_kwargs", "message"),
+    [
+        (None, {"role": "assistant", "content": "The answer is 5."}),
+        ({"enable_thinking": True}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
+    ],
+)
+def test_handler_chat_template_kwargs_apply_when_the_request_omits_them(tmp_path, request_kwargs, message) -> None:
+    """The handler's default renders non-thinking prompts; a request's own key wins."""
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "The answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        payload = {
+            "model": "served-model",
+            "messages": [{"role": "user", "content": "what is 2+3?"}],
+            "max_completion_tokens": 2,
+        }
+        if request_kwargs is not None:
+            payload["chat_template_kwargs"] = request_kwargs
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=HybridThinkingTokenizer(),
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            response = await backend.inference(_artifact(tmp_path), "/v1/chat/completions", payload)
+        finally:
+            await server.close()
+
+        assert response["choices"][0]["message"] == message
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_handler_chat_template_kwargs_must_not_carry_tools() -> None:
+    with pytest.raises(ValueError, match="tools is reserved"):
+        SGLangInferenceHandler("http://engine", model_path="model", chat_template_kwargs={"tools": []})
 
 
 def _artifact(tmp_path) -> Artifact:
@@ -915,6 +973,55 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
             {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
         ]
         assert recorded["stream_delivery"]["complete"] is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            event = {
+                "text": "ans",
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": {"type": "abort", "message": "Aborted"},
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "engine:6",
+                    "_reef_token_runtime_load_ids": ["engine:6"],
+                },
+            }
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            stream = await backend.inference_stream(
+                _live_artifact(),
+                path,
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+            [chunk async for chunk in stream.chunks]
+        finally:
+            await server.close()
+
+        assert inference_aborted(stream.record_response)
 
     asyncio.run(run())
 

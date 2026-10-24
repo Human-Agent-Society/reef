@@ -41,7 +41,6 @@ from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.record2record import (
     GroupDecision,
     JudgingRecord2Record,
@@ -58,7 +57,7 @@ from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
-    CommitLogError,
+    CommitHistoryError,
     CommitRecord,
     parse_scenario_metadata,
     scenario_metadata_for,
@@ -230,7 +229,7 @@ def _commit_step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | 
 def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispatchers) -> None:
     dispatcher, backends = dispatchers.open()
     scenario = _scenario(dispatcher, 1)
-    assert [bound.component for bound in scenario.trainers] == [WEIGHTS, HARNESS]
+    assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert scenario.trainer_for(HARNESS) is scenario.trainers[1].trainer
 
     assert _commit_step(scenario, HARNESS) is not None
@@ -755,12 +754,11 @@ def test_the_delete_guard_reads_the_runtime_once(tmp_path: Path, dispatchers: _D
                 return {
                     "ok": False,
                     "phase": "dead",
-                    "training_job": {"deferred_weight_update": True, "status": "IDLE"},
+                    "training_job": {"status": "IDLE"},
                 }
             return {
                 "ok": True,
                 "training_job": {
-                    "deferred_weight_update": True,
                     "status": "RUNNING",
                     "training_job_id": "j",
                     "scenario": "x",
@@ -769,7 +767,7 @@ def test_the_delete_guard_reads_the_runtime_once(tmp_path: Path, dispatchers: _D
 
     handle = Handle()
     dispatcher, _ = dispatchers.open(backends=_dispatched_pair(tmp_path), training=StubTrainingRuntime())
-    object.__setattr__(dispatcher.recipe, "training_runtime", ExecutorTrainingRuntime(handle))  # type: ignore[arg-type]
+    object.__setattr__(dispatcher.recipe, "training_runtime", ExecutorTrainingRuntime(handle, batch_size=1))  # type: ignore[arg-type]
     try:
         assert dispatcher.training_job_in_flight("x") is True
         assert handle.calls == 1
@@ -797,17 +795,6 @@ def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(
         dispatcher.delete_scenario("again")
     marker["commit_acknowledged"] = True
     assert dispatcher.delete_scenario("again")["scenario"] == "again"
-
-
-@pytest.mark.unit
-def test_a_scenario_of_several_components_refuses_a_checkpoint_interval_above_one(
-    tmp_path: Path, dispatchers: _Dispatchers
-) -> None:
-    """A step that published no checkpoint would see its component dropped from the next release."""
-    recipe = _TwoTrainerRecipe(backends=_local_pair(tmp_path), checkpoint_strategy=EveryNVersions(2))
-    dispatcher, _ = dispatchers.open(recipe=recipe)
-    with pytest.raises(ReefError, match="checkpoint interval must be 1"):
-        dispatcher.get_or_create_scenario("agent")
 
 
 @dataclass(frozen=True)
@@ -1269,7 +1256,7 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
                 context,
                 record2record=JudgingRecord2Record(_RetiringRetriesJudging(), _JudgedAtOnce()),
                 record2task=_RetiringRetriesTasks(),
-                task2batch=RetiringRetriesBatches(context, 1),
+                task2batch=RetiringRetriesBatches(context, None),
             )
         return threshold_pipeline(context)
 
@@ -1383,7 +1370,6 @@ def test_a_harness_only_rollback_keeps_the_proof_that_the_weights_job_was_commit
     scenario.rollback(first_harness)
     # Only the harness changed: the weights job's commit still stands.
     assert scenario.committed_training_job_id == "job-1"
-    assert not scenario.committed_training_without_job_id
 
 
 @pytest.mark.unit
@@ -1393,7 +1379,10 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
     scenario = _scenario(dispatcher)
     with pytest.raises(NotImplementedError, match=r"harness \(ThresholdBatches\)"):
         scenario.set_training_mode("hybrid")
-    assert [bound.trainer.pipeline.training_mode for bound in scenario.trainers] == ["auto", "auto"]
+    assert [component_trainer.trainer.pipeline.training_mode for component_trainer in scenario.trainers] == [
+        "auto",
+        "auto",
+    ]
     with pytest.raises(ValueError, match="training_mode must be"):
         scenario.set_training_mode("bogus")
 
@@ -1704,7 +1693,6 @@ def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path, dispa
     assert _commit_step(scenario, HARNESS) is not None
     assert scenario.scenario_step == 2
     assert scenario.committed_training_job_id == "job-1"
-    assert scenario.committed_training_without_job_id is False
 
     # A rollback after the weights commit is the one thing that unmakes the proof.
     scenario.rollback(base)
@@ -1715,7 +1703,7 @@ def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path, dispa
 def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
-    """A checkpoint read back from the artifact head names its component, so a lost commit log resets no trainer."""
+    """A checkpoint read back from the artifact head names its component, so a lost commit history resets no trainer."""
     backend_factory = _seeded_repository(tmp_path)
     dispatcher, _ = dispatchers.open(records_dir=tmp_path / "records-1", backend_factory=backend_factory)
     scenario = _scenario(dispatcher, 1)
@@ -1804,7 +1792,7 @@ def test_commit_record_carries_its_component() -> None:
     assert encoded["component"] == HARNESS
     assert CommitRecord.from_dict(encoded) == record
     assert "component" not in CommitRecord.from_dict({**encoded, "component": None}).to_dict()
-    with pytest.raises(CommitLogError, match="only training commits may carry component"):
+    with pytest.raises(CommitHistoryError, match="only training commits may carry component"):
         CommitRecord(
             scenario="agent",
             step=4,

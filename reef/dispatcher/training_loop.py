@@ -140,7 +140,7 @@ class DispatchedTrainingLoop:
         for name in self.registry.training_scenario_names:
             current = self.registry.get_optional(name)
             if current is not None and any(
-                bound.trainer.pipeline.background_jobs_running() for bound in current.trainers
+                component_trainer.trainer.pipeline.background_jobs_running() for component_trainer in current.trainers
             ):
                 poll = True
         if poll:
@@ -219,9 +219,7 @@ class DispatchedTrainingLoop:
             # commit, or checkpointed before the weight update. Recover that
             # pending step before deciding whether another batch is available.
             backend.recover_pending_step(
-                current.scenario_step,
-                committed_training_job_id=current.committed_training_job_id,
-                committed_training_without_job_id=current.committed_training_without_job_id,
+                current.scenario_step, committed_training_job_id=current.committed_training_job_id
             )
             with self.registry.lock_instance(current) as state:
                 if state is not InstanceState.CURRENT:

@@ -24,6 +24,7 @@ monkey_patch_torch_dist()
 
 # isort: split
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
+from slime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_to_path
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.misc import Box
@@ -288,6 +289,46 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 updater.update_weights = previous
             else:
                 delattr(updater, "update_weights")
+
+    def export_weight_files(self, directory: str) -> None:
+        """Write this actor's current weights to ``directory`` for Reef's file transfer.
+
+        A LoRA actor writes the active scenario's adapter as a PEFT directory,
+        with the writer of its checkpoints. Another actor writes its full
+        weights as a Hugging Face checkpoint, with the writer of the disk
+        transfer. No receiver takes part: Reef's coordinator delivers the directory.
+        """
+        lora = megatron_lora_enabled(self.args)
+        scenario = None if self.adapter_slots is None else self.adapter_slots.active
+        if lora and scenario is None:
+            raise RuntimeError("a LoRA adapter export requires an activated scenario")
+        updater = self.weight_updater
+        if self.args.offload_train:
+            self.wake_up()
+        try:
+            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+                if lora:
+                    # Rank 0 gathers the tensors and writes; every rank raises a write error.
+                    save_lora_adapter_to_path(
+                        self.args,
+                        Path(directory),
+                        updater.export_lora_adapter_tensors(),
+                        scenario=scenario,
+                        scenario_step=None,
+                    )
+                else:
+                    save_hf_model_to_path(
+                        self.args,
+                        Path(directory),
+                        self.model,
+                        model_name=updater.model_name,
+                        quantization_config=updater.quantization_config,
+                        progress_desc="Save HF weights for Reef's file transfer",
+                    )
+                    dist.barrier(group=get_gloo_group())
+        finally:
+            if self.args.offload_train:
+                self.sleep()
 
     def save_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and

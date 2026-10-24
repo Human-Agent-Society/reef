@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 from reef.runtime.interfaces import MarkerStatus, ScenarioHistoryStore, TrainingJobResult, TrainingJobStore
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
+from reef.surface.adapter import adapter_name
 
 logger = logging.getLogger(__name__)
 
@@ -174,12 +175,9 @@ def _validate_marker(value: dict[str, Any], path: Path) -> None:
         raise RuntimeError(f"invalid training marker: {path}")
     if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
         raise RuntimeError(f"invalid training marker: {path}")
-    # A job still out is finished by the scenario step it trained; a settled marker needs none, so one an earlier
-    # release left behind when no job was out does not stop a start.
-    if "scenario_step" in value or marker_in_flight(value):
-        scenario_step = value.get("scenario_step")
-        if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-            raise RuntimeError(f"invalid training marker scenario step: {path}")
+    scenario_step = value.get("scenario_step")
+    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
+        raise RuntimeError(f"invalid training marker scenario step: {path}")
     commit_acknowledged = value.get("commit_acknowledged")
     if commit_acknowledged is not None and not isinstance(commit_acknowledged, bool):
         raise RuntimeError(f"invalid training marker commit acknowledgement: {path}")
@@ -760,7 +758,7 @@ class TrainingRecovery:
         inference_url = publisher.inference.inference_url()
         versions = self._observed_versions(status)
         if publisher.history is not None:
-            publisher.restore_scenario_adapters(marker)
+            publisher.republish_scenario_checkpoints(marker)
         self._restore_version(marker, status, versions)
         self.publication.finish_recovery(marker, publisher.runtime_load_id)
         return inference_url
@@ -774,11 +772,11 @@ class TrainingRecovery:
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
             publisher.inference.recover()
-        if publisher.config.colocate and publisher.config.lora:
+        if publisher.memory_handoff is not None and publisher.config.lora:
             # Cold startup releases everything before training initializes.
             # Restore the frozen base before registering scenario adapters,
             # including runs that only release KV/graphs on later steps.
-            publisher.inference.onload_weights()
+            publisher.memory_handoff.onload_weights()
         if marker is not None and status == "REJECTING":
             self.publication.reject(str(marker["job_id"]))
             marker["status"] = status = "REJECTED"
@@ -803,32 +801,37 @@ class TrainingRecovery:
         recovered_runtime_load_id = None
         if marker is not None and status in PUBLISHED_STATES:
             recovered_runtime_load_id = str(marker["runtime_load_id"])
-        if config.save_hf_template is not None and status != "REJECTED" and not (config.lora and marker is None):
+        if status != "REJECTED" and not (config.lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot inference. Publish actor weights before construction returns
             # so the first Reef inference uses the actual training version. A
-            # LoRA bridge that never trained has nothing to publish: the frozen
-            # base inference booted from is exactly what every fresh adapter
-            # computes, and the history replay above restored trained ones.
+            # LoRA bridge without a marker has nothing more to publish: the
+            # frozen base inference booted from is exactly what every fresh
+            # adapter computes, and the republication above restored trained
+            # ones. The Slime preflight also deletes the marker of a job that
+            # saved no checkpoint.
+            scenario = publisher.marker_scenario(marker)
             publisher.runtime_load_id = publisher.update_serving(
                 # A fresh sender may only capture a delta baseline unless a
                 # real full transfer is requested. Startup must load bytes
                 # and acknowledge Reef's identity on every receiver.
                 force_full=True,
-                scenario=publisher.marker_scenario(marker),
+                scenario=scenario,
                 runtime_load_id=recovered_runtime_load_id or publisher.publication_target(marker),
             )
+            if scenario is not None:
+                # Serving reads the scenario's adapter version from the history.
+                version = publisher.runtime_load_id
+                publisher.require_history().record_publication(scenario, version, adapter_name(scenario, version))
         elif config.lora and marker is None:
             # Nothing to publish, but the engines still need Reef's canonical
             # version token (they boot with a backend default), and colocated
             # engines boot released: give them their weights and KV back
             # before the first request.
-            if config.colocate:
-                publisher.inference.onload_weights()
-                publisher.inference.onload_kv()
+            if publisher.memory_handoff is not None:
+                publisher.memory_handoff.onload_weights()
+                publisher.memory_handoff.onload_kv()
             publisher.initialize_version()
         elif marker is not None and status == "REJECTED":
             publisher.runtime_load_id = str(marker.get("parent_runtime_load_id") or versions[0])
-            publisher.initialize_version()
-        elif config.save_hf_template is None:
             publisher.initialize_version()

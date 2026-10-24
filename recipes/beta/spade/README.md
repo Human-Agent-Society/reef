@@ -20,12 +20,12 @@ SPADE is a task generator. The deployment selects it in `pipeline.record2task.co
 
 ## The generator
 
-`SpadeTaskGenerator` implements `reef.core.tasks.TaskGenerator`. One round of the recipe is one SPADE generation:
+`SpadeTaskGenerator` implements `reef.recipe.generated_tasks.TaskGenerator`. One round of the recipe is one SPADE generation:
 
-1. `generate` makes `count` Designer proposals across the configured `skills`. Each prompt includes the previous generation's results as SPADE's experience section. A task that has `solution/hint.txt` asks for a `hint` arm of `hint_plays` plays with that file appended to the instruction.
+1. `generate` makes `count` Designer proposals across the configured `skills`. Each prompt includes the previous generation's results as SPADE's experience section.
 2. `validate` writes the task under the service's tasks root, runs Harbor's oracle and nop agents, and removes the task again. The reference solution must score 1. Doing nothing must score below 1. A duplicate task is invalid. After a reload cancels a generation, a rerun replaces a task with the same name from the earlier attempt.
-3. The recipe saves each valid task with its train/eval split before play. It plays each training task: `plays_per_task` plain episodes for training, then the hint arm. Hint episodes measure only. The recipe does not play eval tasks.
-4. `record_results` reports the regret of each train proposal against its Designer receipt. A refused or unplayed proposal scores 0. An eval proposal gets no Designer report and does not go into the experience.
+3. The recipe saves each valid task with its train/eval split before play. It plays each training task `plays_per_task` times on the plain arm for training. The recipe does not play eval tasks.
+4. `record_results` plays each played train task that has `solution/hint.txt` `hint_plays` more times through the generator service, on the `hint` arm, with that file appended to the instruction. Hint episodes measure only. It then reports the regret of each train proposal against its Designer receipt. A refused or unplayed proposal scores 0. An eval proposal gets no Designer report and does not go into the experience.
 
 Regret is the mean hint reward minus the mean plain reward. Without hint episodes, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
 
@@ -46,7 +46,7 @@ The generator's `config` keys:
 | `grounding_path` | none | a text file added to the Designer prompt |
 | `hint_plays` | 2 | plays of the hint arm; 0 turns it off |
 | `designer_report` | true | report each proposal's regret against the Designer's receipt |
-| `served_model` | the deployment's | the model the Designer asks for |
+| `served_model` | the deployment's | the model the Designer and the hint plays ask for; set it to the recipe's `served_model` when that is set |
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. With the defaults, 0.0 and 0, all tasks train. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
@@ -85,8 +85,8 @@ from pathlib import Path
 
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord
-from reef.core.tasks import HarborTask, TaskGenerationRequest
-from reef.record2task.generator import HttpGenerator
+from reef.core.tasks import HarborTask
+from reef.record2task.generator import HttpGenerator, TaskGenerationRequest
 
 
 async def rebuild_task(
@@ -112,7 +112,7 @@ Materials can be UTF-8 files or directories on the caller's machine. The client 
 
 Use a prepared snapshot containing only the materials the Designer should see. The client rejects symlinks, special files, non-text files, and unreadable files. Limits are 128 files, 256 KiB of file contents, and 512 KiB of JSON for records and files combined. Oversized inputs fail before a Designer call. The client and service do not truncate these inputs.
 
-The input contract is `TaskGenerationRequest` in `reef.core.tasks`. Both SPADE and the generator service use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`.
+The input contract is `TaskGenerationRequest` in `reef.record2task.generator`. Both SPADE and the generator service use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`.
 
 To call the generator directly, wrap the shared request in `DesignerRequest(inputs=request, difficulty="hard")`. Then call `HttpGenerator.propose(...)`. `DesignerRequest` holds the shared input and adds Designer settings. The HTTP client reads local `assets` into `asset_files`. The service reconstructs the same input type. Each source record retains its payload, type, timestamp, references, and artifact version. Existing `DesignerRequest(target="...")` calls still work for description-only generation. Use matching client and generator versions for historical inputs.
 

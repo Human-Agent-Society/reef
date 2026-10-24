@@ -15,6 +15,7 @@ class SlimeArguments(Namespace):
     fp16: bool
     use_rollout_routing_replay: bool
     num_rollout: int
+    global_batch_size: int
     save_hf: str
     save: str
     compute_advantages_and_returns: bool
@@ -45,7 +46,8 @@ class SlimeArguments(Namespace):
     custom_critic_args_hook_path: str | None = None
     no_save_optim: bool = False
     release_train: bool = False
-    reef_checkpoint_interval: int = 1
+    # Scenario versions between two saved training checkpoints (Megatron and HF export).
+    save_interval: int
     custom_model_provider_path: str | None
     custom_rollout_data_keys: tuple[str, ...] | list[str] | None = ()
     megatron_config_path: str | None
