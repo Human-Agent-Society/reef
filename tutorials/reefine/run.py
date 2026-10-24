@@ -1,24 +1,24 @@
-"""Reefine on reef-pi, end to end: ask, step, promote, setup, install, show.
+"""Reefine on pi, end to end: ask, step, promote, install, show.
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
-    ask     - ``reef-pi evolve "<request>"``: the wrapper posts the request
-              to ``POST /reef/train`` as a training instruction, and the
-              deployment, in ``training_mode: manual``, runs one evolve step
-              for it at once
+    ask     - the request goes to ``POST /reef/train`` as a training
+              instruction, and the deployment, in ``training_mode: manual``,
+              runs one evolve step for it at once
     step    - the service proposer designs the change, writes it and
               reviews it; the evaluation runs the candidate on the recipe's
               health task and the floor decides; the catalog row carries
               the result, the notes and the request it answered under
               ``metrics.training_request``
-    promote - a release that touches a code_extension waits as pending; its
-              page says why it exists and what it changed, and the demo
-              promotes it through the route (a person reads the page first)
-    setup   - when the head's manifest names ``requires``, ``reef-pi setup``
-              checks the items off; an unmet item stops the demo
-    install - the head installs through the install route into work/harness
-    show    - one ``reef-pi -p`` session on the installed tree, with the
-              session's tool calls in order and its final answer
+    promote - a release that changes an extension waits as pending; its page
+              says why it exists and what it changed, and the demo promotes
+              it through the route (a person reads the page first)
+    install - the head's source tree (``GET /reef/harness?form=source``)
+              renders for pi with a model binding at this Reef into
+              work/harness; when the release names ``requires``, the demo
+              checks each item on this machine first, and an unmet one stops it
+    show    - one ``pi -p`` session on the installed tree, with the session's
+              tool calls in order and its final answer
 
 The measurement (``./run.sh measure``) posts a fixed list of requests one
 after another, each once the step of the one before it settled, and prints
@@ -29,26 +29,31 @@ shapes are not here.
 
 Start this through ./run.sh: it starts the Reef these constants point at
 from configs/deployment.yaml, installs the served tree, and runs a mode.
+The demo is the client here: it pulls, renders and runs the release itself.
 Every mode writes work/<mode>-<timestamp>.json with the raw rows it read.
 """
 
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
-import sys
 import time
 import urllib.request
 from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
 
-from reef.harness.client.wrapper import wrapper_directory
+from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.episodes.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree, locate, render_tree
+from reef.recipe.reefine.agent import launch_pi, tool_calls
+from reef.sandbox.process import EpisodeTimeout, LocalExecutor
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
-SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
+SCENARIO = "reefine-demo"  # this workload's isolated lane
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
 # A local model reads the API skill and writes the change, then six pi episodes score it.
@@ -58,19 +63,19 @@ POLL_S = 5.0
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORK = HERE / "work"
-# The install script writes the tree and release metadata here, and the reef-pi wrapper outside it, in
-# ~/.reef/installs.
+# The install writes the rendered tree and the release metadata file here.
 INSTALL_ROOT = WORK / "harness"
-CAPTURES = WORK / "captures"  # the wrapper's spool, beside the run so a show session's receipts can be read back
 DEMOS = HERE / "demos"
 RELEASE_FILE = ".reef-harness-release"
+SHOW_TIMEOUT_S = 600.0
+CHECK_TIMEOUT_S = 30.0
 
 SHOW_PROMPTS = {
     "bugfix": "fix the bug in adder.py",
     "research": "what is the best known lower bound for sorting by comparisons, with a source",
 }
 
-#: The measurement's requests: short harness changes a skill or a rules entry answers, no extension.
+#: The measurement's requests: short harness changes a skill or the rules answer, no extension.
 MEASURE_REQUESTS = (
     "answer in one sentence when the question is arithmetic",
     "always show the command you ran before you show its output",
@@ -121,7 +126,7 @@ def _scenario_headers():
 
 
 def _fetch_text(path):
-    """One raw read of a route that answers text, not JSON: the install script, a step's page."""
+    """One raw read of a route that answers text, not JSON: a step's page."""
     request = urllib.request.Request(
         f"{SERVICE_URL}{path}", headers={"Authorization": f"Bearer {TOKEN}", **_scenario_headers()}
     )
@@ -179,17 +184,17 @@ def result_of(row):
     return str(row.get("operation") or "unknown")
 
 
-def mutations_of(metrics):
-    """The step's mutations as ``op id (kind)``: ``mutation`` for one, ``mutations`` for a composite."""
-    single = metrics.get("mutation")
-    many = [single] if isinstance(single, dict) else list(metrics.get("mutations") or [])
-    return [f"{m.get('op')} {m.get('id')} ({(m.get('options') or {}).get('name', '?')})" for m in many]
+def changes_of(metrics):
+    """The step's patch as ``write path`` and ``remove path`` lines, in path order."""
+    patch = metrics.get("patch") or {}
+    return [f"{'remove' if text is None else 'write'} {path}" for path, text in sorted(patch.items())]
 
 
 def kinds_of(metrics):
-    single = metrics.get("mutation")
-    many = [single] if isinstance(single, dict) else list(metrics.get("mutations") or [])
-    return sorted({str((m.get("options") or {}).get("name", "?")) for m in many})
+    """The tree kinds the step's patch touches."""
+    return sorted(
+        {"?" if (location := locate(path)) is None else location.kind.value for path in metrics.get("patch") or {}}
+    )
 
 
 def tally_parts(metrics):
@@ -241,77 +246,89 @@ def _requires_of(items):
     return ", ".join(f"{item.get('name')} ({item.get('kind', '?')})" for item in items) or "nothing"
 
 
-# -- the wrapper ----------------------------------------------------------------------------------------------
-
-
-def _wrapper_env():
-    """What reef-pi and the install script need: this interpreter as python3, with reef importable from the
-    checkout, the token, and the spool beside the run."""
-    env = dict(os.environ)
-    env["PATH"] = f"{Path(sys.executable).parent}:{env.get('PATH', '')}"
-    env["PYTHONPATH"] = ":".join(part for part in (str(REPO), env.get("PYTHONPATH")) if part)
-    env["REEF_TOKEN"] = TOKEN
-    env["REEF_HARNESS_CAPTURES_DIR"] = str(CAPTURES)
-    return env
-
-
-def reef_pi(args, cwd=None):
-    """One call of the wrapper this install wrote, its lines echoed indented; the completed process. It is this
-    install's own, beside its record in ~/.reef/installs; ~/.local/bin/reef-pi links to the latest install."""
-    wrapper = wrapper_directory(INSTALL_ROOT.resolve()) / "reef-pi"
-    done = subprocess.run([str(wrapper), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True)
-    for line in (done.stdout + done.stderr).splitlines():
-        print("  " + line, flush=True)
-    return done
+# -- the client: ask, install --------------------------------------------------------------------------------
 
 
 def _installed_release():
-    """The release id of the tree under work/harness, from the release metadata file the install script wrote."""
+    """The release id of the tree under work/harness, from the release metadata file the install wrote."""
     try:
         return json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8")).get("release_id")
     except (OSError, ValueError):
         return None
 
 
-def install(release_id=None):
-    """Install the head (or ``release_id``) through the install route into work/harness.
+def unmet(items):
+    """The requires items this machine does not meet: an env item whose variable is unset, a binary not on PATH,
+    an item whose check does not exit 0. The demo runs each check unasked; a person would read it first."""
+    missing = []
+    for item in items:
+        check = item.get("check")
+        if item.get("kind") == "env":
+            met = bool(os.environ.get(check or item.get("name", "")))
+        elif item.get("kind") == "binary" and not check:
+            met = shutil.which(str(item.get("name"))) is not None
+        else:
+            try:
+                met = (
+                    subprocess.run(
+                        ["bash", "-lc", str(check)], capture_output=True, timeout=CHECK_TIMEOUT_S
+                    ).returncode
+                    == 0
+                )
+            except subprocess.TimeoutExpired:
+                met = False
+        if not met:
+            missing.append(item)
+    return missing
 
-    Return the release id from its metadata file, or None when the script
-    refused (an unmet requires item prints the setup list).
+
+def install(release_id=None):
+    """Render the head (or ``release_id``) for pi with a model binding at this Reef, into work/harness.
+
+    Return the release id, or None when the release requires something this machine lacks.
     """
     client = _client()
     _ensure_scenario(client)
-    query = "?adapter=pi" + (f"&release_id={release_id}" if release_id else "")
-    script = _fetch_text(f"/reef/harness/install{query}")
-    WORK.mkdir(parents=True, exist_ok=True)
-    path = WORK / "install.sh"
-    path.write_text(script, encoding="utf-8")
-    say(f"install: bash {path.relative_to(HERE)} {INSTALL_ROOT.relative_to(HERE)}")
-    done = subprocess.run(["bash", str(path), str(INSTALL_ROOT)], env=_wrapper_env(), capture_output=True, text=True)
-    for line in (done.stdout + done.stderr).splitlines():
-        print("  " + line, flush=True)
-    if done.returncode != 0:
-        say(f"install refused (exit {done.returncode})")
+    query = "?form=source" + (f"&release_id={release_id}" if release_id else "")
+    manifest = client.get(f"/reef/harness{query}", extra_headers=_scenario_headers())
+    requires = manifest.get("requires") or []
+    say(f"requires: {_requires_of(requires)}")
+    missing = unmet(requires)
+    if missing:
+        for item in missing:
+            say(f"unmet: {item.get('name')} ({item.get('kind')}): {item.get('prompt') or 'no prompt given'}")
         return None
-    release = _installed_release()
-    say(f"installed release {release} at {INSTALL_ROOT}")
-    return release
+    descriptor = get_adapter("pi")
+    binding = ModelBinding(base_url=SERVICE_URL, model=MODEL, api_key=TOKEN)
+    files = render_tree(HarnessTree(manifest["files"]), descriptor, binding.config_overlays(descriptor))
+    shutil.rmtree(INSTALL_ROOT, ignore_errors=True)
+    for relative, content in files.items():
+        target = INSTALL_ROOT / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    record = {"release_id": manifest["release_id"], "files": sorted(files)}
+    (INSTALL_ROOT / RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    say(f"installed release {manifest['release_id']} at {INSTALL_ROOT}")
+    return manifest["release_id"]
 
 
 def ask(text):
-    """The request through the installed wrapper; the id of the training record the service accepted.
+    """The request as a training instruction; the id of the training record the service accepted.
 
-    Nothing runs before the ask: the wrapper posts the instruction with the
-    installed release id and the originating session id (a spooled session or
-    a fresh one), and the deployment's manual mode runs one step for it. A
-    refusal (admission's screens, a mode that takes no instructions) is a
-    stop, with the wrapper's line saying why."""
-    say(f"ask: reef-pi evolve {text!r}")
-    done = reef_pi(["evolve", text])
-    match = re.search(r"training request (\S+) accepted", done.stdout)
-    if match is None:
-        raise SystemExit("the request was not accepted; the wrapper's lines above say why")
-    return match.group(1)
+    The instruction names the installed release and this demo's session, and
+    the deployment's manual mode runs one step for it. A refusal (the
+    screens, a mode that takes no instructions) is a stop, with the service's
+    answer saying why."""
+    say(f"ask: POST /reef/train {text!r}")
+    payload = {"text": text, "session": SCENARIO, "release_id": _installed_release() or ""}
+    try:
+        answer, _ = _client().post("/reef/train", SCENARIO, payload)
+    except ReefClientError as exc:
+        raise SystemExit(f"the request was not accepted: {exc}") from exc
+    say(
+        f"accepted: training request {answer['agent_record_id']}; its page is {SERVICE_URL}{answer.get('page_path', '')}"
+    )
+    return answer["agent_record_id"]
 
 
 def wait_for_step(client, text, before, deadline):
@@ -365,101 +382,40 @@ def promote(client, rows, row, run_dir):
     return answer["release_id"]
 
 
-def setup_if_required(client):
-    """``reef-pi setup --yes`` when the head's manifest names requires; the items and whether every one is met."""
-    requires = _manifest(client).get("requires") or []
-    say(f"requires: {_requires_of(requires)}")
-    if not requires:
-        return requires, True
-    done = reef_pi(["setup", "--yes"])
-    return requires, done.returncode == 0
-
-
 # -- the show session -----------------------------------------------------------------------------------------
 
 
-def _preview(arguments):
-    """The first argument value of a tool call, cut short: enough to tell a test run from a file edit."""
-    try:
-        parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
-    except ValueError:
-        parsed = arguments
-    if isinstance(parsed, dict) and parsed:
-        # pi's write and edit put the content first and the path second; the path names the call better.
-        named = next((parsed[key] for key in ("path", "file_path", "command") if key in parsed), None)
-        parsed = named if named is not None else next(iter(parsed.values()))
-    text = str(parsed if parsed is not None else "").replace("\n", " ").strip()
-    return text[:57] + "..." if len(text) > 60 else text
-
-
-def _tool_calls(turns):
-    """The tool calls of a session in order, from each captured completion's message, as ``name(preview)``."""
-    calls = []
-    for turn in turns:
-        for choice in (turn.get("response") or {}).get("choices") or []:
-            message = choice.get("message") or choice
-            for call in message.get("tool_calls") or []:
-                function = call.get("function") or {}
-                calls.append(f"{function.get('name')}({_preview(function.get('arguments'))})")
-    return calls
-
-
-def _last_answer(turns):
-    for turn in reversed(turns):
-        for choice in (turn.get("response") or {}).get("choices") or []:
-            content = (choice.get("message") or choice).get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-    return ""
-
-
-def _take_show_spool(started_ns, run_dir):
-    """The spool entry the show session wrote at exit, moved into the run directory; its turns.
-
-    The wrapper spools every session's receipts for ``report`` to claim, and
-    ``evolve`` records the oldest spooled session as the session the request
-    came from; the show session is shown, never reported, so its entry leaves the spool
-    for the run directory, where it is the record this driver reads."""
-    if not CAPTURES.is_dir():
-        return []
-    for path in sorted(CAPTURES.glob("*.pending.json"), reverse=True):
-        # <hash of the scenario>-<20 digit ns stamp>-<uuid>.pending.json: the stamp is the second run of digits.
-        match = re.search(r"-(\d{20})-", path.name)
-        if match and int(match.group(1)) >= started_ns:
-            target = run_dir / "show-captures.json"
-            os.replace(path, target)
-            return json.loads(target.read_text(encoding="utf-8")).get("turns") or []
-    return []
-
-
 def show(mode, run_dir):
-    """One session on the installed tree in the mode's workspace; the tool calls in order and the final answer.
+    """One pi session on the installed tree in the mode's workspace; the tool calls in order and the final answer.
 
-    The calls come from the receipts the wrapper's proxy captured, spooled at
-    exit: pi's own session file lands under its default directory, outside
-    the install root, so the spool is the record this driver reads."""
-    workspace = run_dir / "workspace"
+    The session runs headless, as an episode does, over a copy of the installed
+    files; pi's own session log is the record this driver reads."""
+    root = run_dir / "session"
+    workspace = root / "workspace"
     if mode == "bugfix":
         # A copy: the session edits adder.py, and the committed fixture must fail again next time.
         shutil.copytree(DEMOS / "workspace", workspace)
-    else:
-        workspace.mkdir(parents=True)
     prompt = SHOW_PROMPTS[mode]
-    say(f"show: reef-pi -p {prompt!r} in {workspace.relative_to(HERE)}")
-    started_ns = time.time_ns()
-    done = reef_pi(["-p", prompt], cwd=workspace)
-    turns = _take_show_spool(started_ns, run_dir)
-    calls = _tool_calls(turns)
-    answer = done.stdout.strip() or _last_answer(turns)
-    say(f"show: {len(turns)} model call(s), tool calls in order: {' -> '.join(calls) or 'none'}")
-    say(f"show: final answer: {answer.splitlines()[-1][:160] if answer else '(none)'}")
-    return {
-        "prompt": prompt,
-        "exit": done.returncode,
-        "model_calls": len(turns),
-        "tool_calls": calls,
-        "answer": answer,
+    say(f"show: pi -p {prompt!r} in {workspace.relative_to(HERE)}")
+    descriptor = get_adapter("pi")
+    executor, binary = LocalExecutor().for_program(AdapterProgram(descriptor))
+    files = {
+        path.relative_to(INSTALL_ROOT).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(INSTALL_ROOT.rglob("*"))
+        if path.is_file() and path.name != RELEASE_FILE
     }
+    try:
+        outcome, trajectory = launch_pi(
+            descriptor, binary, executor, files, prompt, {}, root=root, timeout=SHOW_TIMEOUT_S
+        )
+        exit_code = outcome.exit_code
+    except EpisodeTimeout:
+        exit_code, trajectory = None, []
+    calls = [f"{call['tool']}({call.get('arguments', call.get('error', ''))[:60]})" for call in tool_calls(trajectory)]
+    answer = (final_assistant_text(trajectory) or "").strip()
+    say(f"show: tool calls in order: {' -> '.join(calls) or 'none'}")
+    say(f"show: final answer: {answer.splitlines()[-1][:160] if answer else '(none)'}")
+    return {"prompt": prompt, "exit": exit_code, "tool_calls": calls, "answer": answer}
 
 
 # -- the modes ------------------------------------------------------------------------------------------------
@@ -491,13 +447,13 @@ def _won(result):
 
 
 def totals_of(results):
-    """The measurement's counts: filed, answered (a mutation came back), admitted (the evaluation ran), won (met the
+    """The measurement's counts: filed, answered (a patch came back), admitted (the evaluation ran), won (met the
     floor; on a row from before the floor, more wins than losses), published, pending. Under ``selection:
     always`` a publish said nothing about the evaluation, so won and published are counted apart; under the floor a
     publish is a win, and the two agree unless a release waits as pending."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
-        # A mutation came back: a step that skipped on a refusal or on a failed step carries none.
+        # A patch came back: a step that skipped on a refusal or on a failed step carries none.
         "answered": sum(1 for r in results if r.get("filed") and r.get("kinds") not in (None, "-")),
         "admitted": sum(1 for r in results if was_evaluated(r)),
         "won": sum(1 for r in results if _won(r)),
@@ -526,13 +482,13 @@ def demo(mode):
         raise SystemExit(f"no step settled the request within {STEP_TIMEOUT_S:.0f} s; check work/reef.log")
     metrics = row.get("metrics") or {}
     selection_result = result_of(row)
-    mutations = mutations_of(metrics)
+    changes = changes_of(metrics)
     say(f"result: {selection_result}; evaluation {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
-    say(f"mutations: {'; '.join(mutations) or 'none'}")
+    say(f"changes: {'; '.join(changes) or 'none'}")
     promoted = None
     if row.get("pending"):
         promoted = promote(client, rows, row, run_dir)
-    requires, met = setup_if_required(client)
+    requires = _manifest(client).get("requires") or []
     result = {
         "request": text,
         "result": selection_result,
@@ -543,14 +499,10 @@ def demo(mode):
         "requires": _requires_of(requires),
         "proposer_seconds": metrics.get("proposer_seconds", "-"),
     }
-    if not met:
-        record["result"] = {**result, "installed": "-", "setup": "unmet"}
-        _write_record(record_path, record)
-        raise SystemExit(2)
     if selection_result == "selected" or promoted:
         installed = install()
         if installed is None:
-            record["result"] = {**result, "installed": "-", "setup": "refused at install"}
+            record["result"] = {**result, "installed": "-", "setup": "unmet requires"}
             _write_record(record_path, record)
             raise SystemExit(2)
     else:
@@ -637,7 +589,7 @@ def measure(n):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="run.py",
-        description="Reefine on reef-pi: the two demos and the measurement; start it through ./run.sh",
+        description="Reefine on pi: the two demos and the measurement; start it through ./run.sh",
     )
     modes = parser.add_subparsers(dest="mode", required=True)
     modes.add_parser("install", help="install the served head into work/harness (run.sh does this first)")

@@ -1,45 +1,16 @@
-"""The plugin classes the serve files name: ``evolution.propose`` and ``evolution.evaluate`` for both variants.
+"""The plugin classes the serve files name: ``evolution.propose`` and ``evolution.evaluate``.
 
 They import Reef, so they live apart from ``evolution.py`` and
 ``native_evolution.py``, which ``run.py`` imports with only reef-client
-installed. Each class delegates to its module's ``propose`` or ``evaluate``.
+installed. The pi variant proposes with the built-in Reefine text proposer;
+these classes are the scorers of both variants and the native proposer.
 """
 
-from collections.abc import Mapping, Sequence
-from typing import Any
-
 from reef.evaluation.harness import EpisodeScorer
-from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.tree.mutations import Mutation
-from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
-from reef.train.types import TrajectoryItem
+from reef.train.harness_backend.contract import ProposalContext, Proposer, TreeProposal
 
 from . import evolution, native_evolution
-
-
-class SelfProposer(Proposer):
-    """``evolution.propose``: the served model proposes one skill change over its failures, or answers a request."""
-
-    @property
-    def reads_requests(self) -> bool:
-        return True
-
-    def propose(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
-        models: ModelBindings,
-        *,
-        manifest: FailureManifest | None = None,
-        rejected: Sequence[Mapping[str, Any]] = (),
-        sources: Sequence[Mapping[str, Any]] = (),
-        requests: Sequence[Mapping[str, Any]] = (),
-        entries: Sequence[Mapping[str, Any]] = (),
-        agent_host: AgentHost | None = None,
-    ) -> Mutation | Sequence[Mutation] | StepProposal | None:
-        return evolution.propose(nodes, samples, models, requests=requests, entries=entries)
 
 
 class AnswerScorer(EpisodeScorer):
@@ -52,20 +23,9 @@ class AnswerScorer(EpisodeScorer):
 class NativeSelfProposer(Proposer):
     """``native_evolution.propose``: one change to a skill, tool, hook, the loop graph or its agents."""
 
-    def propose(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
-        models: ModelBindings,
-        *,
-        manifest: FailureManifest | None = None,
-        rejected: Sequence[Mapping[str, Any]] = (),
-        sources: Sequence[Mapping[str, Any]] = (),
-        requests: Sequence[Mapping[str, Any]] = (),
-        entries: Sequence[Mapping[str, Any]] = (),
-        agent_host: AgentHost | None = None,
-    ) -> Mutation | Sequence[Mutation] | StepProposal | None:
-        return native_evolution.propose(nodes, samples, models)
+    def propose(self, context: ProposalContext) -> TreeProposal | None:
+        patch = native_evolution.propose(context.tree, context.samples, context.models)
+        return None if patch is None else TreeProposal(patch)
 
 
 class NativeAnswerScorer(EpisodeScorer):

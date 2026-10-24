@@ -719,7 +719,12 @@ class Server(ServeState, ReleaseUpdateListener):
     def turn(
         self, prompt: str, session_id: str | None, workdir: Path, sink: EventSink | None = None
     ) -> dict[str, Any]:
-        """One turn on one session; the events go to ``sink`` as written and the result comes back."""
+        """One turn on one session; the events go to ``sink`` as written and the result comes back.
+
+        The result holds the exit status, the session, the turn number, the
+        final text, and ``receipts``: the receipts of the model calls the turn
+        made, in order, which a report references.
+        """
         if session_id is not None and not _SESSION_NAME.fullmatch(session_id):
             raise ServeError(f"session id {session_id!r} must match {_SESSION_NAME.pattern}")
         with self._turn_lock:
@@ -758,6 +763,8 @@ class Server(ServeState, ReleaseUpdateListener):
                 self._current = None
                 session.close()
                 self._drain_pending()
+            # The receipts of the model calls this turn made, so its caller reports feedback against them.
+            result["receipts"] = [capture["receipt"] for capture in self._proxy.drain() if capture.get("receipt")]
         self._drain_if_idle()
         return result
 

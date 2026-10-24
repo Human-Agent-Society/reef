@@ -11,7 +11,7 @@ reef:
   run-dir: tutorials/evolve-your-harness/work/deployment/stack
 
 recipe:
-  implementation: reef.recipe.cordis:CordisRecipe
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
   # The recipe uses the upstream runtime's model for evaluation as well as serving.
   config:
     evolution:
@@ -19,17 +19,12 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      propose: tutorials.evolve-your-harness.harness.plugins:SelfProposer
+      propose: reef.recipe.reefine.proposer:TextProposer
       evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
-      # The seed carries the /reefine command and the pi extension API skill the proposer reads.
-      requests: true
-      # The notice at session start offers the update once the head moved.
-      version_check: true
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
       # No binary: at startup reef installs the descriptor's pinned pi under
-      # ~/.local/share/reef-harness/pi, shared with the client install script.
-      # Set evolution.binary to a path to use an install of your own instead.
+      # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.
       tasks:
         - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
           integer alone on the last line.'
@@ -58,19 +53,8 @@ recipe:
           9,30
 
           Reply with the median as a plain integer alone on the last line.'
-      seed:
-        - id: answer-style
-          name: skill
-          config:
-            name: answer-style
-            text: '# answer-style
-
-
-              Starter skill. The evolution loop replaces this placeholder with
-
-              concrete guidance learned from failing tasks.
-
-              '
+      # The first tree: the starter skill (run from the repository root).
+      seed: tutorials/evolve-your-harness/seeds/pi
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
 
