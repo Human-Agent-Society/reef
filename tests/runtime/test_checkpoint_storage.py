@@ -622,18 +622,21 @@ def write_running(storage: CheckpointStorage, committed: dict | None, **override
 
 
 @pytest.mark.unit
-def test_preflight_restores_the_committed_marker_when_the_killed_job_saved_nothing(tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize("megatron_lora_rank", [0, 8], ids=["full-weight", "per-scenario-lora"])
+def test_preflight_restores_the_committed_marker_when_the_killed_job_saved_nothing(
+    tmp_path: Path, capsys, megatron_lora_rank: int
+) -> None:
     storage = _storage(tmp_path)
     _complete(storage, 0)
     committed = committed_marker(storage)
     write_running(storage, committed)
 
-    prepare_checkpoint_storage(checkpoint_args(storage), RetentionConfig())
+    prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) == committed
     assert INTERRUPTED_JOB_ID in capsys.readouterr().err
     # The restored state is the documented manual recovery's, so a second start passes too.
-    prepare_checkpoint_storage(checkpoint_args(storage), RetentionConfig())
+    prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank), RetentionConfig())
 
 
 @pytest.mark.unit
@@ -642,7 +645,6 @@ def test_preflight_restores_the_committed_marker_when_the_killed_job_saved_nothi
     [
         "no-committed-marker",
         "commit-not-acknowledged",
-        "per-scenario-lora",
         "rollout-files-present",
         "tracker-names-the-rollout",
         "committed-marker-for-another-rollout",
@@ -658,15 +660,12 @@ def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, ca
     _complete(storage, 0)
     committed = committed_marker(storage)
     running_overrides: dict = {}
-    megatron_lora_rank = 0
     load: str | None | object = _LOAD_SAME_AS_SAVE
     tracker_path = storage.megatron_root / "latest_checkpointed_iteration.txt"
     if case == "no-committed-marker":
         committed = None
     elif case == "commit-not-acknowledged":
         committed["commit_acknowledged"] = False
-    elif case == "per-scenario-lora":
-        megatron_lora_rank = 8
     elif case == "rollout-files-present":
         _write_bytes(storage.pair_paths(1)[1], 60)
     elif case == "tracker-names-the-rollout":
@@ -691,7 +690,7 @@ def test_preflight_keeps_refusing_states_it_cannot_prove_safe(tmp_path: Path, ca
     running = write_running(storage, committed, **running_overrides)
 
     with pytest.raises(RuntimeError, match=f"ambiguous training job {INTERRUPTED_JOB_ID}"):
-        prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank, load=load), RetentionConfig())
+        prepare_checkpoint_storage(checkpoint_args(storage, load=load), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) == running
 
@@ -707,32 +706,34 @@ def write_unsaved(storage: CheckpointStorage, running: bool) -> dict:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("running", [False, True])
-def test_preflight_deletes_the_marker_of_a_job_without_a_checkpoint(tmp_path: Path, capsys, running: bool) -> None:
+@pytest.mark.parametrize("megatron_lora_rank", [0, 8], ids=["full-weight", "per-scenario-lora"])
+def test_preflight_deletes_the_marker_of_a_job_without_a_checkpoint(
+    tmp_path: Path, capsys, running: bool, megatron_lora_rank: int
+) -> None:
     storage = _storage(tmp_path)
     _complete(storage, 0)
     write_unsaved(storage, running)
 
-    prepare_checkpoint_storage(checkpoint_args(storage), RetentionConfig())
+    prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) is None
-    assert "job job-1 (rollout 1) saved no checkpoint. Training continues from the checkpoint of rollout 0." in (
-        capsys.readouterr().err
-    )
+    assert (
+        "job job-1 (rollout 1) saved no checkpoint. "
+        "The weights of each scenario continue from their last checkpoint, at rollout 0 or before. "
+        "The jobs of a scenario after its last checkpoint do not train again."
+    ) in capsys.readouterr().err
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("running", [False, True])
-@pytest.mark.parametrize("case", ["per-scenario-lora", "load-other-checkpoint", "newer-record", "tracker-not-before"])
+@pytest.mark.parametrize("case", ["load-other-checkpoint", "newer-record", "tracker-not-before"])
 def test_preflight_keeps_the_marker_of_a_job_without_a_checkpoint_when_it_cannot_prove_safety(
     tmp_path: Path, running: bool, case: str
 ) -> None:
     storage = _storage(tmp_path)
     _complete(storage, 0)
-    megatron_lora_rank = 0
     load: str | None | object = _LOAD_SAME_AS_SAVE
-    if case == "per-scenario-lora":
-        megatron_lora_rank = 8
-    elif case == "load-other-checkpoint":
+    if case == "load-other-checkpoint":
         other = tmp_path / "other-megatron"
         other.mkdir()
         (other / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
@@ -749,6 +750,6 @@ def test_preflight_keeps_the_marker_of_a_job_without_a_checkpoint_when_it_cannot
         f"ambiguous training job {INTERRUPTED_JOB_ID}" if running else r"job job-1 \(rollout 1\) saved no checkpoint"
     )
     with pytest.raises(RuntimeError, match=match):
-        prepare_checkpoint_storage(checkpoint_args(storage, megatron_lora_rank, load=load), RetentionConfig())
+        prepare_checkpoint_storage(checkpoint_args(storage, load=load), RetentionConfig())
 
     assert durable_io.read_marker(storage.marker_path) == marker

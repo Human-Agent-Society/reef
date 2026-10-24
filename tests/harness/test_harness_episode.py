@@ -337,6 +337,12 @@ def test_pi_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
         read_pi_session(tmp_path)
 
 
+def test_pi_reader_keeps_unicode_line_separators_inside_an_event(tmp_path: Path) -> None:
+    events = [{"type": "message", "text": "one\u2028two\x85three"}, {"type": "agent_end"}]
+    (tmp_path / "session.jsonl").write_text("".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events))
+    assert list(read_pi_session(tmp_path)) == events
+
+
 def test_pi_reader_parses_a_captured_real_session() -> None:
     # Real bytes from a live pi 0.84.2 run, refreshed by the harness-smoke
     # workflow's artifact (see the fixture directory's README.md).

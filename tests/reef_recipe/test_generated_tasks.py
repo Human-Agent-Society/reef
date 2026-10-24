@@ -119,12 +119,15 @@ def played(processor: TrainingPipeline, task: str, index: int, score: float, **f
     processor.push(report(f"rep-{task}-{index}", f"rec-{task}-{index}", task, score, **fields))
 
 
-def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
-    def play(reward: float | None, error: str = "") -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
+def test_rewards_of_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran() -> None:
+    def episode(reward: float | None, error: str = "") -> TaskPlay:
+        return TaskPlay(Path("t"), "t", "e", reward, {}, error, (), 0, (), None)
 
-    assert rewards_of((play(1.0), play(None), play(None, "the trial raised"))) == (1.0, 0.0)
-    assert rewards_of((play(0.5, "a late error"),)) == (0.5,)
+    assert rewards_of((episode(1.0), episode(None), episode(None, "the trial raised"))) == (1.0, 0.0)
+    assert rewards_of((episode(0.5, "a late error"),)) == (0.5,)
+    assert (
+        episode(None, "the sandbox is gone").is_infrastructure_failure and not episode(0.0).is_infrastructure_failure
+    )
 
 
 def test_reported_task_name_reads_the_task_players_metadata() -> None:
@@ -564,7 +567,7 @@ def test_a_refused_write_or_a_task_the_agent_cannot_play_comes_back_unplayed(tmp
     p, _ = rounds(tmp_path / "second", task_generator, unplayable)
     assert not looked(p)
     assert [call["arm"] for call in unplayable.plays] == ["plain"]
-    assert unplayable.deleted == ["harbor-00000-000"]
+    assert unplayable.deleted == [], "the staged copy stays for the next play"
     assert task_generator.results[0][0].error == "the agent could not play the task: Failed to start tmux session."
 
 

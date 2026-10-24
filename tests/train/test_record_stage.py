@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -573,3 +574,55 @@ def test_the_batch_stage_buffer_size_is_its_own_or_else_the_context_default() ->
     assert PairBatches(PipelineContext("s", default_buffer_size=12), None).buffer_size == 12
     assert PairBatches(PipelineContext("s", default_buffer_size=12), 3).buffer_size == 3
     assert PairBatches(PipelineContext("s"), None).buffer_size is None, "no default holds every sample"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("legacy_stripped", [False, True], ids=["captured", "legacy-stripped"])
+@pytest.mark.parametrize("replay_before_commit", [False, True], ids=["live", "replay"])
+@pytest.mark.parametrize("references", [("aborted",), ("aborted", "other")], ids=["single", "mixed"])
+def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
+    replay_before_commit: bool, references: tuple[str, ...], legacy_stripped: bool
+) -> None:
+    records = SQLiteRecordStore()
+    aborted = inference("aborted")
+    aborted = replace(
+        aborted,
+        payload={
+            **aborted.payload,
+            "response": {"training": {"finish_reason": "abort", "tokens": [10, 20], "loss_mask": [1]}},
+        },
+    )
+    if legacy_stripped:
+        aborted = replace(
+            aborted,
+            payload={
+                "response": {
+                    "stop_reason": "end_turn",
+                    "stream_delivery": {"complete": False, "error": "upstream engine aborted the generation"},
+                }
+            },
+        )
+    rejected_report = report("aborted-report", *references)
+    for record in (aborted, inference("other"), rejected_report, inference("valid"), report("valid-report", "valid")):
+        records.append(record)
+    trainer = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    if replay_before_commit:
+        trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
+    batch = trainer.reserve_training_batch()
+    assert batch is not None
+    assert len(batch.items) == 1
+    assert batch.items[0].source_agent_record_ids == ("valid", "valid-report")
+    execution = trainer.execute_reserved_step(0)
+    assert execution.result is not None
+    prepared = trainer.prepare_commit(execution.result)
+    assert prepared.consumed_ids == {"valid", "valid-report", "aborted-report", *references}
+    trainer.commit(prepared)
+    assert not trainer.pipeline.releasable_record_ids()
+
+    restored = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
+    records.append(report("later-report", "aborted"))
+    assert restored.reserve_training_batch() is None
+    assert "later-report" in restored.skipped_record_ids
+    # Consumption changes training eligibility, not the stored diagnostic payload.
+    assert records.get("s", "aborted") == aborted
