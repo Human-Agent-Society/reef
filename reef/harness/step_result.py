@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-
 def missed_episodes(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     """The candidate episodes a step's evaluation names that failed or scored below its floor, from the row's
     ``candidate_episodes`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none."""

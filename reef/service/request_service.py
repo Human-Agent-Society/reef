@@ -24,13 +24,13 @@ from reef.dispatcher import Dispatcher
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
+from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.scenario.release_files import component_files
 from reef.train.harness_backend.capabilities import PatchAdmission, StepProgressReader, StepRecords
 from reef.train.harness_backend.inbox import ProposalInbox
 from reef.train.trainer import Trainer

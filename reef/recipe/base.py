@@ -40,8 +40,8 @@ from reef.surface.weights import create_weight_surface
 from reef.task2batch import NoBatches
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
-from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.backend import CommittedReleases, ComponentReleases
+from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 

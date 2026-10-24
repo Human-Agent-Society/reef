@@ -60,7 +60,9 @@ LAYOUT = {
     TreeKind.SKILL: re.compile(rf"skills/(?P<name>{NAME_PATTERN})/SKILL\.md"),
     TreeKind.AGENT_COMMAND: re.compile(rf"commands/(?P<name>{NAME_PATTERN})\.md"),
     # The name is matched lazily, so the suffix is the last one: "a.b.ts" is the extension "a.b".
-    TreeKind.CODE_EXTENSION: re.compile(r"extensions/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*?)(?P<suffix>\.ts|\.mjs|\.js|\.py)"),
+    TreeKind.CODE_EXTENSION: re.compile(
+        r"extensions/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*?)(?P<suffix>\.ts|\.mjs|\.js|\.py)"
+    ),
     TreeKind.NATIVE_TOOL: re.compile(rf"native/tools/(?P<name>{NAME_PATTERN})\.py"),
     TreeKind.NATIVE_HOOK: re.compile(rf"native/hooks/(?P<name>{NAME_PATTERN})\.py"),
     TreeKind.NATIVE_GRAPH: re.compile(rf"native/graphs/(?P<name>{NAME_PATTERN})\.json"),

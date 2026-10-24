@@ -91,8 +91,6 @@ def require_mapping(config: Any) -> Mapping[str, Any]:
     return config
 
 
-
-
 def require_string_field(config: Mapping[str, Any], key: str) -> str:
     value = config.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -153,8 +151,6 @@ def reject_inline_secret(data: Any, path: str) -> None:
             reject_inline_secret(value, f"{path}[{index}]")
 
 
-
-
 def secret_shaped(text: str) -> bool:
     """Whether free text carries a credential-shaped literal; shared by tree validation and saved task checks."""
     return SECRET_TEXT.search(text) is not None
@@ -201,12 +197,6 @@ def reject_secret_shaped_text(text: str, where: str) -> None:
         )
 
 
-
-
-
-
-
-
 #: A write to the harness process's own stdout or stderr from inside an extension.
 CONSOLE_WRITE = re.compile(
     r"\bconsole\.(?:log|error|warn|info|debug|trace|dir|table|group|groupEnd|time|timeEnd|count|assert)\s*\("
@@ -238,12 +228,6 @@ def reject_unguarded_console_write(code: str, where: str) -> None:
             )
         if line.strip():
             previous = line
-
-
-
-
-
-
 
 
 def graph_stage(name: str, stage: Any) -> str:
@@ -446,8 +430,6 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     return options
 
 
-
-
 def distinct_names(options: Mapping[str, Any], key: str, where: str, limit: int | None = None) -> None:
     value = options.get(key, [])
     if not isinstance(value, Sequence) or isinstance(value, str) or len(set(value)) < len(value):
@@ -487,8 +469,6 @@ def validate_native_agent(config: Any) -> Mapping[str, Any]:
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= cap):
             raise ValueError(f"native_agent '{key}' must be an integer from 1 to {cap}")
     return options
-
-
 
 
 def unread_field(node: ast.AST, field: str) -> bool:

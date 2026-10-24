@@ -350,4 +350,3 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 
 - [SGLang](https://github.com/sgl-project/sglang) — 高性能推理
 - [slime](https://github.com/THUDM/slime) — 模型权重训练
-- [cordis](https://github.com/cordiverse/cordis) — harness 进化

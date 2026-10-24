@@ -677,7 +677,7 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
 
 
 class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin, SelectionPlugin):
-    """Cordis's default evaluation: measure through the candidate backend, decide by score comparison."""
+    """Harness evolution's default evaluation: measure through the candidate backend, decide by score comparison."""
 
     def __init__(self, candidate_backend: Any, *, min_win_margin: int = 0) -> None:
         super().__init__(min_win_margin=min_win_margin)

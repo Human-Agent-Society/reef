@@ -33,12 +33,7 @@ from reef.core.batches import TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import (
-    EVALUATION_SIDES,
-    FailureObservation,
-    HarnessCandidate,
-    HarnessEpisodeEvaluator,
-)
+from reef.evaluation.harness import EVALUATION_SIDES, FailureObservation, HarnessCandidate, HarnessEpisodeEvaluator
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch, ValidationResult, locate, validate_patch
@@ -217,8 +212,31 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             started_at=time.time(),
             step_record=None if step_dir is None else str(step_dir),
         )
-        if automatic and self.recheck_due(state):
-            raise NotImplementedError("the recheck of a published tree is not ported to the tree backend yet")
+        if automatic and self.recheck_due(state) and state.rollback_release_id is not None:
+            # The candidate is the tree the latest publish replaced; it wins only when the head got worse.
+            target = self.releases.release(state.rollback_release_id)
+            target_tree = HarnessTree(target.files)
+            drifted = state.rollback_context != self.evaluation_context()
+            metrics.update(
+                {
+                    "recheck": True,
+                    "recheck_reason": "drift" if drifted else "cadence",
+                    "recheck_release_id": target.release_id,
+                    # A recheck asks the proposer nothing, so its record holds episodes only.
+                    "proposer_calls": 0,
+                }
+            )
+            candidate = HarnessCandidate(
+                candidate_id=f"{batch.batch_id}:recheck",
+                candidate_tree=target_tree,
+                current_tree=head_tree,
+                patch=head_tree.diff(target_tree),
+                evaluation_tasks=step_tasks.tasks,
+                recheck=True,
+                record_dir=step_dir,
+                method_state=state.method_state,
+            )
+            return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
         claimed = None if self.inbox is None or not automatic else self.inbox.claim()
         if claimed is not None:
             metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "reason": claimed.reason}
@@ -227,21 +245,25 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             if not validation.passed:
                 self.inbox_refuse(claimed.id, validation.message())
         else:
-            proposal, validation = self.propose(batch.request, samples, state, head_tree, step_dir, metrics)
+            proposal, validation = self.propose(
+                batch.request, samples, step_tasks.tasks, state, head_tree, step_dir, metrics
+            )
         if proposal is None:
             return skipped(state, metrics, "no proposal")
+        if proposal.notes:
+            metrics["proposal_notes"] = bounded(proposal.notes)
+        if proposal.method_state is not None:
+            state = replace(state, method_state=proposal.method_state)
+        if not proposal.patch.changes:
+            return skipped(state, metrics, "the proposal changes nothing")
         self.records.write(step_dir, PATCH_FILE, bounded(proposal.patch.to_json()))
         if not validation.passed:
             return skipped(state, metrics, validation.message())
-        if proposal.notes:
-            metrics["proposal_notes"] = bounded(proposal.notes)
         if batch.request is not None:
             requires = merge_requires(batch.request.requires, proposal.requires)
             if len(requires) > MAX_REQUIRES:
                 return skipped(state, metrics, f"proposal requires {len(requires)} items; at most {MAX_REQUIRES}")
             metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
-        method_state = state.method_state if proposal.method_state is None else proposal.method_state
-        state = replace(state, method_state=method_state)
         candidate = HarnessCandidate(
             candidate_id=f"{batch.batch_id}:candidate",
             candidate_tree=head_tree.apply(proposal.patch),
@@ -250,7 +272,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             evaluation_tasks=step_tasks.tasks,
             proposal_id=None if claimed is None else claimed.id,
             record_dir=step_dir,
-            method_state=method_state,
+            method_state=state.method_state,
         )
         return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
 
@@ -258,6 +280,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         self,
         request: TrainingRequest | None,
         samples: tuple[TrajectoryItem, ...],
+        evaluation_tasks: tuple[str, ...],
         state: HarnessState,
         head_tree: HarnessTree,
         step_dir: Path | None,
@@ -272,6 +295,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             samples=samples,
             sources=tuple(source_of(sample) for sample in samples),
             request=request,
+            evaluation_tasks=evaluation_tasks,
             models=budgeted_bindings(self.models, calls),
             manifest=state.manifest,
             rejected=state.rejected,
@@ -285,7 +309,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         try:
             for _ in range(PROPOSAL_ATTEMPTS):
                 proposal = self.proposer.propose(context)
-                if proposal is None:
+                if proposal is None or not proposal.patch.changes:
                     break
                 validation = validate_patch(head_tree, proposal.patch, self.descriptor)
                 if validation.passed:
@@ -329,21 +353,36 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             }
         context = self.evaluation_context()
         rejected = state.rejected
-        if not decision.selected and self.limits.max_rejected_history:
+        if not candidate.recheck and not decision.selected and self.limits.max_rejected_history:
             rejected = (*rejected, RejectedProposal(state.steps, candidate.patch, decision.reason))
             rejected = rejected[-self.limits.max_rejected_history :]
+        # A publish keeps the tree it replaced as the recheck's target; a recheck that rolls back consumes it.
         rollback_release_id, rollback_context = state.rollback_release_id, state.rollback_context
-        if decision.selected and self.limits.recheck_every:
+        if candidate.recheck:
+            metrics["rolled_back"] = decision.selected
+            if decision.selected:
+                rollback_release_id, rollback_context = None, None
+        elif decision.selected and self.limits.recheck_every:
             rollback_release_id, rollback_context = str(metrics["head_release_id"]), context
+        # A recheck is not a proposal, so it leaves the failure streak alone.
+        if candidate.recheck:
+            failure_streak = state.failure_streak
+        else:
+            failure_streak = 0 if decision.selected else state.failure_streak + 1
         state = replace(
             state,
-            failure_streak=0 if decision.selected else state.failure_streak + 1,
+            failure_streak=failure_streak,
             manifest=manifest,
             rejected=rejected,
             rollback_release_id=rollback_release_id,
             rollback_context=rollback_context,
-            last_outcome=StepOutcome(
-                state.steps, candidate.patch, decision.selected, decision.reason, candidate_scores, current_scores
+            # A recheck evaluated no proposal, so the method's latest outcome stays the one it had.
+            last_outcome=(
+                state.last_outcome
+                if candidate.recheck
+                else StepOutcome(
+                    state.steps, candidate.patch, decision.selected, decision.reason, candidate_scores, current_scores
+                )
             ),
         )
         metrics.update(
@@ -366,7 +405,9 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         candidate.candidate_tree.write(directory)
         artifact = Artifact.local(directory)
         self.local_artifacts[state.steps] = artifact
-        return TrainStepResult(state.to_json(), metrics, artifact=artifact, pending=self.held_for_review(candidate.patch))
+        # A rollback serves a tree that was published before, so only publish: review holds it.
+        pending = self.limits.publish == "review" if candidate.recheck else self.held_for_review(candidate.patch)
+        return TrainStepResult(state.to_json(), metrics, artifact=artifact, pending=pending)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None

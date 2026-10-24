@@ -395,4 +395,3 @@ We are particularly grateful to these projects which power important parts of Re
 
 - [SGLang](https://github.com/sgl-project/sglang) — high-performance inference
 - [slime](https://github.com/THUDM/slime) — model weight training
-- [cordis](https://github.com/cordiverse/cordis) — harness evolution

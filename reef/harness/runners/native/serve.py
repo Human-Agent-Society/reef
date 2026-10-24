@@ -396,7 +396,9 @@ class Server(ServeState, ReleaseUpdateListener):
             try:
                 manifest = self.client.fetch(release)
             except ReleaseClientError as exc:
-                raise ServeError(f"no source tree under {self.dest / SOURCE_DIR} and Reef answered none: {exc}") from exc
+                raise ServeError(
+                    f"no source tree under {self.dest / SOURCE_DIR} and Reef answered none: {exc}"
+                ) from exc
             stored = tree_of(manifest)
             release = str(manifest["release_id"])
             parent = None if manifest.get("parent_release_id") is None else str(manifest["parent_release_id"])

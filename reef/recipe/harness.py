@@ -518,7 +518,9 @@ class HarnessEvolutionRecipe(Recipe):
             scorer = EpisodeScorer.from_setting(
                 evolution.get("evaluate"), setting="evolution.evaluate", default=spec.scorer
             )
-            propose = Proposer.from_setting(evolution.get("propose"), setting="evolution.propose", default=spec.proposer)
+            propose = Proposer.from_setting(
+                evolution.get("propose"), setting="evolution.propose", default=spec.proposer
+            )
             promote = (
                 Promoter.from_setting(evolution["promote"], setting="evolution.promote")
                 if "promote" in evolution
@@ -748,7 +750,9 @@ class HarnessEvolutionRecipe(Recipe):
                 max_promoted_per_client=self.max_promoted_per_client,
             ),
             models=models,
-            model_resolver=None if self.scenario_model is None else ScenarioModels(self.scenario_model, self, scenario),
+            model_resolver=(
+                None if self.scenario_model is None else ScenarioModels(self.scenario_model, self, scenario)
+            ),
             limits=StepLimits(
                 max_steps=self.max_steps,
                 max_failure_streak=self.max_failure_streak,

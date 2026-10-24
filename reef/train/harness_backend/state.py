@@ -57,7 +57,10 @@ class HarnessState:
                 raise ValueError(f"HarnessState.{label} must be an integer of at least 0")
         if len(set(self.promoted_tasks)) != len(self.promoted_tasks):
             raise ValueError("HarnessState.promoted_tasks must not repeat a prompt")
-        if any(isinstance(count, bool) or not isinstance(count, int) or count < 1 for count in self.promoted_clients.values()):
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 1
+            for count in self.promoted_clients.values()
+        ):
             raise ValueError("HarnessState.promoted_clients counts must be positive integers")
         if (self.rollback_release_id is None) != (self.rollback_context is None):
             raise ValueError("HarnessState rollback_release_id and rollback_context are both set or both None")
@@ -89,7 +92,9 @@ class HarnessState:
             failure_streak=int(value.get("failure_streak", 0)),
             manifest=None if manifest is None else FailureManifest.from_state(manifest),
             promoted_tasks=tuple(str(task) for task in value.get("promoted_tasks", ())),
-            promoted_clients={str(name): int(count) for name, count in dict(value.get("promoted_clients", {})).items()},
+            promoted_clients={
+                str(name): int(count) for name, count in dict(value.get("promoted_clients", {})).items()
+            },
             rejected=tuple(RejectedProposal.from_json(item) for item in value.get("rejected_proposals", ())),
             rollback_release_id=value.get("rollback_release_id"),
             rollback_context=value.get("rollback_context"),

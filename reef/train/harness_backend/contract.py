@@ -27,6 +27,7 @@ from reef.harness.tree import HarnessTree, TreePatch
 from reef.sandbox.process import EpisodeExecutor
 from reef.train.harness_backend.manifest import FailureManifest
 
+
 @dataclass(frozen=True)
 class SampleSource:
     """Where one trace sample came from.
@@ -182,8 +183,9 @@ class ProposalContext:
     ``SampleSource`` per sample in the same order; a sample's ``score`` is
     ``None`` when the deployment batches unscored traffic. ``request`` is the
     training instruction this step answers, ``None`` for an automatic step.
-    ``models`` are the bindings the proposer may call, every call counted
-    against the step's budget. ``manifest`` is the previous step's failure
+    ``evaluation_tasks`` are the tasks this step's evaluation runs, the seed
+    tasks first, then the promoted ones. ``models`` are the bindings the
+    proposer may call, every call counted against the step's budget. ``manifest`` is the previous step's failure
     manifest, ``None`` before the first. ``rejected`` holds the latest
     rejected proposals, oldest first. ``problems`` is empty on the first
     proposal of a step and holds the validation problems of the previous
@@ -201,6 +203,7 @@ class ProposalContext:
     samples: tuple[TrajectoryItem, ...]
     sources: tuple[SampleSource, ...]
     request: TrainingRequest | None
+    evaluation_tasks: tuple[str, ...]
     models: ModelBindings
     manifest: FailureManifest | None = None
     rejected: tuple[RejectedProposal, ...] = ()
@@ -219,15 +222,16 @@ class ProposalContext:
 class TreeProposal:
     """What a proposer returns for one step.
 
-    Values: ``patch`` changes the head tree, and must change at least one
-    file. ``requires`` are what the change needs from the person's machine,
-    beyond the request's own (``reef.core.requirements`` items). ``notes`` is
-    the proposer's JSON record of the step, which the commit metrics carry
-    and the backend never reads. ``method_state`` replaces the method's
-    committed state; ``None`` keeps it.
-    Purpose: ``Proposer.propose`` makes it; the backend applies, validates
-    and evaluates ``patch``, and commits ``method_state`` with the step
-    whatever the selection decides.
+    Values: ``patch`` changes the head tree; the empty patch changes nothing.
+    ``requires`` are what the change needs from the person's machine, beyond
+    the request's own (``reef.core.requirements`` items). ``notes`` is the
+    proposer's JSON record of the step, which the commit metrics carry and
+    the backend never reads. ``method_state`` replaces the method's committed
+    state; ``None`` keeps it.
+    Purpose: ``Proposer.propose`` makes it. The backend commits
+    ``method_state`` and ``notes`` with the step whatever happens next. It
+    skips the step for the empty patch, and otherwise applies, validates and
+    evaluates ``patch``.
     """
 
     patch: TreePatch
@@ -236,17 +240,16 @@ class TreeProposal:
     method_state: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if not self.patch.changes:
-            raise ValueError("a TreeProposal patch must change at least one file; return None to skip the step")
         object.__setattr__(self, "requires", tuple(parse_requires(list(self.requires))))
 
 
 class Proposer(ConfiguredPlugin, ABC):
     """Base class of a harness evolution method's proposer.
 
-    ``propose`` returns the patch for the step, or ``None`` to skip it. A
-    deployment names the class in ``evolution.propose``, and the recipe builds
-    it with ``from_config``.
+    ``propose`` returns the patch for the step, or ``None`` to skip it with
+    nothing to record; a ``TreeProposal`` with the empty patch skips it and
+    records the method's state. A deployment names the class in
+    ``evolution.propose``, and the recipe builds it with ``from_config``.
     """
 
     @property
@@ -273,7 +276,9 @@ class Promoter(ConfiguredPlugin, ABC):
     """
 
     @abstractmethod
-    def promote(self, samples: tuple[TrajectoryItem, ...], *, manifest: FailureManifest | None = None) -> Sequence[str]:
+    def promote(
+        self, samples: tuple[TrajectoryItem, ...], *, manifest: FailureManifest | None = None
+    ) -> Sequence[str]:
         """The prompts this step should promote into the evaluation tasks."""
 
 
