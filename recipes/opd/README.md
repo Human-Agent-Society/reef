@@ -5,7 +5,7 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 - Method: [Thinking Machines Lab, On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - Reference implementation: the [tinker-cookbook distillation recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/dfe4d77e8e8c/tinker_cookbook/recipes/distillation) at `dfe4d77e8e8c`. The Reef implementation configures the Slime backend's distillation base (`reef/train/slime_backend/distill/`) and makes no Tinker API calls.
 - Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`).
-- Claim scope: the [math example](examples/math/README.md) distils Qwen3-32B into a Qwen3-8B OpenThoughts3-SFT student through the teacher engine and raises AIME'24 accuracy from 41.0% to about 50%.
+- Claim scope: the [math example](examples/math/README.md) distils Qwen3-32B into a Qwen3-8B OpenThoughts3-SFT student through the teacher engine and raises AIME'24 accuracy from 41.0% to about 50%, in a run recorded before advantage normalization.
 
 ## Layout
 
@@ -23,12 +23,19 @@ opd/
 
 `--opd-teacher=separate` names a checkpoint (`--opd-teacher-checkpoint`) that the teacher pass swaps into the actor's model layout, so teacher and student must share the architecture, parallel layout and token ids. `--opd-top-k=1` selects the base's sampled-token reverse-KL estimator: the loss uses the teacher's log-probability of the student's sampled token, normalized over the full vocabulary, with the score-function gradient. The other divergences and representations of the base are reachable through the inherited `--opd-*` flags; changing them changes the method.
 
-For optional advantage clipping, set `opd-advantage-clip: 1.0` under
-`training.options`. It bounds the sampled teacher/student log-prob difference
-to `[-1, 1]` before importance-sampling and sample weights. Score centering
-uses the same bound. The default is `0`, which leaves the gradient unchanged.
-Clipping requires sampled reverse KL with positive `opd-top-k` and
-`opd-top-k-distribution: renormalized`; the reported divergence stays unclipped.
+The gradient's raw per-token advantage is the teacher's log-probability of
+the sampled token minus the rollout engine's. The family centers these values
+and divides them by their standard deviation over every trained token of the
+training job. Normalization has no flag. The reported divergence stays
+unnormalized.
+
+For optional advantage clipping, set `opd-advantage-clip: 5.0` under
+`training.options`. It bounds the normalized advantage to `[-5, 5]` before
+importance-sampling and sample weights. Score centering uses the same
+advantage. The default is `0`, which applies no bound. Clipping requires
+sampled reverse KL with positive `opd-top-k` and
+`opd-top-k-distribution: renormalized`. The reported divergence stays
+unclipped.
 
 ## Teacher engine
 
