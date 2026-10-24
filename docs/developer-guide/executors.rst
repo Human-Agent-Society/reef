@@ -496,7 +496,11 @@ allocation when there is none. The selected protocol sets the session type:
   and the sender drives the engines through it. For example,
   ``slime-sglang-control-v2`` carries engine/lock handles consumed by the
   sender. This is an explicit transport integration, not a universal tensor
-  format.
+  format. ``reef-no-weight-transfer-v1`` is the native protocol of
+  ``inference.backend: none``, which runs no engine. Its receiver records one
+  runtime load ID; in place of a send, the trainer records the version of the
+  weights it keeps. Slime lists it after its engine protocol, so a receiver
+  with engines keeps that protocol.
 - Any other accepted protocol is delivered by Reef. The
   ``WeightTransferSession`` carries no receiver handle: the trainer writes
   files and the coordinator asks the receiver to load them.
@@ -725,8 +729,7 @@ The training payload carries the Reef ``scenario_step`` the job trains; the
 backend picks the checkpoint index from its own sequence, which the
 ``{rollout_id}`` checkpoint path template and the marker's ``rollout_id`` name.
 Every marker records both, and the coordinator's health reports the job's
-``scenario_step``. A marker of a job still out without ``scenario_step`` is
-invalid; a settled one an earlier release left behind is read as it is.
+``scenario_step``. A marker without ``scenario_step`` is invalid.
 
 Reef records ``RUNNING`` before calling ``train``, then invokes
 ``save_checkpoint`` and verifies the checkpoint directory. When the backend

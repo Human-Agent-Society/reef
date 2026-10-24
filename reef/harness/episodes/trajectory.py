@@ -124,7 +124,7 @@ def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
     """
     events: list[dict[str, Any]] = []
     for file in sorted(Path(path).rglob("*.jsonl")):
-        lines = file.read_text(encoding="utf-8").splitlines()
+        lines = file.read_text(encoding="utf-8").removesuffix("\n").split("\n")
         for index, line in enumerate(lines):
             if not line.strip():
                 continue

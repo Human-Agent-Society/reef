@@ -14,15 +14,18 @@ the job marker, written with each checkpoint, so a restart continues it.
 
 from __future__ import annotations
 
+import json
 import math
+import shutil
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA
 from reef.core.batches import StepScheduling, TrainingBatch
-from reef.runtime.executor import resolve
+from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
@@ -36,6 +39,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
+    WeightFiles,
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
 )
@@ -46,11 +50,7 @@ from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.batches import (
-    WORKER_SWITCH_KEY,
-    TrainingBatchProcessor,
-    optimizer_step_sizes,
-)
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
     configure_rollout_runtime,
@@ -96,6 +96,10 @@ class WorkerTrainingSettings:
     schedule_state: LearningRateScheduleState | None
 
 
+#: Where a file session's exported weights live, beside the HF and Megatron checkpoint roots.
+WEIGHT_FILES_DIRNAME = "weight-files"
+
+
 class _NullAlgorithm(SlimeAlgorithm):
     """Stateless no-op algorithm for bridges started without a loss family."""
 
@@ -111,7 +115,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
     This adapter has no inference control object and never reads or advances
     Reef's publication marker. Its context contains only scheduling values.
-    ``args`` are the arguments the workers started with.
+    ``args`` are the arguments the workers started with. ``version_receiver``
+    is the receiver of a ``reef-no-weight-transfer-v1`` session, or None for a
+    native one. With it, no weights leave the workers: preparing a send does
+    nothing, and a send records the runtime load ID in the receiver.
     """
 
     def __init__(
@@ -120,7 +127,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         *,
         batch_processor: TrainingBatchProcessor,
         args: SlimeArguments,
-        save_hf_template: str | None,
+        save_hf_template: str,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
         megatron_save_root: str | None = None,
@@ -141,8 +148,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_runtime: SlimeAlgorithm | None = None,
         score_centering: ScoreCenteringSettings | None = None,
         train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+        version_receiver: Executor | None = None,
+        weight_files_root: Path | None = None,
     ) -> None:
         self.train_rpc_timeout_s = train_rpc_timeout_s
+        self.version_receiver = version_receiver
+        #: Set for a file session: each publication exports the actor's weights here.
+        self.weight_files_root = weight_files_root
         self._worker_failure: ExecutorFailure | None = None
         self._score_centering = score_centering
         self._group = actor_group
@@ -163,7 +175,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         )
         self._context = TrainingContext(
             next_rollout_id=start_rollout_id,
-            history=ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None,
+            history=ScenarioHistory(history_path(save_hf_template)) if lora else None,
         )
         if loss_runtime is not None:
             self._algo = loss_runtime
@@ -186,13 +198,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self.switched_arg_names: set[str] = set()
         self.worker_settings = WorkerTrainingSettings(self._algo.loss_family, None)
         self.learning_rate_schedules_path = (
-            None
-            if save_hf_template is None
-            else Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
+            Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
         )
+        # The progress of the weights that train next, per scenario; the file keeps the progress of saved weights.
         self.learning_rate_schedules = read_learning_rate_schedules(
             self.learning_rate_schedules_path, next_rollout_id=start_rollout_id
         )
+        self.saved_learning_rate_schedules = dict(self.learning_rate_schedules)
         self._storage = (
             CheckpointStorage(
                 storage_config,
@@ -205,7 +217,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 lora=lora,
                 saves_optimizer=not args.no_save_optim,
             )
-            if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
+            if storage_config is not None and megatron_save_root is not None
             else None
         )
 
@@ -275,7 +287,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 raise RuntimeError(
                     "a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups"
                 )
-            optimizer_steps = len(optimizer_step_sizes(rollout_data, self.args.global_batch_size))
+            optimizer_steps = len(rollout_data["external_step_sizes"])
         context: Any = nullcontext(None)
         # A job that saves no checkpoint does not admit storage. Thus it does not delete an older checkpoint.
         if self._storage is not None and writes_checkpoint:
@@ -381,7 +393,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
-        if self.learning_rate_schedules:
+        # The checkpoint saves the weights of this job's scenario only. Another
+        # scenario's progress since its own last save is lost on a restart.
+        schedule = self.learning_rate_schedules.get(checkpoint.scenario or "")
+        if schedule is not None:
+            self.saved_learning_rate_schedules[checkpoint.scenario or ""] = schedule
             self.write_learning_rate_schedules()
 
     def algorithm_for_loss_family(self, loss_family: str) -> SlimeAlgorithm:
@@ -453,20 +469,73 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return None if record is None else LearningRateScheduleState.from_dict(record)
 
     def write_learning_rate_schedules(self) -> None:
-        """Write the schedule progress of a saved checkpoint beside the job marker.
+        """Write the schedule progress of the saved weights beside the job marker.
 
-        Each record names the rollout that trained it. A saved checkpoint
-        includes all earlier rollouts. Thus the file does not name a rollout
-        after the checkpoint that a restart loads.
+        Each record names the rollout that trained it. A scenario's record
+        changes only when a checkpoint saves that scenario's weights, and a
+        saved checkpoint includes the scenario's earlier rollouts. Thus the
+        file does not name a rollout after the checkpoint that a restart loads.
         """
-        if self.learning_rate_schedules_path is None:
-            raise RuntimeError("the Slime bridge keeps learning-rate schedule progress beside --save-hf")
-        write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
+        write_json(self.learning_rate_schedules_path, {"schedules": self.saved_learning_rate_schedules})
+
+    def weight_files(self, scenario: str | None, runtime_load_id: str) -> WeightFiles | None:
+        """Export the actor's weights as ``runtime_load_id`` when the session delivers files.
+
+        Without a file session this returns None and Reef uses the native
+        sender. Full-weight training exports a Hugging Face checkpoint, and
+        ``scenario`` is None. LoRA training activates ``scenario`` and exports
+        its current adapter as a PEFT directory, as the native adapter transfer
+        sends it. The export goes to ``weight_files_root`` and replaces the
+        previous export, which the receiver loaded before Reef asks for the next one.
+        """
+        root = self.weight_files_root
+        if root is None:
+            return None
+        if (scenario is not None) != self._config.lora:
+            raise RuntimeError(
+                "Slime exports a scenario's adapter for LoRA training and full weights otherwise; "
+                f"got scenario {scenario!r} with lora={self._config.lora}"
+            )
+        if root.exists():
+            for previous in root.iterdir():
+                shutil.rmtree(previous)
+        directory = root / runtime_load_id.replace(":", "-")
+        root.mkdir(parents=True, exist_ok=True)
+        if scenario is not None:
+            self._group.activate_scenario(scenario)
+        self._group.export_weight_files(directory)
+        # Rank 0 writes the configuration and the adapter; each training node writes its own full-weight shards.
+        # The coordinator reads them on its node.
+        index = directory / "model.safetensors.index.json"
+        required = (ADAPTER_CONFIG, ADAPTER_METADATA) if scenario is not None else ("config.json", index.name)
+        if directory.is_symlink() or not all((directory / name).is_file() for name in required):
+            raise RuntimeError(
+                f"exported weights are missing or incomplete: {directory}; "
+                f"training on other nodes needs {root} on shared storage"
+            )
+        if scenario is not None:
+            return WeightFiles(directory, "adapter")
+        missing = sorted(
+            set(json.loads(index.read_text())["weight_map"].values()) - {path.name for path in directory.iterdir()}
+        )
+        if missing:
+            raise RuntimeError(
+                f"exported weights lack shards {missing} on this node; multi-node training needs {root} on shared storage"
+            )
+        return WeightFiles(directory, "full")
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
+        if self.version_receiver is not None:
+            return
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
 
     def send_weights(self, runtime_load_id: str, *, force_full: bool) -> str:
+        if self.version_receiver is not None:
+            # The workers keep their weights; the version names what they hold.
+            self.version_receiver.rpc(
+                0, "set_runtime_load_id", args=(runtime_load_id,), timeout=self.train_rpc_timeout_s
+            )
+            return runtime_load_id
         self._group.send_prepared_weights(runtime_load_id, force_full=force_full)
         return self.current_runtime_load_id()
 
@@ -516,15 +585,18 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic; refuse a method the workers cannot train."""
         prepared = prepare_slime_step(
-            batch, method, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
+            batch,
+            method,
+            algorithm_state,
+            scheduling,
+            step_size=self.args.global_batch_size,
+            sampler_topk=self._score_centering is not None,
         )
         if prepared.payload is not None:
             self.algorithm_for_loss_family(prepared.payload["loss"]).validate_payload(prepared.payload)
         return prepared
 
     def _checkpoint_path(self, rollout_id: int) -> str:
-        if self._save_hf_template is None:
-            raise RuntimeError("slime args.save_hf is not set")
         return self._save_hf_template.format(rollout_id=rollout_id)
 
     def resolve_training_result(self, value: Any) -> Any:
@@ -570,9 +642,9 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
         self._backend.save_job_checkpoint(self)
 
 
-def read_learning_rate_schedules(path: Path | None, *, next_rollout_id: int) -> dict[str, dict[str, Any]]:
+def read_learning_rate_schedules(path: Path, *, next_rollout_id: int) -> dict[str, dict[str, Any]]:
     """Every scenario's schedule progress, refusing progress newer than the checkpoints the workers loaded."""
-    value = None if path is None else read_json(path)
+    value = read_json(path)
     if value is None:
         return {}
     records: dict[str, dict[str, Any]] = {}
@@ -629,8 +701,14 @@ def create_training_backend(
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
     train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
+    version_receiver: Executor | None = None,
+    delivers_weight_files: bool = False,
 ) -> SlimeTrainingBackend:
-    """Build a training-only adapter around already-started Slime workers."""
+    """Build a training-only adapter around already-started Slime workers.
+
+    With ``delivers_weight_files``, exports go to ``weight-files`` beside the
+    HF and Megatron checkpoint roots, outside the roots that retention scans.
+    """
     from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
 
     return SlimeTrainingBackend(
@@ -657,4 +735,10 @@ def create_training_backend(
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),
         train_rpc_timeout_s=train_rpc_timeout_s,
+        version_receiver=version_receiver,
+        weight_files_root=(
+            Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent / WEIGHT_FILES_DIRNAME
+            if delivers_weight_files
+            else None
+        ),
     )

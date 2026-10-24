@@ -77,10 +77,10 @@ def report(context: str = "", score: float = 0.0) -> AgentRecord:
 def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: TrainingPipeline, score: float) -> None:
     processor.push(inference())
     processor.push(report(score=score))
-    batch = processor.build_batch()
+    batch = processor.build_batch(1)
     assert isinstance(batch, TrainingBatch)
     assert batch.batch_id == "math:batch:1"
-    prepared = prepare_slime_step(batch, TrainingMethod("opd"), {}, StepScheduling(unit="sample", batch_size="actual"))
+    prepared = prepare_slime_step(batch, TrainingMethod("opd"), {}, StepScheduling(unit="sample"), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
@@ -115,7 +115,7 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2task, OPDTasks)
     assert isinstance(pipeline.task2batch, DistillBatches)
-    assert spec.scheduling == StepScheduling(unit="sample", batch_size="actual")
+    assert spec.scheduling == StepScheduling(unit="sample")
     with pytest.raises(ValueError, match="epochs"):
         OpdObjective().validate_scheduling(StepScheduling(unit="sample", epochs=2))
 
@@ -154,7 +154,7 @@ def test_overflow_report_does_not_fill_the_batch() -> None:
     limited = opd_pipeline(max_teacher_tokens=5)
     limited.push(inference())
     limited.push(report())
-    assert not limited.ready()
+    assert not limited.ready(1)
     assert limited.operational_metrics()["teacher_overflow_reports"] == 1
     # The skipped report and its inference are released.
     assert {"r1", "i1"} <= limited.releasable_record_ids()

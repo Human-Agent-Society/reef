@@ -9,7 +9,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import BatchSettings, Task2Batch
+from reef.task2batch import BufferSettings, Task2Batch
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
@@ -49,7 +49,7 @@ class ThresholdBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
+        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
@@ -58,7 +58,7 @@ class ThresholdBatches(Task2Batch):
 def threshold_pipeline(
     context: PipelineContext,
     *,
-    batch_size: int = 1,
+    buffer_size: int | None = None,
     accept_multi_turn: bool = False,
     record2record: ReportRecord2Record | None = None,
     task2batch: Task2Batch | None = None,
@@ -68,5 +68,5 @@ def threshold_pipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()) if record2record is None else record2record,
         record2task=ThresholdTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2batch=ThresholdBatches(context, batch_size) if task2batch is None else task2batch,
+        task2batch=ThresholdBatches(context, buffer_size) if task2batch is None else task2batch,
     )

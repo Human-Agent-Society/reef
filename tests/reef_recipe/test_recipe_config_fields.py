@@ -218,16 +218,11 @@ def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key()
     # The stage's own range check fails when the pipeline builds.
     recipe = SAORecipe.from_environment(
         {},
-        config={"pipeline": {"task2batch": {"config": {"batch_size": -1}}}},
+        config={"pipeline": {"task2batch": {"config": {"buffer_size": -1}}}},
         **runtime_bindings(StubTrainingRuntime()),
     )
-    with pytest.raises(RecipeConfigError, match="batch_size must be positive"):
+    with pytest.raises(RecipeConfigError, match="buffer_size must be positive"):
         recipe.build_pipeline(PipelineContext("math"))
-    # The removed environment fallback no longer configures the stage.
-    recipe = SAORecipe.from_environment(
-        {"REEF_SAO_BATCH_SIZE": "4"}, config={}, **runtime_bindings(StubTrainingRuntime())
-    )
-    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 128
 
 
 @pytest.mark.unit
@@ -244,11 +239,11 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 @pytest.mark.unit
 def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     stages = PipelineConfig.from_setting(
-        {"task2batch": {"config": {"batch_size": 2}}}, spec=StagedRecipe.pipeline_spec(), environ={}
+        {"task2batch": {"config": {"buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    trainer = StagedRecipe(**runtime_bindings(StubTrainingRuntime()), max_staleness=3, pipeline_stages=stages).build(
-        "scenario", SQLiteRecordStore()
-    )
+    trainer = StagedRecipe(
+        **runtime_bindings(StubTrainingRuntime(batch_size=2)), max_staleness=3, pipeline_stages=stages
+    ).build("scenario", SQLiteRecordStore())
 
     assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
     assert isinstance(trainer.pipeline.task2batch, ThresholdBatches)
@@ -256,7 +251,8 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
     assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
     assert trainer.candidate_backend.training_method_selector.method.objective == "sft"
-    assert trainer.pipeline.batch_size == 2
+    # The batch size comes from the training runtime, and the buffer size from the stage config.
+    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (2, 8)
     # The shared recipe field reaches the stages as the typed context field, not as stage config.
     assert trainer.pipeline.context.max_staleness == 3
 

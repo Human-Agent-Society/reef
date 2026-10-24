@@ -60,6 +60,8 @@ class WrittenTask:
     path: Path
     name: str
     digest: str
+    #: False when the same task was already under its name, so this write created nothing to remove.
+    created: bool = True
 
 
 class Generator(ABC):
@@ -83,7 +85,13 @@ class Generator(ABC):
     ) -> str: ...
 
     @abstractmethod
-    async def write_task(self, task: HarborTask) -> WrittenTask: ...
+    async def write_task(self, task: HarborTask) -> WrittenTask:
+        """Stage the task under the tasks root and return where it is.
+
+        Writing the same task again returns the staged copy with ``created`` False, so a play that a stop
+        interrupted can stage and play again. Raises ``TaskNameConflict`` when a different task holds the name,
+        and ``DuplicateTask`` when the same content is staged under another name.
+        """
 
     @abstractmethod
     async def delete_task(self, name: str) -> None: ...
@@ -231,6 +239,7 @@ class HttpGenerator(Generator):
             path=Path(checked_string(document, "path", label="a written task")),
             name=checked_string(document, "name", label="a written task"),
             digest=checked_string(document, "digest", label="a written task"),
+            created=status == 201,
         )
 
     async def delete_task(self, name: str) -> None:

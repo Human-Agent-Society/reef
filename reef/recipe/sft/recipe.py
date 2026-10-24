@@ -31,9 +31,9 @@ class SFTRecipe(WeightTrainingRecipe):
 
     * ``pipeline.record2task.config``: ``tokenizer_path`` (required),
       ``target``, and ``max_tokens``.
-    * ``pipeline.task2batch.config.batch_size``: the number of samples in one
-      batch. The Slime ``--global-batch-size`` is the number of samples in one
-      optimizer step.
+    * ``pipeline.task2batch.config.buffer_size``: the most samples that wait
+      for a batch. A batch holds the Slime ``--global-batch-size`` of
+      samples, the samples in one optimizer step.
 
     Configure the optimizer in ``training.options``.
     """

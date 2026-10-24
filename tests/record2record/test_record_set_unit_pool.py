@@ -19,6 +19,8 @@ from reef.record2record import (
     RecordSet,
     RecordSetUnit,
     RecordSetUnitPool,
+    ReportGrouping,
+    ReportRecord2Record,
     SelectionPolicy,
     SingleRecordSet,
     SingleSetUnit,
@@ -26,6 +28,7 @@ from reef.record2record import (
 )
 from reef.record2record.staleness import producing_runtime_load_ids, stale_units
 from reef.record2task import TaskResult
+from reef.train import PipelineContext
 
 
 def inference(record_id: str) -> AgentRecord:
@@ -122,7 +125,7 @@ def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
     pool = RecordSetUnitPool()
     for name in ("a", "b", "c"):
         pool.put(named(name, pool.next_arrival_index()))
-    reserved = pool.reserve(2)
+    reserved = pool.reserve(pool.ordered_units()[:2])
     pool.remove("a")
     pool.put(named("d", pool.next_arrival_index()))
     assert pool.reserved_units() == reserved
@@ -132,13 +135,22 @@ def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
     assert pool.reserved_units() == ()
 
 
-def test_a_reservation_refuses_a_negative_count_and_units_the_pool_does_not_hold() -> None:
-    with pytest.raises(ValueError, match="max_unit_count must not be negative"):
-        RecordSetUnitPool().reserve(-1)
+def test_a_reservation_refuses_a_repeated_unit_and_units_the_pool_does_not_hold() -> None:
+    pool = RecordSetUnitPool()
+    held = named("held", pool.next_arrival_index())
+    pool.put(held)
+    with pytest.raises(ValueError, match="more than one time"):
+        pool.reserve((held, held))
+    with pytest.raises(ValueError, match="units that the pool holds"):
+        pool.reserve((named("not-held", 2),))
+    assert pool.reserved_units() == ()
+
+
+def test_the_pool_refuses_a_selection_policy_that_returns_units_it_does_not_hold() -> None:
     pool = RecordSetUnitPool(ForeignUnit())
     pool.put(named("held", pool.next_arrival_index()))
     with pytest.raises(ValueError, match="does not hold"):
-        pool.reserve(1)
+        pool.ordered_units()
 
 
 def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
@@ -189,7 +201,7 @@ def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserve
         stage.settle(single(record_id, stage.pool.next_arrival_index()), TaskStatus.READY, frozenset({version}))
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
-    stage.pool.reserve(2)
+    stage.pool.reserve(stage.pool.ordered_units())
     stage.drop_stale_units(0)
     assert len(stage.pool) == 2
 
@@ -206,3 +218,68 @@ def test_a_serving_version_of_another_incarnation_restarts_the_served_versions()
     for version in ("e:1", "e:2", "e:2", "f:0"):
         stage.observe_serving_runtime_load_id(version)
     assert stage.served_runtime_load_ids == ["f:0"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"finish_reason": "abort", "training": {"tokens": [1, 2]}},
+        {"meta_info": {"finish_reason": {"type": "abort"}}},
+        {"choices": [{"finish_reason": "abort"}]},
+        {"choices": [{"finish_reason": "tool_calls", "meta_info": {"finish_reason": "abort"}}]},
+        {"stop_reason": "end_turn", "training": {"finish_reason": "abort", "tokens": [1, 2]}},
+        {
+            "stop_reason": "end_turn",
+            "stream_delivery": {"complete": False, "error": "upstream engine aborted the generation"},
+        },
+    ],
+    ids=["native", "sglang", "openai", "tool-call", "anthropic", "legacy-stripped-anthropic"],
+)
+def test_aborted_inference_ends_before_task_creation(response: dict[str, object]) -> None:
+    stage = InferenceRecord2Record()
+    aborted = AgentRecord.create(
+        scenario="s", request_type=RequestType.INFERENCE, payload={"response": response}, agent_record_id="aborted"
+    )
+    stage.push(aborted)
+    stage.push(inference("valid-without-tensors"))
+    assert [record_set.record_ids() for record_set in stage.pull()] == [("valid-without-tensors",)]
+    assert stage.releasable_record_ids() == {"aborted"}
+    assert aborted.payload["response"] == response
+    stage.release_records(frozenset({"aborted"}))
+    assert not stage.releasable_record_ids()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("report_stage", [False, True], ids=["inference", "report"])
+def test_a_rejected_set_formed_twice_frees_its_records_on_release_for_a_retry(report_stage: bool) -> None:
+    aborted = AgentRecord.create(
+        scenario="s",
+        request_type=RequestType.INFERENCE,
+        payload={"response": {"choices": [{"finish_reason": "abort"}]}},
+        agent_record_id="aborted",
+    )
+    stage: InferenceRecord2Record | ReportRecord2Record
+    if report_stage:
+        stage = ReportRecord2Record(PipelineContext("s"), ReportGrouping())
+        stage.push(aborted)
+        rejected, retry = report("set", "aborted"), report("set", "clean")
+    else:
+        stage = InferenceRecord2Record()
+        rejected, retry = aborted, inference("aborted")
+    set_id = rejected.agent_record_id
+    record_ids = {"aborted", set_id}
+    stage.push(rejected)
+    stage.push(rejected)
+    assert stage.pull() == ()
+    # The rejected set keeps its records until release, so another set cannot take them first.
+    assert stage.set_of_record == dict.fromkeys(record_ids, set_id)
+    assert stage.releasable_record_ids() == record_ids
+    assert stage.take_ended() == {set_id}
+    stage.release_records(stage.releasable_record_ids())
+    assert stage.set_of_record == {}
+    assert not stage.releasable_record_ids()
+    if report_stage:
+        stage.push(inference("clean"))
+    stage.push(retry)
+    assert [record_set.set_id for record_set in stage.pull()] == [set_id]

@@ -20,7 +20,7 @@ from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface, create_weight_surface
@@ -780,6 +780,248 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert len(recorded) == 1
         assert recorded[0].artifact_ref == calls[-1]
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+class StreamRecordHandler(InferenceHandler):
+    """Streams fixed frames and the record response of one turn.
+
+    ``frames`` is a nonempty tuple of byte frames, sent in order; the constructor rejects an
+    empty tuple. With ``record_before_terminal`` the record response is set after every frame
+    but the last is sent, as SGLang's token-by-token stream does. Otherwise it is set when the
+    stream is created, as a stream served from a buffered result (vLLM) is.
+    """
+
+    def __init__(
+        self,
+        record_response: dict,
+        frames: tuple[bytes, ...],
+        *,
+        record_before_terminal: bool,
+        content_type: str = "text/event-stream",
+    ) -> None:
+        if not frames:
+            raise ValueError("StreamRecordHandler needs at least one frame")
+        self.record_response = record_response
+        self.frames = frames
+        self.record_before_terminal = record_before_terminal
+        self.content_type = content_type
+        self.calls = 0
+
+    async def inference(self, artifact, path, payload):
+        raise AssertionError("a streamed request must not call the buffered route")
+
+    async def inference_stream(self, artifact, path, payload):
+        self.calls += 1
+
+        async def chunks():
+            for frame in self.frames[:-1]:
+                yield frame
+            if self.record_before_terminal:
+                stream.record_response = self.record_response
+            yield self.frames[-1]
+
+        stream = InferenceStream(
+            status=200,
+            headers={"Content-Type": self.content_type},
+            chunks=chunks(),
+            record_response=None if self.record_before_terminal else self.record_response,
+            record_response_pending=self.record_before_terminal,
+        )
+        return stream
+
+
+STREAM_TRAINING = {"tokens": [10, 11, 20, 21], "loss_mask": [1, 1], "rollout_log_probs": [-0.5, -0.5]}
+CHAT_STREAM_FRAMES = (b'data: {"choices":[{"delta":{"content":"a b"}}]}\n\n', b"data: [DONE]\n\n")
+MESSAGES_STREAM_FRAMES = (
+    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"a b"}}\n\n',
+    b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+)
+
+
+def chat_stream_record(finish_reason: str) -> dict:
+    return {
+        "choices": [{"index": 0, "message": {"content": "a b"}, "finish_reason": finish_reason}],
+        "training": STREAM_TRAINING,
+    }
+
+
+#: An Anthropic record shows an abort only in its private training block: stop_reason maps abort to end_turn.
+ABORTED_MESSAGES_RECORD = {
+    "type": "message",
+    "role": "assistant",
+    "content": [{"type": "text", "text": "a b"}],
+    "stop_reason": "end_turn",
+    "training": {**STREAM_TRAINING, "finish_reason": "abort"},
+}
+
+
+async def post_stream(dispatcher, handler, path: str):
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
+    await client.start_server()
+    try:
+        response = await client.post(
+            path,
+            headers={"x-reef-scenario": "chat"},
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+        return response.status, dict(response.headers), await response.read()
+    finally:
+        await client.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+@pytest.mark.parametrize(
+    ("path", "record_response", "frames"),
+    [
+        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
+        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
+    ],
+    ids=["chat", "messages"],
+)
+def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
+    tmp_path, path, record_response, frames, record_before_terminal
+) -> None:
+    """A stream cannot restart after it sent frames, so an aborted stream ends like an incomplete one."""
+
+    async def run() -> None:
+        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, _, body = await post_stream(dispatcher, handler, path)
+            assert status == 200
+            assert body == b"".join(frames)
+            assert handler.calls == 1
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == record_response["training"]
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/completed_total"] == 0
+            assert metrics["serve/request/active"] == 0
+            assert metrics["ingest/accepted_total"] == 1
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_stream_record_handler_needs_a_frame() -> None:
+    with pytest.raises(ValueError, match="at least one frame"):
+        StreamRecordHandler(chat_stream_record("stop"), (), record_before_terminal=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+@pytest.mark.parametrize(
+    ("path", "record_response", "frames"),
+    [
+        ("/v1/chat/completions", chat_stream_record("abort"), CHAT_STREAM_FRAMES),
+        ("/v1/messages", ABORTED_MESSAGES_RECORD, MESSAGES_STREAM_FRAMES),
+    ],
+    ids=["chat", "messages"],
+)
+def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
+    tmp_path, path, record_response, frames, record_before_terminal
+) -> None:
+    """An engine abort before the first sampled token reports no runtime-load ID; it is not a 409."""
+
+    async def run() -> None:
+        handler = StreamRecordHandler(record_response, frames, record_before_terminal=record_before_terminal)
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        (initial / "model.txt").write_text("base")
+        dispatcher = weight_dispatcher(tmp_path, initial)
+        try:
+            dispatcher.get_or_create_scenario("chat")
+            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+            status, _, body = await post_stream(dispatcher, handler, path)
+            assert status == 200
+            assert body == b"".join(frames)
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == record_response["training"]
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/version_mismatch_total"] == 0
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/active"] == 0
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_aborted_non_sse_stream_has_no_receipt_header(tmp_path) -> None:
+    async def run() -> None:
+        body = json.dumps(chat_stream_record("abort")).encode()
+        handler = StreamRecordHandler(
+            chat_stream_record("abort"), (body,), record_before_terminal=False, content_type="application/json"
+        )
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, headers, received = await post_stream(dispatcher, handler, "/v1/chat/completions")
+            assert status == 200
+            assert received == body
+            assert "x-reef-agent-record-id" not in headers
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            recorded = record.payload["response"]
+            assert recorded["training"] == STREAM_TRAINING
+            assert recorded["stream_delivery"]["complete"] is False
+            assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/failed_total"] == 1
+            assert metrics["serve/request/active"] == 0
+        finally:
+            dispatcher.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
+def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_before_terminal) -> None:
+    async def run() -> None:
+        handler = StreamRecordHandler(
+            chat_stream_record("stop"), CHAT_STREAM_FRAMES, record_before_terminal=record_before_terminal
+        )
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        try:
+            status, _, body = await post_stream(dispatcher, handler, "/v1/chat/completions")
+            assert status == 200
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            assert record.agent_record_id.encode() in body
+            recorded = record.payload["response"]
+            assert recorded["training"] == STREAM_TRAINING
+            assert recorded["stream_delivery"]["complete"] is True
+            assert "error" not in recorded["stream_delivery"]
+            metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
+            assert metrics["serve/request/completed_total"] == 1
+            assert metrics["serve/request/failed_total"] == 0
+        finally:
+            dispatcher.close()
 
     import asyncio
 

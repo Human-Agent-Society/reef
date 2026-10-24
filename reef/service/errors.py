@@ -14,7 +14,14 @@ from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import ReefError, ScenarioBusy, ScenarioCapacityFull, ScenarioLimitReached, UnknownScenario
+from reef.core.errors import (
+    InferenceUnavailable,
+    ReefError,
+    ScenarioBusy,
+    ScenarioCapacityFull,
+    ScenarioLimitReached,
+    UnknownScenario,
+)
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.request_service import InferenceRetryTimeout
 from reef.service.routing import RoutingRequestError
@@ -38,6 +45,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (TrajectoryConflict, web.HTTPConflict),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
+    (InferenceUnavailable, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),
     (ReefError, web.HTTPBadRequest),
     (ValueError, web.HTTPBadRequest),

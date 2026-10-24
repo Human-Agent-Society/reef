@@ -39,6 +39,13 @@ or ``/v1/messages``; all three take the provider's own request body.
 
 **The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
 
+**503 this deployment runs no inference engine.** The deployment sets
+``inference.backend: none``, so it trains without an engine and serves no
+requests. This is expected. Serve a published checkpoint from a separate
+deployment, or select an engine with ``inference.backend``. See `Train without
+an inference engine
+<../reference/configuration.rst#train-without-an-inference-engine>`__.
+
 **503 inference retry deadline exceeded (300s).** Buffered inference exhausted
 ``inference.retry-timeout-s``. It follows ``inference.timeout-s`` when not set
 separately, and both default to 300 seconds. If one valid generation can take
@@ -57,7 +64,7 @@ them does not give one generation more time.
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (the backend's batch size of samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready, and its ``processor`` entry compares ``ready_samples`` with ``batch_size``. When more samples wait than ``pipeline.task2batch.config.buffer_size``, Reef releases the oldest record sets untrained and logs a warning.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -67,7 +74,7 @@ Reports and training
 
 **After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``save-interval`` at 1 unless you can afford to lose live versions.
 
-**After a restart, the training of the last jobs is lost.** With ``--save-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. To lose fewer jobs, decrease the interval.
+**After a restart, the training of the last jobs is lost.** With ``--save-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. With per-scenario LoRA, each scenario continues from its own last checkpoint. To lose fewer jobs, decrease the interval.
 
 **A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
 
@@ -82,9 +89,9 @@ The preflight also refuses a copy whose marker says ``REJECTING`` or ``REJECTED`
 
 For a first job, empty the checkpoint root, including the hidden ``.reef-retention`` directory. The preflight refuses a checkpoint record left in it. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
 
-*Full-weight run, the job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. A marker written by an earlier release has no copy, so recover it by hand.
+*The job saved nothing.* The preflight recovers this state by itself when the ``RUNNING`` marker keeps a copy of the committed marker it replaced. Reef keeps that copy, under ``committed_marker``, when the job before it was committed and its commit was acknowledged. The preflight then checks the conditions below, restores the copy, and logs the replaced ``RUNNING`` marker; the job's batch trains again. The preflight does this for full-weight and per-scenario LoRA runs, so it does not check the ``per-scenario LoRA: no`` condition. A marker written by an earlier release has no copy, so recover it by hand.
 
-*Full-weight run, the job before it saved no checkpoint.* With ``--save-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again.
+*The job before it saved no checkpoint.* With ``--save-interval`` above 1, the copy of the committed marker can name a job without a checkpoint. Then the preflight deletes the marker. It does not restore the copy. It examines the same conditions. Training continues from the checkpoint of rollout ``P``. The batches of the jobs after ``P`` do not train again. With per-scenario LoRA, each scenario continues from its own last checkpoint.
 
 Recover by hand only when all of these hold:
 

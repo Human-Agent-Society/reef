@@ -21,7 +21,7 @@ uses the deployment's model:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2batch: {config: {batch_size: 8}}}
+             pipeline: {task2batch: {config: {buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:

@@ -146,6 +146,11 @@ class NativeWeightTransferSession(WeightTransferSession):
 
 #: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
 WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
+#: The transfer in which no weights leave the trainer: each version names the weights the trainer holds.
+#: Its session is native. The receiver's rank 0 records one runtime load ID: the trainer calls
+#: ``set_runtime_load_id(runtime_load_id)`` on it in place of a send, and the receiver's backend reports
+#: the recorded ID. Only a receiver that runs no engine, such as ``inference.backend: none``, accepts it.
+NO_WEIGHT_TRANSFER_PROTOCOL = "reef-no-weight-transfer-v1"
 
 
 class InferenceService(DeploymentHealth):
@@ -518,6 +523,7 @@ _BUILTIN_FACTORIES = {
     "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
     "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
+    "none": "reef.inference.null:NullRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
@@ -663,6 +669,9 @@ class RuntimeConnectionConfig:
     inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
     inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
     train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
+    batch_size: int = config_option(
+        1, help="Samples in one training step; Reef's Slime and Tinker deployments set it from the training options."
+    )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
@@ -674,6 +683,8 @@ class RuntimeConnectionConfig:
         ):
             if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"runtime.{name} must be a positive finite number")
+        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size <= 0:
+            raise ValueError("runtime.batch_size must be a positive integer")
 
 
 @dataclass(frozen=True)

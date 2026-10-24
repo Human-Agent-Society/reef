@@ -149,14 +149,14 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=3), stage),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
     processor.observe_serving_runtime_load_id("v1")
     processor.observe_serving_runtime_load_id("v2")
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
-    batch = processor.build_batch()
+    batch = processor.build_batch(3)
     versions = {sample.training.get("runtime_load_id", None) for sample in batch.items}
     assert versions == {"v2"}
     assert len(batch.items) == 3
@@ -174,11 +174,11 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
         context,
         record2record=stage,
         record2task=OpenClawRLTasks(),
-        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=3), stage),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(), stage),
     )
     _judged_turns(processor, worker, ["v1", "v1"])
     # All-one-version queue below batch size: nothing is dropped, not ready yet.
-    assert not processor.ready()
+    assert not processor.ready(3)
     assert len(processor.releasable_record_ids()) == 0
 
 

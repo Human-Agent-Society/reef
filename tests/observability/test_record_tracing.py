@@ -450,7 +450,6 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     dispatcher = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(RecordingRuntime(served_version="w0")),
-            batch_size=1,
         ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",

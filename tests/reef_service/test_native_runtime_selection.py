@@ -48,7 +48,7 @@ def test_slime_job_result_and_outer_timeout_keep_transport_semantics(monkeypatch
         return result
 
     monkeypatch.setattr(RayExecutor, "rpc", rpc)
-    runtime = SlimeTrainingRuntime(train_timeout_s=43200)
+    runtime = SlimeTrainingRuntime(train_timeout_s=43200, batch_size=1)
     try:
         if failure is None:
             assert runtime.execute_training_job({"job": "payload"}) is result
@@ -95,12 +95,14 @@ def test_slime_runtime_uses_the_selected_inference_factory(monkeypatch):
             "actor_name": "separate-trainer",
             "namespace": "training-cluster",
             "train_timeout_s": 14400,
+            "batch_size": 4,
         },
         model_path="model",
         recipe_config={"method": "custom"},
         environ={},
     )
     assert isinstance(training, SlimeTrainingRuntime)
+    assert training.batch_size == 4
     assert inference is selected
     assert received[0][0]["control"] is coordinator
     assert received[0][1:] == ("model", {"method": "custom"})
@@ -187,10 +189,13 @@ def test_automatic_service_assembly_uses_both_native_runtime_implementations(mon
         inference_backend="sglang",
         ray_address="auto",
         inference_handler_config={"trust_remote_code": True},
+        training_backend_options={"global-batch-size": 8},
     )
     training, inference = _connect_training_runtime(settings, model_path="model")
     try:
         assert isinstance(training, SlimeTrainingRuntime)
+        # The deployment reads the batch size from the training options and gives it to the runtime.
+        assert training.batch_size == 8
         assert isinstance(inference, SGLangInferenceRuntime)
         assert inference.inference_handler is handler
         assert received == [{"trust_remote_code": True}]
@@ -208,12 +213,25 @@ def test_slime_runtime_requires_explicit_inference_selection_before_connecting(m
         RuntimeRegistry().build({"type": "slime_training"}, model_path="model", environ={})
 
 
+def test_slime_runtime_requires_a_batch_size_before_connecting(monkeypatch):
+    def connect(**kwargs):
+        pytest.fail("invalid runtime configuration must not connect to Ray")
+
+    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", connect)
+    with pytest.raises(RuntimeConfigError, match="batch_size"):
+        RuntimeRegistry().build(
+            {"type": "slime_training", "inference_runtime": "sglang"}, model_path="model", environ={}
+        )
+
+
 def test_failed_inference_construction_releases_the_training_connection(monkeypatch):
     coordinator = Coordinator()
     monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: coordinator)
     with pytest.raises(RuntimeConfigError, match="unknown runtime type"):
         RuntimeRegistry().build(
-            {"type": "slime_training", "inference_runtime": "unavailable"}, model_path="model", environ={}
+            {"type": "slime_training", "inference_runtime": "unavailable", "batch_size": 1},
+            model_path="model",
+            environ={},
         )
     assert coordinator.shutdown_events == ["shutdown"]
 
@@ -233,12 +251,14 @@ def test_an_inference_factory_returning_a_pair_releases_all_connections(monkeypa
         kind = "wrong-pair"
 
         def __call__(self, config, model_path, recipe_config, environ):
-            return ExecutorTrainingRuntime(other_coordinator), OtherInference(base_url="http://other")
+            return ExecutorTrainingRuntime(other_coordinator, batch_size=1), OtherInference(base_url="http://other")
 
     monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"wrong-pair": WrongInferenceFactory()})
     with pytest.raises(RuntimeConfigError, match="must return an InferenceRuntime"):
         RuntimeRegistry().build(
-            {"type": "slime_training", "inference_runtime": "wrong-pair"}, model_path="model", environ={}
+            {"type": "slime_training", "inference_runtime": "wrong-pair", "batch_size": 1},
+            model_path="model",
+            environ={},
         )
     assert coordinator.shutdown_events == ["shutdown"]
     assert other_coordinator.shutdown_events == ["shutdown"]

@@ -87,8 +87,9 @@ Configuration
 The deployment's ``pipeline`` section configures the recipe's three stages.
 The recipe's own classes are the defaults, so the section needs no
 ``module``. The record-to-record stage correlates sessions and runs the PRM
-judge. The task-to-batch stage sets the batch size and writes the PRM record
-file. The record-to-task stage takes no config.
+judge. The task-to-batch stage writes the PRM record file. The record-to-task
+stage takes no config. The batch size is Slime's ``--global-batch-size``,
+``training.config.global_batch_size`` in the example.
 
 .. code:: yaml
 
@@ -99,9 +100,9 @@ file. The record-to-task stage takes no config.
        config:
          prm_url: http://127.0.0.1:23001
          prm_tokenizer_path: /models/prm
-     task2batch:
-       config:
-         batch_size: 16
+   training:
+     config:
+       global_batch_size: 16
 
 .. config::
 
@@ -115,7 +116,7 @@ file. The record-to-task stage takes no config.
    pipeline.record2record.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
    pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
    pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
-   pipeline.task2batch.config.batch_size | 16 | judged turns per training step. Must equal the driver's ``--global-batch-size``.
+   training.config.global_batch_size | judged turns per batch and per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
    pipeline.task2batch.config.prm_record_file | "" | judged population, one JSON line per batch; empty disables it
    recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
 

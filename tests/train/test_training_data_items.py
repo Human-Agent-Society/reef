@@ -68,8 +68,10 @@ def test_mixed_items_survive_worker_serialization():
 SCHEDULING = {
     "sao": StepScheduling(unit="sample"),
     "openclawrl": StepScheduling(unit="sample"),
-    "tttd": StepScheduling(unit="sample", batch_size="actual"),
+    "tttd": StepScheduling(unit="sample"),
 }
+#: The rollouts in one optimizer step: each batch here trains as one step.
+STEP_SIZE = 2
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
@@ -79,9 +81,10 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     loaded = TrainingBatch(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    assert prepare_slime_step(loaded, TrainingMethod(algorithm), {}, SCHEDULING[algorithm]) == prepare_slime_step(
-        original, TrainingMethod(algorithm), {}, SCHEDULING[algorithm]
-    )
+    scheduling = SCHEDULING[algorithm]
+    assert prepare_slime_step(
+        loaded, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE
+    ) == prepare_slime_step(original, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE)
     assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
 
@@ -167,14 +170,16 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
     batch = TrainingBatch("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported item 1"):
-        prepare_slime_step(batch, TrainingMethod(algorithm), state, SCHEDULING[algorithm])
+        prepare_slime_step(batch, TrainingMethod(algorithm), state, SCHEDULING[algorithm], step_size=STEP_SIZE)
     assert state == {"steps": 3}
     assert isinstance(batch.items[1], TaskItem)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_step(TrainingBatch("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING["sao"])
+    prepared = prepare_slime_step(
+        TrainingBatch("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING["sao"], step_size=STEP_SIZE
+    )
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -250,7 +255,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
         context,
         record2record=ReportRecord2Record(context, ReportGrouping(), exclusive_sources=True),
         record2task=MixedTasks(),
-        task2batch=MixedBatches(context, 2),
+        task2batch=MixedBatches(context, None),
     )
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
@@ -271,14 +276,14 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 payload={"references": [f"inference-{index}"], "score": 1.0},
             )
         )
-    batch = processor.build_batch()
-    assert processor.build_batch() is batch
+    batch = processor.build_batch(2)
+    assert processor.build_batch(2) is batch
     assert isinstance(batch.items[0], TrajectoryItem)
     assert isinstance(batch.items[1], TaskItem)
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
     assert processor.releasable_record_ids().isdisjoint(ids)
     assert processor.acknowledge(batch.batch_id) == ids
-    assert not processor.ready()
+    assert not processor.ready(2)
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl"])
@@ -286,7 +291,7 @@ def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = TrainingBatch(
         "grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2))
     )
-    result = prepare_slime_step(batch, TrainingMethod(algorithm), {}, SCHEDULING[algorithm])
+    result = prepare_slime_step(batch, TrainingMethod(algorithm), {}, SCHEDULING[algorithm], step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["source_rows"] == [0, 1]
 

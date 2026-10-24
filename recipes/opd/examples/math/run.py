@@ -71,9 +71,9 @@ class Campaign:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         stack = yaml.safe_load(args.config.read_text())
-        batch_size = stack["pipeline"]["task2batch"]["config"]["batch_size"]
+        batch_size = stack["training"]["config"]["global_batch_size"]
         if args.steps and batch_size != args.prompts_per_step * args.samples_per_prompt:
-            raise ValueError("The driver's prompts times samples per step must equal the pipeline's batch_size")
+            raise ValueError("The driver's prompts times samples per step must equal the global batch size")
         if int(stack["inference"]["options"]["context-length"]) <= args.eval_tokens:
             raise ValueError("Inference context must fit evaluation tokens plus the prompt")
         self.client = ReefClient(args.url, token=os.environ.get("REEF_TOKEN"), timeout_s=args.timeout)

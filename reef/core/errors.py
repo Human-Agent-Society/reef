@@ -31,3 +31,7 @@ class ScenarioCapacityFull(ReefError):
 
 class DeployConfigError(ReefError):
     """A ``reef serve`` deployment config cannot be loaded or is invalid."""
+
+
+class InferenceUnavailable(ReefError):
+    """The deployment serves no inference requests, for example one with ``inference.backend: none``."""

@@ -475,7 +475,7 @@ class WeightTrainingRecipe(Recipe):
         if self.training_runtime.concurrent_training_scenarios:
             # Every scenario owns an adapter on the shared base: route by
             # scenario and the frozen artifact's publication.
-            return create_weight_surface(scenario=scenario)
+            return create_weight_surface(scenario=scenario, runtime=self.runtime)
         return create_weight_surface(adapter_name=self.runtime.serving_adapter_name())
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -631,4 +631,5 @@ class WeightTrainingRecipe(Recipe):
             training_mode=self.training_mode,
             max_staleness=self.max_staleness,
             task_storage=task_storage,
+            batch_size=self.training_runtime.batch_size,
         )

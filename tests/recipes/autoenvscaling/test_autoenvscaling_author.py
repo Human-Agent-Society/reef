@@ -190,6 +190,31 @@ def test_a_repository_snapshot_holds_the_base_commit_alone(tmp_path: Path) -> No
     assert repository_snapshot(source, tmp_path / "cache") == snapshot
 
 
+def test_a_repository_snapshot_starts_no_gc_that_could_prune_it_while_it_is_copied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "gitconfig"
+    config.write_text("[gc]\n\tauto = 1\n\tautoDetach = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    (tmp_path / "origin").mkdir()
+    for index in range(1000):
+        (tmp_path / "origin" / f"{index}.txt").write_text(str(index))
+    for command in (
+        ["init", "-q"],
+        ["add", "-A"],
+        ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base"],
+    ):
+        subprocess.run(["git", *command], cwd=tmp_path / "origin", check=True, capture_output=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path / "origin", check=True, capture_output=True, text=True
+    ).stdout.strip()
+    source = SessionSource(
+        "r", "sessions", Repository(url=f"file://{tmp_path / 'origin'}", commit=commit, path="/app")
+    )
+    snapshot = repository_snapshot(source, tmp_path / "cache")
+    assert not list((snapshot / ".git" / "objects" / "pack").glob("*.pack"))
+
+
 @pytest.mark.parametrize(
     ("place", "commit", "error", "message"),
     [

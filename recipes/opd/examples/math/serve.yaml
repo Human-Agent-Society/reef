@@ -41,9 +41,6 @@ pipeline:
   record2task:
     config:
       max_teacher_tokens: 32768
-  task2batch:
-    config:
-      batch_size: 256                  # run.py's prompts per step times samples per prompt
 training:
   backend: slime
   colocate: false
@@ -59,7 +56,7 @@ training:
       max_storage_fraction: 0.8
       min_free_space: 100GB
       policy: latest
-    global_batch_size: 256
+    global_batch_size: 256             # run.py's prompts per step times samples per prompt; one batch, one step
   options:
     reef-checkpoint-max-storage: ${training.config.checkpoint_retention.max_storage}
     reef-checkpoint-max-storage-fraction: ${training.config.checkpoint_retention.max_storage_fraction}

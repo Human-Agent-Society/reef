@@ -554,6 +554,41 @@ class InferenceAdmissionController:
 # -- Request handling ---------------------------------------------------------
 
 
+#: Delivery diagnostic retained by older records that stripped the abort finish reason.
+#: Stored records keep this text and ``inference_aborted`` compares it exactly. Do not change it.
+INFERENCE_ABORT_ERROR = "upstream engine aborted the generation"
+
+
+def inference_aborted(response: Mapping[str, object]) -> bool:
+    """Whether a native, provider, or stored response reports an engine abort.
+
+    Read finish reasons without requiring training tensors. Older stored
+    Anthropic aborts kept only the stream-delivery error after stripping tensors.
+    """
+    delivery = response.get("stream_delivery")
+    if isinstance(delivery, Mapping) and delivery.get("error") == INFERENCE_ABORT_ERROR:
+        return True
+
+    def aborted(value: object) -> bool:
+        return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
+
+    meta = response.get("meta_info")
+    if aborted(response.get("finish_reason")) or (isinstance(meta, Mapping) and aborted(meta.get("finish_reason"))):
+        return True
+    training = response.get("training")
+    if isinstance(training, Mapping) and aborted(training.get("finish_reason")):
+        return True
+    choices = response.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(choice, Mapping)
+        and (
+            aborted(choice.get("finish_reason"))
+            or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
+        )
+        for choice in choices
+    )
+
+
 class InferenceStream:
     """One open provider response whose bytes can be forwarded incrementally."""
 
@@ -801,6 +836,16 @@ class TrainingRuntime(ABC):
     """
 
     @property
+    @abstractmethod
+    def batch_size(self) -> int:
+        """The rollouts in one optimizer step, a positive int: the samples in one training batch.
+
+        The deployment reads it from the training options (Slime's
+        ``--global-batch-size``, Tinker's ``batch_size``) and gives it to the
+        runtime; a recipe passes it to ``Trainer.build``.
+        """
+
+    @property
     def concurrent_training_scenarios(self) -> bool:
         """Whether several scenarios may train on this runtime at once.
 
@@ -903,7 +948,7 @@ class PreparedTrainingJob(ABC):
 class TrainingCoordinationConfig:
     """Deployment policy interpreted only by Reef's coordinator."""
 
-    save_hf_template: str | None
+    save_hf_template: str
     colocate: bool = False
     lora: bool = False
     adapter_capacity: int | None = None

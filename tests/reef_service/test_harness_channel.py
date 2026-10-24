@@ -179,7 +179,8 @@ def _dispatcher(
         adapter=adapter,
         model_metadata=model_metadata or {},
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
-        pipeline_stages=harness_stages(batch_size, inference=inference_stages),
+        batch_size=batch_size,
+        pipeline_stages=harness_stages(inference=inference_stages),
         seed=seed,
     )
     bootstrap = tmp_path / "bootstrap"

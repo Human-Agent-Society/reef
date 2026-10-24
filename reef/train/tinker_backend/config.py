@@ -14,9 +14,7 @@ class TinkerConfig:
     lora_rank: int = config_option(32, help="Rank of the remote LoRA adapter.")
     learning_rate: float = config_option(1e-4, help="Adam learning rate.")
     kl_coef: float = config_option(0.0, help="Frozen-base KL coefficient for loss adapters that support it.")
-    batch_size: int = config_option(
-        1, help="Comparison sets per optimizer step when the recipe uses configured sizing."
-    )
+    batch_size: int = config_option(1, help="Rollouts per optimizer step; a batch holds at least this many samples.")
     seed: int = config_option(0, help="Initial adapter seed.")
     api_key_env: str = config_option("TINKER_API_KEY", help="Environment variable containing the Tinker API key.")
     max_loaded_adapters: int = config_option(
