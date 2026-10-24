@@ -15,23 +15,22 @@ import pytest
 from aiohttp import web
 
 from reef.artifact import Artifact
+from reef.core.errors import ReefError
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.inference.remote.runtime import RemoteAdapterRuntimeFactory, RemoteRuntimeFactory
+from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
-from reef.inference.remote.service import RemoteControl, RemoteInferenceService
+from reef.inference.remote.service import RemoteControl, RemoteInferenceBackend, RemoteInferenceService
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.runtime.deployment import (
-    WEIGHT_FILES_PROTOCOL,
     InferenceConnection,
     InferenceService,
     RuntimeConfigError,
     RuntimeRegistry,
     runtime_factory_for,
 )
-from reef.runtime.executor.connection import CoordinatorClient
-from reef.runtime.interfaces import InferenceBackend, ModelCandidate, WeightFiles
-from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime
+from reef.runtime.interfaces import InferenceBackend, WeightFiles
+from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime, FullWeightServingRuntime
 from reef.surface.adapter import adapter_name
 
 CONTROL_TOKEN = "control-secret"
@@ -105,6 +104,7 @@ class FakeEngines(InferenceBackend):
 
     def recover(self):
         self.events.append("recover")
+        return 1
 
     def abort(self):
         self.events.append("abort")
@@ -131,9 +131,6 @@ class FakeService(InferenceService):
     def start(self, resources):
         self.events.append(("start", dict(self.config), resources.inference_placement))
         return InferenceConnection(self.connection_protocol, None)
-
-    def prepare_weight_transfer(self, connection):
-        self.events.append("fence")
 
     def backend(self, connection):
         return self.engines
@@ -193,21 +190,23 @@ def started_service(url: str) -> RemoteInferenceService:
 def test_service_starts_engines_and_publishes_weight_files_through_the_component(component, tmp_path):
     url, events, work_dir, _ = component
     service = started_service(url)
-    assert service.supported_transfer_protocols == (WEIGHT_FILES_PROTOCOL,)
+    # The engines start paused; the control plane decides when they serve.
     assert events == [
         ("start", {"backend": "sglang", "model_path": "Qwen/Qwen3-8B"}, "placement-2"),
         "health",
-        "fence",
+        "pause",
     ]
     connection = InferenceConnection(CONTROL_PROTOCOL, None)
-    service.prepare_weight_transfer(connection)
     backend = service.backend(connection)
+    assert isinstance(backend, RemoteInferenceBackend)
     assert backend.inference_url() == url
     backend.initialize_version("inc:1")
     assert backend.runtime_load_ids() == ["inc:1"]
-    for operation in (backend.pause, backend.resume, backend.recover, backend.abort):
+    for operation in (backend.pause, backend.resume, backend.abort):
         operation()
-    assert events[-4:] == ["pause", "resume", "recover", "abort"]
+    assert events[-3:] == ["pause", "resume", "abort"]
+    # The recover route returns the engine slots the remote backend refilled.
+    assert backend.recover() == 1
 
     adapter = tmp_path / "adapter"
     adapter.mkdir()
@@ -253,13 +252,14 @@ def test_component_requires_its_tokens_and_running_engines(component):
     with pytest.raises(RuntimeError, match="400"):
         RemoteControl(url, CONTROL_TOKEN).call("PUT", "engines", payload={"backend": "sglang", "config": {}})
     started_service(url)
+    started = list(events)
     for token in (None, CONTROL_TOKEN):
         request = urllib.request.Request(f"{url}/generate", data=b"{}", method="POST")
         if token is not None:
             request.add_header("Authorization", f"Bearer {token}")
         with pytest.raises(urllib.error.HTTPError, match="401"):
             urllib.request.urlopen(request, timeout=30)
-    assert "pause" not in events
+    assert events == started
 
 
 def test_component_starts_only_the_engine_its_operator_chose(component):
@@ -362,108 +362,69 @@ def test_settings_read_dashed_keys_and_normalize_the_url():
     )
 
 
-class Coordinator(CoordinatorClient):
-    def health(self):
-        return {"ok": True}
-
-    def prepare_training_step(self, batch, method, algorithm_state, scheduling):
-        raise AssertionError("unused")
-
-    def execute_training_job(self, payload):
-        raise AssertionError("unused")
-
-    def update_serving_weights(self, training_job_id):
-        raise AssertionError("unused")
-
-    def acknowledge_training_commit(self, training_job_id):
-        raise AssertionError("unused")
-
-    def reject_training_candidate(self, training_job_id):
-        raise AssertionError("unused")
+def serving_config(url: str = "https://component.example", **values) -> dict:
+    return {
+        "type": "remote_serving",
+        "remote": {"url": url, "startup-timeout-s": 30},
+        "engine": "sglang",
+        "engine_config": {"model_path": "Qwen/Qwen3-8B"},
+        "num_gpus": 2,
+        **values,
+    }
 
 
-def test_runtime_sends_requests_to_the_component_with_the_inference_token(tmp_path):
-    runtime = RuntimeRegistry().build(
-        {
-            "type": "remote",
-            "control": Coordinator(),
-            "inference_url": "https://component.example",
-            "inference_token_env": "TOKEN",
-        },
-        model_path="Qwen/Qwen3-8B",
-        environ={"TOKEN": INFERENCE_TOKEN},
-    )
-    handler = runtime.inference_handler
-    assert isinstance(handler, SGLangInferenceHandler)
-    arguments = handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
-    assert arguments["url"] == "https://component.example/generate"
-    assert arguments["headers"]["Authorization"] == f"Bearer {INFERENCE_TOKEN}"
+TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN, "REEF_REMOTE_INFERENCE_TOKEN": INFERENCE_TOKEN}
+
+
+def saved_adapter(path):
+    (path / ADAPTER_DIR).mkdir(parents=True)
+    (path / ADAPTER_DIR / "adapter_config.json").write_text('{"r": 16}')
+    return path
 
 
 @pytest.mark.parametrize(
-    ("config", "environ", "match"),
+    ("values", "environ", "match"),
     [
-        ({"engine": "my.engines:create"}, {"TOKEN": "x"}, "explicit inference handler factory"),
-        ({}, {}, "environment variable TOKEN"),
-        ({"engine": " "}, {"TOKEN": "x"}, "runtime.engine must be a non-empty string"),
+        ({"engine": "my.engines:create"}, TOKENS, "explicit inference handler factory"),
+        ({}, {"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN}, "REEF_REMOTE_INFERENCE_TOKEN"),
+        ({}, {"REEF_REMOTE_INFERENCE_TOKEN": INFERENCE_TOKEN}, "REEF_REMOTE_CONTROL_TOKEN"),
+        ({"engine": " "}, TOKENS, "runtime.engine must be a non-empty string"),
+        ({"layout": "shards"}, TOKENS, "runtime.layout must be adapter or full"),
+        ({"num_gpus": 0}, TOKENS, "runtime.num_gpus must be a positive integer"),
+        ({"adapter_capacity": 0}, TOKENS, "runtime.adapter_capacity must be a positive integer"),
+        ({"inference_timeout_s": 0}, TOKENS, "runtime.inference_timeout_s must be positive"),
+        ({"remote": {"url": "ftp://host"}}, TOKENS, "HTTP"),
     ],
 )
-def test_runtime_refuses_an_unknown_dialect_or_a_missing_token(config, environ, match):
+def test_runtime_refuses_invalid_settings_before_it_starts_engines(component, values, environ, match):
+    url, events, _, _ = component
     with pytest.raises(RuntimeConfigError, match=match):
-        RuntimeRegistry().build(
-            {
-                "type": "remote",
-                "control": Coordinator(),
-                "inference_url": "https://component.example",
-                "inference_token_env": "TOKEN",
-                **config,
-            },
-            model_path="Qwen/Qwen3-8B",
-            environ=environ,
-        )
+        RuntimeRegistry().build(serving_config(url, **values), model_path="Qwen/Qwen3-8B", environ=environ)
+    assert events == []
 
 
-def test_factory_is_registered_for_the_remote_kind():
-    assert isinstance(runtime_factory_for("remote"), RemoteRuntimeFactory)
-    assert isinstance(runtime_factory_for("remote_adapters"), RemoteAdapterRuntimeFactory)
+def test_factory_is_registered_for_the_remote_serving_kind():
+    assert isinstance(runtime_factory_for("remote_serving"), RemoteServingRuntimeFactory)
 
 
-def test_adapter_runtime_starts_the_engines_and_loads_each_selected_adapter_through_the_component(component, tmp_path):
+def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_through_the_component(
+    component, tmp_path
+):
     url, events, work_dir, _ = component
     runtime = RuntimeRegistry().build(
-        {
-            "type": "remote_adapters",
-            "remote": {"url": url, "startup-timeout-s": 30},
-            "engine": "sglang",
-            "engine_config": {"model_path": "Qwen/Qwen3-8B"},
-            "num_gpus": 2,
-            "adapter_capacity": 2,
-        },
-        model_path="Qwen/Qwen3-8B",
-        environ={"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN, "REEF_REMOTE_INFERENCE_TOKEN": INFERENCE_TOKEN},
+        serving_config(url, adapter_capacity=2), model_path="Qwen/Qwen3-8B", environ=TOKENS
     )
     assert isinstance(runtime, AdapterServingRuntime)
-    # The engines start fenced, then serve the base model under the runtime's first version.
+    assert runtime.per_scenario_adapters and runtime.shared_by_training_scenarios
+    # The engines start paused, then serve the base model under the runtime's first version.
     assert events[:4] == [
         ("start", {"backend": "sglang", "model_path": "Qwen/Qwen3-8B"}, "placement-2"),
         "health",
-        "fence",
+        "pause",
         "resume",
     ]
     assert runtime.serving_runtime_load_id() is not None
-    checkpoint = tmp_path / "job-1"
-    (checkpoint / ADAPTER_DIR).mkdir(parents=True)
-    (checkpoint / ADAPTER_DIR / "adapter_config.json").write_text('{"r": 16}')
-    activated = runtime.activate_candidate(
-        ModelCandidate(
-            candidate_id="job-1",
-            training_job_id="job-1",
-            checkpoint_path=str(checkpoint),
-            current_runtime_load_id=None,
-            metadata={"scenario": "math"},
-        )
-    )
-    version = activated.runtime_load_id
+    version = runtime.activate_checkpoint(Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math")
     _, layout, name, loaded, contents, served = events[-2]
     assert (layout, name, loaded, contents) == (
         "adapter",
@@ -473,21 +434,43 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_selected_adapter_thro
     )
     assert served.parent == work_dir and events[-1] == "resume"
     assert runtime.serving_runtime_load_id() == version
+    assert runtime.serving_adapter_runtime_load_id("math") == version
     arguments = runtime.inference_handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
     assert (arguments["url"], arguments["headers"]["Authorization"]) == (
         f"{url}/generate",
         f"Bearer {INFERENCE_TOKEN}",
     )
+    assert isinstance(runtime.inference_handler, SGLangInferenceHandler)
     runtime.shutdown()
     assert events[-2:] == ["close", "release"]
 
 
-def test_adapter_runtime_refuses_missing_tokens_before_it_starts_engines(component):
+def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(component, tmp_path):
     url, events, _, _ = component
-    with pytest.raises(RuntimeConfigError, match="REEF_REMOTE_INFERENCE_TOKEN"):
+    runtime = RuntimeRegistry().build(serving_config(url, layout="full"), model_path="Qwen/Qwen3-8B", environ=TOKENS)
+    assert isinstance(runtime, FullWeightServingRuntime)
+    assert not runtime.per_scenario_adapters and not runtime.shared_by_training_scenarios
+    weights = tmp_path / "hf"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    version = runtime.activate_checkpoint(Artifact.local(weights))
+    _, layout, name, loaded, contents, _ = events[-2]
+    assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
+    assert runtime.current_runtime_load_id() == version
+    runtime.shutdown()
+    assert events[-2:] == ["close", "release"]
+
+
+def test_a_failed_runtime_start_stops_the_engines_it_started(component, tmp_path):
+    url, events, _, _ = component
+
+    class BrokenHandler(SGLangInferenceHandler):
+        @classmethod
+        def from_config(cls, upstream_url, **config):
+            raise ReefError("handler refused its configuration")
+
+    with pytest.raises(ReefError, match="handler refused"):
         RuntimeRegistry().build(
-            {"type": "remote_adapters", "remote": {"url": url}, "engine_config": {}},
-            model_path="Qwen/Qwen3-8B",
-            environ={"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN},
+            serving_config(url, inference_handler_factory=BrokenHandler), model_path="Qwen/Qwen3-8B", environ=TOKENS
         )
-    assert events == []
+    assert [event for event in events if isinstance(event, str)][-2:] == ["close", "release"]

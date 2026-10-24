@@ -5,7 +5,7 @@ size of 1: every rollout in a step comes from a different prompt, and a rollout
 joins the next step the moment it is scored, without waiting for siblings. The
 Harbor loop in ``run.py`` is the smallest possible instance of that (six
 rollouts of one problem, one optimizer step each) and is meant as a smoke
-test. This driver is the paper's shape at a budget one node can afford: it
+test. This driver is the paper's shape at the two-node budget of serve-30b.yaml: it
 keeps ``IN_FLIGHT`` requests open at all times, each on a problem drawn from a
 training pool, grades each completion with the same strict rule the Harbor
 verifier uses, and reports the score against that rollout's receipt. Reef
@@ -130,7 +130,7 @@ def serving_release() -> str | None:
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed max-staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2record.config.max_staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """

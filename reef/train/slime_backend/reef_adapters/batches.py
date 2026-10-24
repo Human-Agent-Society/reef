@@ -1,4 +1,4 @@
-"""Slime tensorization and batch partitioning inside the training coordinator."""
+"""Slime tensorization and batch partitioning inside the Slime training component."""
 
 from __future__ import annotations
 

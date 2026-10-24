@@ -59,10 +59,7 @@ class ServiceConfig:
     )
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
-        "reef", public_path=("training", "ray_namespace"), help="Ray namespace for the training bridge."
-    )
-    ray_actor_name: str = config_option(
-        "reef-train-bridge", public_path=("training", "ray_actor_name"), help="Training bridge actor name."
+        "reef", public_path=("training", "ray_namespace"), help="Ray namespace of the training component."
     )
     inference_url: str | None = config_option(None, public_path=("inference", "url"), help="Local inference endpoint.")
     model_path: str | None = config_option(
@@ -123,11 +120,6 @@ class ServiceConfig:
         metadata=config_metadata(
             "Options owned by the selected training backend.", public_path=("training", "options")
         ),
-    )
-    colocate: bool = config_option(
-        False,
-        public_path=("training", "colocate"),
-        help="Train on the inference GPUs; Reef reserves one shared allocation and hands memory between them.",
     )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
@@ -282,11 +274,11 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2batch``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2task``, ``task2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2batch, each with module and "
+            "Pipeline stages as a JSON/YAML object: record2record, record2task and task2job, each with module and "
             "config.",
             path=("pipeline",),
         ),
@@ -300,9 +292,20 @@ class ServiceConfig:
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
+    #: The deployment's ``execution`` and ``executors`` sections, which select each role's executor.
+    #: Its keys are a subset of ``{"execution", "executors"}``; a training integration reads it.
+    execution_config: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
+        if not isinstance(self.execution_config, Mapping):
+            raise TypeError("ServiceConfig.execution_config must be a mapping")
+        unknown_execution_keys = set(self.execution_config) - {"execution", "executors"}
+        if unknown_execution_keys:
+            raise ValueError(
+                "ServiceConfig.execution_config holds only the execution and executors sections, got "
+                + ", ".join(sorted(map(str, unknown_execution_keys)))
+            )
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
             raise ValueError("reef.scenario_idle_unload_s must be positive")
         # The built-in admission checks its own limits.
@@ -476,4 +479,7 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
-    return ServiceConfig(**values, recipe_settings=_reef_section(config), preset_config=preset)
+    execution = {key: config[key] for key in ("execution", "executors") if key in config}
+    return ServiceConfig(
+        **values, recipe_settings=_reef_section(config), preset_config=preset, execution_config=execution
+    )

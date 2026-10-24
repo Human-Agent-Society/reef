@@ -11,17 +11,17 @@ from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import (
     CandidateBackend,
+    JobData,
     PipelineContext,
     PreparedStep,
     Trainer,
-    TrainingBatch,
     TrainingPipeline,
     TrainStepResult,
 )
 
 
 @dataclass(frozen=True)
-class ExampleBatch(TrainingBatch):
+class ExampleJobData(JobData):
     values: tuple[str, ...] = field(kw_only=True)
 
 
@@ -31,14 +31,14 @@ class ExamplePipeline(TrainingPipeline):
         return frozenset({RequestType.REPORT})
 
     @property
-    def output_schema(self) -> type[ExampleBatch]:
-        return ExampleBatch
+    def output_schema(self) -> type[ExampleJobData]:
+        return ExampleJobData
 
     def __init__(self, context: PipelineContext, events: list[str]) -> None:
         super().__init__(context)
         self.events = events
         self.items: list[AgentRecord] = []
-        self.pending: ExampleBatch | None = None
+        self.pending: ExampleJobData | None = None
 
     def push(self, item: AgentRecord) -> None:
         self.events.append(f"push:{item.agent_record_id}")
@@ -47,13 +47,13 @@ class ExamplePipeline(TrainingPipeline):
     def ready(self, sample_count: int) -> bool:
         return len(self.items) >= sample_count
 
-    def build_batch(self, sample_count: int) -> ExampleBatch:
+    def build_job_data(self, sample_count: int) -> ExampleJobData:
         self.events.append("build")
-        self.pending = ExampleBatch(batch_id="batch-1", values=(self.items[0].agent_record_id,))
+        self.pending = ExampleJobData(data_id="batch-1", values=(self.items[0].agent_record_id,))
         return self.pending
 
-    def acknowledge(self, batch_id: str) -> frozenset[str]:
-        self.events.append(f"ack:{batch_id}")
+    def acknowledge(self, data_id: str) -> frozenset[str]:
+        self.events.append(f"ack:{data_id}")
         consumed = frozenset(item.agent_record_id for item in self.items)
         self.items.clear()
         self.pending = None
@@ -71,15 +71,15 @@ class ExampleBackend(CandidateBackend):
 
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        batch: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
         del scenario_step
-        assert isinstance(batch, ExampleBatch)
-        self.events.append(f"prepare:{batch.batch_id}")
+        assert isinstance(batch, ExampleJobData)
+        self.events.append(f"prepare:{batch.data_id}")
         return PreparedStep.with_candidate(
-            UpdateCandidate(batch.batch_id),
+            UpdateCandidate(batch.data_id),
             state={"version": int(state["version"]) + 1},
         )
 
@@ -107,11 +107,11 @@ def test_training_pipeline_is_the_no_update_default() -> None:
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.push(record)
     assert processor.releasable_record_ids() == frozenset()
-    # The default holds no batch-ready units, so it never becomes ready and
-    # build_batch refuses on that ground — the same refusal every pipeline gives.
-    with pytest.raises(RuntimeError, match="no batch ready"):
-        processor.build_batch(1)
-    with pytest.raises(ValueError, match="unknown batch_id"):
+    # The default holds no units, so it never becomes ready and
+    # build_job_data refuses on that ground — the same refusal every pipeline gives.
+    with pytest.raises(RuntimeError, match="no job data ready"):
+        processor.build_job_data(1)
+    with pytest.raises(ValueError, match="unknown data_id"):
         processor.acknowledge("math:whatever:1")
 
 
@@ -125,9 +125,9 @@ def test_training_backend_cannot_be_instantiated_without_contract_methods() -> N
 def test_prepared_step_enforces_its_single_outcome() -> None:
     candidate = UpdateCandidate("candidate-1")
 
-    with pytest.raises(ValueError, match="requires a candidate"):
+    with pytest.raises(ValueError, match="only a candidate step, carries a candidate"):
         PreparedStep("candidate", {})
-    with pytest.raises(ValueError, match="cannot carry a candidate"):
+    with pytest.raises(ValueError, match="only a candidate step, carries a candidate"):
         PreparedStep("skip", {}, candidate=candidate)
     with pytest.raises(ValueError, match="outcome"):
         PreparedStep("unknown", {})  # type: ignore[arg-type]
@@ -149,6 +149,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
+        default_job_samples=1,
     )
 
     assert isinstance(trainer, Trainer)
@@ -179,6 +180,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
+        default_job_samples=1,
     )
     records.append(
         AgentRecord.create(
@@ -215,7 +217,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
     class SkippingBackend(ExampleBackend):
         def prepare_step(
             self,
-            batch: TrainingBatch,
+            batch: JobData,
             state: Mapping[str, Any],
             scenario_step: int,
         ) -> PreparedStep:
@@ -239,6 +241,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, []),
         candidate_backend=SkippingBackend("math", []),
+        default_job_samples=1,
     )
 
     result = trainer.run_once()
@@ -263,6 +266,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
+        default_job_samples=1,
     )
     records.append(
         AgentRecord.create(
@@ -293,6 +297,7 @@ def test_trainer_reads_only_new_records() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         candidate_backend=ExampleBackend("math", events),
+        default_job_samples=1,
     )
 
     first = trainer.run_once()

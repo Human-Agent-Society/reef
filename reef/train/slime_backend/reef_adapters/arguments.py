@@ -26,7 +26,6 @@ class SlimeArguments(Namespace):
     colocate: bool
     offload_train: bool
     offload_rollout: bool
-    keep_lora_base_resident: bool
     disjoint_prefix_sharing: bool
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
@@ -41,6 +40,10 @@ class SlimeArguments(Namespace):
     lr: float
     hf_checkpoint: str
     load: str | None
+    ref_load: str | None
+    megatron_to_hf_mode: str
+    use_wandb: bool
+    wandb_key: str | None
     start_rollout_id: int | None
     custom_megatron_init_path: str | None
     custom_critic_args_hook_path: str | None = None
@@ -58,6 +61,9 @@ class SlimeArguments(Namespace):
     finetune: bool
     ckpt_step: int | None
     reef_executor_backend: str
+    reef_train_executor_options: dict[str, object]
+    reef_rollout_executor_backend: str
+    reef_rollout_executor_options: dict[str, object]
     advantage_estimator: str
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]

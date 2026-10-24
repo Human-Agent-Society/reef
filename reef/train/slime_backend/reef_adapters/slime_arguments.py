@@ -48,16 +48,6 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Adapter slots the SGLang engine keeps loaded on the shared base model (>= 1).",
     )
     parser.add_argument(
-        "--keep-lora-base-resident",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Release only the KV cache and CUDA graphs on a colocated LoRA training step, "
-            "leaving the frozen base weights on the GPU. Off by default: it trades the "
-            "per-step base copy for holding that memory for the whole run."
-        ),
-    )
-    parser.add_argument(
         "--disjoint-prefix-sharing",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -146,8 +136,8 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
     explicitly_resident = "--no-offload-train" in arguments
     save = args.save
     if not isinstance(save, str) or not save.strip():
-        # Megatron requires --save-interval only with --save, and the bridge reads both.
-        raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
+        # Megatron requires --save-interval only with --save, and the component reads both.
+        raise ValueError("the Slime training component requires --save for Megatron recovery checkpoints")
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is

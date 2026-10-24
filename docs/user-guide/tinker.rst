@@ -32,8 +32,11 @@ Choose ``training.backend: tinker``, an available Tinker base model in
 ``inference.model-path``, and a persistent ``training.options.state-dir``.
 The model remains a remote identifier: deployment does not download its weight
 snapshot. The SDK obtains tokenizer resources for prompt rendering. The runtime
-requires exclusive ownership of its state directory. When Tinker samples, a
-deployment trains one scenario.
+requires exclusive ownership of its state directory. The Tinker training
+component lets several scenarios share it, because each job carries its own
+start. When Tinker samples, a deployment still trains one scenario. With
+``inference.backend: sglang``, Reef's engines serve each scenario its own
+adapter, so several scenarios can train on one deployment.
 
 Supported inference and training
 ---------------------------------
@@ -51,21 +54,25 @@ It does not provide token-by-token latency. Prompt IDs come from the tokenizer's
 chat template. Sampled IDs and log probabilities come directly from Tinker;
 the backend never recovers training tokens by tokenizing decoded output.
 
-Reef's normal ``WeightTrainingRecipe`` and ``RuntimeCandidateBackend`` drive the
-integration. The backend is one training runtime (``reef.train.tinker_backend``)
-and one inference runtime (``reef.inference.tinker``), like every other pair
-Reef schedules. They share nothing in process: each candidate's artifact
-carries a ``tinker-checkpoint.json`` manifest naming its remote training
-state and sampler, the inference side serves the sampler an artifact names,
-and the training side branches from the checkpoint Reef last committed,
-which ``state-dir`` remembers across restarts.
+Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
+one training component (``reef.train.tinker_backend``) and one inference
+runtime (``reef.inference.tinker``). Reef submits each job's ready data to the
+component as one training job. They share nothing in process: each saved
+checkpoint carries a ``tinker-checkpoint.json`` manifest that names its
+remote training state and sampler. The inference side serves the sampler that
+a release names. Each job starts from the scenario's last saved checkpoint,
+which ``state-dir`` keeps across restarts.
 
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
-one optimizer step. The training pipeline makes a batch when it holds this
-many samples. A batch takes whole record sets, so it can hold more; Reef then
-cuts it into optimizer steps of the batch size. Backend-neutral step
-scheduling retains comparison sets, shuffling, epochs, and
-partial/drop/error remainder policies for the last step.
+one optimizer step. ``pipeline.task2job.config.job_samples`` is the job size:
+the training pipeline submits a job when it holds this many samples. Set it
+to the batch size, so that one job is one optimizer step. Job data takes whole
+record sets, so it can hold more; the component then cuts it into optimizer
+steps of the batch size (see `Job size
+<../developer-guide/processors.rst#job-size>`__). A step keeps each rollout of
+the objective's ``rollout_unit`` whole: one sample, or one comparison set. A
+job's optional ``scheduling`` parameter sets the epochs, the shuffle, and the
+``partial``, ``drop`` or ``error`` policy for the last step.
 
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``
@@ -102,37 +109,41 @@ and Adam updates. Other Adam settings currently use the pinned SDK's defaults
 transport timeouts; ``inference.timeout-s`` bounds sampling. These timeouts do
 not cancel a remote update that the service has already accepted.
 
-Candidates, checkpoints, and recovery
---------------------------------------
+Jobs, checkpoints, and recovery
+-------------------------------
 
-Each candidate starts a separate Tinker training session from the incumbent's
-saved weights **and optimizer state**. An accepted optimizer update exports both
-``save_state`` and ``save_weights_for_sampler`` with explicit unique names and
-no expiration. The training session then closes. Candidates can therefore be
-evaluated without changing the incumbent sampler, and rejected candidates do
-not require undoing an in-place model mutation.
+A job trains the optimizer steps of its data from the job's start checkpoint. It
+restores the saved weights **and optimizer state** in a new Tinker training
+session. It then exports both ``save_state`` and
+``save_weights_for_sampler`` with explicit unique names and no expiration, and
+the session closes. The job parameter ``save_interval``, which a recipe's job
+plan can set, gives the optimizer
+steps between two saved checkpoints. Without it, a job saves one checkpoint
+when it ends. Each saved checkpoint is a candidate. Candidate evaluation
+decides whether Reef publishes it; a rejected candidate changes no served
+sampler. The next job starts from the last saved checkpoint, whether or not
+Reef selected it.
 
 An uncertain API result may leave an unreferenced remote checkpoint and consume
-credits. A retry starts from the same incumbent checkpoint in a fresh session;
-it cannot accidentally apply the uncertain gradient a second time to that model.
-This favors recovery correctness over session reuse and training throughput.
+credits. A retry starts from the same checkpoint in a fresh session; it cannot
+apply the uncertain gradient a second time to that model. A job that a restart
+interrupts continues after its last saved checkpoint. This favors recovery
+correctness over session reuse and training throughput.
 
 Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
 schema version, base model, LoRA rank, training-state URI, and sampler URI.
 After a recipe selects a learning-rate schedule, it also records the schedule's
-progress. It
-contains references, not portable weight tensors. Restore and rollback require
-continued access to both remote checkpoints in the originating account/project.
-Local disk retention does not remove remote files. Use Tinker's checkpoint
-management for remote retention, preserving all checkpoints referenced by Reef.
+progress. It contains references, not portable weight tensors. Restore and
+rollback require continued access to both remote checkpoints in the
+originating account/project. Local disk retention does not remove remote
+files. Use Tinker's checkpoint management for remote retention, preserving all
+checkpoints referenced by Reef.
 
-Selection closes admission until the matching Reef training job is committed.
-Already admitted requests retain their immutable sampler snapshot. The weight
-loader binds the materialized, recovered artifact before serving a scenario;
-restart creates a fresh runtime-load incarnation and starts subsequent training
-from that artifact's optimizer state. Rollback binds the republished older
-snapshot, including its optimizer. Each Tinker version is a durable
-checkpoint, so a restart does not lose a version.
+Requests that are already admitted keep the sampler of the release they
+started with. Restart creates a fresh runtime-load incarnation and serves the
+committed release. Rollback works: Reef imports the older release's manifest
+into the component, cancels the running job, and the next job starts from that
+release's weights and optimizer state.
 
 Serve on inference engines
 --------------------------
@@ -178,10 +189,10 @@ keeps its served adapter resident, so this value must be at least the number
 of training scenarios; a scenario's new adapter replaces its own served
 adapter when no slot is free.
 
-Each scenario trains its own adapter. A job runs the batch's optimizer steps
-on Tinker from the scenario's committed checkpoint. It then downloads the
-result and converts it with ``tinker-cookbook`` into a PEFT adapter in the
-``adapter/`` directory of the job's checkpoint. When Reef selects the
+Each scenario trains its own adapter. A job runs the optimizer steps of its data
+on Tinker from the scenario's last saved checkpoint. At each save, it downloads
+the result and converts it with ``tinker-cookbook`` into a PEFT adapter in the
+``adapter/`` directory of the checkpoint. When Reef selects the
 candidate, the control plane loads that directory into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
 weight surface. The engines capture the sampled tokens and log probabilities
@@ -193,8 +204,8 @@ transformers.
 The trajectories then come from Reef's engines while Tinker computes the loss,
 so the base model and tokenizer on both sides must match, and the
 importance-sampling ratio carries the numerical difference between the two
-engines' log probabilities. ``training.colocate`` does not apply: there are no
-training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
+engines' log probabilities. ``reef serve`` refuses ``training.colocate``:
+there are no training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
 which the Slime configuration never targets; whether the installed SGLang
 accepts that module is checked only when the engines load the adapter.
 

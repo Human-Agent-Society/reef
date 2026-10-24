@@ -16,9 +16,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
 from reef.runtime.recovery import fsync_dir as _fsync_dir
-from reef.runtime.recovery import marker_path as _marker_path
 from reef.runtime.recovery import mkdir_durable as _mkdir_durable
 from reef.runtime.recovery import read_json as _read_json
 from reef.runtime.recovery import write_json as _write_json
@@ -31,10 +29,8 @@ class CheckpointStorageError(RuntimeError):
     pass
 
 
-#: Rank-local adapter snapshots live beside the Megatron checkpoint.
-ADAPTER_SLOTS_DIRNAME = "reef_adapter_slots"
-#: The learning-rate schedule progress of every scenario lives beside the job marker.
-LEARNING_RATE_SCHEDULES_FILENAME = "reef_learning_rate_schedules.json"
+#: The file Megatron keeps beside its checkpoints, naming the newest iteration.
+MEGATRON_TRACKER = "latest_checkpointed_iteration.txt"
 
 
 @dataclass(frozen=True)
@@ -79,21 +75,10 @@ def critic_checkpoint_due(rollout_id: int, interval: int) -> bool:
     """Whether the commit at ``rollout_id`` writes the critic checkpoint.
 
     Every ``interval``-th commit does, counting from the first; ``interval``
-    1 is every commit. The bridge saves on this cadence and the storage
-    requires the critic asset on the same commits.
+    1 is every commit. The training component saves on this cadence and the
+    storage requires the critic asset on the same commits.
     """
     return (rollout_id + 1) % interval == 0
-
-
-def checkpoint_due(scenario_step: int, interval: int) -> bool:
-    """Return True if the job that trains ``scenario_step`` saves the paired checkpoint.
-
-    Each ``interval``-th scenario version saves. With ``interval`` 1, each
-    job saves. The count uses scenario versions, not rollout IDs, because
-    each saved version becomes an artifact. A rejected job uses a rollout ID
-    but makes no version.
-    """
-    return (scenario_step + 1) % interval == 0
 
 
 class CheckpointStorage:
@@ -151,11 +136,6 @@ class CheckpointStorage:
         )
         self._disk_usage = disk_usage
 
-    @property
-    def marker_path(self) -> Path:
-        """Location of the durable training-job marker for these checkpoints."""
-        return _marker_path(self.hf_template)
-
     def validate_capacity(self, *, active_rollouts: set[int] | None = None) -> dict[str, Any]:
         with self._locked():
             inventory = self._reconcile()
@@ -201,7 +181,7 @@ class CheckpointStorage:
 
     def complete(self, job_id: str, rollout_id: int, *, reward: float | None) -> None:
         # The critic asset is required at completion time on the commits the
-        # critic's cadence saves it — the bridge saves it before completing —
+        # critic's cadence saves it — the component saves it before completing —
         # so a failed critic save cannot be recorded as a durable checkpoint.
         for path in self.required_assets(rollout_id):
             if path.is_symlink() or not path.is_dir():
@@ -351,29 +331,28 @@ class CheckpointStorage:
 
     def _unknown_assets(self, known: set[Path]) -> list[str]:
         unknown: list[str] = []
-        # Control files Reef itself keeps in the managed roots: the job marker,
-        # the LoRA scenario history and the learning-rate schedule progress
-        # beside the HF exports, and the adapter-slot snapshots beside the
-        # Megatron checkpoints.
-        roots = [
-            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME, LEARNING_RATE_SCHEDULES_FILENAME}),
-            (self.megatron_root, "latest_checkpointed_iteration.txt", {ADAPTER_SLOTS_DIRNAME}),
-        ]
+        # The only control file in the managed roots is Megatron's tracker beside its checkpoints,
+        # and the temporary file it is written through.
+        roots = [(self.hf_root, None), (self.megatron_root, MEGATRON_TRACKER)]
         if self.critic_root is not None:
-            roots.append((self.critic_root, "latest_checkpointed_iteration.txt", set()))
-        for root, control, owned in roots:
+            roots.append((self.critic_root, MEGATRON_TRACKER))
+        for root, control in roots:
             if root.exists():
                 unknown.extend(
                     str(path)
                     for path in root.iterdir()
                     if path not in known
-                    and path.name != control
-                    and path.name not in owned
-                    and not (
-                        not path.is_symlink()
-                        and path.is_file()
-                        and path.name.startswith(f".{control.lstrip('.')}.")
-                        and path.name.endswith(".tmp")
+                    and (
+                        control is None
+                        or not (
+                            path.name == control
+                            or (
+                                not path.is_symlink()
+                                and path.is_file()
+                                and path.name.startswith(f".{control}.")
+                                and path.name.endswith(".tmp")
+                            )
+                        )
                     )
                 )
         return unknown
@@ -418,7 +397,7 @@ class CheckpointStorage:
         if re.fullmatch(r"iter_\d{7}", path.name):
             return path
         try:
-            iteration = int((path / "latest_checkpointed_iteration.txt").read_text(encoding="utf-8").strip())
+            iteration = int((path / MEGATRON_TRACKER).read_text(encoding="utf-8").strip())
         except FileNotFoundError:
             return path if path.is_dir() else None
         except (IsADirectoryError, ValueError):
@@ -430,7 +409,7 @@ class CheckpointStorage:
         rollouts: set[int] = set()
         roots = [self.megatron_root] + ([self.critic_root] if self.critic_root is not None else [])
         for root in roots:
-            tracker = root / "latest_checkpointed_iteration.txt"
+            tracker = root / MEGATRON_TRACKER
             try:
                 rollouts.add(int(tracker.read_text(encoding="utf-8").strip()))
             except (FileNotFoundError, ValueError):

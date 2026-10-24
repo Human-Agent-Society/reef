@@ -133,11 +133,6 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def reconnect(self, upstream_url: str) -> None:
-        if not isinstance(upstream_url, str) or not upstream_url.startswith(("http://", "https://")):
-            raise ValueError("inference endpoint must be an HTTP URL")
-        self._upstream_url = upstream_url.rstrip("/")
-
     def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Keyword arguments of one ``session.post`` call."""
         return {

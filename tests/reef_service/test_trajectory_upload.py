@@ -17,8 +17,8 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2batch import Task2Batch
-from reef.train import CandidateBackend, PreparedStep, Trainer, TrainingBatch, TrainStepResult
+from reef.task2job import Task2Job
+from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrajectoryItem
 
@@ -46,13 +46,13 @@ def uploaded(*trajectory_ids: str) -> dict[str, Any]:
 class CountingBackend(CandidateBackend):
     """Keeps every batch and skips its step, so the trainer commits it."""
 
-    def __init__(self, batches: list[TrainingBatch]) -> None:
+    def __init__(self, batches: list[JobData]) -> None:
         self.batches = batches
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"trained": 0}
 
-    def prepare_step(self, batch: TrainingBatch, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
+    def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
         self.batches.append(batch)
         return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.items)})
 
@@ -66,34 +66,34 @@ class CountingBackend(CandidateBackend):
         pass
 
 
-class UploadBatches(Task2Batch):
+class UploadJobData(Task2Job):
     accepts_trajectories = True
 
-    def make_batch(self, tasks, batch_id):
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, tasks, data_id):
+        return JobData(data_id, tasks)
 
 
-class RecordOnlyBatches(UploadBatches):
+class RecordOnlyJobData(UploadJobData):
     accepts_trajectories = False
 
 
 @dataclass(frozen=True, kw_only=True)
 class UploadRecipe(Recipe):
-    batch_stage: type[Task2Batch] = UploadBatches
-    batches: list[TrainingBatch] = field(default_factory=list)
+    batch_stage: type[Task2Job] = UploadJobData
+    batches: list[JobData] = field(default_factory=list)
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: TrainingPipeline(context, task2batch=self.batch_stage(context, None)),
+            pipeline_factory=lambda context: TrainingPipeline(context, task2job=self.batch_stage(context, None, None)),
             candidate_backend=CountingBackend(self.batches),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
-            # An uploaded trajectory is one sample, so two uploads make one batch.
-            batch_size=2,
+            # An uploaded trajectory is one sample, so two uploads make one job's data.
+            default_job_samples=2,
         )
 
 
@@ -155,7 +155,7 @@ def test_uploaded_trajectories_train_once_also_after_a_restart(tmp_path):
 
 
 def test_an_upload_needs_a_recipe_that_accepts_uploaded_trajectories(tmp_path):
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe(batch_stage=RecordOnlyBatches))
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe(batch_stage=RecordOnlyJobData))
 
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:

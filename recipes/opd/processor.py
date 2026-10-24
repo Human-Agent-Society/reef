@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
-from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
+from reef.core.job_data import TrajectoryItem
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext

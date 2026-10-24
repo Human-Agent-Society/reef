@@ -13,9 +13,8 @@ from tests.support.runtime_stubs import runtime_bindings
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import validate_services
-from reef.service.deploy.inference import command_line_config
+from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE, command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.train.slime_backend.launch import driver_environment
 
 OPENCLAW = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 
@@ -56,8 +55,6 @@ def test_cli_cannot_reintroduce_process_configuration(tmp_path, flag, from_file)
 
 
 def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_path):
-    from tests.support.runtime_stubs import StubTrainingRuntime
-
     from recipes.openclawrl.recipe import OpenClawRLRecipe
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.service_config import service_config_from_mapping
@@ -71,16 +68,16 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
         },
         tmp_path / "serve.yaml",
     )
-    driver, http = validate_services(config, "test")
-    assert driver["name"] == "slime-driver"
+    component, http = validate_services(config, "test")
+    assert component["name"] == INFERENCE_COMPONENT_SERVICE
     assert http["name"] == "reef"
-    assert not driver.get("depends_on")
-    assert driver["executor"] == http["executor"] == "uni"
-    assert http["depends_on"] == [driver["name"]]
+    assert not component.get("depends_on")
+    assert component["executor"] == http["executor"] == "uni"
+    assert http["depends_on"] == [component["name"]]
     settings = service_config_from_mapping(config)
     recipe_config = OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
     recipe_config["pipeline"] = settings.pipeline_settings
-    recipe = OpenClawRLRecipe.from_environment({}, config=recipe_config, **runtime_bindings(StubTrainingRuntime()))
+    recipe = OpenClawRLRecipe.from_environment({}, config=recipe_config, **runtime_bindings())
     assert recipe.stages().record2record.config == {
         "prm_url": "http://other:9000",
         "prm_tokenizer_path": "/models/other",
@@ -114,20 +111,12 @@ def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    recipe = _serving_recipe(raw["recipe"]["implementation"], service_config_from_mapping(config), {}, None)
+    recipe = _serving_recipe(raw["recipe"]["implementation"], service_config_from_mapping(config), {})
     assert recipe.runtime.base_url == "http://localhost:8000"
 
 
-def test_training_environment_defaults_belong_to_backend_and_honor_overrides():
-    assert driver_environment({}) == {"CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0"}
-    assert driver_environment({"CUDA_DEVICE_MAX_CONNECTIONS": "8", "NCCL_NVLS_ENABLE": "1"}) == {
-        "CUDA_DEVICE_MAX_CONNECTIONS": "8",
-        "NCCL_NVLS_ENABLE": "1",
-    }
-
-
-@pytest.mark.parametrize("fail_driver", [False, True])
-def test_reef_shutdown_and_startup_failure_leave_external_prm_running(tmp_path, monkeypatch, fail_driver):
+@pytest.mark.parametrize("fail_inference", [False, True])
+def test_reef_shutdown_and_startup_failure_leave_external_prm_running(tmp_path, monkeypatch, fail_inference):
     # Run real child processes and readiness checks; replace only GPU workloads/placement.
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     closed = []
@@ -151,7 +140,7 @@ def test_reef_shutdown_and_startup_failure_leave_external_prm_running(tmp_path, 
         text=True,
     )
     try:
-        _exercise_reef_lifecycle(tmp_path, external, fail_driver)
+        _exercise_reef_lifecycle(tmp_path, external, fail_inference)
         assert external.poll() is None
     finally:
         external.terminate()
@@ -160,13 +149,13 @@ def test_reef_shutdown_and_startup_failure_leave_external_prm_running(tmp_path, 
     assert closed == [True]
 
 
-def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
+def _exercise_reef_lifecycle(tmp_path, external, fail_inference):
     port = int(external.stdout.readline())
     raw = method_config()
     endpoint = f"http://127.0.0.1:{port}"
     raw["pipeline"]["record2record"]["config"]["prm_url"] = endpoint
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    assert [process["name"] for process in config["services"]] == ["slime-driver", "reef"]
+    assert [process["name"] for process in config["services"]] == [INFERENCE_COMPONENT_SERVICE, "reef"]
     for process in config["services"]:
         name = process["name"]
         marker = tmp_path / name
@@ -177,7 +166,7 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
             "assert all(Path(p).exists() for p in paths); "
             f"Path({str(marker)!r}).write_text('ready'); time.sleep(120)"
         )
-        if fail_driver and name == "slime-driver":
+        if fail_inference and name == INFERENCE_COMPONENT_SERVICE:
             script = "raise SystemExit(7)"
         process.update(
             executor="uni",
@@ -194,10 +183,10 @@ def _exercise_reef_lifecycle(tmp_path, external, fail_driver):
     run_dir.mkdir()
     stack = _Stack(config, validate_services(config, "test"), run_dir, 10, tmp_path / "config.yaml")
     try:
-        if fail_driver:
-            with pytest.raises(RuntimeError, match=r"slime-driver.*exited"):
+        if fail_inference:
+            with pytest.raises(RuntimeError, match=r"inference.*exited"):
                 stack.start()
-            assert not (tmp_path / "slime-driver").exists()
+            assert not (tmp_path / INFERENCE_COMPONENT_SERVICE).exists()
             assert not (tmp_path / "reef").exists()
         else:
             stack.start()

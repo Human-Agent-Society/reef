@@ -6,11 +6,11 @@ A deployment selects the recipe as ``reef.recipe.sft:SFTRecipe``. Its
 - ``processor``: the stages. ``SFTRecord2Record`` makes each report its own
   record set and never drops a set as stale. ``SFTTasks`` renders the
   recorded request and the target response with the served model's chat
-  template. The shared ``DistillBatches`` stage puts the tasks into batches.
+  template. The shared ``DistillJobData`` stage puts the tasks into job data.
 - ``objective``: ``SftObjective`` trains all samples with the same weight.
   Another recipe can select it for a job with
   ``TrainingMethod("reef.recipe.sft:SftObjective")``.
-- ``recipe``: the objective, the step schedule, and the report contract
+- ``recipe``: the objective and the report contract
   (``reef.core.reports.TeacherContextReport``).
 
 The ``sft`` loss family is in ``reef.train.slime_backend.sft`` and uses

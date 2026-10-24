@@ -40,7 +40,7 @@ from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import merged_requires
 from reef.train.trainer import Trainer
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])
@@ -445,7 +445,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
         return MARKER
 
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
-    batch = TrainingBatch("demo:instruction:ask-1", (), request=request)
+    batch = JobData("demo:instruction:ask-1", (), request=request)
     candidate_backend = backend(tmp_path, extending)
     initial = candidate_backend.initial_state()
     result = run_backend_step(candidate_backend, batch, initial)
@@ -496,7 +496,7 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
 def test_no_proposal_keeps_the_requests_requires(tmp_path: Path) -> None:
     person = [{"name": "P0", "kind": "env"}]
     request = TrainingRequest("ask", "s", "rel-0", "ask-2", requires=tuple(person))
-    batch = TrainingBatch("demo:instruction:ask-2", (), request=request)
+    batch = JobData("demo:instruction:ask-2", (), request=request)
     candidate_backend = backend(tmp_path, lambda n, s, m, *, requests=(): None)
     result = run_backend_step(candidate_backend, batch, candidate_backend.initial_state())
     assert result.metrics["skipped"] == "no proposal"
@@ -532,6 +532,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
             pipeline_factory=harness_stages(inference=True).build,
             candidate_backend=_RequiresBackend(written),
             training_mode="manual",
+            default_job_samples=1,
         )
         try:
             records.append(

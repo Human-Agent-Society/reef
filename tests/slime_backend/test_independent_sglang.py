@@ -135,7 +135,7 @@ def test_external_engine_refuses_incompatible_capture_settings(native_engine, mo
     assert not launched and not events
 
 
-def test_group_preserves_shared_gpu_placement_and_multinode_rendezvous(monkeypatch):
+def test_group_preserves_gpu_placement_and_multinode_rendezvous(monkeypatch):
     from reef.inference.sglang import launch
 
     calls, initialized = [], []
@@ -161,7 +161,7 @@ def test_group_preserves_shared_gpu_placement_and_multinode_rendezvous(monkeypat
 
     monkeypatch.setattr(launch.ray, "remote", lambda cls: ActorClass())
     monkeypatch.setattr(launch.ray, "get", lambda value: value)
-    config = SGLangConfig("model", 8, 8, 4, offload=True, shared_gpus=8)
+    config = SGLangConfig("model", 8, 8, 4)
     group = SGLangEngineGroup(
         config,
         SGLangGroupConfig("regular", 8, 8),
@@ -173,7 +173,6 @@ def test_group_preserves_shared_gpu_placement_and_multinode_rendezvous(monkeypat
     assert len(calls) == 2
     assert [c["scheduling_strategy"].placement_group_bundle_index for c in calls] == [0, 4]
     assert initialized[0]["dist_init_addr"] == initialized[1]["dist_init_addr"] == "node-0:15003"
-    assert group.needs_offload
     assert len(group.engines) == 1
     model = SGLangModel([group])
     assert model.engine_gpu_counts == [8]

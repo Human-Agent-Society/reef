@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import Column, Float, Integer, MetaData, Table, Text, create_engine
 from sqlalchemy.engine import Connection
 
+from tests.support.consumption_receipts import write_consumption_receipt
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.postgres import PostgresRecordStore
 from reef.storage.records import AppendResult, RecordConflict, RecordStore
@@ -161,7 +162,9 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
             original = record("first")
             with pytest.raises(RuntimeError, match="abort outer transaction"), connection.begin():
                 records.append(original)
-                records.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
+                write_consumption_receipt(
+                    records, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1}
+                )
                 records.write_settings(ScenarioSettings(training_mode="manual"))
                 assert len(records.consumption_receipts("math")) == 1
                 assert records.read_settings().training_mode == "manual"
@@ -175,7 +178,9 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
                 assert records.append_result(committed).inserted
-                records.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 2})
+                write_consumption_receipt(
+                    records, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 2}
+                )
                 records.append(record("second"))
 
             with connection.begin():
@@ -240,7 +245,7 @@ def test_batch_commit_rollback_and_retired_retries(records: RecordStore) -> None
     with pytest.raises(ValueError, match="one scenario"):
         records.append_many([record("third"), record("other", "other")])
     assert records.count("math") == 2
-    records.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
+    write_consumption_receipt(records, "math", frozenset({"first"}), receipt_id="skip", metadata={})
     assert records.append_many([first])[0].inserted is False
     with pytest.raises(RecordConflict):
         records.append_many([record("third"), replace(first, payload={"changed": True})])
@@ -280,25 +285,17 @@ def test_batch_uses_one_write_transaction_and_observes_only_committed_records(tm
         store.close()
 
 
-def test_consumption_receipts_preserve_bodies_and_reject_conflicting_retries(records: RecordStore) -> None:
+def test_consumption_receipts_of_an_older_store_preserve_bodies(records: RecordStore) -> None:
     original = record("source")
     records.append(original)
-    ids = frozenset({"source"})
     metadata = {"outcome": "stale", "metrics": {"dropped": 1}}
-    records.record_consumption("math", ids, receipt_id="batch-1", metadata=metadata)
+    write_consumption_receipt(records, "math", frozenset({"source"}), receipt_id="batch-1", metadata=metadata)
     [receipt] = records.consumption_receipts("math")
     assert receipt["consumed_ids"] == ("source",)
     assert receipt["metadata"] == metadata
-    records.record_consumption("math", ids, receipt_id="batch-1", metadata=metadata)
-    assert records.consumption_receipts("math") == (receipt,)
-    with pytest.raises(RecordConflict, match="different content"):
-        records.record_consumption("math", ids, receipt_id="batch-1", metadata={"outcome": "changed"})
-    assert records.consumption_receipts("math") == (receipt,)
     assert records.consumption_receipts("code") == ()
     assert records.get("math", "source") == original
     assert records.replay("math") == (original,)
     assert records.append_result(original).inserted is False
     # Storage accepts feedback independently of whether a consumer processed the source.
     assert records.append_result(record("late", references=("source",))).inserted
-    with pytest.raises(ValueError, match="non-empty"):
-        records.record_consumption("math", ids, receipt_id="", metadata={})

@@ -8,8 +8,8 @@ from typing import Any
 from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.registry import register_objective
-from reef.train.algos.signals import StepSignal
-from reef.train.types import TrainingBatch, trajectories
+from reef.train.algos.signals import TrainingSignal
+from reef.train.types import JobData, trajectories
 
 
 @register_objective
@@ -19,10 +19,10 @@ class SaoObjective(TrainingObjective):
     # The SAO ratio is clipped on both sides, so passes after the first stay bounded.
     supports_multiple_epochs = True
 
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        samples = trajectories(batch)
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
         steps = next_steps(state)
-        return StepSignal(
+        return TrainingSignal(
             "train",
             {"steps": steps},
             {"steps": steps, "rollouts": len(samples)},

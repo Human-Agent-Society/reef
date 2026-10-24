@@ -333,7 +333,6 @@ def _training_inference_values(**options):
             **{
                 "hf_checkpoint": "model",
                 "seed": 1,
-                "offload_rollout": False,
                 "fp16": False,
                 "use_rollout_routing_replay": False,
                 "megatron_lora_rank": 0,
@@ -342,8 +341,9 @@ def _training_inference_values(**options):
                 "num_gpus_per_node": 1,
                 "actor_num_nodes": 1,
                 "actor_num_gpus_per_node": 1,
-                "colocate": False,
                 "disjoint_prefix_sharing": False,
+                "reef_rollout_executor_backend": "auto",
+                "reef_rollout_executor_options": {},
                 **options,
             },
         )
@@ -356,7 +356,7 @@ def test_training_inference_forces_the_flags_reef_serving_relies_on():
     config = _training_inference_config(sglang_disable_radix_cache=False)
     assert config.options["disable_radix_cache"] is True
     assert config.options["incremental_streaming_output"] is True
-    opted_out = _training_inference_config(colocate=True, offload_rollout=True, sglang_disable_radix_cache=True)
+    opted_out = _training_inference_config(disjoint_prefix_sharing=True, sglang_disable_radix_cache=True)
     assert opted_out.options["disable_radix_cache"] is True, "a launch may always opt out of sharing"
 
 
@@ -421,12 +421,12 @@ def test_reef_config_selects_pause_mode_and_scopes_shared_prefix_cache(
     assert engine_environment(disjoint)["SGLANG_PLUGINS"] == "telemetry,reef"
     assert os.environ["SGLANG_PLUGINS"] == "telemetry"
 
-    colocated = create_inference(_training_inference_values(colocate=True, offload_rollout=True)).config
-    assert colocated.pause_mode == "retract"
-    assert colocated.options["incremental_streaming_output"] is True
-    # A colocated step releases the KV cache before every publication, so a
+    sharing = create_inference(_training_inference_values(disjoint_prefix_sharing=True)).config
+    assert sharing.pause_mode == "retract"
+    assert sharing.options["incremental_streaming_output"] is True
+    # A retracting pause releases the KV cache before every weight load, so a
     # shared entry cannot outlive the weights that built it.
-    assert colocated.options["disable_radix_cache"] is False
+    assert sharing.options["disable_radix_cache"] is False
 
 
 @pytest.mark.unit
@@ -446,14 +446,14 @@ def test_disjoint_shares_prefixes_only_by_opting_into_retraction() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("adapter_scoped", [True, False])
-def test_colocated_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
+def test_retracting_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
     monkeypatch: pytest.MonkeyPatch, adapter_scoped: bool
 ) -> None:
     """One engine holds several scenarios' adapters; the engine must keep them apart."""
     _load_sglang_engine_module(monkeypatch)
     monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
 
-    config = _training_inference_config(colocate=True, offload_rollout=True, megatron_lora_rank=8)
+    config = _training_inference_config(disjoint_prefix_sharing=True, megatron_lora_rank=8)
 
     assert config.options["enable_lora"] is True
     assert (
@@ -566,10 +566,10 @@ sglang:
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
         create_inference(_training_inference_values(sglang_config=str(config)))
 
-    colocated = create_inference(
-        _training_inference_values(colocate=True, offload_rollout=True, sglang_config=str(config))
+    sharing = create_inference(
+        _training_inference_values(disjoint_prefix_sharing=True, sglang_config=str(config))
     ).config
-    assert colocated.models[0].groups[0].options["disable_radix_cache"] is False, "a colocated group may share"
+    assert sharing.models[0].groups[0].options["disable_radix_cache"] is False, "a retracting group may share"
 
 
 @pytest.mark.unit
@@ -596,11 +596,10 @@ sglang:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("colocate", [True, False])
 @pytest.mark.parametrize("adapter_scoped", [True, False])
 @pytest.mark.parametrize("disabled", [True, False])
 def test_lora_yaml_cannot_override_required_cache_isolation(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, colocate: bool, adapter_scoped: bool, disabled: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter_scoped: bool, disabled: bool
 ) -> None:
     _load_sglang_engine_module(monkeypatch)
     monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
@@ -611,9 +610,7 @@ def test_lora_yaml_cannot_override_required_cache_isolation(
         encoding="utf-8",
     )
     values = _training_inference_values(
-        colocate=colocate,
-        offload_rollout=colocate,
-        disjoint_prefix_sharing=not colocate,
+        disjoint_prefix_sharing=True,
         megatron_lora_rank=8,
         sglang_config=str(config),
     )
@@ -624,29 +621,6 @@ def test_lora_yaml_cannot_override_required_cache_isolation(
             create_inference(values)
     else:
         create_inference(values)
-
-
-@pytest.mark.unit
-def test_colocated_reef_config_rejects_pd_disaggregation(tmp_path: Path) -> None:
-    config = tmp_path / "sglang.yaml"
-    config.write_text(
-        """\
-sglang:
-  - name: actor
-    server_groups:
-      - worker_type: prefill
-        num_gpus: 1
-      - worker_type: decode
-        num_gpus: 1
-""",
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="regular engines"):
-        create_inference(
-            _training_inference_values(
-                colocate=True, offload_rollout=True, rollout_num_gpus=2, sglang_config=str(config)
-            )
-        )
 
 
 @pytest.mark.unit
@@ -992,56 +966,3 @@ def test_retract_flush_preserves_pending_grammar_and_gpu_guards(monkeypatch: pyt
     assert scheduler.is_fully_idle() is False
     future.set_result("compiled grammar")
     assert scheduler.grammar_manager.grammar_queue.pop().grammar.result() == "compiled grammar"
-
-
-@pytest.mark.unit
-def test_memory_transitions_pair_cold_startup_with_keep_base_training(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
-    calls: list[tuple[str, object]] = []
-    engine = object.__new__(module.ReefSGLangEngine)
-    engine.node_rank = 0
-    engine._make_request = lambda route, payload=None, **_kw: calls.append((route, payload))
-    engine.flush_cache = lambda: calls.append(("flush_cache", None))
-
-    engine.release_memory_occupation()
-    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
-    engine.resume_memory_occupation(["weights"])
-    engine.resume_memory_occupation(["weights"])
-    engine.resume_memory_occupation()
-    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
-    engine.resume_memory_occupation()
-
-    assert calls == [
-        ("flush_cache", None),
-        ("release_memory_occupation", {"tags": ["weights", "kv_cache", "cuda_graph"]}),
-        ("resume_memory_occupation", {"tags": ["weights"]}),
-        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
-        ("flush_cache", None),
-        ("release_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
-        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
-    ]
-
-
-@pytest.mark.parametrize("failure", ["release_memory_occupation", "resume_memory_occupation"])
-def test_uncertain_memory_transition_requires_engine_replacement(monkeypatch, failure):
-    module = _load_sglang_engine_module(monkeypatch)
-    engine = object.__new__(module.ReefSGLangEngine)
-    calls = []
-
-    def request(route, payload):
-        calls.append(route)
-        return {"success": route != failure}
-
-    engine._make_request = request
-    engine.flush_cache = lambda: None
-    with pytest.raises(RuntimeError, match=failure):
-        engine.release_memory_occupation()
-        engine.resume_memory_occupation()
-    before = list(calls)
-    with pytest.raises(RuntimeError, match="uncertain"):
-        engine.resume_memory_occupation()
-    with pytest.raises(RuntimeError, match="uncertain"):
-        engine.release_memory_occupation()
-    assert calls == before

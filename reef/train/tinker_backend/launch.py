@@ -1,7 +1,7 @@
 """Tinker deployment definition and runtime factory; no SDK import at discovery.
 
 Tinker trains in the HTTP service's process: ``TinkerTrainingComponent`` runs
-each job behind ``JobTrainingRuntime``. Without an inference engine, Tinker
+each job. Without an inference engine, Tinker
 samples too (``reef.inference.tinker``). With ``inference.backend: sglang``,
 Reef's serving engines run on an inference component: the one that
 ``inference.remote`` names, or one that ``reef serve`` starts on this host.
@@ -17,7 +17,8 @@ from typing import Any
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.train.deployment import InProcessTrainingDeployment, inference_handler_factory_for, prepare_inference_config
 from reef.train.tinker_backend.config import TinkerConfig
 
@@ -77,8 +78,6 @@ class TinkerDeployment(InProcessTrainingDeployment):
             raise DeployConfigError("Tinker serves through inference engines only with inference.backend: sglang")
         if settings["inference_url"] or config.get("reef", {}).get("runtime"):
             raise DeployConfigError("Tinker reaches its serving engines through their inference component")
-        if settings["colocate"]:
-            raise DeployConfigError("a hosted trainer has no training GPUs; remove training.colocate")
         if {"training", "rollout"} & config.get("execution", {}).keys():
             raise DeployConfigError("Tinker trains in the HTTP service's process; remove the execution roles")
         options = normalize_native_options(settings["training_backend_options"])
@@ -94,8 +93,8 @@ class TinkerDeployment(InProcessTrainingDeployment):
         config["ready_timeout"] = max(int(config.get("ready_timeout", 30)), int(settings["training_ready_timeout"]))
         return ()
 
-    def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
-        runtime_config = super().runtime_config(settings, connector=connector)
+    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+        runtime_config = super().runtime_config(settings, loss_family=loss_family)
         if "serving" in runtime_config:
             raise DeployConfigError("training.options cannot set serving; the deployment selects the engines")
         if not self.serves_on_inference_component(settings):
@@ -124,8 +123,7 @@ class TinkerRuntimeFactory(RuntimeFactory):
 
     def __call__(
         self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
-    ) -> tuple[TrainingRuntime, InferenceRuntime]:
-        from reef.train.job_runtime import JobTrainingRuntime
+    ) -> tuple[TrainingComponent, InferenceRuntime]:
         from reef.train.tinker_backend.client import TinkerSDKClient
         from reef.train.tinker_backend.component import TinkerTrainingComponent
 
@@ -140,13 +138,12 @@ class TinkerRuntimeFactory(RuntimeFactory):
         except BaseException:
             client.close()
             raise
-        # Engines serve one adapter per scenario, so each scenario trains its own adapter.
-        training = JobTrainingRuntime(component, component.state_dir / "runtime", per_scenario=bool(serving))
         try:
             if serving:
                 remote = serving["remote"]
                 inference_config = {
-                    "type": "remote_adapters",
+                    "type": "remote_serving",
+                    "layout": "adapter",
                     "remote": remote,
                     "engine": serving["engine"],
                     "engine_config": sglang_engine_config(
@@ -177,9 +174,9 @@ class TinkerRuntimeFactory(RuntimeFactory):
             if not isinstance(inference, InferenceRuntime):
                 raise RuntimeConfigError("the Tinker serving factory must return an InferenceRuntime")
         except BaseException:
-            training.shutdown()
+            component.close()
             raise
-        return training, inference
+        return component, inference
 
 
 runtime_factory = TinkerRuntimeFactory()

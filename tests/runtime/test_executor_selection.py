@@ -92,18 +92,18 @@ def test_slime_rejects_unsupported_builtin_gpu_launchers(backend):
         slime_executor_class(backend)
 
 
-def test_driver_auto_and_cli_auto_override_yaml(caplog):
+def test_slime_component_auto_and_cli_auto_override_yaml(caplog):
     pytest.importorskip("ray")
-    from reef.train.slime_backend.driver import _configure_executors
+    from reef.train.slime_backend.component import configure_executors
 
-    args = SimpleNamespace(reef_executor_backend="auto", reef_rollout_executor_backend="auto")
+    args = SimpleNamespace(reef_executor_backend="auto")
     with caplog.at_level("INFO"):
-        _configure_executors(args, {}, [])
-    assert args.reef_executor_backend == args.reef_rollout_executor_backend == "ray"
+        configure_executors(args, {}, [])
+    assert args.reef_executor_backend == "ray"
     assert "training: executor=ray" in caplog.text
     assert "Slime model workers" in caplog.text
     args.reef_executor_backend = "auto"
-    _configure_executors(args, {"execution": {"training": "custom:Training"}}, ["--reef-executor-backend", "auto"])
+    configure_executors(args, {"training": "custom:Training"}, ["--reef-executor-backend", "auto"])
     assert args.reef_executor_backend == "ray"
 
 

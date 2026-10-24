@@ -9,8 +9,8 @@ from reef.core.trajectories import trajectory_reward
 from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.registry import register_objective
-from reef.train.algos.signals import StepSignal
-from reef.train.types import TrainingBatch, trajectories
+from reef.train.algos.signals import TrainingSignal
+from reef.train.types import JobData, trajectories
 
 
 @register_objective
@@ -22,12 +22,12 @@ class OpenClawRLObjective(TrainingObjective):
     # wrong policy; the Slime spec refuses --num-steps-per-rollout>1 for the same reason.
     supports_multiple_epochs = False
 
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        samples = trajectories(batch)
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
         # The upstream top-K loss consumes raw rewards without normalization.
         advantages = tuple(trajectory_reward(sample) for sample in samples)
         steps = next_steps(state)
-        return StepSignal(
+        return TrainingSignal(
             "train",
             {"steps": steps},
             {"advantages": advantages, "steps": steps},
