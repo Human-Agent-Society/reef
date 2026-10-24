@@ -1,12 +1,11 @@
-"""The GEPA candidate pool: fronts, parent sampling, budget, persistence.
+"""The GEPA candidate pool: fronts, parent sampling, and budget.
 
 GEPA keeps its whole search in one state object: every program
 it ever proposed, that program's per-instance validation scores, the Pareto
 front each instance induces, a round-robin cursor per candidate, and the
-metric-call budget spent so far. Standalone drivers persist every mutation
-to JSON. A Reef recipe instead keeps this object transactionally in Reef's
-algorithm state and updates the JSON mirror only after the scenario commit
-is durable, so a failed activation or commit cannot advance the search.
+metric-call budget spent so far. The recipe keeps this object as the method
+state Reef commits with each step (``Archive.to_state``), so a step that
+fails or is never committed cannot advance the search.
 
 Two rules are GEPA's and are reproduced exactly:
 
@@ -22,12 +21,9 @@ Two rules are GEPA's and are reproduced exactly:
 
 from __future__ import annotations
 
-import json
-import os
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 
@@ -75,85 +71,71 @@ class Candidate:
 
 @dataclass
 class Archive:
-    """Every candidate the search has produced, and the budget it has spent."""
+    """Every candidate the search has produced, and the budget it has spent.
 
-    path: Path
-    #: Standalone archives write after every mutation. Reef-bound archives
-    #: disable this and persist only from the post-commit hook.
-    autosave: bool = True
+    Purpose: the GEPA proposer reads it from the committed method state with
+    ``from_state``, folds in the latest evaluation with ``settle``, runs one
+    iteration on it, and returns ``to_state``; the selection reads it.
+    """
+
     candidates: list[Candidate] = field(default_factory=list)
     #: The candidate the mechanism is serving, and the one a proposal is
-    #: stated against; ``pending`` is the candidate awaiting the selector's
-    #: validation pass, at most one, because a step settles before the next.
+    #: stated against; ``pending`` is the candidate awaiting its validation
+    #: pass, at most one, because a step settles before the next.
     served: int | None = None
     pending: int | None = None
+    #: The step that proposed the pending candidate: only that step's outcome is its validation pass.
+    pending_step: int | None = None
     metric_calls: int = 0
     #: GEPA iterations that reached a child evaluation, and how many of those
     #: the minibatch acceptance test rejected.
     steps: int = 0
     rejections: int = 0
     #: One row per reflection: what the model was shown and what it wrote,
-    #: with the minibatch scores on both sides and the verdict. GEPA keeps the
+    #: with the minibatch scores on both sides and the result. GEPA keeps the
     #: same record in its run directory; without it a search outcome can only
     #: be inferred from the candidate texts after the fact.
     proposals: list[dict[str, Any]] = field(default_factory=list)
     #: GEPA's one random stream, in its order: a parent draw, then a reshuffle
-    #: of the training order at an epoch boundary. Persisted so the same seed
-    #: walks the same problems as ``gepa.optimize`` would, across restarts.
+    #: of the training order at an epoch boundary. Committed with the state, so
+    #: the same seed walks the same problems as ``gepa.optimize`` would.
     rng_seed: int = 0
     rng_state: list[Any] | None = None
     iteration: int = 0
     order: list[int] = field(default_factory=list)
     epoch: int = -1
-    plans: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _plan_refreshed: bool = field(default=False, init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        self.path = Path(self.path)
-        if not isinstance(self.autosave, bool):
-            raise TypeError("archive autosave must be a boolean")
-        if self.path.exists():
-            self._load()
-
-    # -- persistence ---------------------------------------------------------
-
-    def _read(self) -> Mapping[str, Any]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as error:
-            raise ValueError(f"cannot read the GEPA archive at {self.path}: {error}") from error
-        if not isinstance(data, Mapping):
-            raise ValueError(f"the GEPA archive at {self.path} must hold a JSON object")
-        return data
-
-    def _load(self) -> None:
-        self.restore(self._read())
-
-    def restore(self, data: Mapping[str, Any]) -> None:
-        """Replace the in-memory archive from a committed state snapshot."""
+    @classmethod
+    def from_state(cls, data: Mapping[str, Any] | None, *, rng_seed: int = 0) -> Archive:
+        """The archive a committed ``to_state`` snapshot describes; an empty one seeded ``rng_seed`` for none."""
+        if data is None:
+            return cls(rng_seed=rng_seed)
         if not isinstance(data, Mapping):
             raise ValueError("GEPA archive state must be a mapping")
-        self._plan_refreshed = False
-        self.candidates = [Candidate.from_dict(entry) for entry in data.get("candidates", ())]
         served, pending = data.get("served"), data.get("pending")
-        self.served = None if served is None else int(served)
-        self.pending = None if pending is None else int(pending)
-        self.metric_calls = int(data.get("metric_calls", 0))
-        self.steps = int(data.get("steps", 0))
-        self.rejections = int(data.get("rejections", 0))
-        self.proposals = [dict(row) for row in data.get("proposals", ())]
-        self.rng_seed = int(data.get("rng_seed", self.rng_seed))
-        self.rng_state = data.get("rng_state")
-        self.iteration = int(data.get("iteration", 0))
-        self.order = [int(index) for index in data.get("order", ())]
-        self.epoch = int(data.get("epoch", -1))
-        self.plans = {str(key): dict(value) for key, value in (data.get("plans") or {}).items()}
+        return cls(
+            candidates=[Candidate.from_dict(entry) for entry in data.get("candidates", ())],
+            served=None if served is None else int(served),
+            pending=None if pending is None else int(pending),
+            pending_step=None if data.get("pending_step") is None else int(data["pending_step"]),
+            metric_calls=int(data.get("metric_calls", 0)),
+            steps=int(data.get("steps", 0)),
+            rejections=int(data.get("rejections", 0)),
+            proposals=[dict(row) for row in data.get("proposals", ())],
+            rng_seed=int(data.get("rng_seed", rng_seed)),
+            rng_state=data.get("rng_state"),
+            iteration=int(data.get("iteration", 0)),
+            order=[int(index) for index in data.get("order", ())],
+            epoch=int(data.get("epoch", -1)),
+        )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_state(self) -> dict[str, Any]:
+        """The JSON snapshot ``from_state`` reads back as an equal archive."""
         return {
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "served": self.served,
             "pending": self.pending,
+            "pending_step": self.pending_step,
             "metric_calls": self.metric_calls,
             "steps": self.steps,
             "rejections": self.rejections,
@@ -163,47 +145,7 @@ class Archive:
             "iteration": self.iteration,
             "order": list(self.order),
             "epoch": self.epoch,
-            "plans": {key: dict(value) for key, value in self.plans.items()},
         }
-
-    def refresh(self) -> None:
-        """Re-read the file: the driver that plans an iteration and the method
-        that runs it hold separate objects on one archive, never at once.
-
-        A Reef-bound archive accepts only the driver's scheduling fields from
-        disk. Candidate, budget, and serving state must still match the
-        committed in-memory snapshot, so a stale or speculative mirror cannot
-        replace Reef's canonical state.
-        """
-        if self.autosave:
-            if self.path.exists():
-                self._load()
-            return
-        if self._plan_refreshed:
-            return
-        self._plan_refreshed = True
-        if not self.path.exists():
-            return
-        data = self._read()
-        current = self.to_dict()
-        planned_fields = {"rng_state", "order", "epoch", "plans"}
-        if any(data.get(key) != value for key, value in current.items() if key not in planned_fields):
-            raise ValueError(f"the GEPA archive plan at {self.path} does not match Reef's committed state")
-        self.rng_state = data.get("rng_state")
-        self.order = [int(index) for index in data.get("order", ())]
-        self.epoch = int(data.get("epoch", -1))
-        self.plans = {str(key): dict(value) for key, value in (data.get("plans") or {}).items()}
-
-    def persist(self) -> None:
-        """Rewrite the JSON mirror atomically from the current state."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        scratch = self.path.with_name(f"{self.path.name}.tmp")
-        scratch.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(scratch, self.path)
-
-    def _write(self) -> None:
-        if self.autosave:
-            self.persist()
 
     # -- growth --------------------------------------------------------------
 
@@ -216,12 +158,11 @@ class Archive:
         """
         self.candidates.append(Candidate(texts=dict(texts), discovered_at=self.metric_calls))
         self.served = len(self.candidates) - 1
-        self.pending = None
-        self._write()
+        self.clear_pending()
         return self.served
 
-    def add(self, texts: Mapping[str, str], parent: int, minibatch_scores: Sequence[float]) -> int:
-        """Append an accepted child as the pending candidate and return its index.
+    def add(self, texts: Mapping[str, str], parent: int, minibatch_scores: Sequence[float], step: int) -> int:
+        """Append an accepted child as the pending candidate of ``step`` and return its index.
 
         The child inherits its parent's round-robin cursor, as GEPA does, so
         successive descendants keep walking the component list rather than
@@ -237,38 +178,51 @@ class Archive:
             )
         )
         self.pending = len(self.candidates) - 1
+        self.pending_step = step
         self.steps += 1
-        self._write()
         return self.pending
 
     def reject(self) -> None:
         """Record a GEPA iteration whose child lost the minibatch comparison."""
         self.steps += 1
         self.rejections += 1
-        self._write()
 
     def log_proposal(self, row: Mapping[str, Any]) -> None:
         """Keep one reflection's full record: parent, component, minibatch,
         prompt, reply, child scores, and whether the child was accepted."""
         self.proposals.append({"step": self.steps, **row})
-        self._write()
 
     def record_validation(self, index: int, scores: Sequence[float]) -> None:
         self.candidates[index].val_scores = [float(score) for score in scores]
-        self._write()
+
+    def settle(self, candidate_scores: Sequence[float], served_scores: Sequence[float], selected: bool) -> None:
+        """Fold one evaluated step into the archive: GEPA's validation pass and the update of the served candidate.
+
+        The pending candidate takes the step's candidate scores and is charged
+        for them; a served candidate that has no validation yet (the seed, on
+        the first evaluated step) takes the served scores, charged when it was
+        seeded. A selected step serves the pending candidate.
+        """
+        pending = self.pending
+        if pending is not None:
+            self.record_validation(pending, candidate_scores)
+            self.charge(len(candidate_scores))
+        if self.served is not None and self.candidates[self.served].val_scores is None:
+            self.record_validation(self.served, served_scores)
+        if selected and pending is not None:
+            self.serve(pending)
+        self.clear_pending()
 
     def serve(self, index: int) -> None:
         self.served = index
-        self._write()
 
     def clear_pending(self) -> None:
         self.pending = None
-        self._write()
+        self.pending_step = None
 
     def charge(self, calls: int) -> None:
         """Spend ``calls`` of the metric-call budget: one per scored episode."""
         self.metric_calls += calls
-        self._write()
 
     # -- GEPA's two rules ----------------------------------------------------
 
@@ -302,19 +256,15 @@ class Archive:
     # -- the iteration plan ---------------------------------------------------
 
     def plan(self, trainset_size: int, valset_size: int, minibatch_size: int) -> dict[str, Any]:
-        """The current iteration's parent and minibatch, drawn the way GEPA draws them.
+        """This iteration's parent and minibatch, drawn the way GEPA draws them, and the step to the next iteration.
 
         ``gepa.optimize`` feeds one generator to both its Pareto selector and
         its epoch-shuffled batch sampler, and consumes it in that order: the
         parent is chosen, then the training order is reshuffled when an epoch
         starts. Reproducing the order is what makes a seed mean the same thing
-        here as there. The plan is written before anything runs, so a restart
-        replays the same iteration instead of drawing a new one.
+        here as there. The draw is a function of the committed state, so a
+        driver that reads the same state draws the same plan.
         """
-        self.refresh()
-        key = str(self.iteration)
-        if key in self.plans:
-            return dict(self.plans[key])
         rng = self._rng()
         parent = self.select_parent(rng, valset_size)
         base = self.iteration * minibatch_size
@@ -324,28 +274,20 @@ class Archive:
             self.order = _shuffled_epoch(trainset_size, minibatch_size, rng)
         start = base % len(self.order)
         plan = {"iteration": self.iteration, "parent": parent, "minibatch": self.order[start : start + minibatch_size]}
-        self.plans[key] = plan
         self.rng_state = _state_to_json(rng.getstate())
-        self._write()
-        return dict(plan)
+        self.iteration += 1
+        return plan
 
     def take_parent(self, valset_size: int) -> int:
-        """The parent for this iteration and the step to the next one.
+        """The parent for this iteration, drawn from GEPA's generator, and the step to the next iteration.
 
-        A driver that planned the iteration fixed the parent already; a
-        deployment feeding real traffic did not, so the parent is drawn here
-        from the same generator, keeping GEPA's order of draws either way.
+        A deployment fed real traffic has no training order to plan, so only
+        the parent is drawn.
         """
-        self.refresh()
-        plan = self.plans.get(str(self.iteration))
-        if plan is not None:
-            parent = int(plan["parent"])
-        else:
-            rng = self._rng()
-            parent = self.select_parent(rng, valset_size)
-            self.rng_state = _state_to_json(rng.getstate())
+        rng = self._rng()
+        parent = self.select_parent(rng, valset_size)
+        self.rng_state = _state_to_json(rng.getstate())
         self.iteration += 1
-        self._write()
         return parent
 
     def _rng(self) -> random.Random:
@@ -383,7 +325,6 @@ class Archive:
         candidate = self.candidates[index]
         position = candidate.cursor % len(keys)
         candidate.cursor = (position + 1) % len(keys)
-        self._write()
         return keys[position]
 
 

@@ -178,9 +178,10 @@ class AgentHost:
 class ProposalContext:
     """Everything one step gives a proposer.
 
-    Values: ``tree`` is the head tree the patch applies to, and ``descriptor``
-    the adapter it renders for, which says the kinds and config targets a
-    tree may hold there. ``samples`` are
+    Values: ``step`` ≥ 1 is this step's number, the one ``StepOutcome.step``
+    names once the step is evaluated. ``tree`` is the head tree the patch
+    applies to, and ``descriptor`` the adapter it renders for, which says the
+    kinds and config targets a tree may hold there. ``samples`` are
     the step's trace samples in batch order, and ``sources`` holds one
     ``SampleSource`` per sample in the same order; a sample's ``score`` is
     ``None`` when the deployment batches unscored traffic. ``request`` is the
@@ -201,6 +202,7 @@ class ProposalContext:
     returns a ``TreeProposal`` or ``None``.
     """
 
+    step: int
     tree: HarnessTree
     descriptor: AdapterDescriptor
     samples: tuple[TrajectoryItem, ...]
@@ -217,6 +219,8 @@ class ProposalContext:
     agent_host: AgentHost | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step < 1:
+            raise ValueError("ProposalContext.step must be a positive integer")
         if len(self.sources) != len(self.samples):
             raise ValueError("ProposalContext needs one source per sample")
 

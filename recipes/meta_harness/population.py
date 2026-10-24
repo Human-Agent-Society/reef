@@ -1,62 +1,31 @@
-"""Durable candidate population for the Meta-Harness method.
+"""The Meta-Harness candidate population: every proposed tree, its scores, and the budget spent.
 
-The population is algorithm state, not a filesystem database.  Reef carries
-the value through its scenario commit history and snapshot metadata.  The JSON
-file managed by :class:`PopulationStore` is deliberately write-only from the
-method's point of view: it is an inspectable post-commit mirror, and recovery
-always rewrites it from Reef's committed state.
+The population is the method state Reef commits with each step
+(``Population.to_dict``), not a file of its own. A step reads it from the
+committed state, folds in the evaluation of its pending candidate
+(``population_for_step``), and returns the next one.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from reef.harness.tree import HarnessTree
+from reef.train.harness_backend.contract import StepOutcome
 
-SCHEMA_VERSION = 1
-_OUTCOMES = frozenset({"pending", "retained", "selected"})
-
-
-def normalize_entries(entries: Sequence[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
-    """Return stable, JSON-only root entry options with unique ids."""
-    if isinstance(entries, (str, bytes)):
-        raise ValueError("candidate entries must be a sequence of entry mappings")
-    normalized: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, entry in enumerate(entries):
-        if not isinstance(entry, Mapping):
-            raise ValueError(f"candidate entry {index} must be a mapping")
-        try:
-            value = json.loads(json.dumps(dict(entry), sort_keys=True))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"candidate entry {index} must be JSON-serializable") from exc
-        entry_id = value.get("id")
-        kind = value.get("name")
-        if not isinstance(entry_id, str) or not entry_id or ":" in entry_id:
-            raise ValueError(f"candidate entry {index} requires a non-empty root-level string id")
-        if entry_id in seen:
-            raise ValueError(f"candidate entries contain duplicate id {entry_id!r}")
-        if not isinstance(kind, str) or not kind:
-            raise ValueError(f"candidate entry {index} requires a non-empty string name")
-        seen.add(entry_id)
-        normalized.append(value)
-    return tuple(normalized)
+SCHEMA_VERSION = 2
+#: The method state key that holds the population.
+POPULATION_KEY = "population"
+OUTCOMES = frozenset({"pending", "retained", "selected"})
 
 
-def content_id(entries: Sequence[Mapping[str, Any]]) -> str:
-    """Content-address one complete composition, including entry order."""
-    canonical = json.dumps(normalize_entries(entries), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _scores(values: Sequence[float]) -> tuple[float, ...]:
-    scores = tuple(float(value) for value in values)
+def finite_scores(values: Sequence[float | None]) -> tuple[float, ...]:
+    """A non-empty score vector of finite values, a failed episode read as zero."""
+    scores = tuple(0.0 if value is None else float(value) for value in values)
     if not scores:
         raise ValueError("candidate score vectors must not be empty")
     if any(not math.isfinite(value) for value in scores):
@@ -66,10 +35,15 @@ def _scores(values: Sequence[float]) -> tuple[float, ...]:
 
 @dataclass
 class CandidateRecord:
-    """One unique composition and the committed results collected for it."""
+    """One unique tree and the results collected for it.
+
+    ``candidate_id`` is the tree's checksum, so two proposals of the same
+    tree are one candidate. ``outcome`` is ``pending`` until the step that
+    proposed it is evaluated, then ``selected`` or ``retained``.
+    """
 
     candidate_id: str
-    entries: tuple[dict[str, Any], ...]
+    files: dict[str, str]
     parent_id: str | None
     proposed_at: int
     outcome: str
@@ -78,22 +52,25 @@ class CandidateRecord:
     changes: str = ""
 
     def __post_init__(self) -> None:
-        self.entries = normalize_entries(self.entries)
-        if self.candidate_id != content_id(self.entries):
-            raise ValueError("candidate id does not match its composition content")
+        if self.candidate_id != HarnessTree(self.files).checksum():
+            raise ValueError("candidate id does not match its tree")
         if self.parent_id is not None and (not isinstance(self.parent_id, str) or not self.parent_id):
             raise ValueError("candidate parent id must be a non-empty string or None")
         if isinstance(self.proposed_at, bool) or not isinstance(self.proposed_at, int) or self.proposed_at < 0:
             raise ValueError("candidate proposed_at must be a non-negative integer")
-        if self.outcome not in _OUTCOMES:
-            raise ValueError(f"candidate outcome must be one of {tuple(sorted(_OUTCOMES))}")
+        if self.outcome not in OUTCOMES:
+            raise ValueError(f"candidate outcome must be one of {tuple(sorted(OUTCOMES))}")
         if self.scores is not None:
-            self.scores = _scores(self.scores)
+            self.scores = finite_scores(self.scores)
+
+    @property
+    def tree(self) -> HarnessTree:
+        return HarnessTree(self.files)
 
     @classmethod
     def create(
         cls,
-        entries: Sequence[Mapping[str, Any]],
+        tree: HarnessTree,
         *,
         parent_id: str | None,
         proposed_at: int,
@@ -101,10 +78,9 @@ class CandidateRecord:
         hypothesis: str = "",
         changes: str = "",
     ) -> CandidateRecord:
-        normalized = normalize_entries(entries)
         return cls(
-            candidate_id=content_id(normalized),
-            entries=normalized,
+            candidate_id=tree.checksum(),
+            files=dict(tree.files),
             parent_id=parent_id,
             proposed_at=proposed_at,
             outcome=outcome,
@@ -114,18 +90,16 @@ class CandidateRecord:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CandidateRecord:
-        entries = value.get("entries")
-        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
-            raise ValueError("candidate record entries must be a list")
-        if not all(isinstance(entry, Mapping) for entry in entries):
-            raise ValueError("candidate record entries must contain only mappings")
+        files = value.get("files")
+        if not isinstance(files, Mapping):
+            raise ValueError("candidate record files must be an object of path to text")
         scores = value.get("scores")
         if scores is not None and (not isinstance(scores, Sequence) or isinstance(scores, (str, bytes))):
             raise ValueError("candidate record scores must be a list or null")
         parent = value.get("parent_id")
         return cls(
             candidate_id=str(value.get("candidate_id", "")),
-            entries=tuple(dict(entry) for entry in entries),
+            files={str(path): str(text) for path, text in files.items()},
             parent_id=None if parent is None else str(parent),
             proposed_at=int(value.get("proposed_at", 0)),
             outcome=str(value.get("outcome", "")),
@@ -137,7 +111,7 @@ class CandidateRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
-            "entries": [dict(entry) for entry in self.entries],
+            "files": dict(self.files),
             "parent_id": self.parent_id,
             "proposed_at": self.proposed_at,
             "outcome": self.outcome,
@@ -149,11 +123,12 @@ class CandidateRecord:
 
 @dataclass
 class Population:
-    """Every proposed candidate plus the currently served member and budgets."""
+    """Every proposed candidate, the served one, the pending one with the step that proposed it, and the budgets."""
 
     candidates: list[CandidateRecord] = field(default_factory=list)
     served_id: str | None = None
     pending_id: str | None = None
+    pending_step: int | None = None
     proposer_calls: int = 0
     episode_calls: int = 0
     attempts: list[dict[str, Any]] = field(default_factory=list)
@@ -162,7 +137,7 @@ class Population:
         ids: set[str] = set()
         for candidate in self.candidates:
             if candidate.candidate_id in ids:
-                raise ValueError("population candidates must have unique content ids")
+                raise ValueError("population candidates must have unique tree checksums")
             if candidate.parent_id is not None and candidate.parent_id not in ids:
                 raise ValueError("population candidate parent must precede its child")
             ids.add(candidate.candidate_id)
@@ -170,6 +145,8 @@ class Population:
             raise ValueError("population served candidate is missing")
         if self.pending_id is not None and self.pending_id not in ids:
             raise ValueError("population pending candidate is missing")
+        if (self.pending_id is None) != (self.pending_step is None):
+            raise ValueError("population pending_id and pending_step are both set or both None")
         if self.pending_id is not None and self.by_id(self.pending_id).outcome != "pending":
             raise ValueError("population pending candidate must have pending outcome")
         for label, value in (("proposer_calls", self.proposer_calls), ("episode_calls", self.episode_calls)):
@@ -177,7 +154,10 @@ class Population:
                 raise ValueError(f"population {label} must be a non-negative integer")
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> Population:
+    def from_dict(cls, value: Mapping[str, Any] | None) -> Population:
+        """The population a committed ``to_dict`` snapshot describes; the empty one for none."""
+        if value is None:
+            return cls()
         if int(value.get("schema_version", SCHEMA_VERSION)) != SCHEMA_VERSION:
             raise ValueError(f"population schema_version must be {SCHEMA_VERSION}")
         rows = value.get("candidates", ())
@@ -186,25 +166,15 @@ class Population:
             raise ValueError("population candidates must be a list")
         if not isinstance(attempts, Sequence) or isinstance(attempts, (str, bytes)):
             raise ValueError("population attempts must be a list")
-        candidates = []
-        for row in rows:
-            if not isinstance(row, Mapping):
-                raise ValueError("population candidate rows must be mappings")
-            candidates.append(CandidateRecord.from_dict(row))
-        normalized_attempts = []
-        for row in attempts:
-            if not isinstance(row, Mapping):
-                raise ValueError("population attempt rows must be mappings")
-            normalized_attempts.append(json.loads(json.dumps(dict(row), sort_keys=True)))
-        served = value.get("served_id")
-        pending = value.get("pending_id")
+        served, pending, pending_step = value.get("served_id"), value.get("pending_id"), value.get("pending_step")
         return cls(
-            candidates=candidates,
+            candidates=[CandidateRecord.from_dict(row) for row in rows],
             served_id=None if served is None else str(served),
             pending_id=None if pending is None else str(pending),
+            pending_step=None if pending_step is None else int(pending_step),
             proposer_calls=int(value.get("proposer_calls", 0)),
             episode_calls=int(value.get("episode_calls", 0)),
-            attempts=normalized_attempts,
+            attempts=[json.loads(json.dumps(dict(row), sort_keys=True)) for row in attempts],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -213,13 +183,11 @@ class Population:
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "served_id": self.served_id,
             "pending_id": self.pending_id,
+            "pending_step": self.pending_step,
             "proposer_calls": self.proposer_calls,
             "episode_calls": self.episode_calls,
             "attempts": [dict(attempt) for attempt in self.attempts],
         }
-
-    def clone(self) -> Population:
-        return Population.from_dict(self.to_dict())
 
     def by_id(self, candidate_id: str) -> CandidateRecord:
         try:
@@ -243,66 +211,45 @@ class Population:
     def generated_candidates(self) -> int:
         return sum(candidate.parent_id is not None for candidate in self.candidates)
 
-    def sync_served(self, entries: Sequence[Mapping[str, Any]], *, step: int) -> CandidateRecord:
-        """Make the composition Reef says it serves a known population member."""
-        normalized = normalize_entries(entries)
-        candidate_id = content_id(normalized)
-        if self.candidates:
-            if candidate_id != self.served_id:
-                raise ValueError("committed Meta-Harness population does not match Reef's served composition")
+    def sync_served(self, tree: HarnessTree, *, step: int) -> CandidateRecord:
+        """Make the tree the step serves a known member and the served one.
+
+        A tree the population does not hold (the first step, or an operator's
+        rollback) joins it as a parentless candidate.
+        """
+        candidate_id = tree.checksum()
+        try:
             candidate = self.by_id(candidate_id)
-            candidate.outcome = "selected"
-            self.pending_id = None
-            return candidate
-        candidate = CandidateRecord.create(
-            normalized,
-            parent_id=None,
-            proposed_at=step,
-            outcome="selected",
-            hypothesis="Reef served composition",
-        )
-        self.candidates.append(candidate)
+        except KeyError:
+            candidate = CandidateRecord.create(
+                tree, parent_id=None, proposed_at=step, outcome="selected", hypothesis="Reef served tree"
+            )
+            self.candidates.append(candidate)
         candidate.outcome = "selected"
-        self.served_id = candidate.candidate_id
-        self.pending_id = None
+        self.served_id = candidate_id
         return candidate
 
     def stage_candidate(
-        self,
-        entries: Sequence[Mapping[str, Any]],
-        *,
-        parent_id: str,
-        step: int,
-        hypothesis: str = "",
-        changes: str = "",
+        self, tree: HarnessTree, *, parent_id: str, step: int, hypothesis: str = "", changes: str = ""
     ) -> tuple[CandidateRecord, bool]:
+        """The candidate ``tree`` is, staged as ``step``'s pending one when it is new; whether it is new."""
         if self.pending_id is not None:
             raise RuntimeError("population already has a pending candidate")
         self.by_id(parent_id)
-        candidate = CandidateRecord.create(
-            entries,
-            parent_id=parent_id,
-            proposed_at=step,
-            outcome="pending",
-            hypothesis=hypothesis,
-            changes=changes,
-        )
         try:
-            return self.by_id(candidate.candidate_id), False
+            return self.by_id(tree.checksum()), False
         except KeyError:
+            candidate = CandidateRecord.create(
+                tree, parent_id=parent_id, proposed_at=step, outcome="pending", hypothesis=hypothesis, changes=changes
+            )
             self.candidates.append(candidate)
-            self.pending_id = candidate.candidate_id
+            self.pending_id, self.pending_step = candidate.candidate_id, step
             return candidate, True
 
     def discard_pending(self) -> None:
-        """Undo a staged candidate that never became a proposal.
-
-        Staging appends and sets ``pending_id`` together, so unwinding both is
-        the population's own business; a caller reaching into ``candidates``
-        would have to guess which record was its own.
-        """
+        """Drop the pending candidate: its step proposed it but never had it evaluated."""
         pending_id = self.pending_id
-        self.pending_id = None
+        self.pending_id = self.pending_step = None
         if pending_id is None:
             return
         self.candidates = [
@@ -311,86 +258,42 @@ class Population:
             if not (candidate.candidate_id == pending_id and candidate.outcome == "pending")
         ]
 
-    def record_decision(
-        self,
-        *,
-        candidate_scores: Sequence[float],
-        current_scores: Sequence[float],
-        selected: bool,
-    ) -> CandidateRecord:
+    def settle(self, outcome: StepOutcome) -> CandidateRecord:
+        """Record the evaluation of the pending candidate: its scores, the served one's first scores, the result."""
         candidate = self.pending
         served = self.served
-        candidate.scores = _scores(candidate_scores)
-        # Written once, never refreshed: the frontier only moves when a
-        # candidate wins, so an incumbent keeps the score it was admitted on.
-        # Overwriting it with each batch would let the bar drift downward,
-        # which upstream's `if avg > current_best_avg` never does.
+        candidate.scores = finite_scores(outcome.candidate_scores)
+        # Written once, never refreshed: the frontier only moves when a candidate wins, so an incumbent keeps the
+        # score it was admitted on. Overwriting it with each batch would let the bar drift downward, which
+        # upstream's `if avg > current_best_avg` never does.
         if served.scores is None:
-            served.scores = _scores(current_scores)
-        candidate.outcome = "selected" if selected else "retained"
-        if selected:
+            served.scores = finite_scores(outcome.current_scores)
+        candidate.outcome = "selected" if outcome.selected else "retained"
+        if outcome.selected:
             self.served_id = candidate.candidate_id
-        self.pending_id = None
-        self.episode_calls += len(candidate_scores) + len(current_scores)
+        self.pending_id = self.pending_step = None
+        self.episode_calls += len(outcome.candidate_scores) + len(outcome.current_scores)
         return candidate
 
     def record_attempt(self, **values: Any) -> None:
-        row = json.loads(json.dumps(values, sort_keys=True))
-        self.attempts.append(row)
+        self.attempts.append(json.loads(json.dumps(values, sort_keys=True)))
 
 
-class PopulationStore:
-    """A committed population plus one disposable per-step transaction."""
+def population_for_step(method_state: Mapping[str, Any], last_outcome: StepOutcome | None) -> Population:
+    """The population as a step starts: the committed one, with the evaluation of its pending candidate folded in.
 
-    def __init__(self, mirror_path: Path) -> None:
-        self.mirror_path = Path(mirror_path)
-        self._committed = Population()
-        self._staged: Population | None = None
-
-    @property
-    def committed(self) -> Population:
-        return self._committed
-
-    @property
-    def active(self) -> Population:
-        if self._staged is None:
-            raise RuntimeError("Meta-Harness population has no active step")
-        return self._staged
-
-    def begin(self, state: Mapping[str, Any]) -> Population:
-        self._staged = None
-        incoming = Population.from_dict(state)
-        if incoming.to_dict() != self._committed.to_dict():
-            raise RuntimeError(
-                "Meta-Harness algorithm state differs from the last applied commit; restart the scenario "
-                "before continuing"
-            )
-        self._staged = incoming.clone()
-        return self._staged
-
-    def abort(self) -> None:
-        self._staged = None
-
-    def restore_committed(self, state: Mapping[str, Any]) -> None:
-        self._committed = Population.from_dict(state)
-        self._staged = None
-
-    def commit_applied(self, state: Mapping[str, Any]) -> None:
-        self.restore_committed(state)
-        self.persist()
-
-    def persist(self) -> None:
-        """Atomically rewrite the mirror from committed Reef state."""
-        self.mirror_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.mirror_path.with_name(f".{self.mirror_path.name}.tmp")
-        temporary.write_text(json.dumps(self._committed.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temporary, self.mirror_path)
+    The pending candidate's evaluation is the outcome of the step that
+    proposed it. A pending candidate whose step never reached an evaluation
+    has none and is dropped.
+    """
+    population = Population.from_dict(method_state.get(POPULATION_KEY))
+    if population.pending_id is None:
+        return population
+    if last_outcome is not None and last_outcome.step == population.pending_step:
+        population.settle(last_outcome)
+    else:
+        population.discard_pending()
+    return population
 
 
-__all__ = [
-    "CandidateRecord",
-    "Population",
-    "PopulationStore",
-    "content_id",
-    "normalize_entries",
-]
+__all__ = ["POPULATION_KEY", "CandidateRecord", "Population", "finite_scores", "population_for_step"]

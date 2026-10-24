@@ -291,6 +291,7 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             raise ValueError("an instruction step requires a proposer whose reads_requests is true")
         calls = self.step_calls if self.step_calls is not None else StepCalls(0, [])
         context = ProposalContext(
+            step=state.steps,
             tree=head_tree,
             descriptor=self.descriptor,
             samples=samples,

@@ -6,7 +6,7 @@ recipe:
       adapter: terminus
       binary: reef-terminus
       evaluate: harness.benchmark:VerifierScorer
-      seed: [harness.benchmark:SEED]
+      seed: seed  # The first tree, beside this file; run.py resolves the path.
       tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
       episode_repeats: 2
       batch_size: 1  # Each report is one trace batch.
@@ -24,7 +24,6 @@ recipe:
           api_key_env: REEF_PROPOSER_API_KEY
           timeout_s: 1800
       meta_harness:
-        archive: ${REEF_WORK}/population
         mode: full_history
         components: [code_extension]
         max_candidates: 4

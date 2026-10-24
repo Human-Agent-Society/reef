@@ -16,9 +16,12 @@ the served compositions are each scored on the sealed 150-problem test split
 through per-example checkpoints and ``summary.json`` puts those numbers beside
 the retained official record.
 
-The work directory resumes: the archive, the checkpoints, the round counter,
-and the scenario's own commit history all survive a restart. ``--dry-run`` boots
-the recipe and prints the plan without a model call.
+The work directory resumes: the scenario's commit history, which carries the
+archive as the method's committed state, and the checkpoints survive a
+restart. Each round reads the archive from the latest commit and draws the
+iteration's plan exactly as the proposer will (``archive_for_step``, ``sync``,
+``Archive.plan``), so the problems it sends are the minibatch GEPA's order
+names. ``--dry-run`` boots the recipe and prints the plan without a model call.
 """
 
 from __future__ import annotations
@@ -42,15 +45,18 @@ from aiohttp import web
 import harness
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
+from recipes.gepa import components
 from recipes.gepa.archive import Archive
-from recipes.gepa.recipe import scenario_archive_path
+from recipes.gepa.proposer import archive_for_step, sync
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import evaluation_selection
-from reef.harness import render_composition, run_episode
+from reef.harness import run_episode
 from reef.harness.adapters import get_adapter
+from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree, TreeKind, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.registry import build_recipe
@@ -59,6 +65,7 @@ from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.state import HarnessState
 
 HERE = Path(__file__).resolve().parent
 # run.sh exports these; the defaults repeat here so the module imports (and
@@ -76,6 +83,7 @@ SCENARIO = os.environ.get("REEF_GEPA_SCENARIO", "gepa-aime")
 # the default single-node run is the one the retained record compares against.
 MULTI = os.environ.get("REEF_GEPA_MULTI") == "1"
 COMPONENTS = ["rules", "skill"] if MULTI else ["rules"]
+KINDS = tuple(TreeKind(component) for component in COMPONENTS)
 # The service key the Pi episodes present. The embedded service does not
 # authenticate; this must never be the provider key, which would land in a
 # rendered models.json inside the episode root.
@@ -89,7 +97,7 @@ STEP_TIMEOUT_S = 7200.0
 RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
 
-def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, Any]:
+def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0, trainset_size: int) -> tuple[str, Any]:
     """The recipe gepa.yaml declares, with the validation split filled in.
 
     This driver is the deployment: it owns the provider endpoint and hands it
@@ -108,19 +116,18 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
         evolution["evaluate"] = scorer
     if evolution.get("feedback") == "harness.aime:AIMEFeedback":
         evolution["feedback"] = scorer
-    # One --seed drives both random draws: the proposer's parent sampling
-    # (evolution.gepa.seed) and the driver's minibatch order.
-    evolution["gepa"] = {**evolution["gepa"], "seed": seed}
+    # One --seed drives both random draws, the parent sampling and the minibatch order, which the proposer plans
+    # over the training split.
+    evolution["gepa"] = {**evolution["gepa"], "seed": seed, "trainset_size": trainset_size}
+    seed_tree = HarnessTree.read(HERE / str(evolution["seed"]))
     if MULTI:
-        evolution["seed"] = [
-            *evolution["seed"],
-            {
-                "id": aime.SKILL_SEED_NAME,
-                "name": "skill",
-                "config": {"name": aime.SKILL_SEED_NAME, "text": aime.SKILL_SEED},
-            },
-        ]
+        seed_tree = seed_tree.apply(TreePatch({f"skills/{aime.SKILL_SEED_NAME}/SKILL.md": aime.SKILL_SEED}))
         evolution["gepa"] = {**evolution["gepa"], "components": COMPONENTS}
+    seed_dir = WORK / "seed"
+    if seed_dir.exists():
+        shutil.rmtree(seed_dir)
+    seed_tree.write(seed_dir)
+    evolution["seed"] = str(seed_dir)
     sections["evolution"] = evolution
     runtime = InferenceProxyRuntime(
         model_path=os.environ["REEF_MODEL"],
@@ -248,6 +255,14 @@ class RunService:
         """The endpoint an episode reaches this service through."""
         return ModelBinding(self.base_url, os.environ["REEF_MODEL"], api_key=EMBEDDED_KEY, timeout_s=EPISODE_TIMEOUT_S)
 
+    def committed_state(self) -> HarnessState:
+        """The harness backend's state as the latest commit recorded it; the initial state before any."""
+        scenario = self.dispatcher.get_or_create_scenario(self.scenario)
+        assert scenario is not None
+        history = scenario.store.history()
+        state = history[-1].algorithm_state if history else None
+        return HarnessState() if state is None else HarnessState.from_json(state)
+
     def records(self) -> RecordStore:
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
@@ -332,35 +347,17 @@ def report(service: RunService, client: Any, payload: dict[str, Any]) -> None:
 
 
 def pull_tree(client: Any, service: RunService, target: Path) -> dict[str, Any]:
-    """The pull path: materialize the served tree from ``GET /reef/harness``."""
-    manifest = client.get("/reef/harness", extra_headers={SCENARIO_HEADER: service.scenario})
+    """The pull path: materialize the served source tree from ``GET /reef/harness?form=source``."""
+    manifest = client.get("/reef/harness?form=source", extra_headers={SCENARIO_HEADER: service.scenario})
     if target.exists():
         shutil.rmtree(target)
-    for relative, text in manifest["files"].items():
-        path = target / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+    HarnessTree(manifest["files"]).write(target)
     return manifest
 
 
-def episode_files(files: Mapping[str, str], binding: ModelBinding, descriptor: Any) -> dict[str, str]:
-    """A served tree plus the transient endpoint, as the render engine would compose them.
-
-    The published tree carries no provider, so the binding's config nodes are
-    rendered separately and merged into the tree's JSON here; the driver reaches
-    the same episode input the mechanism's own evaluation renders."""
-    merged = dict(files)
-    for path, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
-        merged[path] = json.dumps(_merge(json.loads(merged.get(path, "{}")), json.loads(text)), indent=2)
-    return merged
-
-
-def _merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in overlay.items():
-        below = merged.get(key)
-        merged[key] = _merge(below, value) if isinstance(below, dict) and isinstance(value, Mapping) else value
-    return merged
+def episode_files(tree: HarnessTree, binding: ModelBinding, descriptor: AdapterDescriptor) -> dict[str, str]:
+    """``tree`` rendered with the transient endpoint: the episode input the mechanism's own evaluation renders."""
+    return render_tree(tree, descriptor, binding.config_overlays(descriptor))
 
 
 def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict[str, Any]]:
@@ -370,15 +367,10 @@ def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict
     return aime.evaluate(task, result), {"response": response, "exit_code": result.exit_code}
 
 
-def archive() -> Archive:
-    """The method's own archive: the driver reads it and plans through it."""
-    return Archive(scenario_archive_path(WORK / "gepa", SCENARIO))
-
-
-def seed_tree(recipe: Any) -> dict[str, str]:
-    """The composition the search started from, rendered for the frozen pass."""
-    nodes = tuple((str(entry["name"]), entry.get("config")) for entry in recipe.seed if not entry.get("disabled"))
-    return render_composition(nodes, get_adapter(recipe.adapter))
+def committed_archive(service: RunService, seed: int) -> Archive:
+    """The archive as the next step starts from it: the latest commit's method state, its evaluation folded in."""
+    state = service.committed_state()
+    return archive_for_step(state.method_state, state.last_outcome, rng_seed=seed)
 
 
 def verify_binary(binary: str) -> str:
@@ -400,22 +392,21 @@ def search(
 
     The method plans each iteration - the parent it will reflect from and the
     training problems it wants to see - from one seeded generator in GEPA's own
-    order, and writes the plan before anything runs. The driver only carries
-    that plan out, so the same seed walks the same problems as ``gepa.optimize``
-    and a resumed run replays the iteration it was in rather than drawing a new
-    one."""
-    search_archive = archive()
-    search_archive.rng_seed = seed
+    order. The plan is a function of the committed archive and the served tree,
+    so the driver draws the plan the proposer will and carries it out: the same
+    seed walks the same problems as ``gepa.optimize``, and a resumed run replays
+    the iteration it was in rather than drawing a new one."""
     for _ in range(budget):
-        search_archive.refresh()
+        served = HarnessTree(pull_tree(client, service, WORK / "served")["files"])
+        search_archive = committed_archive(service, seed)
+        sync(search_archive, components.texts_of(served, KINDS), valset_size)
         step = search_archive.iteration
         calls = search_archive.metric_calls
         print(f"round {step}: {calls}/{budget} metric calls, {len(search_archive.candidates)} candidates")
         if calls >= budget:
             return
         plan = search_archive.plan(len(trainset), valset_size, 3)
-        manifest = pull_tree(client, service, WORK / "served")
-        files = episode_files(manifest["files"], service.binding(), get_adapter("pi"))
+        files = episode_files(served, service.binding(), get_adapter("pi"))
         # Records at or below this sequence are earlier rounds' leftovers; a
         # repeated problem must not match its own past session.
         floor = max_sequence(service.records(), service.scenario)
@@ -444,7 +435,7 @@ def test_passes(service: RunService, recipe: Any, client: Any, binary: str, test
     tasks = [str(example["input"]) for example in testset]
     binding = service.binding()
     descriptor = get_adapter("pi")
-    trees = {"frozen": seed_tree(recipe), "selected": pull_tree(client, service, WORK / "selected")["files"]}
+    trees = {"frozen": recipe.seed, "selected": HarnessTree(pull_tree(client, service, WORK / "selected")["files"])}
     scores = {}
     for label, tree in trees.items():
         rendered = episode_files(tree, binding, descriptor)
@@ -452,7 +443,7 @@ def test_passes(service: RunService, recipe: Any, client: Any, binary: str, test
         def one(index: int, task: str, files: Mapping[str, str] = rendered) -> tuple[float, dict[str, Any]]:
             return solve(files, task, binary)
 
-        measured = evaluator.scores(label, tasks, tree, one)
+        measured = evaluator.scores(label, tasks, tree.files, one)
         scores[label] = sum(measured) / len(measured)
         print(f"{label} test score: {scores[label]:.4f}")
     return scores
@@ -475,7 +466,7 @@ def main() -> None:
     if args.dry_run:
         # A dry run proves the recipe boots from gepa.yaml with the real
         # validation set; the placeholder credential is never sent anywhere.
-        recipe_name, _ = load_recipe(tasks, api_key="dry-run", seed=args.seed)
+        recipe_name, _ = load_recipe(tasks, api_key="dry-run", seed=args.seed, trainset_size=len(trainset))
         plan = {
             "recipe": recipe_name,
             "scenario": SCENARIO,
@@ -497,13 +488,12 @@ def main() -> None:
     from reef_client import ReefClient
 
     key = provider_key()
-    recipe_name, recipe = load_recipe(tasks, api_key=key, seed=args.seed)
     WORK.mkdir(parents=True, exist_ok=True)
+    recipe_name, recipe = load_recipe(tasks, api_key=key, seed=args.seed, trainset_size=len(trainset))
     bootstrap = WORK / "bootstrap"
     if not bootstrap.is_dir():
-        for relative, text in seed_tree(recipe).items():
-            (bootstrap / relative).parent.mkdir(parents=True, exist_ok=True)
-            (bootstrap / relative).write_text(text, encoding="utf-8")
+        # The base release holds the source tree, as every harness release does.
+        recipe.seed.write(bootstrap)
     with worker_runtime(recipe):
         service = RunService(
             scenario=SCENARIO,
@@ -520,7 +510,7 @@ def main() -> None:
             client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
             search(service, client, binary, trainset, len(valset), args.budget, args.seed)
             scores = test_passes(service, recipe, client, binary, testset)
-            final = archive()
+            final = committed_archive(service, args.seed)
             summary = {
                 "scenario": SCENARIO,
                 "seed": args.seed,

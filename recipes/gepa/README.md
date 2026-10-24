@@ -10,13 +10,13 @@ Reproduction of [GEPA](https://arxiv.org/abs/2507.19457) as a Reef harness-evolu
 
 ```text
 gepa/
-  archive.py      candidates, Pareto fronts, seeded sampling, and search budget
-  backend.py      committed algorithm state and the post-commit archive mirror
-  components.py   harness components as prompt texts and mutations
-  method.py       reflection proposals, minibatch acceptance, and selection
+  recipe.py       GEPARecipe: the evolution.gepa section, the proposer and the selection
+  proposer.py     the reflective mutation: parent sampling, minibatch acceptance, the patch
+  selection.py    strict mean improvement over the served candidate's stored validation score
+  archive.py      candidates, Pareto fronts, seeded sampling, and search budget, committed as method state
+  components.py   the tree's evolvable files as named prompt texts
   reflection.py   attributed upstream reflection prompt and record formatting
-  recipe.py       GEPARecipe: configuration and evolution backend binding
-  examples/aime/  the runnable validation loop: harness, gepa.yaml, and results
+  examples/aime/  the runnable validation loop: harness, seed tree, gepa.yaml, and results
 ```
 
 ## Where the rest is documented

@@ -38,65 +38,23 @@ recipe:
           model: gpt-5-2025-08-07
           api_key_env: OPENAI_API_KEY
       gepa:
-        # The archive is the method's own state: one JSON file per scenario with
-        # the candidates, their validation vectors, the fronts, and the metric-call
-        # count a resumed run continues from.
-        archive: ${REEF_WORK}/gepa
+        # The archive is the method state Reef commits with each step: the
+        # candidates, their validation vectors and the metric-call count a
+        # resumed run continues from. run.py sets trainset_size to the pinned
+        # training split, so each iteration walks GEPA's own minibatch order.
         minibatch_size: 3
         seed: 0
         skip_perfect_score: true
         perfect_score: 1.0
         max_metric_calls: 150
-        # The evolvable node kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
+        # The evolvable kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
         components: [rules]
-      # The seed composition. The rules node is the quickstart's system prompt and
-      # the only evolvable entry; the other two reproduce the quickstart's request
-      # envelope and never change.
-      seed:
-        - id: rules
-          name: rules
-          config:
-            text: "You are a helpful assistant. Answer the question. Put your final answer in the format '### <answer>'"
-        # Pi 0.84.2 starts with no built-in tools when settings.json says so
-        # (docs/settings.md in the Pi package), which is the upstream envelope:
-        # one model call per problem, no tool loop.
-        - id: quickstart-settings
-          name: config
-          config:
-            target: primary
-            data:
-              defaultTools: []
-        # The rest of the envelope: the rendered rules text becomes Pi's entire
-        # system prompt instead of being appended to Pi's own coding-agent prompt,
-        # and a single text part is flattened to the plain string upstream sends.
-        # The extension reads AGENTS.md at startup, so it stays fixed while the
-        # rules node underneath it evolves.
-        - id: reef-quickstart-system
-          name: code_extension
-          config:
-            name: reef-quickstart-system
-            code: |
-              import { readFileSync } from "node:fs";
-              import { join } from "node:path";
-
-              export default function reefQuickstartSystem(pi) {
-                pi.on("before_agent_start", async () => {
-                  const root = process.env.PI_CODING_AGENT_DIR;
-                  const rules = readFileSync(join(root, "AGENTS.md"), "utf8").replace(/\n+$/, "");
-                  return { systemPrompt: rules };
-                });
-                pi.on("before_provider_request", async ({ payload }) => {
-                  if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return payload;
-                  const messages = payload.messages.map((message) => {
-                    const content = message?.content;
-                    if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text") {
-                      return { ...message, content: content[0].text };
-                    }
-                    return message;
-                  });
-                  return { ...payload, messages };
-                });
-              }
+      # The first tree, beside this file: rules.md is the quickstart's system
+      # prompt and the only evolvable file; config/primary.json (Pi starts with
+      # no built-in tools, one model call per problem) and the extension that
+      # makes the rules Pi's whole system prompt reproduce the quickstart's
+      # request envelope and never change. run.py resolves the path.
+      seed: seed
 
 inference:
   upstream-model: ${REEF_MODEL}

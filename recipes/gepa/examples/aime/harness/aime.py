@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
-from recipes.gepa.method import Feedback
+from recipes.gepa.proposer import Feedback
 from reef.evaluation.harness import EpisodeScorer
 from reef.harness.episodes.run import EpisodeResult
 

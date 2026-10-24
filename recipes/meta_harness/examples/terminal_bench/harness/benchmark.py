@@ -11,13 +11,6 @@ from reef.evaluation.harness import EpisodeScorer
 from reef.harness import EpisodeResult
 
 MANIFEST = json.loads(Path(__file__).with_name("tasks.json").read_text(encoding="utf-8"))
-SEED = (
-    {
-        "id": "agent",
-        "name": "code_extension",
-        "config": {"name": "agent", "code": Path(__file__).with_name("agent.py").read_text(encoding="utf-8")},
-    },
-)
 
 
 def task_paths(root: Path, names: list[str] | None = None) -> tuple[str, ...]:
