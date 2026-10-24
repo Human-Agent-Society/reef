@@ -1,15 +1,18 @@
 """Test-only adapters that wrap a plain function as a Proposer or an EpisodeScorer.
 
 Reef takes harness evolution plugins as classes only. Tests keep their short
-lambdas through these adapters. As before, a keyword reaches the function only
-when its signature names it (or takes ``**kwargs``), and the function declares
-``reads_requests`` and ``runs_agent`` by naming ``requests`` and ``agent_host``.
+functions through these adapters. A proposer function takes the step's
+``ProposalContext`` and returns a ``TreeProposal``, a ``TreePatch`` (which the
+adapter wraps in a proposal), or ``None``. ``reads_requests`` and
+``runs_agent`` declare what the wrapped function handles. A scorer function
+takes ``(task, result)``, and ``models`` too when its signature names it.
 """
 
 import inspect
 
 from reef.evaluation.harness import EpisodeScorer
-from reef.train.cordis_backend.strategies import Proposer
+from reef.harness.tree import TreePatch
+from reef.train.harness_backend.contract import Proposer, TreeProposal
 
 
 def _accepts(fn, name):
@@ -17,33 +20,23 @@ def _accepts(fn, name):
     return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
 
 
-def _names(fn, name):
-    parameter = inspect.signature(fn).parameters.get(name)
-    return parameter is not None and parameter.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    )
-
-
 class FunctionProposer(Proposer):
-    def __init__(self, fn):
+    def __init__(self, fn, *, reads_requests=False, runs_agent=False):
         self.fn = fn
+        self.answers_requests = reads_requests
+        self.uses_agent = runs_agent
 
     @property
     def reads_requests(self):
-        return _names(self.fn, "requests")
+        return self.answers_requests
 
     @property
     def runs_agent(self):
-        return _names(self.fn, "agent_host")
+        return self.uses_agent
 
-    def propose(self, nodes, samples, models, **keywords):
-        forwarded = {name: value for name, value in keywords.items() if _accepts(self.fn, name)}
-        if not self.reads_requests:
-            forwarded.pop("requests", None)
-        if not self.runs_agent:
-            forwarded.pop("agent_host", None)
-        return self.fn(nodes, samples, models, **forwarded)
+    def propose(self, context):
+        proposal = self.fn(context)
+        return TreeProposal(proposal) if isinstance(proposal, TreePatch) else proposal
 
 
 class FunctionScorer(EpisodeScorer):
@@ -59,8 +52,10 @@ class FunctionScorer(EpisodeScorer):
         return self.fn(task, result)
 
 
-def resolve_proposer(value):
-    return value if isinstance(value, Proposer) else FunctionProposer(value)
+def resolve_proposer(value, *, reads_requests=False, runs_agent=False):
+    if isinstance(value, Proposer):
+        return value
+    return FunctionProposer(value, reads_requests=reads_requests, runs_agent=runs_agent)
 
 
 def resolve_episode_scorer(value):
