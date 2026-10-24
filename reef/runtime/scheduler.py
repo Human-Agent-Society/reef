@@ -298,6 +298,8 @@ class RuntimeScheduler:
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
+        *,
+        scenario: str | None = None,
     ) -> PreparedTrainingStep:
         return self.training_runtime.prepare_training_step(
             batch,
@@ -306,6 +308,7 @@ class RuntimeScheduler:
             scheduling,
             scenario_step,
             parent_runtime_load_id=self.inference_runtime.current_runtime_load_id(),
+            scenario=scenario,
         )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
@@ -386,7 +389,7 @@ class RuntimeScheduler:
         training_job = self.training_runtime.training_job_status()
         if training_job is None:
             if committed_training_job_id is not None:
-                self.finish_committed_training_job(committed_training_job_id)
+                self.finish_committed_training_job(committed_training_job_id, scenario=scenario)
             return
         status = training_job["status"]
         if self._sync_inference_admission(training_job):
@@ -412,19 +415,21 @@ class RuntimeScheduler:
                 self.inference_runtime.resume_weight_update(training_job_id)
         # Other components can advance the scenario; only this job's commit can finish it.
         if scenario_step > job_scenario_step and committed_training_job_id == training_job_id:
-            self.finish_committed_training_job(training_job_id)
+            self.finish_committed_training_job(training_job_id, scenario=scenario)
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str, *, scenario: str | None = None) -> None:
         """Release a selected update only after its matching durable commit."""
         self.recover_pending_step(scenario_step, scenario=scenario, committed_training_job_id=training_job_id)
 
-    def finish_committed_training_job(self, training_job_id: str) -> None:
+    def finish_committed_training_job(self, training_job_id: str, *, scenario: str | None = None) -> None:
         """Acknowledge the matched job before publishing its identity and reopening admission.
+
+        ``scenario`` owns the job exactly when the training runtime trains several scenarios.
 
         If either acknowledgement fails, admission stays closed; retry completes the same job.
         """
         self.inference_runtime.acknowledge_publication(training_job_id)
-        self.training_runtime.commit_candidate(training_job_id)
+        self.training_runtime.commit_candidate(training_job_id, scenario=scenario)
         self.inference_runtime.mark_published()
         self.inference_runtime.resume_admission()
 

@@ -221,6 +221,15 @@ class TrainingDeployment(ABC):
     def runtime_config(self, settings: Mapping[str, Any], *, connector: Any = None) -> dict[str, Any]:
         """Describe the runtime for RuntimeRegistry, without constructing it."""
 
+    def serves_on_inference_component(self, settings: Mapping[str, Any]) -> bool:
+        """Whether the control plane serves saved weights on an inference component for these settings.
+
+        The component is the one ``inference.remote`` names. Without that
+        section, ``reef serve`` starts one on this host and records its address
+        there before :meth:`prepare` runs.
+        """
+        return False
+
     def create_training_plan(self, config: Mapping[str, Any], *, loss_family: str) -> TrainingDeploymentPlan:
         """Provide an unstarted trainer for Reef's optional model driver.
 

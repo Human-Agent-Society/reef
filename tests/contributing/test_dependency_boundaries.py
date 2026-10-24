@@ -442,6 +442,7 @@ def test_runtime_directory_has_only_its_owned_modules() -> None:
         "deployment.py",
         "publication.py",
         "recovery.py",
+        "serving.py",
         "executor",
     }
 
@@ -466,6 +467,7 @@ def test_runtime_modules_follow_their_dependency_order() -> None:
             "reef.runtime.scheduler",
             "reef.runtime.executor",
         ),
+        "serving.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.deployment"),
         "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
     }
     root = REPO_ROOT / "reef/runtime"

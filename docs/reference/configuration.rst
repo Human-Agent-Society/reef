@@ -123,7 +123,7 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime`` for compatibility. The optional
 ``tinker`` backend provides remote LoRA training and immutable sampling without
-local GPUs, or trains behind Reef's coordinator for a local SGLang engine when
+local GPUs, or serves its saved adapters on Reef's SGLang engines when
 ``inference.backend: sglang`` is selected; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
 ``package.module:Deployment`` class. The selected definition describes the process
@@ -1104,14 +1104,16 @@ names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 ``reef serve`` refuses the section unless the training backend supports remote
-engines. Tinker publishes its adapters. Slime publishes full weights, or
-per-scenario adapters with LoRA, and refuses ``training.colocate`` with remote
-engines. The section tells Reef how to reach the component:
+engines. Tinker serves each scenario's saved adapter; without the section,
+Tinker's engines run on a component that ``reef serve`` starts on this host.
+Slime publishes full weights, or per-scenario adapters with LoRA, and refuses
+``training.colocate`` with remote engines. The section tells Reef how to reach
+the component:
 
 .. config::
 
    inference.remote.url | the component's HTTP(S) base URL, without credentials, query or fragment
-   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the model driver reads it
+   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the process that starts the engines reads it
    inference.remote.inference-token-env | REEF_REMOTE_INFERENCE_TOKEN | variable with the component's inference token; the HTTP service reads it
    inference.remote.startup-timeout-s | 3600 | deadline for one engine start on the component, including the model download
    inference.remote.model-path | ``inference.model-path`` as written | the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot

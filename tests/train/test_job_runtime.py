@@ -67,8 +67,10 @@ def batch(name: str = "b") -> TrainingBatch:
     return TrainingBatch(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
 
 
-def prepare(runtime: JobTrainingRuntime, data: TrainingBatch, state=None, step: int = 0):
-    return runtime.prepare_training_step(data, TrainingMethod("sft"), state or {}, StepScheduling(), step)
+def prepare(runtime: JobTrainingRuntime, data: TrainingBatch, state=None, step: int = 0, scenario=None):
+    return runtime.prepare_training_step(
+        data, TrainingMethod("sft"), state or {}, StepScheduling(), step, scenario=scenario
+    )
 
 
 @pytest.fixture
@@ -114,7 +116,7 @@ def test_the_next_job_starts_from_the_committed_checkpoint_and_a_rejection_keeps
     second = runtime.train_candidate(prepare(runtime, batch("two")).payload)
     assert [job.start for job in component.jobs] == [None, None]
     runtime.commit_candidate(second.training_job_id)
-    assert runtime.start == second.checkpoint_path
+    assert runtime.start() == second.checkpoint_path
     prepare(runtime, batch("three"))
     assert component.jobs[-1].start == second.checkpoint_path
     with pytest.raises(ValueError, match="unknown training candidate"):
@@ -146,10 +148,10 @@ def test_the_start_survives_a_restart_and_a_restart_commits_by_the_components_st
     candidate = runtime.train_candidate(prepare(runtime, batch()).payload)
     restarted = JobTrainingRuntime(component, tmp_path / "runtime", poll_interval_seconds=0.001)
     restarted.commit_candidate(candidate.training_job_id)
-    assert restarted.start == candidate.checkpoint_path
+    assert restarted.start() == candidate.checkpoint_path
     # A job the component never saw, such as one of another trainer, changes nothing.
     restarted.commit_candidate("unknown")
-    assert JobTrainingRuntime(component, tmp_path / "runtime").start == candidate.checkpoint_path
+    assert JobTrainingRuntime(component, tmp_path / "runtime").start() == candidate.checkpoint_path
 
 
 @pytest.mark.unit
@@ -160,7 +162,7 @@ def test_a_rollback_copies_the_release_into_the_start_and_an_empty_release_is_th
     (release / "reef-artifact.json").write_text("{}")
     artifact = Artifact.local(release)
     runtime.restore_checkpoint(artifact)
-    start = Path(runtime.start)
+    start = Path(runtime.start())
     assert start.parent == runtime.state_dir / "restored"
     assert (start / "weights").read_text() == "restored"
     assert not (start / "reef-artifact.json").exists()
@@ -168,7 +170,7 @@ def test_a_rollback_copies_the_release_into_the_start_and_an_empty_release_is_th
     empty.mkdir()
     (empty / "reef-artifact.json").write_text("{}")
     runtime.restore_checkpoint(Artifact.local(empty))
-    assert runtime.start is None
+    assert runtime.start() is None
 
 
 @pytest.mark.unit
@@ -179,7 +181,31 @@ def test_a_rollback_the_component_refuses_keeps_the_start(runtime, component, tm
     component.refused_starts.add("foreign")
     with pytest.raises(ValueError, match="cannot start from these weights"):
         runtime.restore_checkpoint(Artifact.local(release))
-    assert runtime.start is None
+    assert runtime.start() is None
+
+
+@pytest.mark.unit
+def test_each_scenario_trains_its_own_weights_from_its_own_start(component, tmp_path):
+    runtime = JobTrainingRuntime(component, tmp_path / "runtime", per_scenario=True, poll_interval_seconds=0.001)
+    assert runtime.concurrent_training_scenarios
+    math = runtime.train_candidate(prepare(runtime, batch(), scenario="math").payload)
+    # The same rows are another job for another scenario.
+    code = runtime.train_candidate(prepare(runtime, batch(), scenario="code").payload)
+    assert math.training_job_id != code.training_job_id
+    # The component learns no scenario: a job names only its start, data and parameters.
+    assert all("scenario" not in job.parameters for job in component.jobs)
+    assert (math.metadata, code.metadata) == (
+        {"scenario_step": 0, "scenario": "math"},
+        {"scenario_step": 0, "scenario": "code"},
+    )
+    runtime.commit_candidate(math.training_job_id, scenario="math")
+    assert (runtime.start("math"), runtime.start("code")) == (math.checkpoint_path, None)
+    restarted = JobTrainingRuntime(component, tmp_path / "runtime", per_scenario=True)
+    assert restarted.start("math") == math.checkpoint_path
+    with pytest.raises(TrainingRuntimeError, match="needs the scenario"):
+        prepare(runtime, batch("other"))
+    with pytest.raises(TrainingRuntimeError, match="takes no scenario"):
+        JobTrainingRuntime(component, tmp_path / "single").start("math")
 
 
 @pytest.mark.unit

@@ -32,7 +32,15 @@ class RollbackRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        self,
+        batch,
+        objective,
+        algorithm_state,
+        scheduling,
+        scenario_step,
+        *,
+        parent_runtime_load_id=None,
+        scenario=None,
     ):
         del batch, objective
         return PreparedTrainingStep(
@@ -72,7 +80,7 @@ class RollbackRuntime(StubTrainingRuntime):
     def supports_checkpoint_restore(self):
         return True
 
-    def restore_checkpoint(self, artifact):
+    def restore_checkpoint(self, artifact, *, scenario=None):
         assert not self.inference.inference_admission_status["open"]
         self.restore_order.append("training")
 

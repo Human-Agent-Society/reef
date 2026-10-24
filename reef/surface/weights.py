@@ -55,7 +55,7 @@ class WeightLoader(ArtifactActivator):
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         """Let the runtime bind the final release before traffic reaches it, including at startup."""
         if isinstance(runtime, WeightRuntime):
-            return runtime.activate_checkpoint(artifact)
+            return runtime.activate_checkpoint(artifact, scenario=self._scenario)
         return artifact.ref.release_id
 
     def recover(
@@ -97,7 +97,7 @@ class WeightLoader(ArtifactActivator):
             raise ReefError("weight rollback requires an inference runtime")
         if artifact.local_path is None:
             raise ReefError("weight rollback requires a materialized checkpoint")
-        runtime_load_id = runtime.restore_checkpoint(artifact)
+        runtime_load_id = runtime.restore_checkpoint(artifact, scenario=self._scenario)
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise TypeError("restore_checkpoint must return a non-empty runtime load ID")
         return runtime_load_id

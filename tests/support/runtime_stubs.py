@@ -53,6 +53,7 @@ class StubTrainingRuntime(TrainingRuntime):
         scenario_step: int,
         *,
         parent_runtime_load_id: str | None = None,
+        scenario: str | None = None,
     ) -> PreparedTrainingStep:
         raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
 
@@ -85,7 +86,7 @@ class StubTrainingRuntime(TrainingRuntime):
     def supports_checkpoint_restore(self):
         return True
 
-    def restore_checkpoint(self, artifact):
+    def restore_checkpoint(self, artifact, *, scenario=None):
         return None
 
     def restore_serving_checkpoint(self, artifact):
@@ -115,7 +116,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     def activate_candidate(self, candidate):
         return self.fixture.activate_candidate(candidate)
 
-    def restore_checkpoint(self, artifact):
+    def restore_checkpoint(self, artifact, *, scenario=None):
         return self.fixture.restore_serving_checkpoint(artifact)
 
 
@@ -161,6 +162,9 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
         super().__init__(
             training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
         )
+
+    def prepare_training_step(self, batch, method, algorithm_state, scheduling, scenario_step):
+        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
 
     @property
     def inference(self):

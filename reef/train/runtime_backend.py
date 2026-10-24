@@ -28,7 +28,6 @@ from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     InferenceRuntime,
     ModelCandidate,
-    PreparedTrainingStep,
     RuntimeContractError,
     StaleCandidate,
     TrainingMethod,
@@ -154,23 +153,26 @@ class RuntimeCandidateBackend(CandidateBackend):
         if not isinstance(method, TrainingMethod):
             selector_name = type(self.training_method_selector).__name__
             raise TypeError(f"{selector_name}.select must return a TrainingMethod, got {type(method).__name__}")
-        prepared = self.prepare_training_step(batch, method, state, self.scheduling, scenario_step)
+        runtime = self.training_runtime
+        # A runtime that trains several scenarios' weights needs to know whose weights the job trains.
+        scenario = self._scenario if runtime.concurrent_training_scenarios else None
+        prepared = self.scheduler.prepare_training_step(
+            batch, method, state, self.scheduling, scenario_step, scenario=scenario
+        )
         next_state = dict(prepared.next_algorithm_state)
         metrics = {**prepared.metrics, "training_method": method.to_dict()}
         if prepared.action == "skip":
             return PreparedStep.skipped(state=next_state, metrics=metrics)
         if prepared.payload is None:
             raise RuntimeContractError("training runtime prepared a train step without a payload")
-        runtime = self.training_runtime
         payload = dict(prepared.payload)
         if self._scenario is not None:
             # The job marker names the scenario that owns the job, so a delete can tell whose job is out;
             # the job identity leaves the owner out.
             payload[JOB_OWNER_KEY] = self._scenario
-        if self._scenario is not None and runtime.concurrent_training_scenarios:
-            # A runtime that trains several scenarios' adapters needs to know
-            # whose slot this job fills; the job identity then includes it.
-            payload["scenario"] = self._scenario
+        if scenario is not None:
+            # The job identity includes the scenario whose slot the job fills.
+            payload["scenario"] = scenario
         try:
             candidate = self.train_candidate(payload)
         except CandidateTrainingDeferred as blocked:
@@ -226,16 +228,6 @@ class RuntimeCandidateBackend(CandidateBackend):
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.reject_candidate(self._prepared_candidate(prepared))
-
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
-    ) -> PreparedTrainingStep:
-        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         return self.scheduler.train_candidate(payload)

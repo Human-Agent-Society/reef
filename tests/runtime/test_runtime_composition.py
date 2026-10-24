@@ -37,7 +37,15 @@ class CheckpointTrainer(TrainingRuntime):
         return 1
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        self,
+        batch,
+        objective,
+        algorithm_state,
+        scheduling,
+        scenario_step,
+        *,
+        parent_runtime_load_id=None,
+        scenario=None,
     ):
         return PreparedTrainingStep("train", algorithm_state, {}, {"value": 7})
 

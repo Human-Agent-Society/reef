@@ -1,10 +1,9 @@
-"""Optional Tinker integration: remote LoRA training, with sampling on Tinker or a local engine.
+"""Optional Tinker integration: remote LoRA training, with sampling on Tinker or on Reef's serving engines.
 
 Deployment/config discovery does not import the SDK. ``client`` owns the
 training SDK boundary, ``losses`` names the Tinker loss and shapes its
-inputs, ``component`` is the training component that runs each job in
-process behind ``reef.train.job_runtime.JobTrainingRuntime``, and ``backend``
-and ``training`` are the same trainer behind Reef's coordinator for a local
-SGLang engine. Sampling on Tinker itself is ``reef.inference.tinker``; the
-two sides share only the checkpoint manifest an artifact carries.
+inputs, and ``component`` is the training component that runs each job in
+process behind ``reef.train.job_runtime.JobTrainingRuntime``. Sampling on
+Tinker itself is ``reef.inference.tinker``; serving on engines is
+``reef.runtime.serving``. Each side reads the checkpoint an artifact carries.
 """

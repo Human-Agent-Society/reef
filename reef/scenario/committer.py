@@ -377,8 +377,10 @@ class ScenarioCommitter:
                             f"restore training weights, so release {release_id!r} cannot be served again"
                         )
                     self._binding.runtime.pause_admission()
-                    self._binding.training_runtime.restore_checkpoint(
-                        surface.component_artifact(source, loaded_component)
+                    training_runtime = self._binding.training_runtime
+                    training_runtime.restore_checkpoint(
+                        surface.component_artifact(source, loaded_component),
+                        scenario=self._name if training_runtime.concurrent_training_scenarios else None,
                     )
                 if restore_weights:
                     surface.load(source, self._binding.runtime)

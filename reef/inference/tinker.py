@@ -25,7 +25,7 @@ from typing import Any
 
 from reef_client.sse import synthesize_sse_events
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import REPOSITORY_FILES, Artifact
 from reef.core.config import config_option
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
@@ -162,7 +162,7 @@ def checkpoint_sampler_path(artifact: Artifact, base_model: str) -> str | None:
         return sampler
     # Reef's empty base tree represents the initial seeded adapter.
     # An arbitrary uploaded weight directory must not silently become base.
-    contents = {entry.name for entry in path.iterdir()} - {".git", ".gitattributes", "reef-artifact.json"}
+    contents = {entry.name for entry in path.iterdir()} - REPOSITORY_FILES
     if contents:
         raise ValueError(f"artifact is missing {MANIFEST}")
     return None
@@ -244,12 +244,12 @@ class TinkerInferenceRuntime(InferenceRuntime):
 
     # -- Weight updates
 
-    def restore_checkpoint(self, artifact: Artifact) -> str:
+    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         # Rollback validates the target first; activate_checkpoint binds the
         # republished artifact. No mutable remote serving slot needs restoring.
         return self.snapshot(artifact)[1]
 
-    def activate_checkpoint(self, artifact: Artifact) -> str:
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Bind the recovered or republished artifact's sampler before the scenario serves it."""
         with self._lock:
             sampler_path, version = self.snapshot(artifact)

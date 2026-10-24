@@ -360,10 +360,10 @@ class _StubTrainingRuntime(WeightRuntime):
     def current_runtime_load_id(self) -> str | None:
         return self._published
 
-    def restore_checkpoint(self, artifact) -> str:
+    def restore_checkpoint(self, artifact, *, scenario=None) -> str:
         raise AssertionError("recover must not restore a checkpoint")
 
-    def activate_checkpoint(self, artifact) -> str:
+    def activate_checkpoint(self, artifact, *, scenario=None) -> str:
         return artifact.ref.release_id
 
 

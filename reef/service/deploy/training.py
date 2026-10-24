@@ -11,7 +11,7 @@ from reef.inference.remote.config import RemoteInferenceSettings
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import DeployConfigError, config_value
-from reef.service.deploy.inference import http_service
+from reef.service.deploy.inference import http_service, local_inference_component
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 
@@ -127,6 +127,10 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         )
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
+    component = None
+    if not settings.inference_remote and backend.serves_on_inference_component(asdict(settings)):
+        component = local_inference_component(config, settings)
+        settings = service_config_from_mapping(config)
     if settings.inference_remote:
         # Every later reader gets the validated section, with underscore keys and defaults filled in. The
         # component loads the model as the file names it: a later download replaces reef.model_path on this host.
@@ -137,6 +141,8 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         settings = service_config_from_mapping(config)
     config["reef"]["training_backend"] = settings.training_backend or "slime"
     dependencies = backend.prepare(config, asdict(settings))
+    if component is not None:
+        dependencies = (component, *dependencies)
     http = http_service(config, service_config_from_mapping(config))
     if dependencies:
         http["depends_on"] = [process["name"] for process in dependencies]

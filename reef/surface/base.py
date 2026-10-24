@@ -47,12 +47,18 @@ class WeightRuntime(ServingRuntime):
         """Return the version that Reef acknowledged as published. An update that is not committed does not count."""
 
     @abstractmethod
-    def restore_checkpoint(self, artifact: Artifact) -> str: ...
+    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        """Load the rolled-back release ``artifact``; return the runtime load ID that serves it.
 
-    def activate_checkpoint(self, artifact: Artifact) -> str:
+        ``scenario`` names the release's scenario exactly when the runtime
+        serves a separate adapter per scenario.
+        """
+
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Bind a recovered or republished artifact before the scenario serves it.
 
-        Called once a release is final and before traffic routes to it. The
+        Called once a release is final and before traffic routes to it, with
+        ``scenario`` as for :meth:`restore_checkpoint`. The
         default binds nothing and returns the release ID: for runtimes whose
         serving update and Reef publication are one operation, the artifact
         already names what the engine serves. A runtime that serves immutable

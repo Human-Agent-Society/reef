@@ -34,6 +34,7 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
         "none",
         "ray_training",
         "remote",
+        "remote_adapters",
         "sglang",
         "slime_training",
         "tinker",

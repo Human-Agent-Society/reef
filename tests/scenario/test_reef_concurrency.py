@@ -37,7 +37,15 @@ class CountingRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        self,
+        batch,
+        objective,
+        algorithm_state,
+        scheduling,
+        scenario_step,
+        *,
+        parent_runtime_load_id=None,
+        scenario=None,
     ):
         del batch, objective
         return PreparedTrainingStep(

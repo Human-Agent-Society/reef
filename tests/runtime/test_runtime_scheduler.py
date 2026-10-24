@@ -41,7 +41,15 @@ class CheckpointTrainer(TrainingRuntime):
         return self.journal
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        self,
+        batch,
+        objective,
+        algorithm_state,
+        scheduling,
+        scenario_step,
+        *,
+        parent_runtime_load_id=None,
+        scenario=None,
     ):
         self.calls.append(("prepare", parent_runtime_load_id))
         return PreparedTrainingStep("train", algorithm_state, {}, {"scenario_step": scenario_step})
@@ -295,7 +303,7 @@ def test_failed_candidate_commit_keeps_admission_closed_until_completion_retries
     staged_journal(training)
     committed: list[str] = []
 
-    def fail_commit(training_job_id: str) -> None:
+    def fail_commit(training_job_id: str, *, scenario: str | None = None) -> None:
         raise OSError("candidate commit unavailable")
 
     with monkeypatch.context() as patch:
@@ -306,7 +314,9 @@ def test_failed_candidate_commit_keeps_admission_closed_until_completion_retries
     assert inference.current_runtime_load_id() == "engine:0"
     assert inference.serving_runtime_load_id() == "engine:1"
 
-    monkeypatch.setattr(training, "commit_candidate", committed.append)
+    monkeypatch.setattr(
+        training, "commit_candidate", lambda training_job_id, scenario=None: committed.append(training_job_id)
+    )
     scheduler.acknowledge_commit(1, "job-1")
     assert committed == ["job-1"]
     assert inference.calls == [("activate", "job-1"), ("acknowledge", "job-1"), ("acknowledge", "job-1")]

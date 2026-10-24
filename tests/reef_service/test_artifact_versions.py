@@ -282,7 +282,7 @@ def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_p
     scenario = value.get_or_create_scenario("math")
     head = scenario.current_artifact_ref()
 
-    def fail_restore(artifact):
+    def fail_restore(artifact, *, scenario=None):
         raise RuntimeError("restore failed")
 
     target = training if component == "training" else training.inference

@@ -163,7 +163,8 @@ class RemoteInferenceService(InferenceService):
         self.started = False
         self.closed = False
 
-    def start(self, resources: DeploymentResources) -> InferenceConnection:
+    def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
+        """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
         self.started = True

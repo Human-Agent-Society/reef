@@ -17,7 +17,7 @@ from aiohttp import web
 from reef.artifact import Artifact
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.inference.remote.runtime import RemoteRuntimeFactory
+from reef.inference.remote.runtime import RemoteAdapterRuntimeFactory, RemoteRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
 from reef.inference.remote.service import RemoteControl, RemoteInferenceService
 from reef.inference.sglang.chat import SGLangInferenceHandler
@@ -30,7 +30,9 @@ from reef.runtime.deployment import (
     runtime_factory_for,
 )
 from reef.runtime.executor.connection import CoordinatorClient
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
+from reef.runtime.interfaces import InferenceBackend, ModelCandidate, WeightFiles
+from reef.runtime.serving import ADAPTER_DIR, AdapterServingRuntime
+from reef.surface.adapter import adapter_name
 
 CONTROL_TOKEN = "control-secret"
 INFERENCE_TOKEN = "inference-secret"
@@ -423,3 +425,69 @@ def test_runtime_refuses_an_unknown_dialect_or_a_missing_token(config, environ, 
 
 def test_factory_is_registered_for_the_remote_kind():
     assert isinstance(runtime_factory_for("remote"), RemoteRuntimeFactory)
+    assert isinstance(runtime_factory_for("remote_adapters"), RemoteAdapterRuntimeFactory)
+
+
+def test_adapter_runtime_starts_the_engines_and_loads_each_selected_adapter_through_the_component(component, tmp_path):
+    url, events, work_dir, _ = component
+    runtime = RuntimeRegistry().build(
+        {
+            "type": "remote_adapters",
+            "remote": {"url": url, "startup-timeout-s": 30},
+            "engine": "sglang",
+            "engine_config": {"model_path": "Qwen/Qwen3-8B"},
+            "num_gpus": 2,
+            "adapter_capacity": 2,
+        },
+        model_path="Qwen/Qwen3-8B",
+        environ={"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN, "REEF_REMOTE_INFERENCE_TOKEN": INFERENCE_TOKEN},
+    )
+    assert isinstance(runtime, AdapterServingRuntime)
+    # The engines start fenced, then serve the base model under the runtime's first version.
+    assert events[:4] == [
+        ("start", {"backend": "sglang", "model_path": "Qwen/Qwen3-8B"}, "placement-2"),
+        "health",
+        "fence",
+        "resume",
+    ]
+    assert runtime.serving_runtime_load_id() is not None
+    checkpoint = tmp_path / "job-1"
+    (checkpoint / ADAPTER_DIR).mkdir(parents=True)
+    (checkpoint / ADAPTER_DIR / "adapter_config.json").write_text('{"r": 16}')
+    activated = runtime.activate_candidate(
+        ModelCandidate(
+            candidate_id="job-1",
+            training_job_id="job-1",
+            checkpoint_path=str(checkpoint),
+            current_runtime_load_id=None,
+            metadata={"scenario": "math"},
+        )
+    )
+    version = activated.runtime_load_id
+    _, layout, name, loaded, contents, served = events[-2]
+    assert (layout, name, loaded, contents) == (
+        "adapter",
+        adapter_name("math", version),
+        version,
+        {"adapter_config.json": '{"r": 16}'},
+    )
+    assert served.parent == work_dir and events[-1] == "resume"
+    assert runtime.serving_runtime_load_id() == version
+    arguments = runtime.inference_handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
+    assert (arguments["url"], arguments["headers"]["Authorization"]) == (
+        f"{url}/generate",
+        f"Bearer {INFERENCE_TOKEN}",
+    )
+    runtime.shutdown()
+    assert events[-2:] == ["close", "release"]
+
+
+def test_adapter_runtime_refuses_missing_tokens_before_it_starts_engines(component):
+    url, events, _, _ = component
+    with pytest.raises(RuntimeConfigError, match="REEF_REMOTE_INFERENCE_TOKEN"):
+        RuntimeRegistry().build(
+            {"type": "remote_adapters", "remote": {"url": url}, "engine_config": {}},
+            model_path="Qwen/Qwen3-8B",
+            environ={"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN},
+        )
+    assert events == []

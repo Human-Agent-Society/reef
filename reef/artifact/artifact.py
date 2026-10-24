@@ -34,6 +34,8 @@ __all__ = [
 #: ``Artifact.local`` and repository staging both mint releases under it;
 #: ``is_local_release`` is the shared predicate for recognizing them.
 LOCAL_RELEASE_PREFIX = "local:"
+#: Files a repository adds to a materialized release; a release with nothing else holds no weights.
+REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 
 
 def is_local_release(release_id: str) -> bool:

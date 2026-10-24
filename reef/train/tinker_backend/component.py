@@ -3,14 +3,17 @@
 A job starts from ``job.start``, a directory that holds a Tinker checkpoint
 manifest, or from the base checkpoint when ``start`` is ``None``. Each attempt
 branches from those weights and their optimizer state, so repeating an attempt
-can consume API resources but cannot apply its gradient twice. The inference
-side, ``reef.inference.tinker``, reads each checkpoint's manifest from its
-artifact; nothing is shared in process.
+can consume API resources but cannot apply its gradient twice. Serving reads
+each saved checkpoint from its artifact: Tinker's sampler
+(``reef.inference.tinker``) reads the manifest, and Reef's serving engines
+(``reef.runtime.serving``) load the PEFT adapter the component exports beside
+it. Nothing is shared in process.
 """
 
 from __future__ import annotations
 
 import fcntl
+import shutil
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -21,6 +24,7 @@ from reef.core.batches import StepScheduling
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.runtime.recovery import read_json, write_json
+from reef.runtime.serving import ADAPTER_DIR
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
@@ -38,14 +42,18 @@ class TinkerTrainingComponent(TrainingComponent):
     raises when it fails, so a job is never reported as failed.
 
     ``config.state_dir`` holds ``base/`` (the base checkpoint), and for every
-    job that trained, ``jobs/<job_id>/`` (its checkpoint manifest) and
+    job that trained, ``jobs/<job_id>/`` (its checkpoint manifest, and with
+    ``export_adapter`` its PEFT adapter in ``adapter/``) and
     ``jobs/<job_id>.json`` (its metrics and proposed algorithm state).
     """
 
-    def __init__(self, base_model: str, config: TinkerConfig, client: TinkerClient) -> None:
+    def __init__(
+        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, export_adapter: bool = False
+    ) -> None:
         self._model = base_model
         self._config = config
         self._client = client
+        self._export_adapter = export_adapter
         self._lock = RLock()
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
@@ -128,7 +136,12 @@ class TinkerTrainingComponent(TrainingComponent):
             start, batches, resolve_tinker_loss(prepared.payload["loss"]), learning_rates
         )
         checkpoint = replace(self._validated(checkpoint), learning_rate_schedule_state=schedule_state)
-        checkpoint.write(self._root / "jobs" / job.job_id)
+        directory = self._root / "jobs" / job.job_id
+        if self._export_adapter:
+            # An earlier attempt may have left part of the adapter.
+            shutil.rmtree(directory / ADAPTER_DIR, ignore_errors=True)
+            self._client.download(checkpoint, directory / ADAPTER_DIR)
+        checkpoint.write(directory)
         # The result is written last: a job with a result file has a complete checkpoint.
         write_json(
             self._root / "jobs" / f"{job.job_id}.json",

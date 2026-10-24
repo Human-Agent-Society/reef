@@ -151,7 +151,7 @@ def runtime(tmp_path):
 
 def incumbent(training):
     """The checkpoint the next job starts from."""
-    start = training.start
+    start = training.start()
     return TinkerCheckpoint.read(Path(start) if start is not None else training.component.state_dir / "base")
 
 
@@ -236,7 +236,7 @@ def test_rejected_and_failed_jobs_leave_the_start_unchanged(runtime, objective):
     value.training.prepare_training_step(other, TrainingMethod(objective.name), {}, SCHEDULING, 0)
     assert len(client.calls) == 3
     assert all(call[0].state_path == "tinker://base/state" for call in client.calls)
-    assert value.training.start is None
+    assert value.training.start() is None
     assert value.inference.current_runtime_load_id() == original
 
 

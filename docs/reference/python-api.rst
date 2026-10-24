@@ -1657,19 +1657,31 @@ from the start checkpoint the training runtime remembers on disk, which commits
 move; the inference runtime reads each candidate's or
 artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
 sampler it names, activates selected candidates and binds the head Reef
-publishes through ``activate_checkpoint``. With a local inference engine the
-same deployment instead returns a model-driver plan: ``TinkerTrainingService``
-supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
-that delivers each published adapter as a PEFT directory through
-``weight_files``, which returns a ``WeightFiles`` value with the ``"adapter"``
-layout. Reef's publisher then calls the receiver's
-``InferenceBackend.load_weight_files``, so the trainer never holds an engine
-handle. This is the ``reef-weight-files-v1`` transfer. A receiver that declares
-it loads both layouts: ``"adapter"`` under the adapter name Reef chooses, and
-``"full"`` (a Hugging Face checkpoint) in place of the served weights. The HTTP service connects through the
-``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
+publishes through ``activate_checkpoint``. With inference engines the same
+deployment builds ``JobTrainingRuntime(component, ..., per_scenario=True)``,
+whose component also exports each job's PEFT adapter into ``adapter/`` beside
+the manifest, and, through the ``remote_adapters`` inference kind, a
+``reef.runtime.serving.AdapterServingRuntime``. That runtime controls the
+engines of an inference component through ``RemoteInferenceBackend``: it loads
+a selected candidate's ``adapter/`` directory as a ``WeightFiles`` value with
+the ``"adapter"`` layout under ``adapter_name(scenario, version)``, and loads a
+release's adapter again when a scenario starts or rolls back.
+``TrainingDeployment.serves_on_inference_component(settings)`` returns true for
+such a deployment; ``reef serve`` then starts a local component unless
+``inference.remote`` names one. With per-scenario weights, Reef passes
+``scenario`` to ``TrainingRuntime.prepare_training_step``,
+``restore_checkpoint`` and ``commit_candidate``, and to
+``WeightRuntime.restore_checkpoint`` and ``activate_checkpoint``. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
+
+The ``reef-weight-files-v1`` transfer delivers saved weights as files: a
+trainer returns a ``WeightFiles`` value from ``TrainingBackend.weight_files``,
+and Reef's publisher calls the receiver's
+``InferenceBackend.load_weight_files``, so the trainer never holds an engine
+handle. A receiver that declares the transfer loads both layouts:
+``"adapter"`` under the adapter name Reef chooses, and ``"full"`` (a Hugging
+Face checkpoint) in place of the served weights.
 
 Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
 and register it with ``register_loss_family_ref(name, "package.module:CLASS",
