@@ -162,6 +162,47 @@ RUN SGLANG_QWEN3_5=/opt/sglang/python/sglang/srt/models/qwen3_5.py && \
                                       mrope_interleaved_glm=False, cos_sin_cache=torch.empty(0)); \
                assert MRotaryEmbedding._build_axis_map(rope).tolist() == [0, 1, 2] * 10 + [0, 1]"
 
+# Slime's Qwen3.5 trainer runs the transformers vision tower. Five of its ops
+# round differently from SGLang's vision tower, so in bf16 the trainer's image
+# features differ from the rollout's by 5 to 10 percent. The module makes the
+# trainer use SGLang's kernels and encode each image in its own call. Then the
+# features are bit-identical to the engine under the conditions in
+# docker/README.md. The patch makes Slime's Qwen3.5 vision loader call the
+# module. The step is skipped when Slime already calls it. The check below
+# fails the build when transformers is outside the range that the module
+# supports, because the module then does nothing. It also fails when SGLang no
+# longer has the RoPE function that the module imports.
+# Remove the module, the patch, this step and
+# tests/slime_backend/test_qwen3_5_vision_numerics.py when the Slime pin has
+# the change.
+RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
+        print(pathlib.Path(importlib.util.find_spec('slime_plugins.models.qwen3_5_vl').origin).parent)") && \
+    if ! grep -q "match_sglang_vision_numerics" "$SLIME_MODELS/qwen3_5_vl.py"; then \
+        cp docker/patch/slime_qwen3_5_vision_numerics.py "$SLIME_MODELS/qwen3_5_vision_numerics.py" && \
+        git -C "$SLIME_MODELS" apply -p3 "$PWD/docker/patch/slime_qwen3_5_vl_vision_numerics.patch"; \
+    fi && \
+    grep -q "match_sglang_vision_numerics(vision_model)" "$SLIME_MODELS/qwen3_5_vl.py" && \
+    python -c "from slime_plugins.models.qwen3_5_vision_numerics import transformers_api_supported; \
+               from sglang.srt.layers.rotary_embedding.utils import apply_rotary_pos_emb_native; \
+               assert transformers_api_supported()"
+
+# With context parallel size 1, Slime's Qwen3.5-VL trainer rejects every packed
+# sequence with an odd length ("must be divisible by 2 * CP size 1"), so it
+# fails in the first training step. The patch returns the full packed stream
+# when cp_size is 1. THUDM/slime#2376 fixes the call site. This patch is a
+# helper-side variant of the same fix, which #2376 says would be directly
+# unit-testable. Both give the same indices at CP 1.
+# The step is skipped when the helper already handles cp_size 1. Remove the
+# patch, this step and tests/slime_backend/test_slime_thd_cp1_indices.py when
+# the Slime pin has a fix.
+RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
+        print(pathlib.Path(importlib.util.find_spec('slime_plugins.models.qwen3_5_vl_utils').origin).parent)") && \
+    if ! grep -q "if cp_size == 1:" "$SLIME_MODELS/qwen3_5_vl_utils.py"; then \
+        git -C "$SLIME_MODELS" apply -p3 "$PWD/docker/patch/slime_thd_cp1_indices.patch"; \
+    fi && \
+    python -c "import torch; from slime_plugins.models.qwen3_5_vl_utils import get_packed_cp_local_indices; \
+               assert get_packed_cp_local_indices([0, 3, 4, 7], 1, 0, torch.device('cpu')).tolist() == list(range(7))"
+
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
 # adapters. Earlier slime bases bundled it; newer ones do not (observed
