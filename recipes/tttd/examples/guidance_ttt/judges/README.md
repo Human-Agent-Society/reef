@@ -128,11 +128,13 @@ python judges/frontiercs2_server.py \
 ```
 
 Each worker runs one verifier on its own CPU set of the task's
-`verifier.cpu_millis`, under the task's evaluation timeout. The verifier
-returns the score and development metrics that a FrontierCS 2 agent receives;
-the message carries them to the next guidance. A candidate is valid when its
-score is positive. The pid `<task>:eval` runs the held-out final suite and adds
-the private `beats_reference` verdict; only the final verifier uses it.
+`verifier.cpu_millis`, under the task's evaluation timeout. A cluster can send
+each verifier to its scheduler instead by overriding `FrontierCS2Judge._run`.
+The verifier returns the score and development metrics that a FrontierCS 2
+agent receives; the message carries them to the next guidance. A candidate is
+valid when its score is positive. The pid `<task>:eval` runs the held-out
+final suite and adds the private `beats_reference` verdict; only the final
+verifier uses it.
 
 `lejepa_world_model` and `polar_express` ship their file as a stub that scores
 zero. `bootstrap_frontiercs2.py` asks the frozen executor once for a simple
