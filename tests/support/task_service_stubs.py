@@ -77,14 +77,18 @@ def episode_reward(rewards: float | Sequence[float], index: int) -> float:
     return float(rewards[index % len(rewards)])
 
 
-def rollout_turn(model: str | None, episode: int) -> EpisodeTurn:
+def rollout_turn(model: str | None, episode: int, runtime_load_id: str | None = None) -> EpisodeTurn:
     """One answered model call of a rollout episode, with the training block the service returns."""
+    training: dict[str, object] = {
+        "tokens": [1, 2, 3, episode],
+        "loss_mask": [1, 1],
+        "rollout_log_probs": [-0.1, -0.2],
+    }
+    if runtime_load_id is not None:
+        training["runtime_load_id"] = runtime_load_id
     return EpisodeTurn(
         request={"model": model or "served", "messages": [{"role": "user", "content": f"solve {episode}"}]},
-        response={
-            "choices": [{"message": {"role": "assistant", "content": "done"}}],
-            "training": {"tokens": [1, 2, 3, episode], "loss_mask": [1, 1], "rollout_log_probs": [-0.1, -0.2]},
-        },
+        response={"choices": [{"message": {"role": "assistant", "content": "done"}}], "training": training},
     )
 
 
@@ -112,6 +116,8 @@ class StandInGenerator(Generator):
         self.is_solvable = is_solvable
         self.rewards = dict(rewards or {"plain": 0.25, "hint": 0.75})
         self.episode_error = episode_error
+        #: The version that answers each rollout call; None names none.
+        self.runtime_load_id: str | None = None
         self.fail_after = fail_after
         self.check_fail_after = check_fail_after
         self.proposals: list[dict[str, object]] = []
@@ -214,7 +220,7 @@ class StandInGenerator(Generator):
                     failed_calls=0,
                     report_agent_record_ids=(),
                     trial_uri=None,
-                    turns=() if self.episode_error else (rollout_turn(model, self.episodes),),
+                    turns=() if self.episode_error else (rollout_turn(model, self.episodes, self.runtime_load_id),),
                 )
             )
         return tuple(rows)

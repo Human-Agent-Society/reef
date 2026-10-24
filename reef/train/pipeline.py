@@ -30,17 +30,15 @@ A client can also upload an ATIF trajectory. It is not a record, so it does not
 go through the first two stages. It counts as one sample. A batch takes
 uploaded trajectories first.
 
-A pipeline whose task-to-batch stage is a ``RolloutTask2Batch``
-(:mod:`reef.task2batch.rollout`) also rolls saved tasks out. A rollout episode
-is not a record either: the stage hands back its samples, and a rollout batch
-trains on the fresh groups of one rollout.
+A task-to-batch stage can also make samples itself, from no record, such as
+the generated-task recipe's rollout episodes. While ``Task2Batch.own_batch``
+returns samples, the pipeline is ready, and its next batch holds exactly those.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-import uuid
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -52,10 +50,10 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, TaskStatus, UnitDropReason
-from reef.record2record.staleness import is_stale, producing_runtime_load_ids
+from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2task import NoTasks, Record2Task
 from reef.storage.trajectories import consumed_trajectory_id
-from reef.task2batch import NoBatches, PooledTask, RolloutTask2Batch, Task2Batch, consumed_rollout_id
+from reef.task2batch import NoBatches, Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 
@@ -149,24 +147,6 @@ def stage_reference(default: type[Plugin], value: object, stage: str) -> PluginR
 
 
 @dataclass(frozen=True)
-class ActiveRollout:
-    """The rollout batch that runs, or that waits for its training.
-
-    Values: ``task_uses`` are the batch's task uses, and ``tasks`` the pooled tasks that they run, in the same
-    order. ``samples`` is None while the episodes run; then it maps each task use that has a group to its
-    samples. ``fresh_uses`` are the uses, in submit order, whose groups passed the staleness check; they train.
-    Purpose: the pipeline keeps it from submit until the batch trains or ends. A task whose group did not
-    train goes back to the task pool; a task without a group stays out of it.
-    """
-
-    batch: str
-    task_uses: tuple[str, ...]
-    tasks: tuple[PooledTask, ...]
-    samples: Mapping[str, tuple[TrajectoryItem, ...]] | None = None
-    fresh_uses: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class InstructionFailure:
     """A failed instruction and the attempt metadata carried through an in-process trainer reload."""
 
@@ -239,21 +219,10 @@ class TrainingPipeline:
         self.reserved_trajectory_ids: tuple[str, ...] = ()
         #: The commit IDs of the uploaded trajectories that a batch consumed. A second read of one does not queue it.
         self.consumed_trajectory_ids: set[str] = set()
-        #: The task-to-batch stage, when it rolls tasks out.
-        self.rollout_stage: RolloutTask2Batch | None = None
-        #: The rollout batch from submit until it trains or ends.
-        self.rollout: ActiveRollout | None = None
-        #: The task uses of each trained rollout batch, with the IDs that its commit consumes. The tasks are
-        #: marked trained when those IDs are released, after the commit is durable.
-        self.trained_rollouts: list[tuple[str, tuple[str, ...], frozenset[str]]] = []
-        #: The commit IDs of the rollout groups that a batch consumed, until the commit is durable.
-        self.consumed_rollout_ids: set[str] = set()
-        if isinstance(self.task2batch, RolloutTask2Batch):
-            if self.task2batch.accepts_trajectories:
-                raise TypeError(
-                    f"{type(self.task2batch).__name__} rolls tasks out and cannot take uploaded trajectories"
-                )
-            self.rollout_stage = self.task2batch
+        #: Whether the handed out batch holds the task-to-batch stage's own samples (``Task2Batch.own_batch``).
+        self.pending_is_own = False
+        #: The IDs that consumed own batches listed, until their commit is durable.
+        self.consumed_own_ids: set[str] = set()
         self.buffer_release_warned = False
         self.set_training_mode(context.training_mode)
 
@@ -434,8 +403,9 @@ class TrainingPipeline:
             self.uploaded_trajectories.setdefault(trajectory_id, trajectory)
 
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Give the record stage the runtime load ID that serves the scenario now, for its staleness check."""
+        """Give the stages the runtime load ID that serves the scenario now, for their staleness checks."""
         self.record2record.observe_serving_runtime_load_id(runtime_load_id)
+        self.task2batch.observe_serving_runtime_load_id(runtime_load_id)
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -454,20 +424,18 @@ class TrainingPipeline:
         # Background work, such as judgments or finished rounds, forms sets without a new record.
         self.record2record.advance(time.monotonic())
         self.move_record_sets()
-        if self.pending is None and self.rollout_stage is None:
-            # A rollout batch runs the staleness check when its groups settle.
+        self.task2batch.advance()
+        if self.pending is None:
             self.record2record.drop_stale_units(self.context.max_staleness)
             self.forget_ended_sets()
 
     def ready(self, sample_count: int) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples.
 
-        A pipeline that rolls tasks out is ready when a settled rollout batch can train, whatever its sample count.
+        The stage's own batch (``Task2Batch.own_batch``) makes the pipeline ready, whatever its sample count.
         """
         self.advance()
-        if self.rollout_stage is not None:
-            return self.rollout_ready(self.rollout_stage)
-        if self.pending is not None:
+        if self.pending is not None or self.task2batch.own_batch() is not None:
             return True
         if self.training_mode == "manual":
             return bool(self.training_requests)
@@ -475,78 +443,17 @@ class TrainingPipeline:
             return True
         return self.count_held_samples() >= sample_count
 
-    def rollout_ready(self, stage: RolloutTask2Batch) -> bool:
-        """Advance the rollout loop; return True when the fresh groups of an ended rollout batch can train."""
-        for result in stage.take_finished():
-            if self.rollout is None or result.batch != self.rollout.batch:
-                logger.warning(
-                    "scenario %r ignores the episodes of rollout %r, which is not running", self.scenario, result.batch
-                )
-                continue
-            served = self.record2record.served_runtime_load_ids
-            fresh = tuple(
-                task_use
-                for task_use in self.rollout.task_uses
-                if task_use in result.samples
-                and not is_stale(
-                    producing_runtime_load_ids(result.samples[task_use]), served, self.context.max_staleness
-                )
-            )
-            self.rollout = replace(self.rollout, samples=dict(result.samples), fresh_uses=fresh)
-        if self.pending is not None:
-            return True
-        if self.rollout is not None:
-            if self.rollout.samples is None:
-                return False
-            if self.rollout.fresh_uses:
-                return True
-            # No group of the batch can train.
-            self.end_rollout(stage, trained_uses=())
-        self.start_rollout(stage)
-        return False
-
-    def start_rollout(self, stage: RolloutTask2Batch) -> None:
-        """Submit up to ``tasks_per_step`` pooled tasks as the next rollout batch; a failed submit keeps them pooled."""
-        taken = stage.task_pool.take(stage.tasks_per_step)
-        if not taken:
-            return
-        batch = f"{self.scenario}:rollout:{uuid.uuid4().hex[:12]}"
-        try:
-            task_uses = stage.submit(batch, tuple(task.item for task in taken))
-        except Exception:
-            stage.task_pool.put_back(taken)
-            raise
-        self.rollout = ActiveRollout(batch, task_uses, taken)
-
-    def end_rollout(self, stage: RolloutTask2Batch, *, trained_uses: tuple[str, ...]) -> None:
-        """End the rollout batch: a task whose group did not train goes back to the pool, the others leave it."""
-        if self.rollout is None:
-            return
-        rollout = self.rollout
-        samples = rollout.samples or {}
-        returned = tuple(
-            task
-            for task_use, task in zip(rollout.task_uses, rollout.tasks, strict=True)
-            if task_use in samples and task_use not in trained_uses
-        )
-        stage.task_pool.put_back(returned)
-        stage.task_pool.drop(tuple(task for task in rollout.tasks if task not in returned))
-        stage.rollout_ended(rollout.batch, trained=bool(trained_uses))
-        self.rollout = None
-
     def build_batch(self, sample_count: int) -> TrainingBatch:
         """Return the handed out batch, or build one of at least ``sample_count`` samples when ``ready``."""
         if self.pending is None:
             if not self.ready(sample_count):
                 raise RuntimeError(f"scenario {self.scenario!r} has no batch ready")
             self.batch_number += 1
-            if self.rollout is not None and self.rollout.samples is not None:
-                # A rollout batch trains on all of its fresh groups, however many samples they hold.
-                samples = self.rollout.samples
-                rollout_samples = tuple(sample for task_use in self.rollout.fresh_uses for sample in samples[task_use])
-                self.pending = self.task2batch.make_batch(
-                    rollout_samples, f"{self.scenario}:batch:{self.batch_number}"
-                )
+            own = self.task2batch.own_batch()
+            if own is not None:
+                # The stage's own samples train as one batch, however many they are.
+                self.pending = self.task2batch.make_batch(own, f"{self.scenario}:batch:{self.batch_number}")
+                self.pending_is_own = True
                 return self.pending
             # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
             request = (
@@ -586,16 +493,13 @@ class TrainingPipeline:
         """
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        if self.rollout is not None and self.rollout_stage is not None:
-            # A rollout batch consumes its groups, not records: each group has a commit ID of its own.
-            fresh_uses = self.rollout.fresh_uses
-            rollout_ids = frozenset(consumed_rollout_id(task_use) for task_use in fresh_uses)
-            if trained:
-                self.trained_rollouts.append((self.rollout.batch, fresh_uses, rollout_ids))
-                self.consumed_rollout_ids |= rollout_ids
-            self.end_rollout(self.rollout_stage, trained_uses=fresh_uses if trained else ())
+        if self.pending_is_own:
+            # An own batch consumes no record: the stage names what the commit lists.
+            own_ids = self.task2batch.own_batch_done(trained=trained)
+            self.consumed_own_ids |= own_ids
             self.pending = None
-            return rollout_ids if trained else frozenset()
+            self.pending_is_own = False
+            return own_ids
         consumed_units = self.record2record.pool.consume_reserved()
         consumed = self.record2record.consume(consumed_units, trained=trained)
         self.forget_ended_sets()
@@ -615,6 +519,7 @@ class TrainingPipeline:
         if self.pending is None or self.pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         self.pending = None
+        self.pending_is_own = False
         self.reserved_trajectory_ids = ()
         self.record2record.pool.release_reservation()
 
@@ -626,7 +531,7 @@ class TrainingPipeline:
         return (
             frozenset(self.consumed_requests)
             | frozenset(self.consumed_trajectory_ids)
-            | frozenset(self.consumed_rollout_ids)
+            | frozenset(self.consumed_own_ids)
             | self.record2record.releasable_record_ids()
         ) - waiting
 
@@ -634,14 +539,11 @@ class TrainingPipeline:
         """Release committed in-memory state without changing stored records."""
         self.consumed_requests -= agent_record_ids
         self.consumed_trajectory_ids -= agent_record_ids
-        self.consumed_rollout_ids -= agent_record_ids
         self.record2record.release_records(agent_record_ids)
-        if self.rollout_stage is not None:
-            # The commit that consumed a trained rollout's groups is durable now.
-            durable = [entry for entry in self.trained_rollouts if entry[2] & agent_record_ids]
-            for batch, trained_uses, _ in durable:
-                self.rollout_stage.rollout_trained(batch, trained_uses)
-            self.trained_rollouts = [entry for entry in self.trained_rollouts if entry not in durable]
+        durable_own_ids = frozenset(self.consumed_own_ids & agent_record_ids)
+        if durable_own_ids:
+            self.consumed_own_ids -= durable_own_ids
+            self.task2batch.release_own_ids(durable_own_ids)
 
     def background_jobs_running(self) -> bool:
         """Return True while background work runs: a waiting set, or a record stage job such as a judgment.
@@ -651,8 +553,11 @@ class TrainingPipeline:
         Otherwise it sleeps until the next accepted record. The training
         thread reads this between drains. It must not block.
         """
-        is_rolling_out = self.rollout is not None and self.pending is None
-        return bool(self.waiting_sets) or is_rolling_out or self.record2record.background_jobs_running()
+        return (
+            bool(self.waiting_sets)
+            or self.task2batch.background_jobs_running()
+            or self.record2record.background_jobs_running()
+        )
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
@@ -680,23 +585,7 @@ class TrainingPipeline:
         }
         if self.supported_training_modes & {"manual", "hybrid"}:
             state["buffered_requests"] = self.buffered_requests()
-        if self.rollout_stage is None:
-            return {**state, **self.record2record.status(), **self.record2task.status()}
-        state["rollout"] = (
-            None
-            if self.rollout is None
-            else {
-                "batch": self.rollout.batch,
-                "task_uses": len(self.rollout.task_uses),
-                "is_running": self.rollout_stage.running(),
-            }
-        )
-        return {
-            **state,
-            **self.record2record.status(),
-            **self.record2task.status(),
-            **self.rollout_stage.status(),
-        }
+        return {**state, **self.record2record.status(), **self.record2task.status(), **self.task2batch.status()}
 
     def close(self) -> None:
         """Close the stages; safe to call more than once.
@@ -708,8 +597,8 @@ class TrainingPipeline:
             self.record2record.close()
         finally:
             try:
-                # A rollout still saves results through the record-to-task stage, so it closes first.
-                if self.rollout_stage is not None:
-                    self.rollout_stage.close()
+                # A stage's own work, such as a rollout, can still save results through the record-to-task
+                # stage, so it closes first.
+                self.task2batch.close()
             finally:
                 self.record2task.close()

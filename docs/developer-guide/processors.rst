@@ -149,6 +149,26 @@ The trainer calls it on its own thread, under its lock; no call may block:
   them again. ``trained=False`` says the backend dropped the batch as stale,
   for a record stage that paces work on what trained.
 
+A task-to-batch stage can also make samples from no record and train them as
+a batch of its own. The pipeline drives this through the stage's optional
+hooks, whose defaults make no such samples:
+
+- ``advance()``: start or take in the stage's own work. The pipeline calls it
+  in each ``advance()``.
+- ``own_batch()``: return the samples that train now, or ``None``. While it
+  returns samples, the pipeline is ready and its next batch holds exactly
+  these samples, whatever their count. The pipeline asks before it selects
+  record sets.
+- ``own_batch_done(trained=...)``: the step consumed the own batch. Return the
+  IDs that the step's commit lists for it. The pipeline gives them to
+  ``release_own_ids(ids)`` once the commit is durable.
+- ``observe_serving_runtime_load_id``, ``background_jobs_running``,
+  ``status``, and ``close``: as on the record stage.
+
+A released own batch stays the stage's, and the next ``build_batch`` builds
+it again. The generated-task recipe rolls its saved tasks out this way (see
+`Task generation contract <#task-generation-contract>`__).
+
 The pipeline does not know the batch size. The trainer passes its
 ``batch_size`` as ``sample_count``: Slime's ``--global-batch-size`` or
 Tinker's ``batch_size`` through ``TrainingRuntime.batch_size``, or
@@ -491,11 +511,11 @@ was already published is rejected as a duplicate.
 Saved tasks roll out as batches. A rollout episode is not a record: its
 agent's model calls carry the ``x-reef-rollout`` header, so the service serves
 them from the scenario's release but keeps no record of them, and answers with
-each call's training block. The pipeline runs a second loop:
+each call's training block. ``GeneratedTaskBatches`` runs a second loop, which
+the pipeline drives through the stage's own-batch hooks:
 
-1. When no rollout batch runs, the pipeline takes up to ``tasks_per_step``
-   tasks from the task pool of ``GeneratedTaskBatches`` and submits them as one
-   rollout batch.
+1. When no rollout batch runs, the stage takes up to ``tasks_per_step``
+   tasks from its task pool and submits them as one rollout batch.
 2. ``GeneratedTaskBatches`` runs them all at once on its own worker. It
    stages each saved task in the generator service (``write_task``) and runs
    ``episodes_per_task`` episodes of it on the training arm. Staging the same
@@ -524,9 +544,8 @@ of its tasks without a result gets an infrastructure-failure result, so its
 generation's feedback still goes out. A result that the task store fails to
 save is saved again by the next job. On a restart, the train tasks that did not
 train go back to the task pool, including the tasks of a rollout that the stop
-interrupted. The generic part is ``RolloutTask2Batch``
-(``reef.task2batch.rollout``): any task-to-batch stage that turns its episodes
-into samples can use the pipeline's loop.
+interrupted. The loop is the recipe's (``reef.recipe.generated_tasks.rollout``);
+the pipeline only reads the stage's own batch.
 
 When every train task of a generation has a result, the next job sends the
 generation's results to ``record_results``. A generation can therefore close

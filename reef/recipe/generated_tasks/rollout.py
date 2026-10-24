@@ -1,32 +1,28 @@
-"""Rollout: Reef runs saved tasks itself and trains on their episodes.
+"""The generated-task rollout: Reef runs saved tasks itself and trains on their episodes.
 
 A rollout episode is not a record. Its agent's model calls carry ``ROLLOUT_HEADER``
 (:mod:`reef.core.records_types`), so the service keeps no record of them, and the episode comes back with its
-answered calls. A task-to-batch stage that rolls tasks out (``RolloutTask2Batch``) owns the whole path from a
-saved task to a training sample; the record stages never see a rollout episode.
+answered calls. ``GeneratedTaskBatches`` owns the whole path from a saved task to a training sample, and gives
+the pipeline its samples as its own batch (``Task2Batch.own_batch``); the record stages never see a rollout
+episode. One rollout batch runs at a time:
 
-The pipeline (``reef.train.pipeline.TrainingPipeline``) runs one rollout batch at a time:
-
-1. It takes up to ``tasks_per_step`` tasks from the stage's ``TaskPool`` and submits them. Each submitted task
-   gets a task use ``u``, distinct within the batch.
-2. When the batch's episodes end, ``take_finished`` gives ``samples : U ⇀ TrajectoryItem⁺``: the training
-   samples of each task use whose episodes can train together, its group. A use without a group is absent.
-3. The pipeline drops each group whose samples a version produced that is too far behind the version the
-   scenario serves. The surviving groups train as one batch.
+1. When no rollout batch runs, the stage takes up to ``tasks_per_step`` tasks from its ``TaskPool`` and
+   submits them. Each submitted task gets a task use ``u``, distinct within the batch.
+2. When the batch's episodes end, ``samples : U ⇀ TrajectoryItem⁺`` gives the samples of each task use whose
+   episodes can train together, its group. A use without a group is absent.
+3. The stage drops each group whose samples a version produced that is more than ``max_staleness`` versions
+   behind the version the scenario serves. The groups that are left, ``fresh_uses``, are the own batch.
 4. A task whose group did not train, because it was stale or the backend dropped the batch, goes back to the
-   pool. A task without a group stays out of the pool until a restart. A trained task is marked trained once
-   the commit of its step is durable (``rollout_trained``).
+   pool. A task without a group stays out of the pool until a restart. A trained task's commit lists
+   ``rollout:<task use>``, and the task is marked trained once that ID is released after the commit is durable.
 """
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from reef.core.batches import TaskItem, TrajectoryItem
-from reef.task2batch.base import Task2Batch
 
 #: The prefix of the ID that a commit lists for a trained rollout group.
 CONSUMED_ROLLOUT_PREFIX = "rollout:"
@@ -105,62 +101,26 @@ class TaskPool:
 
 
 @dataclass(frozen=True)
-class RolloutResult:
-    """The episodes of one rollout batch ended.
+class ActiveRollout:
+    """The rollout batch that runs, or that waits for its training.
 
-    Values: ``batch`` names the rollout batch. ``samples`` maps a task use of the batch to the non-empty
-    tuple of training samples of its group; a use without a group, such as one whose episodes failed or that
-    has too few episodes to compare, is absent.
-    Purpose: ``RolloutTask2Batch.take_finished`` makes it; the pipeline batches the groups that are fresh.
+    Values: ``task_uses`` are the batch's task uses, and ``tasks`` the pooled tasks that they run, in the same
+    order. ``samples`` is None while the episodes run; then it maps each task use that has a group to its
+    samples, a non-empty tuple. ``fresh_uses`` are the uses, in submit order, whose groups passed the
+    staleness check; they train.
+    Purpose: ``GeneratedTaskBatches`` keeps it from submit until the batch trains or ends.
     """
 
     batch: str
-    samples: Mapping[str, tuple[TrajectoryItem, ...]]
+    task_uses: tuple[str, ...]
+    tasks: tuple[PooledTask, ...]
+    samples: Mapping[str, tuple[TrajectoryItem, ...]] | None = None
+    fresh_uses: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if any(not group for group in self.samples.values()):
+        if len(self.task_uses) != len(self.tasks):
+            raise ValueError("a rollout batch has one task use for each task")
+        if self.samples is not None and any(not group for group in self.samples.values()):
             raise ValueError("a rollout group holds at least one sample")
-
-
-class RolloutTask2Batch(Task2Batch):
-    """A task-to-batch stage that rolls saved tasks out and batches the samples of their episodes.
-
-    Values: ``tasks_per_step`` is the most tasks of one rollout batch, a positive int; ``task_pool`` holds the
-    tasks that wait to roll out. The pipeline takes tasks from the pool and submits them as one rollout batch.
-    The stage runs them on a worker that it owns, and ``take_finished`` hands back each task use's samples
-    when the episodes end. The pipeline batches the fresh groups through ``make_batch``. ``close`` stops the
-    worker.
-    """
-
-    #: The most saved tasks of one rollout batch.
-    tasks_per_step: int = 1
-    #: The saved tasks that wait to roll out.
-    task_pool: TaskPool
-
-    @abstractmethod
-    def submit(self, batch: str, tasks: tuple[TaskItem, ...]) -> tuple[str, ...]:
-        """Start running the tasks as one rollout batch; return one task use ID for each task, in order."""
-
-    @abstractmethod
-    def take_finished(self) -> tuple[RolloutResult, ...]:
-        """Return the rollout batches whose episodes ended since the last call."""
-
-    @abstractmethod
-    def running(self) -> bool:
-        """Whether a rollout batch is running."""
-
-    @abstractmethod
-    def rollout_trained(self, batch: str, task_uses: tuple[str, ...]) -> None:
-        """The commit of the step that trained these task uses' groups is durable; their tasks do not roll out again."""
-
-    def rollout_ended(self, batch: str, *, trained: bool) -> None:
-        """The rollout batch ended: it trained, or it trained nothing. The default does nothing."""
-        return
-
-    def status(self) -> Mapping[str, Any]:
-        """Return JSON-safe state that the pipeline adds to its status."""
-        return {"task_pool": len(self.task_pool)}
-
-    def close(self) -> None:
-        """Stop the rollout worker. Calling it more than one time is safe."""
-        return
+        if not set(self.fresh_uses) <= set(self.samples or {}):
+            raise ValueError("a fresh task use has a group")

@@ -14,9 +14,6 @@ Entry point: ``Task2Batch`` in ``base.py``. A recipe writes ``make_batch`` and
 names the class in its ``pipeline_spec()``.
 
 * ``NoBatches`` (``base.py``): the no-update default; it never makes a batch.
-* ``RolloutTask2Batch`` (``rollout.py``): rolls saved tasks out as batches and
-  batches the samples of their episodes; the pipeline runs its rollout loop. A
-  rollout episode is not a record.
 * ``DistillBatches`` (``distill.py``): tasks as they come; the distilling
   recipes, the SFT recipe, and harness evolution use it.
 
@@ -28,16 +25,10 @@ two earlier stage packages, whose classes ``Task2Batch.from_config`` receives.
 
 from reef.task2batch.base import BufferSettings, NoBatches, Task2Batch
 from reef.task2batch.distill import DistillBatches
-from reef.task2batch.rollout import PooledTask, RolloutResult, RolloutTask2Batch, TaskPool, consumed_rollout_id
 
 __all__ = [
     "BufferSettings",
     "DistillBatches",
     "NoBatches",
-    "PooledTask",
-    "RolloutResult",
-    "RolloutTask2Batch",
     "Task2Batch",
-    "TaskPool",
-    "consumed_rollout_id",
 ]

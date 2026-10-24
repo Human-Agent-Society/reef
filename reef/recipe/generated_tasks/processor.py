@@ -33,6 +33,7 @@ import asyncio
 import logging
 import queue
 import tempfile
+import uuid
 from collections import Counter
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, replace
@@ -56,13 +57,15 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
+from reef.recipe.generated_tasks.rollout import ActiveRollout, TaskPool, consumed_rollout_id
 from reef.record2record import Record2Record, RecordSet, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
 from reef.record2task import Record2Task, TaskResult
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
-from reef.task2batch import RolloutResult, RolloutTask2Batch, TaskPool
+from reef.task2batch import Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
@@ -1086,8 +1089,8 @@ class RolloutOutcome(SupportsReceipt):
     Values: ``receipt`` is the batch ID. ``samples`` maps each task use that has a group to its samples, at
     least two, one for each episode that ran and assembled; a use whose episodes failed, or that has fewer
     than two samples to compare, is absent.
-    Purpose: the worker hands it back from ``run``; ``GeneratedTaskBatches.take_finished`` turns it into a
-    ``RolloutResult``.
+    Purpose: the worker hands it back from ``run``; ``GeneratedTaskBatches.rollout_finished`` keeps its fresh
+    groups.
     """
 
     samples: Mapping[str, tuple[TrajectoryItem, ...]]
@@ -1097,17 +1100,19 @@ class RolloutOutcome(SupportsReceipt):
             raise ValueError("a rollout group holds at least two samples")
 
 
-class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
-    """Roll saved tasks out as batches, and batch the samples of each rollout's episodes.
+class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
+    """Roll saved tasks out as batches, and train on the samples of each rollout's episodes as its own batch.
 
     The stage owns the task pool: the record stage adds each round's train tasks to it, and a restart puts the
-    train tasks that did not train back in it. The pipeline submits up to ``tasks_per_step`` of them as one
-    rollout batch. This stage runs them all at once on its own worker, ``episodes_per_task`` episodes of each,
-    through the record-to-task stage and the generator service, which limits the episodes in flight. A
-    rollout episode is not a record: it comes back with its model calls, and the stage assembles one sample
-    from each episode that ran. The samples of one task form its group. A task's first result goes to the task
-    store, and the record-to-task stage sends finished generations' results to the generator. The tasks of
-    groups that trained are marked trained in the store once the commit of their training step is durable.
+    train tasks that did not train back in it. On each ``advance`` with no rollout batch running, the stage
+    submits up to ``tasks_per_step`` of them as one rollout batch. Its worker runs them all at once,
+    ``episodes_per_task`` episodes of each, through the record-to-task stage and the generator service, which
+    limits the episodes in flight. A rollout episode is not a record: it comes back with its model calls, and
+    the stage assembles one sample from each episode that ran. The samples of one task form its group. When
+    the episodes end, the fresh groups are the stage's own batch (see :mod:`reef.recipe.generated_tasks.rollout`).
+    A task's first result goes to the task store, and the record-to-task stage sends finished generations'
+    results to the generator. The tasks of groups that trained are marked trained in the store once the
+    commit of their training step is durable.
     """
 
     @classmethod
@@ -1156,58 +1161,141 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
             for generation, stored in available_tasks(store):
                 self.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
         self.worker = worker or BackgroundJobWorker(self, thread_name="generated-task-rollouts", concurrency=1)
-        self.running_batch: str | None = None
-        #: The tasks of the rollout batch that runs.
-        self.running_tasks: tuple[TaskItem, ...] = ()
+        #: The rollout batch from submit until it trains or ends.
+        self.rollout: ActiveRollout | None = None
+        #: The task uses of each trained rollout batch, with the IDs that its commit lists. The tasks are marked
+        #: trained when those IDs are released, after the commit is durable.
+        self.trained_rollouts: list[tuple[str, tuple[str, ...], frozenset[str]]] = []
+        #: The versions that the scenario served, for the staleness check of the rollout groups.
+        self.served_versions = ServedVersions()
 
     def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(batch_id, tasks)
 
-    def submit(self, batch: str, tasks: tuple[TaskItem, ...]) -> tuple[str, ...]:
-        task_uses = tuple(f"{batch}/{task.metadata['task']['name']}" for task in tasks)
-        job = RolloutJob(receipt=batch, task_uses=tuple(zip(task_uses, tasks, strict=True)))
-        if not self.worker.submit(job):
-            raise RuntimeError(f"the rollout worker is closed or broken; rollout {batch} cannot run")
-        self.running_batch = batch
-        self.running_tasks = tasks
-        return task_uses
+    # ------------------------------------------------------------- the rollout loop
 
-    def take_finished(self) -> tuple[RolloutResult, ...]:
-        finished: list[RolloutResult] = []
+    def advance(self) -> None:
+        """Take the samples of a rollout batch whose episodes ended; with no rollout batch, start the next one."""
         for outcome in self.worker.poll():
-            self.running_batch = None
-            if isinstance(outcome, RolloutOutcome):
-                finished.append(RolloutResult(outcome.receipt, outcome.samples))
-            else:
-                logger.error("generated-task rollout %s did not finish on scenario %r", outcome.receipt, self.scenario)
-                finished.append(RolloutResult(outcome.receipt, {}))
-                # A task that has no result yet gets a lost one, so its generation's feedback completes.
-                for task in self.running_tasks:
-                    identity = task.metadata["task"]
-                    lost = TaskRolloutResult(
-                        task_name=identity["name"],
-                        error="the rollout did not finish; see the service log",
-                        infrastructure_failure=True,
-                    )
-                    self.record2task.save_result(lost)
-            self.running_tasks = ()
-            self.record2task.deliver_later()
-        return tuple(finished)
+            self.rollout_finished(outcome)
+        if self.rollout is not None and self.rollout.samples is not None and not self.rollout.fresh_uses:
+            # No group of the batch can train.
+            self.end_rollout(trained_uses=())
+        if self.rollout is None:
+            self.start_rollout()
 
-    def running(self) -> bool:
-        return self.running_batch is not None
+    def own_batch(self) -> tuple[TrainDataItem, ...] | None:
+        rollout = self.rollout
+        if rollout is None or rollout.samples is None or not rollout.fresh_uses:
+            return None
+        samples = rollout.samples
+        return tuple(sample for task_use in rollout.fresh_uses for sample in samples[task_use])
 
-    def rollout_trained(self, batch: str, task_uses: tuple[str, ...]) -> None:
-        if self.record2task.task_store is not None:
-            self.record2task.task_store.mark_trained(
-                task_names=tuple(task_use.rsplit("/", 1)[1] for task_use in task_uses)
-            )
+    def own_batch_done(self, *, trained: bool) -> frozenset[str]:
+        if self.rollout is None:
+            raise RuntimeError("no rollout batch was handed out")
+        fresh_uses = self.rollout.fresh_uses
+        if not trained:
+            self.end_rollout(trained_uses=())
+            return frozenset()
+        ids = frozenset(consumed_rollout_id(task_use) for task_use in fresh_uses)
+        self.trained_rollouts.append((self.rollout.batch, fresh_uses, ids))
+        self.end_rollout(trained_uses=fresh_uses)
+        return ids
 
-    def rollout_ended(self, batch: str, *, trained: bool) -> None:
-        self.record2record.rollout_ended(trained=trained)
+    def release_own_ids(self, ids: frozenset[str]) -> None:
+        durable = [entry for entry in self.trained_rollouts if entry[2] & ids]
+        for _, trained_uses, _ in durable:
+            if self.record2task.task_store is not None:
+                self.record2task.task_store.mark_trained(
+                    task_names=tuple(task_use.rsplit("/", 1)[1] for task_use in trained_uses)
+                )
+        self.trained_rollouts = [entry for entry in self.trained_rollouts if entry not in durable]
+
+    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
+        self.served_versions.observe(runtime_load_id)
+
+    def background_jobs_running(self) -> bool:
+        """Whether a rollout batch's episodes run: their end can make the pipeline ready without a record."""
+        return self.rollout is not None and self.rollout.samples is None
+
+    def status(self) -> Mapping[str, Any]:
+        rollout = self.rollout
+        return {
+            "task_pool": len(self.task_pool),
+            "rollout": (
+                None
+                if rollout is None
+                else {
+                    "batch": rollout.batch,
+                    "task_uses": len(rollout.task_uses),
+                    "is_running": rollout.samples is None,
+                }
+            ),
+        }
 
     def close(self) -> None:
         self.worker.close()
+
+    def start_rollout(self) -> None:
+        """Submit up to ``tasks_per_step`` pooled tasks as the next rollout batch; a failed submit keeps them pooled."""
+        taken = self.task_pool.take(self.tasks_per_step)
+        if not taken:
+            return
+        batch = f"{self.scenario}:rollout:{uuid.uuid4().hex[:12]}"
+        task_uses = tuple(f"{batch}/{task.item.metadata['task']['name']}" for task in taken)
+        job = RolloutJob(receipt=batch, task_uses=tuple(zip(task_uses, (task.item for task in taken), strict=True)))
+        if not self.worker.submit(job):
+            self.task_pool.put_back(taken)
+            raise RuntimeError(f"the rollout worker is closed or broken; rollout {batch} cannot run")
+        self.rollout = ActiveRollout(batch, task_uses, taken)
+
+    def rollout_finished(self, outcome: SupportsReceipt) -> None:
+        """Keep the fresh groups of a rollout batch whose episodes ended; a failed job has none."""
+        if self.rollout is None or outcome.receipt != self.rollout.batch:
+            logger.warning(
+                "scenario %r ignores the episodes of rollout %r, which is not running", self.scenario, outcome.receipt
+            )
+            return
+        samples: Mapping[str, tuple[TrajectoryItem, ...]] = {}
+        if isinstance(outcome, RolloutOutcome):
+            samples = outcome.samples
+        else:
+            logger.error("generated-task rollout %s did not finish on scenario %r", outcome.receipt, self.scenario)
+            # A task that has no result yet gets a lost one, so its generation's feedback completes.
+            for task in self.rollout.tasks:
+                identity = task.item.metadata["task"]
+                lost = TaskRolloutResult(
+                    task_name=identity["name"],
+                    error="the rollout did not finish; see the service log",
+                    infrastructure_failure=True,
+                )
+                self.record2task.save_result(lost)
+        self.record2task.deliver_later()
+        served = self.served_versions.versions
+        fresh = tuple(
+            task_use
+            for task_use in self.rollout.task_uses
+            if task_use in samples
+            and not is_stale(producing_runtime_load_ids(samples[task_use]), served, self.context.max_staleness)
+        )
+        self.rollout = replace(self.rollout, samples=dict(samples), fresh_uses=fresh)
+
+    def end_rollout(self, *, trained_uses: tuple[str, ...]) -> None:
+        """End the rollout batch: a task whose group did not train goes back to the pool, the others leave it."""
+        if self.rollout is None:
+            return
+        rollout = self.rollout
+        samples = rollout.samples or {}
+        returned = tuple(
+            task
+            for task_use, task in zip(rollout.task_uses, rollout.tasks, strict=True)
+            if task_use in samples and task_use not in trained_uses
+        )
+        self.task_pool.put_back(returned)
+        self.task_pool.drop(tuple(task for task in rollout.tasks if task not in returned))
+        self.record2record.rollout_ended(trained=bool(trained_uses))
+        self.rollout = None
 
     def episode_sample(self, episode: TaskEpisode, task_name: str) -> TrajectoryItem | None:
         """The sample of one rollout episode in the group ``task_name``, or None when its calls do not assemble.

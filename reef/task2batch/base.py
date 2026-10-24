@@ -118,6 +118,49 @@ class Task2Batch(ABC, Plugin):
         instruction's batch has no tasks.
         """
 
+    # A stage may also make samples itself, from no record, and train them as one batch of its own: the
+    # pipeline asks ``own_batch`` before it selects record sets. The defaults make no such samples.
+
+    def advance(self) -> None:
+        """Advance the stage's own work on the trainer thread, such as starting the next rollout. The default does nothing."""
+        return
+
+    def own_batch(self) -> tuple[TrainDataItem, ...] | None:
+        """Return samples that the stage made itself and that train now as one batch, or None.
+
+        While the value is not None, the pipeline is ready and its next batch holds exactly these samples. It
+        stays the same until ``own_batch_done``.
+        """
+        return None
+
+    def own_batch_done(self, *, trained: bool) -> frozenset[str]:
+        """The step consumed the own batch, or the backend dropped it (``trained`` False).
+
+        Return the IDs that the step's commit lists for it; the pipeline gives them back to
+        ``release_own_ids`` once the commit is durable.
+        """
+        return frozenset()
+
+    def release_own_ids(self, ids: frozenset[str]) -> None:
+        """The commit that listed these IDs of ``own_batch_done`` is durable. The default does nothing."""
+        return
+
+    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
+        """The version that the scenario serves now, for a stage that checks its own samples for staleness."""
+        return
+
+    def background_jobs_running(self) -> bool:
+        """Whether the stage's own work runs, so that the trainer polls instead of waiting for a record."""
+        return False
+
+    def status(self) -> Mapping[str, Any]:
+        """Return JSON-safe state that the pipeline adds to its status."""
+        return {}
+
+    def close(self) -> None:
+        """Stop the stage's own work. Calling it more than one time is safe."""
+        return
+
 
 class NoBatches(Task2Batch):
     """Make no batch: the no-update default. A pipeline with it never becomes ready."""
