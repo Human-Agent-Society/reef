@@ -169,9 +169,9 @@ training:
     # run.sh) and ten warm-up commits would spend the growth weeks of a
     # single-episode run on the critic alone.
     num-critic-only-steps: "2"
-    # An earlier episode's critic checkpoint, when run.sh has put one there;
-    # an empty directory leaves the critic cold, as before.
-    critic-init: /var/lib/reef/critic-init
+    # Uncomment only after placing a valid checkpoint in this directory.
+    # An explicitly configured but missing checkpoint fails startup.
+    # critic-init: /var/lib/reef/critic-init
     sao-length-adaptive-lambda: true
     sao-lambda-alpha: "1.5"
     gamma: "1.0"

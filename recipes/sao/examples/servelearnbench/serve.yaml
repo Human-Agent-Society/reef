@@ -1,0 +1,106 @@
+# Qwen3-8B, full actor updates, frozen-attention critic. All roles share GPUs
+# in sequence; the official task's tools remain in the campaign process.
+# Driver defaults: seed 42, temperature 1, top_p 1; ordered Retail L1/W1.
+reef:
+  host: 127.0.0.1
+  port: ${REEF_PORT}
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_WORK}/stack
+  ready-timeout: 1800
+inference:
+  handler-factory: recipes.sao.examples.servelearnbench.inference.RetailInferenceHandler
+  handler-config:
+    tool_call_parser: qwen25
+    chat_template_kwargs:
+      enable_thinking: true
+  num-gpus: ${SAO_GPUS}
+  tensor-parallel-size: ${SAO_GPUS}
+  model-path: ${MODEL_DIR}
+  timeout-s: 1800
+  options:
+    disable-radix-cache: true
+    incremental-streaming-output: true
+    attention-backend: triton
+    mem-fraction-static: "0.65"
+    max-running-requests: "1"
+    chunked-prefill-size: "2048"
+    context-length: "131072"
+    tool-call-parser: qwen25
+    reasoning-parser: qwen3
+recipe:
+  implementation: recipes.sao.recipe:SAORecipe
+  config:
+    max-staleness: 1
+pipeline:
+  record2task:
+    config:
+      accept_multi_turn_policy_samples: true
+      realign_threshold: 0
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 1800
+  timeout-s: 1800
+  config:
+    checkpoint_dir: ${CHECKPOINT_DIR}
+    global_batch_size: ${SAO_BATCH}
+  options:
+    megatron-to-hf-mode: bridge
+    load: ${CHECKPOINT_DIR}/megatron
+    save: ${CHECKPOINT_DIR}/megatron
+    save-hf: ${CHECKPOINT_DIR}/hf/{rollout_id}
+    save-interval: "1"
+    critic-save-interval: "1"
+    reef-checkpoint-max-storage: "1TiB"
+    reef-checkpoint-min-free-space: "10GiB"
+    num-rollout: "100000000"
+    rollout-batch-size: ${SAO_BATCH}
+    global-batch-size: ${SAO_BATCH}
+    # Fixed micro batches: accumulate eight tasks without packing them together.
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: ${SAO_GPUS}
+    num-gpus-per-node: ${SAO_GPUS}
+    tensor-model-parallel-size: ${SAO_GPUS}
+    pipeline-model-parallel-size: "1"
+    context-parallel-size: "1"
+    seq-length: "131072"
+    rollout-max-response-len: "131072"
+    padded-vocab-size: "151936"
+    # The example provider installs matching YaRN for both training roles.
+    custom-model-provider-path: recipes.sao.examples.servelearnbench.long_context.provide_model
+    position-embedding-type: rope
+    swiglu: true
+    disable-bias-linear: true
+    qk-layernorm: true
+    normalization: RMSNorm
+    rotary-base: "1000000"
+    recompute-granularity: full
+    recompute-method: uniform
+    recompute-num-layers: "1"
+    attention-dropout: "0.0"
+    hidden-dropout: "0.0"
+    log-probs-chunk-size: "1024"
+    optimizer: adam
+    lr: "1e-6"
+    lr-decay-style: constant
+    loss-type: policy_loss
+    use-rollout-logprobs: true
+    use-critic: true
+    critic-lr: "5e-6"
+    critic-steps-per-actor: "2"
+    num-critic-only-steps: ${SAO_WARMUP}
+    sao-freeze-critic-attention: true
+    sao-length-adaptive-lambda: true
+    sao-lambda-alpha: "1.5"
+    gamma: "1.0"
+    lambd: "1.0"
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    n-samples-per-prompt: "1"
+    entropy-coef: "0.0"
+storage:
+  artifact-repository: ${REEF_WORK}/artifacts.git
+  artifact-work-dir: ${CHECKPOINT_DIR}/artifact-work
+  artifact-cache-dir: ${CHECKPOINT_DIR}/artifact-cache
+  agent-record-dir: ${REEF_WORK}/agent-record

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-servelearnbench-example"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "reef-client",
+  "servelearnbench @ git+https://github.com/Infini-AI-Lab/ServeLearnBench.git@57aa919b5ae71d60c38a7ed559262447406f1e8b",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

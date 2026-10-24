@@ -230,7 +230,20 @@ def test_critic_metric_hook_reports_masked_explained_variance(monkeypatch: pytes
     )
 
     assert value.item() == 2.0
-    assert metrics["explained_variance"].item() == pytest.approx(0.75)
+    from reef.train.slime_backend.reef_adapters.critic_metrics import finalize_critic_metrics
+
+    reduced = finalize_critic_metrics({key: value.item() for key, value in metrics.items()})
+    assert reduced["explained_variance"] == pytest.approx(0.75)
+
+
+@pytest.mark.unit
+def test_undefined_ev_does_not_reuse_the_previous_step_value() -> None:
+    worker_hooks.drain_worker_metrics()
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance": 0.8})
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance_valid": 0.0})
+    metrics = worker_hooks.drain_worker_metrics()
+    assert "train/critic-explained_variance" not in metrics
+    assert metrics["train/critic-explained_variance_valid"] == 0
 
 
 @pytest.mark.unit
