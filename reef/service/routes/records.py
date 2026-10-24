@@ -55,12 +55,14 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 agent_record_id = payload.pop("agent_record_id")
                 if not isinstance(agent_record_id, str) or not agent_record_id.strip():
                     raise ValueError("agent_record_id must be a non-empty string")
-            item = await asyncio.to_thread(
-                request_service.accept,
-                request.headers,
-                payload,
-                request_type=request_type,
-                agent_record_id=agent_record_id,
+            item = await request_service.persist(
+                asyncio.to_thread(
+                    request_service.accept,
+                    request.headers,
+                    payload,
+                    request_type=request_type,
+                    agent_record_id=agent_record_id,
+                )
             )
             answer = {
                 "agent_record_id": item.agent_record_id,

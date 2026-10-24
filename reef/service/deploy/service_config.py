@@ -19,6 +19,7 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -33,6 +34,13 @@ class ServiceConfig:
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+
+    ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
+    takes a blank value as not supplied, and nothing checks the file when the value is made.
+    ``routing_deployment`` holds the managed router's settings; loading a configuration parses and checks
+    them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
+    needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
+    those when they start, not here.
     """
 
     recipe: str = config_option(
@@ -57,6 +65,12 @@ class ServiceConfig:
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )
+    routing_manifest: str | None = config_option(
+        None,
+        public_path=("reef", "routing_manifest"),
+        help="External-target routing manifest; reef serve manages Semantic Router for a record-only recipe.",
+    )
+    routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
         "reef", public_path=("training", "ray_namespace"), help="Ray namespace for the training bridge."
@@ -302,6 +316,10 @@ class ServiceConfig:
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        if self.routing_manifest is not None and (
+            not isinstance(self.routing_manifest, str) or not self.routing_manifest
+        ):
+            raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
             raise ValueError("reef.scenario_idle_unload_s must be positive")
@@ -389,6 +407,15 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
     return (
         *config_arguments(ServiceConfig),
         ConfigArgument(
+            "routing_deployment",
+            ("reef", "routing_deployment"),
+            "object",
+            False,
+            {},
+            "Local Semantic Router lifecycle settings; reef serve owns routing whenever routing_manifest is set.",
+            public_path=("reef", "routing_deployment"),
+        ),
+        ConfigArgument(
             "token",
             ("reef", "token"),
             "str",
@@ -449,6 +476,8 @@ def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
     no Reef HTTP child at all.
     """
     values = parse_service_arguments(config)
+    # Reject removed or invalid routing settings while loading, before any process starts.
+    routing_deployment_settings(values["routing_deployment"])
     normalized = copy.deepcopy(dict(config))
     for argument in service_config_arguments():
         if _argument_value(config, argument) is None:
@@ -471,6 +500,7 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     tokens = (token.strip() for token in (values.pop("token") or "", *values["tokens"]))
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
+    values["routing_deployment"] = routing_deployment_settings(values["routing_deployment"])
     # The legacy retry deadline follows the request timeout unless supplied.
     if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+import threading
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +25,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.core import AgentRecord, RequestType
 from reef.runtime.interfaces import InferenceStream
 from reef.service.routes.inference import register_inference_routes
+from reef.service.routing import RoutingDecision
 from reef.service.streaming import frame_for_codex
 
 #: One OpenRouter web search item, in the shape the OpenRouter SDK documents:
@@ -129,13 +131,27 @@ def test_frame_for_codex_leaves_every_other_frame_untouched() -> None:
 
 
 class _RecordingRequestService:
-    """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream."""
+    """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream.
+
+    ``dispatcher`` exposes only ``recipe.harness_adapter``, and ``routing`` is None, so no request is
+    routed. ``start_stream`` appends ``(record, evaluated, decision)`` to ``started`` and returns a new
+    ``upstream`` stream of the ``OPENROUTER_SSE`` frames, with a pending value that holds ``record`` and a
+    new ``reef-codex`` inference record. ``record_stream`` appends the relayed response to ``recorded`` and
+    returns that record, ``persist`` awaits its write, and ``harness_head`` returns None. It writes no
+    storage and holds no connection.
+    """
 
     def __init__(self, harness_adapter: str | None) -> None:
         self.recorded: list[Mapping[str, Any]] = []
+        #: What each opened stream was asked for: whether it keeps a record, its evaluated component, its decision.
+        self.started: list[tuple[bool, str | None, RoutingDecision | None]] = []
         self.dispatcher = SimpleNamespace(recipe=SimpleNamespace(harness_adapter=harness_adapter))
+        self.routing = None
 
-    async def _upstream(self) -> InferenceStream:
+    async def persist(self, write: Awaitable[AgentRecord]) -> AgentRecord:
+        return await write
+
+    async def upstream(self) -> InferenceStream:
         async def chunks() -> AsyncIterator[bytes]:
             for frame in OPENROUTER_SSE.split("\n\n"):
                 if frame:
@@ -152,12 +168,14 @@ class _RecordingRequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        decision: RoutingDecision | None = None,
     ) -> tuple[InferenceStream, Any]:
+        self.started.append((record, evaluated, decision))
         pending = SimpleNamespace(
             item=AgentRecord.create(scenario="reef-codex", request_type=RequestType.INFERENCE, payload=dict(payload)),
             record=record,
         )
-        return await self._upstream(), pending
+        return await self.upstream(), pending
 
     def harness_head(self, headers: Mapping[str, str]) -> None:
         return None
@@ -165,6 +183,36 @@ class _RecordingRequestService:
     def record_stream(self, pending: Any, response: Mapping[str, Any]) -> AgentRecord:
         self.recorded.append(dict(response))
         return pending.item
+
+
+class HeaderLookupService(_RecordingRequestService):
+    """A resident ``pi`` harness whose release-header lookup blocks, or fails, after the stream is open.
+
+    ``upstream`` streams like the base service's but counts each ``close`` of its stream in ``closes``.
+    ``harness_head`` sets ``entered``, then raises ``failure`` if one was given, or else waits up to five
+    seconds for the test to set ``release``. Both events are ``threading.Event`` values.
+    """
+
+    def __init__(self, failure: Exception | None) -> None:
+        super().__init__("pi")
+        self.failure = failure
+        self.closes = 0
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    async def upstream(self) -> InferenceStream:
+        stream = await super().upstream()
+
+        async def close() -> None:
+            self.closes += 1
+
+        return InferenceStream(status=stream.status, headers=stream.headers, chunks=stream.chunks, close=close)
+
+    def harness_head(self, headers: Mapping[str, str]) -> None:
+        self.entered.set()
+        if self.failure is not None:
+            raise self.failure
+        self.release.wait(5)
 
 
 def _relay_client(harness_adapter: str | None) -> tuple[TestClient, _RecordingRequestService]:
@@ -228,5 +276,84 @@ def test_non_codex_deployment_reads_the_raw_item() -> None:
         assert completed["reef"]["agent_record_id"]
         # Reef's record and the client both see the raw stream.
         assert "openrouter:web_search" in request_service.recorded[0]["body"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure",
+    [None, RuntimeError("head lookup failed"), ConnectionResetError("provider connection reset")],
+    ids=["cancelled", "failed", "reset"],
+)
+def test_an_open_stream_whose_header_lookup_ends_early_is_closed_and_recorded_once(failure: Exception | None) -> None:
+    async def run() -> None:
+        request_service = HeaderLookupService(failure)
+        handler_failures: list[Exception] = []
+
+        @web.middleware
+        async def keep_failure(
+            request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+        ) -> web.StreamResponse:
+            try:
+                return await handler(request)
+            except Exception as exc:
+                handler_failures.append(exc)
+                raise
+
+        app = web.Application(middlewares=[keep_failure])
+        register_inference_routes(app, request_service=request_service, inference_handler=None)
+        async with TestClient(TestServer(app)) as client:
+
+            async def send() -> int:
+                return (await _post_codex_stream(client)).status
+
+            sent = asyncio.create_task(send())
+            try:
+                if failure is None:
+                    assert await asyncio.to_thread(request_service.entered.wait, 5)
+                    # Dropping the connection cancels Reef's handler while it waits for the release header.
+                    sent.cancel()
+                else:
+                    assert await sent == 500
+                async with asyncio.timeout(5):
+                    while not request_service.recorded:
+                        await asyncio.sleep(0.01)
+                await asyncio.sleep(0.05)
+            finally:
+                request_service.release.set()
+                sent.cancel()
+                await asyncio.gather(sent, return_exceptions=True)
+
+        assert request_service.closes == 1
+        [recorded] = request_service.recorded
+        assert recorded["complete"] is False
+        if failure is None:
+            assert handler_failures == [] and "error" not in recorded
+        else:
+            # The handler fails with the lookup's own exception, not one raised by the relay.
+            assert handler_failures == [failure]
+            assert recorded["error"] == f"{type(failure).__name__}: {failure}"
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_evaluation_stream_names_its_component_and_carries_no_receipt() -> None:
+    async def run() -> None:
+        client, request_service = _relay_client("pi")
+        async with client:
+            response = await client.post(
+                "/reef/scenarios/reef-codex/components/harness/evaluation/v1/responses",
+                json={"stream": True, "model": "anthropic/claude", "input": []},
+            )
+            assert response.status == 200
+            assert "x-reef-agent-record-id" not in response.headers
+            body = await response.text()
+
+        # The stream opens without a record or a routing decision, for the evaluated component only.
+        assert request_service.started == [(False, "harness", None)]
+        completed = next(payload for payload in _frames(body) if payload.get("type") == "response.completed")
+        assert "reef" not in completed
 
     asyncio.run(run())

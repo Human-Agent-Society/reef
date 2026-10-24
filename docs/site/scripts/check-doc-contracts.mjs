@@ -204,6 +204,15 @@ function terminologySource(path, source) {
       (_, prefix, examples) => prefix + examples.replace(/[^\n]/g, " "),
     );
   }
+  // Preserve SR's JSON field spelling only at its wire boundary and in its tests.
+  // Surrounding text and identifiers still follow the repository's terminology.
+  if ([
+    "reef/service/routing_preview.py",
+    "tests/reef_service/routing/routing_fakes.py",
+    "tests/reef_service/routing/test_routing_preview.py",
+  ].includes(path)) {
+    source = source.replace(/(["'])selection_provenance(?=\1|\.)/g, "$1selection_metadata");
+  }
   const prompt = preservedModelPrompts.get(path);
   if (!prompt) return source;
   // Keep newlines so failures below still point to the original source lines.
