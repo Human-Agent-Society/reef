@@ -1,5 +1,5 @@
 # SPADE on Tinker: the served model writes tasks as the Designer and trains on them as the Reasoning Agent.
-# The built-in generated-task recipe plays and trains; SPADE is the task generator.
+# The built-in generated-task recipe runs the tasks and trains; SPADE is the task generator.
 # Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
 # The generator service runs under the same interpreter as Reef.
 reef:
@@ -13,7 +13,7 @@ inference:
   model-path: Qwen/Qwen3-8B
   # An agent's episode is many turns; a Designer call is one long reply.
   timeout-s: 1800
-# The generator service: writes, checks and plays the Designer's tasks, on the host that has Docker and harbor.
+# The generator service: writes and checks the Designer's tasks and runs their episodes, on the host that has Docker and harbor.
 generator:
   tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
   # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
@@ -31,20 +31,16 @@ recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
 # The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The training plays of each task form one group; the next round is due after batches_per_round batches trained.
+  # The next round is due after batches_per_round batches trained.
   record2record:
     config:
-      plays_per_task: 4
       batches_per_round: 2
-  # The rounds: one generation of tasks each, played through the generator service.
+  # The rounds: one generation of tasks each, run through the generator service.
   record2task:
     config:
       generator_url: ${endpoints.generator}
       rounds: 20
       description: shell tasks with hidden state under /var and /etc
-      state_dir: ${REEF_SPADE_STATE_DIR}/rounds
-      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
-      scaffold_tolerance: 8
       # The task generator: SPADE's Designer, count tasks for each round, a hint arm for each task with a hint.
       generator:
         module: recipes.beta.spade:SpadeTaskGenerator
@@ -54,13 +50,21 @@ pipeline:
           hint_plays: 2
           skills: [inspection, repair]
           state_dir: ${REEF_SPADE_STATE_DIR}/generations
+  # A rollout batch is tasks_per_step saved tasks; it trains on the fresh groups of their episodes.
+  task2batch:
+    config:
+      tasks_per_step: 2
+      # The training episodes of each task form one group.
+      episodes_per_task: 4
+      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+      scaffold_tolerance: 8
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 1800
   options:
     state-dir: ${REEF_SPADE_STATE_DIR}/tinker
-    # Episodes in one batch and one optimizer step: two complete task groups of plays_per_task plays.
+    # Episodes in one batch and one optimizer step: two complete task groups of episodes_per_task episodes.
     batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004

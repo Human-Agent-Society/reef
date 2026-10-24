@@ -23,14 +23,19 @@ class TaskGenerationRequest:
     contents, not both. Construction validates fields but performs no I/O.
     Consumers own file reads, transport limits, and generation settings.
     Description-only generation uses an empty source_records tuple.
+    ``generation`` numbers the request among the requests of one recipe; the
+    recipe sends the results of the request's tasks back under this number.
     """
 
     source_records: tuple[AgentRecord, ...]
     description: str
     assets: tuple[Path, ...] = ()
     asset_files: Mapping[str, str] = field(default_factory=dict)
+    generation: int = 0
 
     def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int) or self.generation < 0:
+            raise ValueError("generation must be a non-negative integer")
         if not isinstance(self.source_records, tuple):
             raise ValueError("source_records must be a tuple of AgentRecord values")
         if any(not isinstance(record, AgentRecord) for record in self.source_records):

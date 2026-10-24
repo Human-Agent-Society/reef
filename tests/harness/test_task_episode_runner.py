@@ -1,4 +1,4 @@
-"""The task player: an agent's calls through the capture proxy, the verifier reward reported against the receipts."""
+"""The task episode runner: an agent's calls through the capture proxy, the verifier reward reported against the receipts."""
 
 from __future__ import annotations
 
@@ -14,14 +14,16 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.records_types import ROLLOUT_HEADER
+
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
+    TaskEpisode,
+    TaskEpisodeError,
+    TaskEpisodeRunner,
     TaskLab,
-    TaskPlay,
-    TaskPlayer,
-    TaskPlayError,
     bound_agent,
     episode_reward,
     main,
@@ -94,7 +96,7 @@ class StandInReef:
 
 
 class StandInLab(TaskLab):
-    """Plays by calling the model twice through the api_base the agent was given, then answers with fixed rewards."""
+    """Runs by calling the model twice through the api_base the agent was given, then answers with fixed rewards."""
 
     def __init__(
         self, rewards: Mapping[str, float], error: str = "", turns: int = 2, trial_uri: str | None = None
@@ -146,7 +148,7 @@ def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
     return write_harbor_task(task, root)
 
 
-def player(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object) -> TaskPlayer:
+def runner(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object) -> TaskEpisodeRunner:
     fields: dict[str, object] = {
         "reef_url": reef.url,
         "scenario": "guess",
@@ -156,7 +158,7 @@ def player(reef: StandInReef, tmp_path: Path, lab: TaskLab, **overrides: object)
         "lab": lab,
     }
     fields.update(overrides)
-    return TaskPlayer(**fields)  # type: ignore[arg-type]
+    return TaskEpisodeRunner(**fields)  # type: ignore[arg-type]
 
 
 # ------------------------------------------------------------------------------------------------ pure parts
@@ -207,7 +209,7 @@ def test_task_identity_carries_the_reef_digest_only_when_the_task_has_one(tmp_pa
     assert task_identity(foreign) == {"name": "foreign", "path": str(foreign)}
 
 
-# ------------------------------------------------------------------------------------------------ playing
+# ------------------------------------------------------------------------------------------------ running
 
 
 def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tmp_path: Path) -> None:
@@ -215,26 +217,26 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     hint = tmp_path / "hint.md"
     hint.write_text("Count with ls | wc -l.\n")
     lab = StandInLab({"reward": 1.0})
-    played = player(reef, tmp_path, lab, labels={"arm": "hint"}, extra_instruction_paths=[hint]).play(task_path)
+    ran = runner(reef, tmp_path, lab, labels={"arm": "hint"}, extra_instruction_paths=[hint]).run(task_path)
 
-    assert played.reward == 1.0 and played.receipts == ("rec-1", "rec-2") and played.error == ""
-    assert played.report_agent_record_ids == ("rep-1",) and played.is_reported
-    assert played.trial_uri == "trials/t1" and len(played.episode_id) == 32
+    assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2") and ran.error == ""
+    assert ran.report_agent_record_ids == ("rep-1",) and ran.is_reported
+    assert ran.trial_uri == "trials/t1" and len(ran.episode_id) == 32
 
     call = lab.calls[0]
-    assert call["task_path"] == task_path and call["key"] == played.episode_id
-    assert call["tags"] == {"task": "t1", "episode": played.episode_id, "arm": "hint"}
+    assert call["task_path"] == task_path and call["key"] == ran.episode_id
+    assert call["tags"] == {"task": "t1", "episode": ran.episode_id, "arm": "hint"}
     assert call["overrides"] == {"environment": {"type": "docker"}, "extra_instruction_paths": [str(hint)]}
     agent = call["agent"]
     assert agent["name"] == "terminus-2" and agent["model_name"] == "openai/qwen3.8:27b"
     assert agent["kwargs"]["api_base"].startswith("http://127.0.0.1:") and agent["kwargs"]["api_base"].endswith("/v1")
     assert agent["kwargs"]["llm_kwargs"] == {"api_key": "reef"}, "the proxy injects the token; no trial dir holds it"
-    assert played.failed_calls == 0
+    assert ran.failed_calls == 0
 
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-scenario"] == "guess" and headers["authorization"] == "Bearer tok"
     assert headers["x-reef-tag-task"] == "t1" and headers["x-reef-tag-arm"] == "hint"
-    assert headers["x-reef-tag-episode"] == played.episode_id
+    assert headers["x-reef-tag-episode"] == ran.episode_id
 
     report = reef.reports[0]
     assert report["headers"]["x-reef-scenario"] == "guess" and report["headers"]["authorization"] == "Bearer tok"
@@ -243,7 +245,7 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     assert body["feedback"] == "verifier reward 1.0 on t1"
     assert body["metadata"]["task"] == task_identity(task_path)
     assert body["metadata"]["episode"] == {
-        "id": played.episode_id,
+        "id": ran.episode_id,
         "agent": "terminus-2",
         "labels": {"arm": "hint"},
         "rewards": {"reward": 1.0},
@@ -251,18 +253,43 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
     }
 
 
+def test_a_rollout_episode_keeps_its_calls_and_reports_nothing(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False, is_rollout=True).run(task_path)
+    assert ran.reward == 1.0 and ran.error == "" and ran.failed_calls == 0
+    assert ran.receipts == () and not ran.is_reported and reef.reports == [], "a rollout episode is not a record"
+    assert [turn.request["messages"][0]["content"] for turn in ran.turns] == ["turn 0", "turn 1"]
+    assert all(turn.response["choices"][0]["message"]["content"] == "ls" for turn in ran.turns)
+    headers = reef.inferences[0]["headers"]
+    assert headers[ROLLOUT_HEADER] == "1" and headers["x-reef-scenario"] == "guess"
+    with pytest.raises(TaskEpisodeError, match="reports nothing"):
+        runner(reef, tmp_path, StandInLab({}), is_rollout=True)
+
+
+def test_a_rollout_episode_whose_calls_all_fail_names_the_first_answer(tmp_path: Path) -> None:
+    refusing = StandInReef(refuse_inference=True)
+    try:
+        task_path = written_task(tmp_path / "tasks", "t1")
+        lab = StandInLab({"reward": 0.0})
+        ran = runner(refusing, tmp_path, lab, is_reporting=False, is_rollout=True).run(task_path)
+        assert ran.turns == () and ran.failed_calls == 2
+        assert ran.error.startswith("2 model calls failed; the first answered 401")
+    finally:
+        refusing.close()
+
+
 def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({}, error="the container died")).play(task_path)
-    assert played.reward is None and played.error == "the container died"
-    assert played.receipts == ("rec-1", "rec-2") and not played.is_reported and reef.reports == []
+    ran = runner(reef, tmp_path, StandInLab({}, error="the container died")).run(task_path)
+    assert ran.reward is None and ran.error == "the container died"
+    assert ran.receipts == ("rec-1", "rec-2") and not ran.is_reported and reef.reports == []
 
 
 def test_an_episode_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).play(task_path)
-    assert played.reward is None and played.error == "the verifier wrote correctness, style and no reward entry"
-    assert not played.is_reported and reef.reports == []
+    ran = runner(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).run(task_path)
+    assert ran.reward is None and ran.error == "the verifier wrote correctness, style and no reward entry"
+    assert not ran.is_reported and reef.reports == []
 
 
 def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: StandInReef, tmp_path: Path) -> None:
@@ -273,45 +300,45 @@ def test_a_verifier_timeout_scores_the_configured_reward_and_is_reported(reef: S
     exception = {"exception_type": "VerifierTimeoutError", "exception_message": "timed out after 900.0 seconds"}
     (trial / "result.json").write_text(json.dumps({"exception_info": exception}))
     lab = StandInLab({}, error="timed out after 900.0 seconds", trial_uri=trial.as_uri())
-    assert player(reef, tmp_path, lab).play(task_path).reward is None, "unscored unless the player opts in"
-    played = player(reef, tmp_path, lab, verifier_timeout_reward=0.0).play(task_path)
-    assert played.reward == 0.0 and played.is_reported and len(reef.reports) == 1
+    assert runner(reef, tmp_path, lab).run(task_path).reward is None, "unscored unless the runner opts in"
+    ran = runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path)
+    assert ran.reward == 0.0 and ran.is_reported and len(reef.reports) == 1
     (trial / "result.json").write_text(json.dumps({"exception_info": {"exception_type": "AgentTimeoutError"}}))
-    assert player(reef, tmp_path, lab, verifier_timeout_reward=0.0).play(task_path).reward is None
+    assert runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path).reward is None
     (trial / "result.json").unlink()
-    assert player(reef, tmp_path, lab, verifier_timeout_reward=0.0).play(task_path).reward is None, "harbor was killed"
+    assert runner(reef, tmp_path, lab, verifier_timeout_reward=0.0).run(task_path).reward is None, "harbor was killed"
 
 
 def test_an_episode_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({"reward": 1.0}, turns=0)).play(task_path)
-    assert played.reward == 1.0 and played.receipts == () and not played.is_reported and reef.reports == []
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}, turns=0)).run(task_path)
+    assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported and reef.reports == []
 
 
 def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({"reward": 0.25}), per_receipt=True).play(task_path)
-    assert played.report_agent_record_ids == ("rep-1", "rep-2")
+    ran = runner(reef, tmp_path, StandInLab({"reward": 0.25}), per_receipt=True).run(task_path)
+    assert ran.report_agent_record_ids == ("rep-1", "rep-2")
     assert [report["body"]["references"] for report in reef.reports] == [["rec-1"], ["rec-2"]]
     assert {report["body"]["score"] for report in reef.reports} == {0.25}
 
 
-def test_a_refused_report_is_the_episodes_error_and_the_play_comes_back_unreported(tmp_path: Path) -> None:
+def test_a_refused_report_is_the_episodes_error_and_the_episode_comes_back_unreported(tmp_path: Path) -> None:
     reef = StandInReef(refuse_reports=True)
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
-        played = player(reef, tmp_path, StandInLab({"reward": 1.0})).play(task_path)
+        ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
     finally:
         reef.close()
-    assert played.reward == 1.0 and not played.is_reported
-    assert "the report for t1 was refused (400)" in played.error
+    assert ran.reward == 1.0 and not ran.is_reported
+    assert "the report for t1 was refused (400)" in ran.error
 
 
 def test_the_agents_own_authorization_passes_through_without_a_token(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
-    played = player(reef, tmp_path, lab, token=None).play(task_path)
-    assert played.is_reported
+    ran = runner(reef, tmp_path, lab, token=None).run(task_path)
+    assert ran.is_reported
     assert lab.calls[0]["agent"]["kwargs"]["llm_kwargs"] == {"api_key": "reef"}
     assert reef.inferences[0]["headers"]["authorization"] == "Bearer agent-side"
     assert "authorization" not in reef.reports[0]["headers"]
@@ -319,32 +346,34 @@ def test_the_agents_own_authorization_passes_through_without_a_token(reef: Stand
 
 def test_a_measurement_run_keeps_its_episodes_out_of_the_training_data(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False).play(task_path)
-    assert played.reward == 1.0 and played.receipts == ("rec-1", "rec-2")
-    assert not played.is_reported and reef.reports == []
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False).run(task_path)
+    assert ran.reward == 1.0 and ran.receipts == ("rec-1", "rec-2")
+    assert not ran.is_reported and reef.reports == []
 
 
-def test_concurrent_plays_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
+def test_concurrent_episodes_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")]
     lab = StandInLab({"reward": 1.0})
-    playing = player(reef, tmp_path, lab)
+    running = runner(reef, tmp_path, lab)
 
-    async def play_all() -> tuple[TaskPlay, ...]:
-        return tuple(await asyncio.gather(*(playing.play_async(path) for path in paths)))
+    async def run_all() -> tuple[TaskEpisode, ...]:
+        return tuple(await asyncio.gather(*(running.run_async(path) for path in paths)))
 
-    plays = asyncio.run(play_all())
-    assert [play.name for play in plays] == ["t1", "t2", "t3"] and all(play.is_reported for play in plays)
-    assert len({play.episode_id for play in plays}) == 3 and len(reef.reports) == 3
+    episodes = asyncio.run(run_all())
+    assert [episode.name for episode in episodes] == ["t1", "t2", "t3"] and all(
+        episode.is_reported for episode in episodes
+    )
+    assert len({episode.episode_id for episode in episodes}) == 3 and len(reef.reports) == 3
     ports = {call["agent"]["kwargs"]["api_base"] for call in lab.calls}
     assert len(ports) == 3, "every episode talks to its own proxy, so its receipts are its own"
-    assert sorted(receipt for play in plays for receipt in play.receipts) == [f"rec-{n}" for n in range(1, 7)]
+    assert sorted(receipt for episode in episodes for receipt in episode.receipts) == [f"rec-{n}" for n in range(1, 7)]
 
 
-def test_two_plays_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
+def test_two_runs_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
-    task_player = player(reef, tmp_path, lab)
-    first, second = task_player.play(task_path), task_player.play(task_path)
+    episode_runner = runner(reef, tmp_path, lab)
+    first, second = episode_runner.run(task_path), episode_runner.run(task_path)
     assert first.episode_id != second.episode_id and lab.calls[0]["key"] != lab.calls[1]["key"]
     assert [report["body"]["references"] for report in reef.reports] == [["rec-1", "rec-2"], ["rec-3", "rec-4"]]
 
@@ -361,14 +390,14 @@ def test_two_plays_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
         ),
     ],
 )
-def test_a_player_refuses_an_incomplete_configuration(reef: StandInReef, tmp_path: Path, overrides, message) -> None:
-    with pytest.raises(TaskPlayError, match=message):
-        player(reef, tmp_path, StandInLab({"reward": 1.0}), **overrides)
+def test_a_runner_refuses_an_incomplete_configuration(reef: StandInReef, tmp_path: Path, overrides, message) -> None:
+    with pytest.raises(TaskEpisodeError, match=message):
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), **overrides)
 
 
 def test_a_directory_without_task_toml_is_refused(reef: StandInReef, tmp_path: Path) -> None:
-    with pytest.raises(TaskPlayError, match="not a Harbor task directory"):
-        player(reef, tmp_path, StandInLab({"reward": 1.0})).play(tmp_path)
+    with pytest.raises(TaskEpisodeError, match="not a Harbor task directory"):
+        runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -376,41 +405,41 @@ def test_a_directory_without_task_toml_is_refused(reef: StandInReef, tmp_path: P
     [
         ({"my arm": "x"}, "label name 'my arm' must be letters"),
         ({"arm/v2": "x"}, "label name 'arm/v2' must be letters"),
-        ({"task": "other"}, "label 'task' is the player's own tag"),
+        ({"task": "other"}, "label 'task' is the episode runner's own tag"),
         ({"arm": "提示"}, "needs a non-empty printable ASCII value"),
         ({"arm": " "}, "needs a non-empty printable ASCII value"),
     ],
 )
 def test_a_label_that_cannot_ride_as_a_header_is_refused(reef: StandInReef, tmp_path: Path, labels, message) -> None:
-    with pytest.raises(TaskPlayError, match=message):
-        player(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels)
+    with pytest.raises(TaskEpisodeError, match=message):
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels)
 
 
 def test_labels_are_stored_the_way_the_service_stores_tags(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": " Hint "}).play(task_path)
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": " Hint "}).run(task_path)
     assert reef.inferences[0]["headers"]["x-reef-tag-arm"] == "Hint"
-    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "Hint"} and played.is_reported
+    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "Hint"} and ran.is_reported
 
 
 def test_refused_model_calls_are_named_in_the_error(tmp_path: Path) -> None:
     reef = StandInReef(refuse_inference=True)
     try:
         task_path = written_task(tmp_path / "tasks", "t1")
-        played = player(reef, tmp_path, StandInLab({"reward": 1.0})).play(task_path)
+        ran = runner(reef, tmp_path, StandInLab({"reward": 1.0})).run(task_path)
     finally:
         reef.close()
-    assert played.reward == 1.0 and played.receipts == () and not played.is_reported
-    assert played.failed_calls == 2
-    assert played.error == "2 model calls failed; the first answered 401: invalid service token"
-    assert played.as_line()["failed_calls"] == 2
+    assert ran.reward == 1.0 and ran.receipts == () and not ran.is_reported
+    assert ran.failed_calls == 2
+    assert ran.error == "2 model calls failed; the first answered 401: invalid service token"
+    assert ran.as_line()["failed_calls"] == 2
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
-    played = player(reef, tmp_path, lab, agent_host="localhost").play(task_path)
-    assert played.is_reported and played.receipts == ("rec-1", "rec-2")
+    ran = runner(reef, tmp_path, lab, agent_host="localhost").run(task_path)
+    assert ran.is_reported and ran.receipts == ("rec-1", "rec-2")
     assert lab.calls[0]["agent"]["kwargs"]["api_base"].startswith("http://localhost:")
 
 
@@ -418,20 +447,20 @@ def test_a_report_that_does_not_reach_reef_is_the_episodes_error(
     reef: StandInReef, tmp_path: Path, monkeypatch
 ) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
-    playing = player(reef, tmp_path, StandInLab({"reward": 1.0}))
+    running = runner(reef, tmp_path, StandInLab({"reward": 1.0}))
 
     def refused(*args: object, **kwargs: object) -> dict[str, object]:
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(playing.client, "report", refused)
-    played = playing.play(task_path)
-    assert not played.is_reported and "the report for t1 did not reach" in played.error
+    monkeypatch.setattr(running.client, "report", refused)
+    ran = running.run(task_path)
+    assert not ran.is_reported and "the report for t1 did not reach" in ran.error
 
 
 # ------------------------------------------------------------------------------------------------ the command
 
 
-def test_main_plays_one_side_of_a_manifest_and_prints_a_line_per_task(
+def test_main_runs_one_side_of_a_manifest_and_prints_a_line_per_task(
     reef: StandInReef, tmp_path: Path, capsys, monkeypatch
 ) -> None:
     root = tmp_path / "tasks"
@@ -530,7 +559,7 @@ def test_main_prints_each_line_as_it_finishes_and_keeps_going_after_a_refused_re
     assert all(line["error"].startswith("the report for t") for line in lines)
 
 
-def test_main_checks_every_task_directory_before_the_first_play(reef: StandInReef, tmp_path: Path, capsys) -> None:
+def test_main_checks_every_task_directory_before_the_first_episode(reef: StandInReef, tmp_path: Path, capsys) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     with pytest.raises(SystemExit):
@@ -561,7 +590,7 @@ def test_main_refuses_a_manifest_beside_task_directories(tmp_path: Path) -> None
 def test_batch_and_task_use_labels_reach_the_inference_tags_and_the_report(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     labels = {"arm": "plain", "batch": "tasks:generated-tasks:1", "task_use": "use-t1-0"}
-    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels).play(task_path)
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), labels=labels).run(task_path)
     headers = reef.inferences[0]["headers"]
     assert headers["x-reef-tag-batch"] == "tasks:generated-tasks:1" and headers["x-reef-tag-task_use"] == "use-t1-0"
-    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == labels and played.is_reported
+    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == labels and ran.is_reported

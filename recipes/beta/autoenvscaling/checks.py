@@ -1,4 +1,4 @@
-"""The checks a generated task runs before the recipe plays it, and what each one found.
+"""The checks a generated task runs before the recipe runs it, and what each one found.
 
 ``validate`` runs them in order on the task's copy under the generator service's tasks root:
 
@@ -116,7 +116,7 @@ class TaskCheck(ABC):
 class OracleCheck(TaskCheck):
     """Harbor's oracle and nop agents: the reference solution scores 1, and doing nothing scores below 1.
 
-    A check that cannot run raises ``GeneratorError``: the generator service that plays the tasks is not usable.
+    A check that cannot run raises ``GeneratorError``: the generator service that runs the tasks is not usable.
     """
 
     def __init__(self, service: Generator) -> None:

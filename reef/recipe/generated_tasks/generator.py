@@ -1,9 +1,9 @@
-"""The task generator contract of the generated-task recipe: the generator, its validation results, and play results.
+"""The task generator contract of the generated-task recipe: the generator, its validation results, and task results.
 
 A deployment selects one :class:`TaskGenerator` in its
 ``pipeline.record2task.config.generator`` setting. The recipe asks the
 generator for tasks with a ``TaskGenerationRequest``
-(:mod:`reef.record2task.generator.inputs`), validates each one, plays the
+(:mod:`reef.record2task.generator.inputs`), validates each one, runs the
 valid ones, and sends the results back to the generator. This module holds the
 values, their field validation, and the generator interface. Consumers own
 file reads, transport limits, and execution.
@@ -15,7 +15,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import Any, Self
 
 from reef.core.plugins import Plugin
 from reef.core.tasks import HarborTask
@@ -45,49 +45,110 @@ class TaskValidationResult:
         return not self.errors
 
 
-@dataclass(frozen=True)
-class TaskPlayResult:
-    """What became of one generated task in a round.
+def check_rewards(rewards: object) -> None:
+    """Raise unless ``rewards`` is a non-empty tuple of finite numbers."""
+    if not isinstance(rewards, tuple) or not rewards:
+        raise TypeError("rollout_rewards must be a non-empty tuple of numbers")
+    if any(
+        isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
+        for reward in rewards
+    ):
+        raise ValueError("rewards must be finite numbers")
 
-    ``training_rewards`` holds the rewards of the plays the recipe trains on,
-    only of the episodes that ran. An episode that ran and returned no reward
-    counts as 0. ``error`` is not
-    empty when the task was not played: it failed validation, the task player
-    refused it, or the agent could not start on it.
-    An eval task has no rewards and is not played, even with an empty error.
+
+@dataclass(frozen=True)
+class RejectedTask:
+    """A candidate that the recipe rejected, so it was never published.
+
+    Values: ``(task, reason)`` with ``task`` a ``HarborTask`` and ``reason`` a
+    non-empty text: the failed validation, or the conflict that kept the
+    candidate out of the task store.
+    Purpose: the recipe sends it to :meth:`TaskGenerator.record_results` for a
+    candidate whose outcome in the task store is a rejection.
     """
 
     task: HarborTask
-    training_rewards: tuple[float, ...] = ()
-    error: str = ""
-    split: Literal["train", "eval"] = "train"
+    reason: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.task, HarborTask):
             raise TypeError("task must be a HarborTask")
-        if not isinstance(self.training_rewards, tuple):
-            raise TypeError("training_rewards must be a tuple of numbers")
-        if any(
-            isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
-            for reward in self.training_rewards
-        ):
-            raise ValueError("rewards must be finite numbers")
-        if not isinstance(self.error, str):
-            raise TypeError("error must be text")
-        if self.error and self.training_rewards:
-            raise ValueError("a task that was not played has no rewards")
-        if self.split not in ("train", "eval"):
-            raise ValueError("task result split must be train or eval")
-        if self.split == "eval" and self.training_rewards:
-            raise ValueError("an eval task result cannot contain rollout rewards")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise ValueError("a rejected task needs its reason")
 
-    @property
-    def is_played(self) -> bool:
-        return self.split == "train" and not self.error
+
+@dataclass(frozen=True)
+class HeldOutTask:
+    """A task published to the eval split: it runs no episodes and gives no training feedback.
+
+    Values: ``task``, a ``HarborTask``.
+    Purpose: the recipe sends it for a candidate published to ``eval``. A
+    generator must not use it as training feedback or as experience.
+    """
+
+    task: HarborTask
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, HarborTask):
+            raise TypeError("task must be a HarborTask")
+
+
+@dataclass(frozen=True)
+class RolledOutTask:
+    """A train task whose first rollout ran: the verifier rewards of its training episodes.
+
+    Values: ``(task, rollout_rewards)`` with ``task`` a ``HarborTask`` and
+    ``rollout_rewards`` a non-empty tuple of finite numbers, one for each
+    training episode of the first rollout that ran, in episode order, as the
+    rollout's policy scored them before it trained on them. An episode that ran
+    and returned no reward counts as 0.
+    Purpose: the recipe sends it for a train task whose first rollout ran.
+    """
+
+    task: HarborTask
+    rollout_rewards: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, HarborTask):
+            raise TypeError("task must be a HarborTask")
+        check_rewards(self.rollout_rewards)
+
+
+@dataclass(frozen=True)
+class FailedTask:
+    """A train task whose first rollout ran no episode.
+
+    Values: ``(task, error, infrastructure_failure)`` with ``task`` a
+    ``HarborTask``, ``error`` a non-empty text and ``infrastructure_failure`` a
+    bool. ``infrastructure_failure`` is true when the task could not run at all,
+    for example because the sandbox failed or its result was lost; it is not a
+    failure of the solver. It is false when the generator service refused the
+    task.
+    Purpose: the recipe sends it for a train task whose first rollout ran no
+    episode.
+    """
+
+    task: HarborTask
+    error: str
+    infrastructure_failure: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, HarborTask):
+            raise TypeError("task must be a HarborTask")
+        if not isinstance(self.error, str) or not self.error:
+            raise ValueError("a failed task needs the error that stopped it")
+        if not isinstance(self.infrastructure_failure, bool):
+            raise TypeError("infrastructure_failure must be a bool")
+
+
+#: What became of one candidate of a generation. Each candidate with an outcome is in exactly one case: a rejected
+#: candidate is a ``RejectedTask``, an eval task a ``HeldOutTask``, and a train task a ``RolledOutTask`` or a
+#: ``FailedTask`` by its first rollout.
+GeneratedTaskResult = RejectedTask | HeldOutTask | RolledOutTask | FailedTask
 
 
 class TaskGenerator(Plugin, ABC):
-    """Makes tasks for one scenario, and adapts to how the agent played them.
+    """Makes tasks for one scenario, and adapts to how the agent did on them.
 
     A deployment names the class in ``pipeline.record2task.config.generator``. Reef calls
     :meth:`from_config` once for each scenario. A generator gets what it needs
@@ -114,17 +175,20 @@ class TaskGenerator(Plugin, ABC):
 
     @abstractmethod
     async def validate(self, task: HarborTask) -> TaskValidationResult:
-        """Check one generated task before the recipe plays it.
+        """Check one generated task before the recipe runs its episodes.
 
         Return task defects as validation errors. Raise when the checks cannot
         run; the exception stops the round. The task is a value: a validation
         that needs a directory writes its own copy.
         """
 
-    async def record_results(self, results: tuple[TaskPlayResult, ...]) -> None:
-        """Receive the result of each task that the last :meth:`generate` call returned.
+    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
+        """Receive the results of the tasks that the :meth:`generate` call of ``generation`` returned.
 
-        The recipe calls this once for each round, after the round's plays,
-        also when the round stopped early. A task that the round did not reach
-        has no result. The default keeps nothing.
+        ``results`` holds one ``GeneratedTaskResult`` for each candidate of the
+        generation, in candidate order. The recipe calls this once every train
+        task of the generation has a first rollout: possibly after later
+        ``generate`` calls, and after a restart. A crash before the recipe
+        records the delivery sends the same results again, so a second call for
+        the same generation must change nothing. The default keeps nothing.
         """

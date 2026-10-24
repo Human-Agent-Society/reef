@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.harness.test_task_player import StandInReef
+from tests.harness.test_task_episode_runner import StandInReef
 
 from reef.record2task.generator import (
     DesignerError,

@@ -49,7 +49,7 @@ ANSWERS = {
     "[health]": "reef-ok",
 }
 
-#: The health task as a Harbor task directory, for an adapter that plays a task directory rather than a prompt
+#: The health task as a Harbor task directory, for an adapter that runs a task directory rather than a prompt
 #: (terminus): the same check, scored by its verifier's reward instead of the reply's last line.
 HEALTH_TASK_DIRECTORY = str(Path(__file__).with_name("health"))
 

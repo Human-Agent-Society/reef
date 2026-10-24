@@ -12,13 +12,14 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   different task under a taken name. Writing the same task again under its name answers 200 with the
   path, so a caller can stage a task again after a stop. ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
-- ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
+- ``POST /episodes``: an agent runs rollout episodes of a written task (a job). Reef keeps no record of
+  their model calls; each episode comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
-  then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check or play.
+  then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run episodes.
 
-Jobs run at the same time on one job worker; a play waits only for the service's episode slots, so a proposal
-or a check never waits behind a play. Closing the service stops the harbor runs a job has in flight, so
+Jobs run at the same time on one job worker; an episode job waits only for the service's episode slots, so a
+proposal or a check never waits behind episodes. Closing the service stops the harbor runs a job has in flight, so
 ``reef serve`` leaves no container behind. Everything here is stateless beyond the tasks
 root: a restarted service serves the same root.
 """
@@ -46,7 +47,7 @@ from reef_client.client import ReefClientError
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskPlay, TaskPlayer, TaskPlayError, checked_labels
+from reef.harness.client.tasks import TaskEpisode, TaskEpisodeError, TaskEpisodeRunner, checked_labels
 from reef.record2task.generator.designer import (
     Designer,
     DesignerError,
@@ -69,8 +70,8 @@ from reef.record2task.generator.wire import (
     checked_object,
     checked_string,
     checked_text_files,
+    episode_document,
     oracle_document,
-    play_document,
     source_records_from_document,
     task_document,
     task_from_document,
@@ -85,7 +86,7 @@ DOCKER_PROBE_TIMEOUT_S = 5.0
 
 
 class ReadinessProbe(ABC):
-    """One thing the generator needs before it can check and play tasks."""
+    """One thing the generator needs before it can check tasks and run their episodes."""
 
     name: str = ""
 
@@ -147,7 +148,7 @@ class DockerProbe(ReadinessProbe):
 
 
 def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]:
-    """What playing and checking a task takes: reef-eval, the harbor command line and Docker."""
+    """What checking a task and running its episodes takes: reef-eval, the harbor command line and Docker."""
     return (
         ModuleProbe("reef_eval", hint="a dependency of reef-infra; reinstall reef-infra"),
         HarborProbe(harbor=harbor),
@@ -166,7 +167,7 @@ MAX_JOBS_IN_FLIGHT = 256
 
 
 class TaskChecks(ABC):
-    """The check before a written task is played: Harbor's oracle and nop agents through the harbor command line."""
+    """The check before a written task runs episodes: Harbor's oracle and nop agents through the harbor command line."""
 
     @abstractmethod
     def oracle(self, task_path: Path) -> OracleResult: ...
@@ -183,28 +184,27 @@ class HarborChecks(TaskChecks):
         return oracle_check(task_path, harbor=self.harbor, runs=self.runs)
 
 
-class TaskPlays(ABC):
-    """Who plays a written task for one arm: the served model through a Harbor agent and the task player."""
+class TaskEpisodes(ABC):
+    """Who runs episodes of a written task for one arm: the served model through a Harbor agent."""
 
     @abstractmethod
-    async def play(
+    async def run_episodes(
         self,
         task_path: Path,
         *,
         scenario: str,
         model: str,
         arm: str,
-        plays: int,
-        is_reporting: bool,
+        count: int,
         extra_instruction_paths: Sequence[Path],
         tags: Mapping[str, str],
-    ) -> tuple[TaskPlay, ...]: ...
+    ) -> tuple[TaskEpisode, ...]: ...
 
 
-class ReefTaskPlays(TaskPlays):
-    """A task player per call, its episodes tagged with the arm; at most ``concurrency`` episodes of all calls in flight.
+class ReefTaskEpisodes(TaskEpisodes):
+    """An episode runner per call, its episodes tagged with the arm; at most ``concurrency`` episodes of all calls in flight.
 
-    The service's job worker runs every play on its one event loop, so the episode slots are shared by all plays.
+    The service's job worker runs every episode on its one event loop, so all calls share the episode slots.
     """
 
     def __init__(
@@ -224,21 +224,20 @@ class ReefTaskPlays(TaskPlays):
         self.agent_host = agent_host
         self.episode_slots = asyncio.Semaphore(concurrency)
 
-    async def play(
+    async def run_episodes(
         self,
         task_path: Path,
         *,
         scenario: str,
         model: str,
         arm: str,
-        plays: int,
-        is_reporting: bool,
+        count: int,
         extra_instruction_paths: Sequence[Path],
         tags: Mapping[str, str],
-    ) -> tuple[TaskPlay, ...]:
-        if plays < 1:
+    ) -> tuple[TaskEpisode, ...]:
+        if count < 1:
             return ()
-        player = TaskPlayer(
+        runner = TaskEpisodeRunner(
             reef_url=self.reef_url,
             scenario=scenario,
             model=model,
@@ -248,16 +247,17 @@ class ReefTaskPlays(TaskPlays):
             agent_host=self.agent_host,
             labels={**tags, "arm": arm},
             extra_instruction_paths=extra_instruction_paths,
-            is_reporting=is_reporting,
+            is_reporting=False,
+            is_rollout=True,
             # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
             verifier_timeout_reward=0.0,
         )
 
-        async def episode() -> TaskPlay:
+        async def episode() -> TaskEpisode:
             async with self.episode_slots:
-                return await player.play_async(task_path)
+                return await runner.run_async(task_path)
 
-        return tuple(await asyncio.gather(*(episode() for _ in range(plays))))
+        return tuple(await asyncio.gather(*(episode() for _ in range(count))))
 
 
 # ------------------------------------------------------------------ the jobs
@@ -353,45 +353,42 @@ class CheckJob(Job):
         return oracle_document(await asyncio.to_thread(self.checks.oracle, self.task_path))
 
 
-class PlayJob(Job):
-    kind = "play"
+class EpisodeJob(Job):
+    kind = "episodes"
 
     def __init__(
         self,
-        plays: TaskPlays,
+        episodes: TaskEpisodes,
         task_path: Path,
         *,
         scenario: str,
         model: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_paths: tuple[Path, ...],
         tags: Mapping[str, str],
     ) -> None:
         super().__init__()
-        self.plays = plays
+        self.episodes = episodes
         self.task_path = task_path
         self.scenario = scenario
         self.model = model
         self.arm = arm
         self.count = count
-        self.is_reporting = is_reporting
         self.extra_instruction_paths = extra_instruction_paths
         self.tags = dict(tags)
 
     async def run(self) -> dict[str, object]:
-        played = await self.plays.play(
+        ran = await self.episodes.run_episodes(
             self.task_path,
             scenario=self.scenario,
             model=self.model,
             arm=self.arm,
-            plays=self.count,
-            is_reporting=self.is_reporting,
+            count=self.count,
             extra_instruction_paths=self.extra_instruction_paths,
             tags=self.tags,
         )
-        return {"plays": [play_document(play) for play in played]}
+        return {"episodes": [episode_document(episode) for episode in ran]}
 
 
 @dataclass(frozen=True)
@@ -414,7 +411,7 @@ class JobRunner(BackgroundJobRunner):
         self.runs = runs if runs is not None else HarborRuns()
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
-        # A play waits for episode slots, not for job slots; the limit only bounds what one client can queue.
+        # An episode job waits for episode slots, not for job slots; the limit only bounds what one client can queue.
         self.worker = BackgroundJobWorker(self, thread_name="generator-jobs", concurrency=MAX_JOBS_IN_FLIGHT)
 
     def submit(self, job: Job) -> Job:
@@ -472,14 +469,14 @@ def checked_tags(value: object) -> dict[str, str]:
     return {name: str(item) for name, item in tags.items()}
 
 
-def checked_play_labels(value: object) -> dict[str, str]:
-    """A play's tags as the task player's labels; ``arm`` comes from the play, so a tag may not name it."""
+def checked_episode_labels(value: object) -> dict[str, str]:
+    """An episode request's tags as the episode runner's labels; ``arm`` comes from the request, so a tag may not name it."""
     tags = checked_tags(value)
     if any(name.strip().lower() == "arm" for name in tags):
-        raise WireError("tags may not name 'arm'; the play's arm sets it")
+        raise WireError("tags may not name 'arm'; the request's arm sets it")
     try:
         return checked_labels(tags)
-    except TaskPlayError as exc:
+    except TaskEpisodeError as exc:
         raise WireError(str(exc)) from exc
 
 
@@ -490,7 +487,7 @@ def checked_count(value: object, label: str, *, minimum: int = 0) -> int:
 
 
 class GeneratorService:
-    """Writes, checks and plays Harbor tasks under one tasks root, for whoever asks over HTTP."""
+    """Writes and checks Harbor tasks under one tasks root and runs their episodes, for whoever asks over HTTP."""
 
     def __init__(
         self,
@@ -498,7 +495,7 @@ class GeneratorService:
         tasks_root: Path,
         designer: Designer,
         checks: TaskChecks,
-        plays: TaskPlays,
+        episodes: TaskEpisodes,
         default_model: str | None = None,
         designer_model: str | None = None,
         jobs: JobRunner | None = None,
@@ -507,7 +504,7 @@ class GeneratorService:
         self.tasks_root = Path(tasks_root)
         self.designer = designer
         self.checks = checks
-        self.plays = plays
+        self.episodes = episodes
         self.default_model = default_model
         # The deployment's generator section owns the Designer's model; a proposal's own model is the fallback.
         self.designer_model = designer_model
@@ -525,7 +522,7 @@ class GeneratorService:
                 web.post("/tasks", self.write_task),
                 web.delete("/tasks/{name}", self.delete_task),
                 web.post("/checks", self.check),
-                web.post("/plays", self.play),
+                web.post("/episodes", self.run_episodes),
                 web.get("/jobs/{job_id}", self.job),
             ]
         )
@@ -587,7 +584,7 @@ class GeneratorService:
         return web.json_response({"job": job.id}, status=202)
 
     def missing_needs(self) -> dict[str, str]:
-        """Every probe's reason for not being met, by name; empty when the generator can check and play."""
+        """Every probe's reason for not being met, by name; empty when the generator can check tasks and run episodes."""
         reasons: dict[str, str] = {}
         for probe in self.probes:
             reason = probe.missing()
@@ -699,7 +696,7 @@ class GeneratorService:
             return error_response(400, str(exc))
         return self.submitted(job)
 
-    async def play(self, request: web.Request) -> web.Response:
+    async def run_episodes(self, request: web.Request) -> web.Response:
         try:
             body = await self.body_of(request)
             task_path = self.task_path_for(body.get("path"))
@@ -710,19 +707,15 @@ class GeneratorService:
             missing = [str(path) for path in extra_paths if not path.is_file()]
             if missing:
                 raise WireError(f"extra instruction files do not exist: {', '.join(missing)}")
-            is_reporting = body.get("is_reporting", True)
-            if not isinstance(is_reporting, bool):
-                raise WireError("is_reporting must be a boolean")
-            job = PlayJob(
-                self.plays,
+            job = EpisodeJob(
+                self.episodes,
                 task_path,
-                scenario=checked_string(body, "scenario", label="a play"),
+                scenario=checked_string(body, "scenario", label="an episode request"),
                 model=self.model_for(body),
-                arm=checked_string(body, "arm", label="a play"),
-                count=checked_count(body.get("plays", 1), "plays", minimum=1),
-                is_reporting=is_reporting,
+                arm=checked_string(body, "arm", label="an episode request"),
+                count=checked_count(body.get("count", 1), "count", minimum=1),
                 extra_instruction_paths=extra_paths,
-                tags=checked_play_labels(body.get("tags")),
+                tags=checked_episode_labels(body.get("tags")),
             )
         except WireError as exc:
             return error_response(400, str(exc))
