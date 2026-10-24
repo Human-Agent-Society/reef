@@ -65,14 +65,9 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
 
 The deployment's `generator` section makes `reef serve` start the generator service before the HTTP service and hand its address to the recipe as `${endpoints.generator}`. The generator runs under Reef's interpreter; its host needs Docker and the `harbor` command line, which the Reef service itself does not. `execution: {generator: ray}` places it elsewhere. `generator.designer-url` and `generator.designer-model` point the Designer at another service (a strong model on OpenRouter while the Reasoning Agent is the deployment under training); by default both roles are the served model. `generator.designer-options` adds fields to the Designer's request: a model that thinks for thousands of tokens before writing an environment runs past the service's inference deadline, and `{"reasoning_effort": "none"}` keeps it to the reply. With `generator.designer-api: responses` (the default when `inference.upstream-api` is `responses`), the Designer asks through the Responses API, and its options take Responses fields such as `{"reasoning": {"effort": "low"}}`. See [the generator section](../../../docs/reference/configuration.rst) for every key.
 
-With `rounds: 0` the recipe generates nothing and trains on the plain episodes that the episode runner reports. Use this to train on tasks written elsewhere:
+With `rounds: 0` the recipe generates nothing; it rolls out only the train tasks that earlier generations saved in the scenario's task store. A rollout episode is not a record: Reef keeps no record of its model calls, and assembles the episode's sample from the calls the episode runner returns.
 
-```bash
-python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario spade --model Qwen/Qwen3-8B \
-  --work-dir work/episodes --label arm=plain tasks/*/
-```
-
-Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold-tolerance` lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
+Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold_tolerance` (in `pipeline.task2batch.config`) lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
 Known limits: a round runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that. The Designer's own training, its regret as the reward of its proposals, follows.
 

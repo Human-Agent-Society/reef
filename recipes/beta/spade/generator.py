@@ -297,7 +297,6 @@ class SpadeTaskGenerator(TaskGenerator):
             scenario=self.scenario,
             arm=HINT_ARM,
             count=self.hint_plays,
-            is_reporting=True,
             extra_instruction_files=(HINT_FILE,),
             tags={"generation": str(generation)},
             model=self.served_model,

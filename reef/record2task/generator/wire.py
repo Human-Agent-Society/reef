@@ -9,7 +9,7 @@ from pathlib import Path
 from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.harness.client.tasks import TaskEpisode
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
 from reef.record2task.generator.designer import DesignerRequest
 from reef.record2task.generator.harbor import OracleResult
 from reef.record2task.generator.inputs import record_document
@@ -183,6 +183,7 @@ def episode_document(episode: TaskEpisode) -> dict[str, object]:
         "failed_calls": episode.failed_calls,
         "report_agent_record_ids": list(episode.report_agent_record_ids),
         "trial_uri": episode.trial_uri,
+        "turns": [{"request": dict(turn.request), "response": dict(turn.response)} for turn in episode.turns],
     }
 
 
@@ -200,6 +201,14 @@ def episode_from_document(document: object) -> TaskEpisode:
     error = fields.get("error", "")
     if (trial_uri is not None and not isinstance(trial_uri, str)) or not isinstance(error, str):
         raise WireError("an episode's trial_uri and error must be text")
+    turns = fields.get("turns", [])
+    if not isinstance(turns, list) or any(
+        not isinstance(turn, Mapping)
+        or not isinstance(turn.get("request"), Mapping)
+        or not isinstance(turn.get("response"), Mapping)
+        for turn in turns
+    ):
+        raise WireError("an episode's turns must be objects with a request and a response")
     return TaskEpisode(
         task_path=Path(checked_string(fields, "task_path", label="an episode")),
         name=checked_string(fields, "name", label="an episode"),
@@ -211,4 +220,5 @@ def episode_from_document(document: object) -> TaskEpisode:
         failed_calls=failed_calls,
         report_agent_record_ids=tuple(reports),
         trial_uri=trial_uri,
+        turns=tuple(EpisodeTurn(turn["request"], turn["response"]) for turn in turns),
     )

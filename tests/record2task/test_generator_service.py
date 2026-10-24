@@ -22,7 +22,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.client.tasks import TaskEpisode, TaskEpisodeRunner
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
 from reef.recipe.generated_tasks.processor import GeneratedTaskRecord2Record, RoundSettings, TaskGroupSettings
@@ -125,9 +125,7 @@ class StandInEpisodes(TaskEpisodes):
         self.reward = reward
         self.calls: list[dict[str, object]] = []
 
-    async def run_episodes(
-        self, task_path, *, scenario, model, arm, count, is_reporting, extra_instruction_paths, tags
-    ):
+    async def run_episodes(self, task_path, *, scenario, model, arm, count, extra_instruction_paths, tags):
         self.calls.append(
             {
                 "task": task_path.name,
@@ -135,7 +133,6 @@ class StandInEpisodes(TaskEpisodes):
                 "model": model,
                 "arm": arm,
                 "count": count,
-                "is_reporting": is_reporting,
                 "extra": [Path(path) for path in extra_instruction_paths],
                 "tags": dict(tags),
             }
@@ -270,7 +267,6 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
             scenario="spade",
             arm="bare",
             count=1,
-            is_reporting=False,
             extra_instruction_files=(),
             tags={},
         )
@@ -451,7 +447,7 @@ def test_a_check_and_a_second_episode_job_run_while_an_episode_job_waits(tmp_pat
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        arguments = {"scenario": "spade", "arm": "plain", "count": 1, "is_reporting": False}
+        arguments = {"scenario": "spade", "arm": "plain", "count": 1}
         running = [
             asyncio.ensure_future(
                 generator.run_episodes(written.path, extra_instruction_files=(), tags={}, **arguments)
@@ -490,7 +486,7 @@ def test_the_task_episodes_keep_at_most_concurrency_episodes_of_all_requests_in_
     task_episodes = ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
 
     async def two_runs() -> list[tuple[TaskEpisode, ...]]:
-        arguments = {"scenario": "s", "model": "m", "arm": "plain", "count": 3, "is_reporting": False}
+        arguments = {"scenario": "s", "model": "m", "arm": "plain", "count": 3}
         return await asyncio.gather(
             *(
                 task_episodes.run_episodes(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments)
@@ -514,7 +510,6 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
             scenario="spade",
             arm="hint",
             count=2,
-            is_reporting=True,
             extra_instruction_files=("solution/hint.txt",),
             tags={"generation": "1"},
         )
@@ -525,7 +520,6 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
                 scenario="spade",
                 arm="hint",
                 count=1,
-                is_reporting=False,
                 extra_instruction_files=("solution/missing.txt",),
                 tags={},
             )
@@ -540,7 +534,6 @@ def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(t
                     scenario="spade",
                     arm="plain",
                     count=1,
-                    is_reporting=True,
                     extra_instruction_files=(),
                     tags=tags,
                 )
@@ -693,6 +686,11 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
         episode_from_document({**episode_document(episode), "rewards": {"score": "high"}})
     with pytest.raises(WireError, match="rewards must map names to numbers"):
         episode_from_document({**episode_document(episode), "rewards": {"score": True}})
+    turn = EpisodeTurn(request={"messages": []}, response={"training": {"tokens": [1, 2]}})
+    rollout = TaskEpisode(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", (), 0, (), None, turns=(turn,))
+    assert episode_from_document(episode_document(rollout)) == rollout, "a rollout episode carries its calls"
+    with pytest.raises(WireError, match="turns must be objects"):
+        episode_from_document({**episode_document(rollout), "turns": [{"request": {}}]})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
@@ -757,9 +755,9 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         assert task.name.startswith("harbor-history-")
         assert (await task_generator.validate(task)).is_valid
         context = PipelineContext("spade")
-        round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(episodes_per_task=2))
+        round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
         generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, generator_service=generator)
-        result, _ = await generation.run_training_episodes(task, 0, labels={})
+        result, _ = await generation.run_training_episodes(task, 0, count=2)
         assert not result.error and len(result.rollout_rewards) == 2
         assert read_harbor_task(tmp_path / "tasks" / task.name).source_agent_record_ids == task.source_agent_record_ids
         await task_generator.record_results((result.generated(task),), generation=0)

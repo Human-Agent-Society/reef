@@ -586,13 +586,13 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     generation = GeneratedTaskTasks(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings(episodes_per_task=2)),
+        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
         task_generator=generator,
         generator_service=service,
     )
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
     for task in generated.tasks:
-        asyncio.run(generation.run_and_record(task, labels={}))
+        asyncio.run(generation.run_and_record(task, count=2))
     delivery_error = asyncio.run(generation.deliver_results())
     results = list(rollout_results(generation.task_store).values())
     generation.close()

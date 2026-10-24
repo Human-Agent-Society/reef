@@ -10,12 +10,12 @@ generator's method:
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
   (``reef.record2task.generator.inputs``).
-- ``processor``: the three stages. ``GeneratedTaskRecord2Record`` groups the
-  training episodes by task and starts each task-generation round when it is
-  due; ``GeneratedTaskTasks`` runs the rounds (generate, validate, run
-  through the generator service, send the results back) and turns the
-  training arm's episodes into tasks; and
-  ``GeneratedTaskBatches`` batches complete task groups.
+- ``processor``: the three stages. ``GeneratedTaskRecord2Record`` holds the
+  source sessions and starts each task-generation round when it is due;
+  ``GeneratedTaskTasks`` runs the rounds (generate, validate, send the results
+  back) and each saved task's episodes through the generator service; and
+  ``GeneratedTaskBatches`` rolls saved tasks out and batches the samples of
+  their episodes, which are not records.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on Tinker's

@@ -136,6 +136,13 @@ Headers
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
 |                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
+| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout episode that |
+|                                   | Reef runs itself. It is served from the scenario's      |
+|                                   | release like any other call, but no record is kept, and |
+|                                   | the response keeps its ``training`` block with the      |
+|                                   | runtime load ID that answered. The call must not        |
+|                                   | stream (HTTP 400). Only the service token opens it.     |
++-----------------------------------+---------------------------------------------------------+
 
 Client release tags
 ~~~~~~~~~~~~~~~~~~~

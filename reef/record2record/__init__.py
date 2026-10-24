@@ -64,7 +64,6 @@ from reef.record2record.reports import (
     ReportRecord2Record,
     ReportSet,
 )
-from reef.record2record.rollout import PooledTask, RolloutGrouping, RolloutReportRecord2Record, TaskPool
 from reef.record2record.selection import ArrivalOrder, GroupKeyOrder, SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
 
@@ -77,7 +76,6 @@ __all__ = [
     "JudgedSet",
     "JudgingRecord2Record",
     "NoRecordSets",
-    "PooledTask",
     "Record2Record",
     "RecordJudging",
     "RecordSet",
@@ -88,12 +86,9 @@ __all__ = [
     "ReportGrouping",
     "ReportRecord2Record",
     "ReportSet",
-    "RolloutGrouping",
-    "RolloutReportRecord2Record",
     "SelectionPolicy",
     "SingleRecordSet",
     "SingleSetUnit",
-    "TaskPool",
     "TaskStatus",
     "UnitDropReason",
 ]

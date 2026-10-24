@@ -287,14 +287,14 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     generation = GeneratedTaskTasks(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings(episodes_per_task=2)),
+        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
         task_generator=generator,
         generator_service=service,
     )
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
     saved_tasks = generation.task_store.tasks(split="train")
     for task in generated.tasks:
-        asyncio.run(generation.run_and_record(task, labels={}))
+        asyncio.run(generation.run_and_record(task, count=2))
     delivery_error = asyncio.run(generation.deliver_results())
     generation.close()
     assert len(generated.tasks) == len(saved_tasks) == 2 and delivery_error == ""

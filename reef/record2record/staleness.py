@@ -47,23 +47,37 @@ def stale_units(
     ``max_staleness`` 0, only data of the current version trains. An empty list
     means that the serving version is unknown, so no unit is stale.
     """
+    return tuple(
+        unit
+        for unit in units
+        if is_stale(
+            frozenset(
+                version
+                for set_id in unit.set_ids()
+                for version in producing_runtime_load_ids_by_set.get(set_id, frozenset())
+            ),
+            served_runtime_load_ids,
+            max_staleness,
+        )
+    )
+
+
+def is_stale(versions: frozenset[str | None], served_runtime_load_ids: Sequence[str], max_staleness: int) -> bool:
+    """Whether training data that ``versions`` produced is more than ``max_staleness`` versions behind.
+
+    It is stale when a version is None, is not in ``served_runtime_load_ids``, or lags the last served version
+    by more than ``max_staleness``. An empty ``served_runtime_load_ids`` means that the serving version is
+    unknown, so no data is stale.
+    """
     if not served_runtime_load_ids:
-        return ()
+        return False
     newest_position = len(served_runtime_load_ids) - 1
     positions = {version: position for position, version in enumerate(served_runtime_load_ids)}
-    stale: list[RecordSetUnit] = []
-    for unit in units:
-        versions = (
-            version
-            for set_id in unit.set_ids()
-            for version in producing_runtime_load_ids_by_set.get(set_id, frozenset())
-        )
-        for version in versions:
-            position = None if version is None else positions.get(version)
-            if position is None or newest_position - position > max_staleness:
-                stale.append(unit)
-                break
-    return tuple(stale)
+    for version in versions:
+        position = None if version is None else positions.get(version)
+        if position is None or newest_position - position > max_staleness:
+            return True
+    return False
 
 
 def canonical_runtime_load_id(value: str) -> RuntimeLoadId | None:

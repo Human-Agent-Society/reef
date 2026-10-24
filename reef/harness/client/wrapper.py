@@ -229,6 +229,7 @@ from typing import Any
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
@@ -868,7 +869,11 @@ class CaptureProxy:
 
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
     call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
-    and hands the release id an answer names to ``observer``."""
+    and hands the release id an answer names to ``observer``.
+
+    With ``is_rollout``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
+    record of it, and the captured response holds the whole training block. A streaming agent still gets a
+    stream, which the proxy makes from the complete answer."""
 
     def __init__(
         self,
@@ -879,6 +884,7 @@ class CaptureProxy:
         tags: Mapping[str, str] | None = None,
         observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
+        is_rollout: bool = False,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -886,7 +892,11 @@ class CaptureProxy:
         fixed: dict[str, str] = {"x-reef-scenario": scenario}
         if token:
             fixed["authorization"] = f"Bearer {token}"
-        self._config = ServeConfig(upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS)
+        if is_rollout:
+            fixed[ROLLOUT_HEADER] = "1"
+        self._config = ServeConfig(
+            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_rollout
+        )
         #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = _Tags(self._config, fixed)
         for name, value in (tags or {}).items():

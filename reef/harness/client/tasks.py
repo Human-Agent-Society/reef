@@ -190,9 +190,39 @@ def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
     return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
 
 
+def rollout_call_failure(turns: Sequence[Mapping[str, object]]) -> str:
+    """Why no model call of a rollout episode answered: the count of failed calls and the first answer."""
+    failed = [turn for turn in turns if turn.get("status") != 200]
+    if not failed:
+        return "the agent made no model call"
+    first = failed[0]
+    response = first.get("response")
+    detail = json.dumps(response)[:200] if isinstance(response, Mapping) else str(response or "no body")[:200]
+    return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
+
+
+@dataclass(frozen=True)
+class EpisodeTurn:
+    """One answered model call of a rollout episode.
+
+    Values: ``(request, response)`` with ``request`` the JSON body the agent sent and ``response`` the JSON
+    body that Reef answered, with its ``training`` block.
+    Purpose: ``TaskEpisodeRunner`` makes it for each call of a rollout episode that answered 200, in call
+    order; the rollout's caller assembles the episode's training sample from them. A rollout episode is not
+    a record: Reef keeps no record of these calls.
+    """
+
+    request: Mapping[str, Any]
+    response: Mapping[str, Any]
+
+
 @dataclass(frozen=True)
 class TaskEpisode:
-    """One episode of a task: what the verifier said and what reached Reef."""
+    """One episode of a task: what the verifier said and what reached Reef.
+
+    ``turns`` holds the answered model calls of a rollout episode, in call order; an episode that reports to
+    Reef has none, because its calls are records.
+    """
 
     task_path: Path
     name: str
@@ -204,6 +234,7 @@ class TaskEpisode:
     failed_calls: int
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
+    turns: tuple[EpisodeTurn, ...] = ()
 
     @property
     def is_reported(self) -> bool:
@@ -247,6 +278,7 @@ class TaskEpisodeRunner:
         extra_instruction_paths: Sequence[Path] = (),
         per_receipt: bool = False,
         is_reporting: bool = True,
+        is_rollout: bool = False,
         lab: TaskLab | None = None,
         verifier_timeout_reward: float | None = None,
     ) -> None:
@@ -258,6 +290,8 @@ class TaskEpisodeRunner:
         ):
             if not isinstance(value, str) or not value.strip():
                 raise TaskEpisodeError(f"{label} must be a non-empty string")
+        if is_rollout and is_reporting:
+            raise TaskEpisodeError("a rollout episode is not a record, so it reports nothing")
         if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
             raise TaskEpisodeError("agent_host must be a non-empty host name or address")
         self.reef_url = reef_url.rstrip("/")
@@ -278,6 +312,8 @@ class TaskEpisodeRunner:
         self.per_receipt = per_receipt
         # A measurement run (an arm run for its reward alone) keeps its episodes out of the training data.
         self.is_reporting = is_reporting
+        # A rollout episode that Reef runs itself: its calls are no records, and the episode keeps its turns.
+        self.is_rollout = is_rollout
         # The reward for an episode whose verifier ran past its timeout; None leaves such an episode unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -299,7 +335,9 @@ class TaskEpisodeRunner:
         episode_id = uuid.uuid4().hex
         tags = {**self.labels, "task": task_path.name, "episode": episode_id}
         listen_host = "0.0.0.0" if self.agent_host else "127.0.0.1"
-        proxy = CaptureProxy(self.reef_url, self.scenario, self.token, tags=tags, listen_host=listen_host)
+        proxy = CaptureProxy(
+            self.reef_url, self.scenario, self.token, tags=tags, listen_host=listen_host, is_rollout=self.is_rollout
+        )
         proxy.start()
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
@@ -311,9 +349,24 @@ class TaskEpisodeRunner:
         finally:
             turns = proxy.drain()
             proxy.stop()
-        receipts = tuple(str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200)
-        failed_calls = len(turns) - len(receipts)
-        error = row.error or ("" if receipts else call_failure(turns))
+        receipts: tuple[str, ...] = ()
+        answered: tuple[EpisodeTurn, ...] = ()
+        if self.is_rollout:
+            answered = tuple(
+                EpisodeTurn(turn["request"], turn["response"])
+                for turn in turns
+                if turn.get("status") == 200
+                and isinstance(turn.get("request"), Mapping)
+                and isinstance(turn.get("response"), Mapping)
+            )
+            failed_calls = len(turns) - len(answered)
+            error = row.error or ("" if answered else rollout_call_failure(turns))
+        else:
+            receipts = tuple(
+                str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
+            )
+            failed_calls = len(turns) - len(receipts)
+            error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
         if row.rewards and primary_reward(row.rewards) is None and not error:
             error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
@@ -338,6 +391,7 @@ class TaskEpisodeRunner:
             failed_calls=failed_calls,
             report_agent_record_ids=report_ids,
             trial_uri=row.trial_uri,
+            turns=answered,
         )
 
     def report(

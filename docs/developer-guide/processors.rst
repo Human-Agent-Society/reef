@@ -466,7 +466,7 @@ oracle passed the same verifier, so the timeout is the agent's.
 
 The recipe splits the work across its stages. A round is not a record set,
 and it does not train. The record stage (``GeneratedTaskRecord2Record``)
-decides when a round is due, holds the source sessions and the task pool, and
+decides when a round is due, holds the source sessions, and
 gives the round number and its sessions to the record-to-task stage
 (``GeneratedTaskTasks``). That stage runs the round's generation on its own
 ``BackgroundJobWorker``, outside the trainer lock, and tells the record stage
@@ -485,62 +485,61 @@ A generator or check that fails to run is retried from the saved candidates,
 up to ``generation_attempts`` times within ``generation_deadline_seconds``.
 After that the round ends without a task, and the next round takes the same
 sessions again, so it finishes the same generation. A round that made train
-tasks puts them in the record stage's task pool. A task identical to one that
+tasks puts them in the task pool. A task identical to one that
 was already published is rejected as a duplicate.
 
-Saved tasks roll out as batches. The pipeline runs a second loop:
+Saved tasks roll out as batches. A rollout episode is not a record: its
+agent's model calls carry the ``x-reef-rollout`` header, so the service serves
+them from the scenario's release but keeps no record of them, and answers with
+each call's training block. The pipeline runs a second loop:
 
 1. When no rollout batch runs, the pipeline takes up to ``tasks_per_step``
-   tasks from the task pool and submits them as one rollout batch.
+   tasks from the task pool of ``GeneratedTaskBatches`` and submits them as one
+   rollout batch.
 2. ``GeneratedTaskBatches`` runs them all at once on its own worker. It
    stages each saved task in the generator service (``write_task``) and runs
    ``episodes_per_task`` episodes of it on the training arm. Staging the same
    task again returns its staged copy, so episodes that a stop interrupted can
    stage the task and run again. The generator service runs at most
-   ``generator.concurrency`` episodes at once, across all requests. Each
-   episode carries the labels ``batch`` and ``task_use``. A task's first
-   episodes save its result. An episode with an error and no reward could not run; when every
-   training episode of a task could not run, the task's result is an
-   infrastructure failure, not a solver failure.
-3. When the episodes end, the rollout hands over the reports of each task use's
-   training episodes. The record stage groups the training reports by
-   ``(batch, task_use)``. A group settles when each of those reports joined it
-   or ended without training, for example because the record-to-task stage
-   skipped it. After ``settle_timeout_seconds``, the groups settle with the
-   reports they hold. A group of fewer than two episodes is discarded; several
-   reports of one episode count as one.
-4. When every group of the batch settled, the staleness check runs, and the
-   batch trains on its surviving groups. Their tasks are marked trained in the
-   task store once the commit of the training step is durable. A task whose group settled ready to train but did not train,
-   for example because it went stale or the backend dropped the batch, goes
-   back to the task pool. When no group survives, the next rollout starts, and
-   the next generation round does not wait for a batch.
+   ``generator.concurrency`` episodes at once, across all requests. A task's
+   first episodes save its result. An episode with an error and no reward
+   could not run; when every training episode of a task could not run, the
+   task's result is an infrastructure failure, not a solver failure.
+3. Each episode comes back with its answered calls. The stage assembles one
+   sample from the calls of each episode that ran, scored with the episode's
+   verifier reward, and the samples of one task form its group. A group of
+   fewer than two samples has no relative reward and does not train.
+4. When the batch's episodes end, the staleness check drops each group whose
+   samples a version produced that is more than ``max-staleness`` versions
+   behind, and the batch trains on the groups that are left. Their tasks are
+   marked trained in the task store once the commit of the training step is
+   durable. A task whose group did not train, because it went stale or the
+   backend dropped the batch, goes back to the task pool. A task without a
+   group stays out of it until a restart. When no group is left, the next
+   rollout starts, and the next generation round does not wait for a batch.
 
-A report whose batch is not running, whose task use is not one of the batch's,
-or whose arm is not the training arm, never trains. A report that arrives after its batch was built is released
-when the batch ends. When a submit fails, its tasks stay in the task pool. If
-a task's episodes fail, the other tasks of the batch run on. If the whole rollout
-job fails, each of its tasks without a result gets an infrastructure-failure
-result, so its generation's feedback still goes out. A result that the task
-store fails to save is saved again by the next job. On a restart, the train
-tasks that did not train go back to the task pool, including the tasks of a
-rollout that the stop interrupted. The generic parts are
-``RolloutReportRecord2Record`` (``reef.record2record.rollout``) and
-``RolloutTask2Batch`` (``reef.task2batch``); any record-to-task stage that
-returns ``TaskItem`` values can feed the loop.
+When a submit fails, its tasks stay in the task pool. If a task's episodes
+fail, the other tasks of the batch run on. If the whole rollout job fails, each
+of its tasks without a result gets an infrastructure-failure result, so its
+generation's feedback still goes out. A result that the task store fails to
+save is saved again by the next job. On a restart, the train tasks that did not
+train go back to the task pool, including the tasks of a rollout that the stop
+interrupted. The generic part is ``RolloutTask2Batch``
+(``reef.task2batch.rollout``): any task-to-batch stage that turns its episodes
+into samples can use the pipeline's loop.
 
 When every train task of a generation has a result, the next job sends the
 generation's results to ``record_results``. A generation can therefore close
 after later generations started. A generation whose delivery fails waits for
 the next job, and later generations still go out.
 
-The training episodes carry the arm ``plain``, and only reports with that label
-train. A generator can run more episodes of a task through the generator service
-on another arm, as SPADE does for its hint plays; those reports do not train.
-The ``task_group`` objective centers and scales each reward within its
-task group, on Tinker's ``importance_sampling`` loss. The record stage
-releases the reports of other arms and reports without an arm, such as a
-generator's own reports, without assembling them.
+The training episodes run on the arm ``plain``. A generator can run more
+episodes of a task through the generator service on another arm, as SPADE does
+for its hint plays; those episodes are not records either, and do not train.
+The ``task_group`` objective centers and scales each reward within its task
+group, on Tinker's ``importance_sampling`` loss. The record stage trains on no
+report: it holds the reports that are source sessions, and releases the others,
+such as a generator's own reports, without assembling them.
 
 A round can also generate tasks from recorded sessions. Set the record
 stage's ``source_records_per_round`` above 0 and its ``source_tag`` to a

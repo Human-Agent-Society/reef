@@ -12,7 +12,8 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
   different task under a taken name. Writing the same task again under its name answers 200 with the
   path, so a caller can stage a task again after a stop. ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
-- ``POST /episodes``: an agent runs episodes of a written task, each episode reported to Reef (a job).
+- ``POST /episodes``: an agent runs rollout episodes of a written task (a job). Reef keeps no record of
+  their model calls; each episode comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
   then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run episodes.
@@ -195,7 +196,6 @@ class TaskEpisodes(ABC):
         model: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_paths: Sequence[Path],
         tags: Mapping[str, str],
     ) -> tuple[TaskEpisode, ...]: ...
@@ -232,7 +232,6 @@ class ReefTaskEpisodes(TaskEpisodes):
         model: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_paths: Sequence[Path],
         tags: Mapping[str, str],
     ) -> tuple[TaskEpisode, ...]:
@@ -248,7 +247,8 @@ class ReefTaskEpisodes(TaskEpisodes):
             agent_host=self.agent_host,
             labels={**tags, "arm": arm},
             extra_instruction_paths=extra_instruction_paths,
-            is_reporting=is_reporting,
+            is_reporting=False,
+            is_rollout=True,
             # The task's verifier finished for its oracle, so a verifier still running at its timeout is the agent's.
             verifier_timeout_reward=0.0,
         )
@@ -365,7 +365,6 @@ class EpisodeJob(Job):
         model: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_paths: tuple[Path, ...],
         tags: Mapping[str, str],
     ) -> None:
@@ -376,7 +375,6 @@ class EpisodeJob(Job):
         self.model = model
         self.arm = arm
         self.count = count
-        self.is_reporting = is_reporting
         self.extra_instruction_paths = extra_instruction_paths
         self.tags = dict(tags)
 
@@ -387,7 +385,6 @@ class EpisodeJob(Job):
             model=self.model,
             arm=self.arm,
             count=self.count,
-            is_reporting=self.is_reporting,
             extra_instruction_paths=self.extra_instruction_paths,
             tags=self.tags,
         )
@@ -710,9 +707,6 @@ class GeneratorService:
             missing = [str(path) for path in extra_paths if not path.is_file()]
             if missing:
                 raise WireError(f"extra instruction files do not exist: {', '.join(missing)}")
-            is_reporting = body.get("is_reporting", True)
-            if not isinstance(is_reporting, bool):
-                raise WireError("is_reporting must be a boolean")
             job = EpisodeJob(
                 self.episodes,
                 task_path,
@@ -720,7 +714,6 @@ class GeneratorService:
                 model=self.model_for(body),
                 arm=checked_string(body, "arm", label="an episode request"),
                 count=checked_count(body.get("count", 1), "count", minimum=1),
-                is_reporting=is_reporting,
                 extra_instruction_paths=extra_paths,
                 tags=checked_episode_labels(body.get("tags")),
             )

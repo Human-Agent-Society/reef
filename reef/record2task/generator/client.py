@@ -107,7 +107,6 @@ class Generator(ABC):
         scenario: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_files: Sequence[str],
         tags: Mapping[str, str],
         model: str | None = None,
@@ -259,7 +258,6 @@ class HttpGenerator(Generator):
         scenario: str,
         arm: str,
         count: int,
-        is_reporting: bool,
         extra_instruction_files: Sequence[str],
         tags: Mapping[str, str],
         model: str | None = None,
@@ -269,7 +267,6 @@ class HttpGenerator(Generator):
             "path": str(task_path),
             "arm": arm,
             "count": count,
-            "is_reporting": is_reporting,
             "extra_instruction_files": list(extra_instruction_files),
             "tags": dict(tags),
         }

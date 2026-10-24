@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
-from reef.core.batches import TaskItem, TrainDataItem, TrainingBatch
+from reef.core.batches import TrainDataItem, TrainingBatch
 from reef.core.config import config_option
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
@@ -117,61 +117,6 @@ class Task2Batch(ABC, Plugin):
         that the recipe leaves out of the batch. In ``manual`` mode an
         instruction's batch has no tasks.
         """
-
-
-@dataclass(frozen=True)
-class RolloutResult:
-    """The episodes of one rollout batch ended.
-
-    Values: ``batch`` names the rollout batch. ``training_reports`` maps each
-    task use of the batch to the report IDs of its training episodes; a use
-    without reports, such as one whose episodes failed, may be absent.
-    Purpose: ``RolloutTask2Batch.take_finished`` makes it. The pipeline gives
-    each use's reports to the record stage, which settles the use's group when
-    those reports joined it or ended.
-    """
-
-    batch: str
-    training_reports: Mapping[str, tuple[str, ...]]
-
-
-class RolloutTask2Batch(Task2Batch):
-    """A task-to-batch stage that rolls saved tasks out, then batches their episodes.
-
-    The pipeline takes tasks from its record stage's task pool and submits them as one rollout batch. The
-    stage runs them on a worker that it owns, and each episode's records carry the batch and the task use.
-    ``take_finished`` hands back each use's training reports when the episodes end. The pipeline then batches
-    the rollout batch's settled groups through ``make_batch``. ``close`` stops the worker.
-    """
-
-    #: The most saved tasks of one rollout batch.
-    tasks_per_step: int = 1
-    #: How long the groups of a batch whose episodes ended may wait for their reports before they settle as they are.
-    settle_timeout_seconds: float = 600.0
-
-    @abstractmethod
-    def submit(self, batch: str, tasks: tuple[TaskItem, ...]) -> tuple[str, ...]:
-        """Start running the tasks as one rollout batch; return one task use ID for each task, in order."""
-
-    @abstractmethod
-    def take_finished(self) -> tuple[RolloutResult, ...]:
-        """Return the rollout batches whose episodes ended since the last call."""
-
-    @abstractmethod
-    def running(self) -> bool:
-        """Whether a rollout batch is running."""
-
-    @abstractmethod
-    def rollout_trained(self, batch: str, task_uses: tuple[str, ...]) -> None:
-        """The commit of the step that trained these task uses' groups is durable; their tasks do not roll out again."""
-
-    def status(self) -> Mapping[str, Any]:
-        """Return JSON-safe state that the pipeline adds to its status."""
-        return {}
-
-    def close(self) -> None:
-        """Stop the rollout worker. Calling it more than one time is safe."""
-        return
 
 
 class NoBatches(Task2Batch):

@@ -222,7 +222,7 @@ The built-in generated-task recipe rolls a generation's tasks out only after the
            description="coding tasks rebuilt from recorded coding-agent sessions",
            generator_url=str(generator_config["generator_url"]),
        )
-       record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(episodes_per_task=4))
+       record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
        tasks = GeneratedTaskTasks(context, settings, record_stage, task_generator=generator)
        try:
            for number in range(next_generation(tasks.task_store), rounds):

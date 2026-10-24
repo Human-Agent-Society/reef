@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.records_types import ROLLOUT_HEADER
+
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
@@ -249,6 +251,31 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
         "rewards": {"reward": 1.0},
         "trial_uri": "trials/t1",
     }
+
+
+def test_a_rollout_episode_keeps_its_calls_and_reports_nothing(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    ran = runner(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False, is_rollout=True).run(task_path)
+    assert ran.reward == 1.0 and ran.error == "" and ran.failed_calls == 0
+    assert ran.receipts == () and not ran.is_reported and reef.reports == [], "a rollout episode is not a record"
+    assert [turn.request["messages"][0]["content"] for turn in ran.turns] == ["turn 0", "turn 1"]
+    assert all(turn.response["choices"][0]["message"]["content"] == "ls" for turn in ran.turns)
+    headers = reef.inferences[0]["headers"]
+    assert headers[ROLLOUT_HEADER] == "1" and headers["x-reef-scenario"] == "guess"
+    with pytest.raises(TaskEpisodeError, match="reports nothing"):
+        runner(reef, tmp_path, StandInLab({}), is_rollout=True)
+
+
+def test_a_rollout_episode_whose_calls_all_fail_names_the_first_answer(tmp_path: Path) -> None:
+    refusing = StandInReef(refuse_inference=True)
+    try:
+        task_path = written_task(tmp_path / "tasks", "t1")
+        lab = StandInLab({"reward": 0.0})
+        ran = runner(refusing, tmp_path, lab, is_reporting=False, is_rollout=True).run(task_path)
+        assert ran.turns == () and ran.failed_calls == 2
+        assert ran.error.startswith("2 model calls failed; the first answered 401")
+    finally:
+        refusing.close()
 
 
 def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:

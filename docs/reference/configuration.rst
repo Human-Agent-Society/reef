@@ -1245,7 +1245,6 @@ nothing trains.
    pipeline:
      record2record:
        config:
-         episodes_per_task: 4
          batches_per_round: 2
      record2task:
        config:
@@ -1258,21 +1257,23 @@ nothing trains.
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
              state_dir: ${REEF_STATE_DIR}/generations
+     task2batch:
+       config:
+         episodes_per_task: 4
 
-``GeneratedTaskRecord2Record`` groups the training episodes by task, paces the
-rounds, and chooses which saved tasks run:
+``GeneratedTaskRecord2Record`` paces the rounds and holds their source
+sessions. It trains on no report: the recipe trains on its rollout episodes,
+which are not records.
 
 .. config::
 
-   pipeline.record2record.config.episodes_per_task | 4 | training episodes of each task in a rollout. At least 2.
    pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
    pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
 
-``GeneratedTaskTasks`` runs the generations, and turns the training episodes
-into tasks. ``GeneratedTaskBatches`` runs ``episodes_per_task`` episodes of each task
-in a rollout:
+``GeneratedTaskTasks`` runs the generations, and stages and runs each saved
+task's episodes for the rollout:
 
 .. config::
 
@@ -1283,7 +1284,6 @@ in a rollout:
    pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
    pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
    pipeline.record2task.config.served_model | the model the episodes ask for; the deployment's by default
-   pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
    pipeline.record2task.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
    pipeline.record2task.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
 
@@ -1300,14 +1300,16 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskBatches`` rolls saved tasks out and batches their complete task groups.
-A rollout batch trains on all of its settled groups, whatever Tinker's batch size
+``GeneratedTaskBatches`` rolls saved tasks out, assembles one sample from each
+episode that ran, and batches the groups of each task. A rollout batch trains on
+all of its fresh groups, whatever Tinker's batch size
 (``training.options.batch-size``) is, so the stage has no ``buffer_size``:
 
 .. config::
 
    pipeline.task2batch.config.tasks_per_step | 4 | saved tasks of one rollout batch
-   pipeline.task2batch.config.settle_timeout_seconds | 600 | seconds a batch whose episodes ended waits for its reports before its groups settle as they are
+   pipeline.task2batch.config.episodes_per_task | 4 | training episodes of each task in a rollout. At least 2.
+   pipeline.task2batch.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
@@ -1472,6 +1474,10 @@ The following names are relative to ``operations/``:
      - The same measurements for calls on the evaluation route, a step's
        episodes and proposer calls, which keep no record; counted apart so a
        step does not read as served traffic.
+   * - ``rollout/request/*``, ``rollout/admission/*``
+     - The same measurements for the calls of rollout episodes that Reef runs
+       itself (``x-reef-rollout``), which keep no record. Their retries,
+       timeouts and version mismatches count under ``rollout/``.
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.

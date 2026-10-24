@@ -20,9 +20,9 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     contract. Its stages are ``GeneratedTaskRecord2Record``,
     ``GeneratedTaskTasks``, and ``GeneratedTaskBatches``; the deployment's
     ``pipeline`` section gives their config: the rounds, the task
-    generator, and the generator service in ``record2task``, the task groups
-    and the source sessions in ``record2record``, and the rollout batches in
-    ``task2batch``. Without that section, no round runs, no task rolls out,
+    generator, and the generator service in ``record2task``, the source
+    sessions and the pace of the rounds in ``record2record``, and the rollout
+    batches and their task groups in ``task2batch``. Without that section, no round runs, no task rolls out,
     and nothing trains.
 
     Enabled rounds save each task and its train/eval split in the scenario's task store before their episodes run.
@@ -33,7 +33,7 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
 
     @property
     def report_type(self) -> type[ReportBase]:
-        # The episode report: the verifier reward as the score; the task under metadata.task.
+        # A scored report: what a source session ends with. The recipe trains on no report.
         return ScoredRolloutReport
 
     @classmethod

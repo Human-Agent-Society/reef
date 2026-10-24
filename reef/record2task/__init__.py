@@ -25,8 +25,8 @@ Implementations:
   the teacher's request with the served model's chat template.
 * ``GeneratedTaskTasks`` (in the built-in recipe ``reef.recipe.generated_tasks``):
   new Harbor tasks from a description and, optionally, from recorded sessions.
-  Each round generates tasks, checks them, and runs their episodes; the training episodes
-  come back as reports and become tasks.
+  Each round generates and checks tasks. Their rollout episodes are not
+  records: ``GeneratedTaskBatches`` turns them into samples.
 
 Shared parts of ``make_sample``:
 

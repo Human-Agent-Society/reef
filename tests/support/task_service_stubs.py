@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
-from reef.harness.client.tasks import TaskEpisode
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
 from reef.record2task.generator import (
     DesignerRequest,
     DuplicateTask,
@@ -70,6 +70,24 @@ def staged_digest(path: Path) -> str | None:
         return None
 
 
+def episode_reward(rewards: float | Sequence[float], index: int) -> float:
+    """The reward of a task's episode ``index``: one reward for every episode, or the rewards in turn."""
+    if isinstance(rewards, (int, float)):
+        return float(rewards)
+    return float(rewards[index % len(rewards)])
+
+
+def rollout_turn(model: str | None, episode: int) -> EpisodeTurn:
+    """One answered model call of a rollout episode, with the training block the service returns."""
+    return EpisodeTurn(
+        request={"model": model or "served", "messages": [{"role": "user", "content": f"solve {episode}"}]},
+        response={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+            "training": {"tokens": [1, 2, 3, episode], "loss_mask": [1, 1], "rollout_log_probs": [-0.1, -0.2]},
+        },
+    )
+
+
 class StandInGenerator(Generator):
     """A generator service in memory: scripted refusals, checks and rewards; tasks written under a root."""
 
@@ -80,7 +98,7 @@ class StandInGenerator(Generator):
         refusals: Mapping[int, str] | None = None,
         same_port: bool = False,
         is_solvable: bool = True,
-        rewards: Mapping[str, float] | None = None,
+        rewards: Mapping[str, float | Sequence[float]] | None = None,
         episode_error: str = "",
         fail_after: int | None = None,
         taken: Sequence[str] = (),
@@ -167,27 +185,23 @@ class StandInGenerator(Generator):
             return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
 
-    async def run_episodes(
-        self, task_path, *, scenario, arm, count, is_reporting, extra_instruction_files, tags, model=None
-    ):
+    async def run_episodes(self, task_path, *, scenario, arm, count, extra_instruction_files, tags, model=None):
         self.episode_requests.append(
             {
                 "task": task_path.name,
                 "arm": arm,
                 "count": count,
-                "is_reporting": is_reporting,
                 "extra": tuple(extra_instruction_files),
                 "tags": dict(tags),
                 "model": model,
             }
         )
-        reward = None if self.episode_error else self.rewards[arm]
         rows = []
         for _ in range(count):
             self.episodes += 1
-            # A task's reports are numbered from 0 across its episodes, as a test that reports them names them.
             index = self.task_episodes.get(task_path.name, 0)
             self.task_episodes[task_path.name] = index + 1
+            reward = None if self.episode_error else episode_reward(self.rewards[arm], index)
             rows.append(
                 TaskEpisode(
                     task_path=task_path,
@@ -196,12 +210,11 @@ class StandInGenerator(Generator):
                     reward=reward,
                     rewards={} if reward is None else {"reward": reward},
                     error=self.episode_error,
-                    receipts=() if self.episode_error else (f"rec-{self.episodes}",),
+                    receipts=(),
                     failed_calls=0,
-                    report_agent_record_ids=(
-                        (f"rep-{task_path.name}-{index}",) if is_reporting and not self.episode_error else ()
-                    ),
+                    report_agent_record_ids=(),
                     trial_uri=None,
+                    turns=() if self.episode_error else (rollout_turn(model, self.episodes),),
                 )
             )
         return tuple(rows)
