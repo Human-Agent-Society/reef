@@ -185,13 +185,14 @@ with surface contracts.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
-``runtime/`` is a namespace package with exactly five Python modules and the
+``runtime/`` is a namespace package with exactly six Python modules and the
 ``executor/`` package; it has no ``__init__.py`` or import facade:
 
 .. code:: text
 
    runtime/
      interfaces.py
+     jobs.py
      scheduler.py
      deployment.py
      publication.py
@@ -203,7 +204,8 @@ definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdo
 ``InferenceBackend`` contracts, and shared values and storage interfaces.
 ``scheduler.py`` owns recipe-facing candidate/commit coordination, remote job
 serialization and train/checkpoint ordering.
-``publication.py`` owns weight publication, version allocation, LoRA residency
+``jobs.py`` defines bounded training jobs and the ``TrainingComponent``
+interface. ``publication.py`` owns weight publication, version allocation, LoRA residency
 and transfer locking. ``recovery.py`` owns durable markers, scenario history,
 engine monitoring and restart recovery. ``deployment.py`` owns component
 lifecycle, runtime configuration and factory resolution. ``executor/`` owns

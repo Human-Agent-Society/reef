@@ -405,7 +405,7 @@ jobs:
               if path.startswith("reef/runtime/") and path.endswith(".py")
           }
           assert runtime_roots == {
-              "interfaces.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"
+              "interfaces.py", "jobs.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"
           }, runtime_roots
           assert {
               "reef/inference/runtime.py", "reef/inference/http.py", "reef/train/runtime.py",
