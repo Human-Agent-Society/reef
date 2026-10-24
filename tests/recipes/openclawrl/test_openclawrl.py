@@ -20,7 +20,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import TrainingJob, TrainingMethod
+from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.algos import StepScheduling
@@ -324,9 +324,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = TrainingBatch("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_step(
-        TrainingJob(batch, TrainingMethod("openclawrl"), StepScheduling(unit="sample"), {}), step_size=4
-    )
+    result = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"), step_size=4)
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"

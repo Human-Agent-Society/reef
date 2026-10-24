@@ -4,7 +4,7 @@ Who implements what:
 
 - Recipes and the dispatcher *use* ``InferenceRuntime`` and ``TrainingRuntime``
   and the values they exchange (``TrainingMethod``, ``ModelCandidate``,
-  ``ActivatedModel``, ``TrainingJob``, ``PreparedTrainingStep``, ``TrainingJobResult``). These
+  ``ActivatedModel``, ``PreparedTrainingStep``, ``TrainingJobResult``). These
   are the backbone.
 - A training integration *implements* ``TrainingBackend`` (with
   ``PreparedTrainingJob``) so Reef's coordinator can drive it.
@@ -389,36 +389,6 @@ class TrainingJobResult:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise ValueError("training_job_id must be a non-empty string or None")
-
-
-@dataclass(frozen=True)
-class TrainingJob:
-    """The request of one training step: a reserved batch, the method and schedule it trains, and the committed state.
-
-    A value has a ``TrainingBatch``, the ``TrainingMethod`` that the recipe
-    selected for it, the recipe's ``StepScheduling``, and ``algorithm_state``,
-    the algorithm state of the scenario's last commit.
-
-    ``RuntimeCandidateBackend`` makes one for each step, and every trainer layer
-    passes it on unchanged. The backend runs the method's objective on it in its
-    own process (``reef.train.algos.registry.run_objective``) and builds its
-    payload, so a retry of the same job prepares the same payload.
-    """
-
-    batch: TrainingBatch
-    method: TrainingMethod
-    scheduling: StepScheduling
-    algorithm_state: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.batch, TrainingBatch):
-            raise TypeError("TrainingJob.batch must be a TrainingBatch")
-        if not isinstance(self.method, TrainingMethod):
-            raise TypeError("TrainingJob.method must be a TrainingMethod")
-        if not isinstance(self.scheduling, StepScheduling):
-            raise TypeError("TrainingJob.scheduling must be a StepScheduling")
-        if not isinstance(self.algorithm_state, Mapping):
-            raise TypeError("TrainingJob.algorithm_state must be a mapping")
 
 
 @dataclass(frozen=True, slots=True)
@@ -896,13 +866,21 @@ class TrainingRuntime(ABC):
 
     @abstractmethod
     def prepare_training_step(
-        self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+        scenario_step: int,
+        *,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        """Turn ``job`` into backend work, or a state-only skip.
+        """Turn one reserved batch into backend work, or a state-only skip.
 
-        The backend resolves ``job.method``'s objective in its own process,
-        refuses a method it cannot train, and records the method in the job's
-        payload. ``scenario_step`` is the scenario step the job trains.
+        ``method`` is the objective and learning-rate schedule the recipe
+        selected for this job, and ``scheduling`` the recipe's step schedule;
+        the backend resolves the objective in its own process, refuses a method
+        it cannot train, and records the method in the job's payload.
         ``parent_runtime_load_id`` is the published version that the job trains from, if known.
         """
 
@@ -1038,8 +1016,13 @@ class TrainingBackend(ABC):
     def check_health(self) -> None: ...
 
     @abstractmethod
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
-        """Run ``job``'s objective and build the native payload; refuse a method the workers cannot train."""
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep: ...
 
     @abstractmethod
     def prepare(

@@ -18,7 +18,7 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
-from reef.runtime.interfaces import InferenceStream, TrainingJob, TrainingMethod
+from reef.runtime.interfaces import InferenceStream, TrainingMethod
 from reef.service.streaming import stream_record
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -83,8 +83,8 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     )
     scheduling = SCHEDULING[algorithm]
     assert prepare_slime_step(
-        TrainingJob(loaded, TrainingMethod(algorithm), scheduling, {}), step_size=STEP_SIZE
-    ) == prepare_slime_step(TrainingJob(original, TrainingMethod(algorithm), scheduling, {}), step_size=STEP_SIZE)
+        loaded, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE
+    ) == prepare_slime_step(original, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE)
     assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
 
@@ -170,9 +170,7 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
     batch = TrainingBatch("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported item 1"):
-        prepare_slime_step(
-            TrainingJob(batch, TrainingMethod(algorithm), SCHEDULING[algorithm], state), step_size=STEP_SIZE
-        )
+        prepare_slime_step(batch, TrainingMethod(algorithm), state, SCHEDULING[algorithm], step_size=STEP_SIZE)
     assert state == {"steps": 3}
     assert isinstance(batch.items[1], TaskItem)
 
@@ -180,7 +178,7 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
     prepared = prepare_slime_step(
-        TrainingJob(TrainingBatch("plain", (item,)), TrainingMethod("sao"), SCHEDULING["sao"], {}), step_size=STEP_SIZE
+        TrainingBatch("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING["sao"], step_size=STEP_SIZE
     )
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
@@ -293,9 +291,7 @@ def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = TrainingBatch(
         "grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2))
     )
-    result = prepare_slime_step(
-        TrainingJob(batch, TrainingMethod(algorithm), SCHEDULING[algorithm], {}), step_size=STEP_SIZE
-    )
+    result = prepare_slime_step(batch, TrainingMethod(algorithm), {}, SCHEDULING[algorithm], step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["source_rows"] == [0, 1]
 

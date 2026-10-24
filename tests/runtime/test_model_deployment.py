@@ -413,7 +413,7 @@ def test_reef_coordinator_closes_backend_operations_before_local_cleanup(tmp_pat
         def close(self):
             events.append("operations-close")
 
-        def prepare_training_step(self, job):
+        def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
             raise AssertionError("unexpected prepare_training_step in this fixture")
 
         def prepare(self, payload, *, job_id, scenario_step, prior_marker):

@@ -10,13 +10,13 @@ import math
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Any
 
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingJob, TrainingJobResult, TrainingRuntimeError
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingMethod, TrainingRuntimeError
 
 DEFAULT_ACTOR_NAME = "reef-train-bridge"
 DEFAULT_NAMESPACE = "reef"
@@ -60,7 +60,13 @@ class CoordinatorClient(ABC):
         """Return backend health and durable training-job state."""
 
     @abstractmethod
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep: ...
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep: ...
 
     @abstractmethod
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult: ...
@@ -115,9 +121,14 @@ class ExecutorCoordinatorClient(CoordinatorClient):
         version = self._rpc("serving_runtime_load_id")
         return None if version is None else str(version)
 
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
-        # A plain dict pickles whatever mapping type the scenario holds its state in.
-        return self._rpc("prepare_training_step", replace(job, algorithm_state=dict(job.algorithm_state)))
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep:
+        return self._rpc("prepare_training_step", batch, method, dict(algorithm_state), scheduling)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self._rpc("execute_training_job", dict(payload))

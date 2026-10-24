@@ -10,15 +10,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.batches import TrainingBatch, TrajectoryItem, trajectories
+from reef.core.batches import StepScheduling, TrainingBatch, TrajectoryItem, trajectories
 from reef.runtime.executor.connection import CoordinatorClient, training_job_status
 from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     ModelCandidate,
     PreparedTrainingStep,
     StaleCandidate,
-    TrainingJob,
     TrainingJobResult,
+    TrainingMethod,
     TrainingRuntime,
     TrainingRuntimeError,
 )
@@ -53,9 +53,16 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         return training_job_status(self._train_group_handle)
 
     def prepare_training_step(
-        self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+        scenario_step: int,
+        *,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        prepared = self._train_group_handle.prepare_training_step(job)
+        prepared = self._train_group_handle.prepare_training_step(batch, method, algorithm_state, scheduling)
         if not isinstance(prepared, PreparedTrainingStep):
             raise TrainingRuntimeError(
                 f"train group handle returned invalid prepared training step: {type(prepared).__name__}"
@@ -65,7 +72,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if prepared.payload is None:
             raise TrainingRuntimeError("non-skip training preparation must carry a payload")
         payload = dict(prepared.payload)
-        samples = _ordered_samples(job.batch, payload.pop("source_rows", None))
+        samples = _ordered_samples(batch, payload.pop("source_rows", None))
         payload.update(self.version_fields(samples, parent_runtime_load_id))
         # The backend numbers its own checkpoints; the job records the scenario step it trains.
         payload["scenario_step"] = scenario_step

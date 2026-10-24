@@ -23,7 +23,6 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     InferenceStream,
     PreparedTrainingStep,
-    TrainingJob,
     TrainingJobResult,
     TrainingMethod,
     TrainingRuntime,
@@ -59,8 +58,14 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
             },
         }
 
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
-        return slime_prepare_step(job, step_size=1)
+    def prepare_training_step(
+        self,
+        batch,
+        objective: str,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep:
+        return slime_prepare_step(batch, objective, algorithm_state, scheduling, step_size=1)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         del payload
@@ -326,9 +331,7 @@ def test_runtime_rejects_invalid_handler_factory_result() -> None:
 @pytest.mark.unit
 def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(policy_batch(), TrainingMethod("sft"), StepScheduling(), {}), 7
-    )
+    prepared = runtime.prepare_training_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling(), 7)
 
     assert prepared.payload is not None
     payload = prepared.payload
@@ -342,8 +345,8 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
 def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(policy_batch(), TrainingMethod(_TEST_SFT_OBJECTIVE), StepScheduling(), {}), 3
+    prepared = runtime.prepare_training_step(
+        policy_batch(), TrainingMethod(_TEST_SFT_OBJECTIVE), {}, StepScheduling(), 3
     )
     assert prepared.payload is not None
     payload = prepared.payload
@@ -394,9 +397,7 @@ def test_training_job_results_round_trip_across_process_boundary(result: Trainin
 def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, objective, state, advantages, loss) -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(batch, TrainingMethod(objective), StepScheduling(unit="sample"), state), 9
-    )
+    prepared = runtime.prepare_training_step(batch, TrainingMethod(objective), state, StepScheduling(unit="sample"), 9)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -424,7 +425,7 @@ def test_ray_runtime_rejects_unsupported_objective_batch_pairs(batch, objective,
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
     with pytest.raises(error, match=message):
-        runtime.scheduler.prepare_training_step(TrainingJob(batch, TrainingMethod(objective), StepScheduling(), {}), 0)
+        runtime.prepare_training_step(batch, TrainingMethod(objective), {}, StepScheduling(), 0)
 
 
 @pytest.mark.unit
@@ -439,9 +440,7 @@ def test_ray_runtime_rejects_empty_serving_runtime_load_id() -> None:
 
 @pytest.mark.unit
 def test_slime_backend_preparation_emits_framework_agnostic_rows() -> None:
-    prepared = slime_prepare_step(
-        TrainingJob(policy_batch(), TrainingMethod("sft"), StepScheduling(), {}), step_size=1
-    )
+    prepared = slime_prepare_step(policy_batch(), TrainingMethod("sft"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -476,9 +475,7 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fi
         ),
     )
 
-    prepared = slime_prepare_step(
-        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample"), {}), step_size=1
-    )
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -515,9 +512,7 @@ def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> 
         ),
     )
 
-    prepared = slime_prepare_step(
-        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample"), {}), step_size=1
-    )
+    prepared = slime_prepare_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     payload = prepared.payload
 
@@ -570,11 +565,8 @@ def test_ray_runtime_records_each_samples_producing_version_and_the_parent_versi
         runtime_load_id="engine:2",
     )
 
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(
-            TrainingBatch("math:sao:2", (first, second)), TrainingMethod("sao"), StepScheduling(unit="sample"), {}
-        ),
-        4,
+    prepared = runtime.prepare_training_step(
+        TrainingBatch("math:sao:2", (first, second)), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 4
     )
 
     assert prepared.payload is not None
@@ -593,8 +585,8 @@ def test_ray_runtime_records_each_samples_producing_version_and_the_parent_versi
 def test_ray_runtime_omits_the_parent_version_when_nothing_is_published() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(sao_batch(None), TrainingMethod("sao"), StepScheduling(unit="sample"), {}), 0
+    prepared = runtime.prepare_training_step(
+        sao_batch(None), TrainingMethod("sao"), {}, StepScheduling(unit="sample"), 0
     )
 
     assert prepared.payload is not None
@@ -619,8 +611,8 @@ def test_ray_runtime_carries_mixed_token_runtime_load_ids() -> None:
     )
     runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
 
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(TrainingBatch("batch", (sample,)), TrainingMethod("sft"), StepScheduling(), {}), 0
+    prepared = runtime.prepare_training_step(
+        TrainingBatch("batch", (sample,)), TrainingMethod("sft"), {}, StepScheduling(), 0
     )
 
     assert prepared.payload is not None
@@ -661,10 +653,14 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
     actor = Bridge()
     handle = RemoteRayCoordinatorClient(train_group_actor=actor)
 
-    job = TrainingJob(policy_batch(), TrainingMethod("openclawrl"), StepScheduling(unit="sample"), {"steps": 2})
+    prepared = handle.prepare_training_step(
+        policy_batch(), TrainingMethod("openclawrl"), {"steps": 2}, StepScheduling(unit="sample")
+    )
 
-    assert handle.prepare_training_step(job) is expected
-    assert actor.prepare_training_step.calls == [(job,)]
+    assert prepared is expected
+    assert actor.prepare_training_step.calls == [
+        (policy_batch(), TrainingMethod("openclawrl"), {"steps": 2}, StepScheduling(unit="sample"))
+    ]
 
 
 @pytest.mark.unit
@@ -1263,13 +1259,11 @@ def test_ray_runtime_producing_versions_follow_the_step_schedule() -> None:
             return "engine:1"
 
     runtime = ExecutorRuntimeFixture(train_group_handle=VersionedHandle(), inference_url="http://router")
-    prepared = runtime.scheduler.prepare_training_step(
-        TrainingJob(
-            grouped_policy_batch(versions=("engine:0", "engine:1")),
-            TrainingMethod("tests.runtime.test_ray_runtime:TwoEpochObjective"),
-            StepScheduling(unit="sample", epochs=2),
-            {},
-        ),
+    prepared = runtime.prepare_training_step(
+        grouped_policy_batch(versions=("engine:0", "engine:1")),
+        TrainingMethod("tests.runtime.test_ray_runtime:TwoEpochObjective"),
+        {},
+        StepScheduling(unit="sample", epochs=2),
         0,
     )
 

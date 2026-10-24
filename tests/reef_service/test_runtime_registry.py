@@ -191,7 +191,7 @@ class NullInferenceCoordinator(CoordinatorClient):
             "training_job": {"deferred_weight_update": True, "status": "IDLE"},
         }
 
-    def prepare_training_step(self, job):
+    def prepare_training_step(self, batch, method, algorithm_state, scheduling):
         raise AssertionError("unused")
 
     def execute_training_job(self, payload):

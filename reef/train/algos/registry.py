@@ -10,9 +10,7 @@ from __future__ import annotations
 import importlib
 from typing import overload
 
-from reef.runtime.interfaces import TrainingJob
 from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.signals import StepSignal
 
 
 class ObjectiveRegistry:
@@ -98,17 +96,6 @@ def unregister_objective(name: str) -> None:
 def resolve_objective(reference: str) -> TrainingObjective:
     """Resolve a registered name or a dotted objective class/instance reference."""
     return OBJECTIVES.resolve(reference)
-
-
-def run_objective(job: TrainingJob) -> tuple[TrainingObjective, StepSignal]:
-    """Resolve ``job``'s objective, check the job's scheduling, and run ``prepare`` on its batch and committed state.
-
-    Every training backend calls this in its own process before it builds its
-    payload; the objective's ``loss_family`` selects the backend's loss.
-    """
-    objective = resolve_objective(job.method.objective)
-    objective.validate_scheduling(job.scheduling)
-    return objective, objective.prepare(job.batch, job.algorithm_state)
 
 
 #: ``{backend: {loss_family: reference}}``; Slime is the default backend.

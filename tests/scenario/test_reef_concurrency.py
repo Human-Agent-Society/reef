@@ -41,11 +41,14 @@ class CountingRuntime(StubTrainingRuntime):
     def inference_handler(self):
         return None
 
-    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+    ):
+        del batch, objective
         return PreparedTrainingStep(
             action="train",
             payload={"scenario_step": scenario_step},
-            next_algorithm_state={"steps": int(job.algorithm_state.get("steps", 0)) + 1},
+            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
             metrics={},
         )
 

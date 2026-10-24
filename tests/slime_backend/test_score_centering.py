@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.runtime.interfaces import TrainingJob, TrainingMethod
+from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.distill import DistillSettings
@@ -212,16 +212,12 @@ def test_payload_carries_each_wire_rows_top_k_in_schedule_order() -> None:
     batch = TrainingBatch("batch", tuple(samples))
     # Two epochs repeat every row: the columns follow the wire rows.
     step = prepare_slime_step(
-        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample", epochs=2), {}),
-        step_size=1,
-        sampler_topk=True,
+        batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample", epochs=2), step_size=1, sampler_topk=True
     )
     assert step.payload is not None
     rows = [row[0] for row in step.payload["samples"]]
     assert [ids[0][1] for ids in step.payload[TOPK_INDICES_KEY]] == [int(row[1:]) for row in rows]
-    plain = prepare_slime_step(
-        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample"), {}), step_size=1
-    )
+    plain = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert plain.payload is not None and TOPK_INDICES_KEY not in plain.payload
 
 

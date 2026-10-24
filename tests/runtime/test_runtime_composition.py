@@ -36,8 +36,10 @@ class CheckpointTrainer(TrainingRuntime):
     def batch_size(self) -> int:
         return 1
 
-    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
-        return PreparedTrainingStep("train", job.algorithm_state, {}, {"value": 7})
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+    ):
+        return PreparedTrainingStep("train", algorithm_state, {}, {"value": 7})
 
     def train_candidate(self, payload):
         self.checkpoint.write_text(str(payload["value"]))

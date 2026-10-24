@@ -11,12 +11,12 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     ModelCandidate,
     PreparedTrainingStep,
-    TrainingJob,
     TrainingMethod,
     TrainingRuntime,
 )
 from reef.train.algos import StepScheduling
 from reef.train.runtime_backend import FixedTrainingMethodSelector
+from reef.train.types import TrainingBatch
 
 
 class StubTrainingRuntime(TrainingRuntime):
@@ -45,7 +45,14 @@ class StubTrainingRuntime(TrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+        scenario_step: int,
+        *,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
         raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
 

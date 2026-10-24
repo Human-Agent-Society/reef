@@ -2,35 +2,42 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict
 from typing import Any
 
-from reef.core.batches import trajectories
+from reef.core.batches import StepScheduling, TrainingBatch, trajectories
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
     PreparedTrainingStep,
-    TrainingJob,
+    TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
-from reef.train.algos.registry import run_objective
+from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import batch_schedule_seed, materialize_schedule
 from reef.train.tinker_backend.losses import TokenRow, resolve_tinker_loss
 
 
 def prepare_tinker_step(
-    job: TrainingJob, *, batch_size: int, kl_coef: float, runtime_load_id: str | None = None
+    batch: TrainingBatch,
+    method: TrainingMethod,
+    state: Mapping[str, Any],
+    scheduling: StepScheduling,
+    *,
+    batch_size: int,
+    kl_coef: float,
 ) -> PreparedTrainingStep:
-    """Shape one job's batch into Tinker optimizer batches under its scheduling.
+    """Shape one batch into Tinker optimizer batches under the recipe's ``scheduling``.
 
-    The job trains its method's objective with that objective's Tinker loss,
+    The job trains ``method``'s objective with that objective's Tinker loss,
     which must be registered in this process and accept ``kl_coef``; the
-    payload records the method.
-    With ``runtime_load_id`` the payload also records the version that the
-    job trains from. The record-to-record stage already dropped stale samples.
+    payload records the method. The record-to-record stage already dropped
+    stale samples.
     """
-    objective, signal = run_objective(job)
-    batch, method, scheduling = job.batch, job.method, job.scheduling
+    objective = resolve_objective(method.objective)
+    objective.validate_scheduling(scheduling)
+    signal = objective.prepare(batch, state)
     if signal.action == "skip":
         return PreparedTrainingStep("skip", signal.next_algorithm_state, signal.metrics)
     resolve_tinker_loss(objective.loss_family).check_kl_coef(kl_coef)
@@ -66,7 +73,6 @@ def prepare_tinker_step(
             "loss": objective.loss_family,
             "method": method.to_dict(),
             "batches": batches,
-            **({"source_runtime_load_id": runtime_load_id} if runtime_load_id is not None else {}),
         },
     )
 

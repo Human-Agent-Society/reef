@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
     PreparedTrainingJob,
@@ -26,7 +27,6 @@ from reef.runtime.interfaces import (
     TrainingCheckpoint,
     TrainingContext,
     TrainingCoordinationConfig,
-    TrainingJob,
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
@@ -84,7 +84,6 @@ class TinkerTrainingBackend(TrainingBackend):
         self._context = TrainingContext(
             next_rollout_id=start_rollout_id, history=ScenarioHistory(history_path(self._template))
         )
-        self._active_scenario: str | None = None
 
     # -- Coordinator contract
 
@@ -135,9 +134,22 @@ class TinkerTrainingBackend(TrainingBackend):
             raise RuntimeError("the Tinker backend seeds its base checkpoint in start()")
         return self._base
 
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep:
         # Staleness admission is the coordinator's; the payload carries only the rows.
-        return prepare_tinker_step(job, batch_size=self._config.batch_size, kl_coef=self._config.kl_coef)
+        return prepare_tinker_step(
+            batch,
+            method,
+            algorithm_state,
+            scheduling,
+            batch_size=self._config.batch_size,
+            kl_coef=self._config.kl_coef,
+        )
 
     @contextmanager
     def prepare(
@@ -225,7 +237,8 @@ class TinkerTrainingBackend(TrainingBackend):
         return
 
     def activate_scenario(self, scenario: str) -> None:
-        self._active_scenario = scenario
+        """Every job names its scenario's adapter, so no scenario is active between jobs."""
+        return
 
     def send_adapter(self, scenario: str, name: str) -> None:
         raise RuntimeError("Tinker delivers adapter files; Reef's receiver loads them")

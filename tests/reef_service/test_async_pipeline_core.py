@@ -65,18 +65,20 @@ class DurableRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self.serving_version
 
-    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
-        sample = job.batch.items[0]
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+    ):
+        sample = batch.items[0]
         payload = {
             "scenario_step": scenario_step,
-            "loss": job.method,
+            "loss": objective,
             "source": source_record_id(sample),
             "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
         return PreparedTrainingStep(
             action="train",
             payload=payload,
-            next_algorithm_state={"steps": int(job.algorithm_state.get("steps", 0)) + 1},
+            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
             metrics={},
         )
 

@@ -8,28 +8,40 @@ own wire tuples from a resolved signal.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingJob
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
 from reef.train.algos import StepScheduling
-from reef.train.algos.registry import run_objective
+from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 
-def prepare_slime_step(job: TrainingJob, *, step_size: int, sampler_topk: bool = False) -> PreparedTrainingStep:
-    """Run the job's training objective and produce its complete Slime training payload.
+def prepare_slime_step(
+    batch: TrainingBatch,
+    method: TrainingMethod,
+    algorithm_state: Mapping[str, Any],
+    scheduling: StepScheduling,
+    *,
+    step_size: int,
+    sampler_topk: bool = False,
+) -> PreparedTrainingStep:
+    """Resolve the job's training objective and produce its complete Slime training payload.
 
-    The payload records ``job.method``, so the method is part of the job's
-    identity. The objective rejects a scheduling its loss cannot train before
-    any payload is built. ``step_size`` is Slime's ``--global-batch-size``, the
-    rollouts in one optimizer step. ``sampler_topk`` adds each row's recorded
-    sampler top-K, which score centering reads.
+    ``method`` is the objective and learning-rate schedule the recipe selected;
+    the payload records it, so it is part of the job's identity.
+    ``scheduling`` is the recipe's step schedule; the objective rejects one its
+    loss cannot train before any payload is built. ``step_size`` is Slime's
+    ``--global-batch-size``, the rollouts in one optimizer step.
+    ``sampler_topk`` adds each row's recorded sampler top-K, which score
+    centering reads.
     """
-    objective, signal = run_objective(job)
-    batch, scheduling = job.batch, job.scheduling
+    objective = resolve_objective(method.objective)
+    objective.validate_scheduling(scheduling)
+    signal = objective.prepare(batch, algorithm_state)
     if signal.action == "skip":
         return PreparedTrainingStep(
             action="skip",
@@ -40,7 +52,7 @@ def prepare_slime_step(job: TrainingJob, *, step_size: int, sampler_topk: bool =
     payload = _build_payload(
         batch, objective.loss_family, signal.advantages, scheduling, step_size=step_size, sampler_topk=sampler_topk
     )
-    payload["method"] = job.method.to_dict()
+    payload["method"] = method.to_dict()
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)

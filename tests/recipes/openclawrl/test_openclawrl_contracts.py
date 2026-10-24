@@ -21,7 +21,7 @@ from recipes.openclawrl.prm import (
 from recipes.openclawrl.processor import OpenClawRLBatches, OpenClawRLBatchSettings, OpenClawRLTasks
 from recipes.openclawrl.turns import TurnJob
 from reef.core.trajectories import source_record_id
-from reef.runtime.interfaces import TrainingJob, TrainingMethod
+from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -264,9 +264,7 @@ class TestTopkTestObjective:
                 _sample(-1.0),
             ),
         )
-        step = prepare_slime_step(
-            TrainingJob(batch, TrainingMethod("openclawrl"), StepScheduling(unit="sample"), {}), step_size=2
-        )
+        step = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"), step_size=2)
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
         # The family's wire row: policy 5-tuple + the three top-K channels.

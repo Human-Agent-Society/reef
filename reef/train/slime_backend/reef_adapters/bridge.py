@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
@@ -35,7 +36,6 @@ from reef.runtime.interfaces import (
     TrainingCheckpoint,
     TrainingContext,
     TrainingCoordinationConfig,
-    TrainingJob,
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
@@ -576,10 +576,21 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise ValueError("per-scenario LoRA training jobs must name their scenario")
         return scenario
 
-    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
-        """Prepare a framework-neutral Reef job with Slime-owned logic; refuse a method the workers cannot train."""
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+    ) -> PreparedTrainingStep:
+        """Prepare a framework-neutral Reef batch with Slime-owned logic; refuse a method the workers cannot train."""
         prepared = prepare_slime_step(
-            job, step_size=self.args.global_batch_size, sampler_topk=self._score_centering is not None
+            batch,
+            method,
+            algorithm_state,
+            scheduling,
+            step_size=self.args.global_batch_size,
+            sampler_topk=self._score_centering is not None,
         )
         if prepared.payload is not None:
             self.algorithm_for_loss_family(prepared.payload["loss"]).validate_payload(prepared.payload)

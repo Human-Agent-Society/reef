@@ -47,7 +47,7 @@ class _MarkerCoordinator(CoordinatorClient):
             "training_job": TrainingCoordinator._training_job_health(self),
         }
 
-    def prepare_training_step(self, job):
+    def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
         raise NotImplementedError
 
     def execute_training_job(self, payload):

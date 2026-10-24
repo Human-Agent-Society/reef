@@ -14,7 +14,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.slime_coordinator import build_slime_coordinator
 
 from reef.core.trajectories import trajectory_reward
-from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingJob, TrainingMethod
+from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
@@ -123,7 +123,7 @@ class Stack:
                 policy_trajectory(f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), 1.0, "v1") for index in range(2)
             ),
         )
-        prepared = self.coordinator.prepare_training_step(TrainingJob(batch, method, ONE_SAMPLE_STEPS, {}))
+        prepared = self.coordinator.prepare_training_step(batch, method, {}, ONE_SAMPLE_STEPS)
         assert prepared.payload is not None
         return {**prepared.payload, "scenario_step": step, "parent_runtime_load_id": "v1"}
 

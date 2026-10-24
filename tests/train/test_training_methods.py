@@ -14,7 +14,6 @@ from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
     PreparedTrainingStep,
-    TrainingJob,
     TrainingMethod,
     resolve_learning_rate_schedule_state,
 )
@@ -113,10 +112,17 @@ class RecordingRuntime(StubTrainingRuntime):
         self.prepared: list[tuple[TrainingMethod, dict[str, Any]]] = []
 
     def prepare_training_step(
-        self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+        scenario_step: int,
+        *,
+        parent_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        self.prepared.append((job.method, dict(job.algorithm_state)))
-        return PreparedTrainingStep("skip", {"steps": job.algorithm_state.get("steps", 0) + 1}, {"steps": 1})
+        self.prepared.append((method, dict(algorithm_state)))
+        return PreparedTrainingStep("skip", {"steps": algorithm_state.get("steps", 0) + 1}, {"steps": 1})
 
 
 class SupervisedThenPolicy(TrainingMethodSelector):

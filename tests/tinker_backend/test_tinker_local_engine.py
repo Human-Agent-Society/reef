@@ -17,7 +17,6 @@ from reef.runtime.interfaces import (
     InferenceBackend,
     LearningRateSchedule,
     LearningRateScheduleState,
-    TrainingJob,
     TrainingMethod,
     WeightFiles,
 )
@@ -174,12 +173,10 @@ class Stack:
     def payload(self, objective, *, step, schedule=None):
         version = self.coordinator.serving_runtime_load_id()
         prepared = self.coordinator.prepare_training_step(
-            TrainingJob(
-                TrainingBatch("b", (item(version, sample=step),)),
-                TrainingMethod(objective.name, schedule),
-                StepScheduling(unit="sample"),
-                {},
-            )
+            TrainingBatch("b", (item(version, sample=step),)),
+            TrainingMethod(objective.name, schedule),
+            {},
+            StepScheduling(unit="sample"),
         )
         return {**prepared.payload, "scenario": "math", "scenario_step": step, "parent_runtime_load_id": version}
 

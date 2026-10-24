@@ -19,7 +19,7 @@ from slime.utils.misc import Box
 from tests.support._trajectories import policy_trajectory
 from tests.support.slime_coordinator import build_slime_coordinator
 
-from reef.runtime.interfaces import TrainingJob, TrainingJobResult, TrainingMethod
+from reef.runtime.interfaces import TrainingJobResult, TrainingMethod
 from reef.runtime.recovery import read_marker, transition_marker, write_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling
@@ -1899,7 +1899,7 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
 
 @pytest.mark.unit
 def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
-    from reef.train.algos import StepSignal, TrainingObjective, registry
+    from reef.train.algos import StepSignal, TrainingObjective
     from reef.train.slime_backend.reef_adapters import preparation
 
     class ScheduleObjective(TrainingObjective):
@@ -1910,10 +1910,13 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
         def prepare(self, batch, state):
             return StepSignal("train", {}, {"steps": 1}, tuple(range(8)))
 
-    monkeypatch.setattr(registry, "resolve_objective", lambda _name: ScheduleObjective())
+    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
 
     result = preparation.prepare_slime_step(
-        TrainingJob(_grouped_batch(8, 1), TrainingMethod("any"), StepScheduling(epochs=2, remainder="drop")),
+        _grouped_batch(8, 1),
+        TrainingMethod("any"),
+        {},
+        StepScheduling(epochs=2, remainder="drop"),
         step_size=3,
     )
 

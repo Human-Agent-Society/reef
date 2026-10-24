@@ -22,7 +22,6 @@ from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
-    TrainingJob,
     TrainingMethod,
     TrainingRuntimeError,
     UpstreamStatusError,
@@ -34,14 +33,15 @@ from reef.surface.weights import WeightLoader
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
+from reef.train.job_runtime import JobTrainingRuntime
 from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
+from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_step
-from reef.train.tinker_backend.runtime import INCUMBENT, TinkerTrainingRuntime
 
 
 class RemoteClient(TinkerClient, TinkerSampler):
@@ -124,7 +124,8 @@ class Deployment:
 
     def __init__(self, config, client):
         self.config = config
-        self.training = TinkerTrainingRuntime("Qwen/Qwen3-8B", config, client)
+        component = TinkerTrainingComponent("Qwen/Qwen3-8B", config, client)
+        self.training = JobTrainingRuntime(component, component.state_dir / "runtime", poll_interval_seconds=0.01)
         self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
 
     def backend(self, objective):
@@ -146,6 +147,12 @@ def runtime(tmp_path):
     value = Deployment(TinkerConfig(state_dir=str(tmp_path / "state")), client)
     yield value, client
     value.shutdown()
+
+
+def incumbent(training):
+    """The checkpoint the next job starts from."""
+    start = training.start
+    return TinkerCheckpoint.read(Path(start) if start is not None else training.component.state_dir / "base")
 
 
 def item(version, group="g"):
@@ -171,9 +178,7 @@ def item(version, group="g"):
 
 def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return runtime.training.prepare_training_step(
-        TrainingJob(batch, TrainingMethod(objective.name), SCHEDULING, {}), step
-    )
+    return runtime.training.prepare_training_step(batch, TrainingMethod(objective.name), {}, SCHEDULING, step)
 
 
 def decision(selected):
@@ -208,11 +213,11 @@ def test_selection_waits_for_matching_commit_and_freezes_old_sampler(runtime, ob
     backend.acknowledge_commit(1, result.training_job_id)
     assert value.inference.current_runtime_load_id() == result.runtime_load_id
     assert value.inference.inference_admission_status["open"]
-    assert value.training.incumbent.state_path == "tinker://update-1/state"
+    assert incumbent(value.training).state_path == "tinker://update-1/state"
     assert len(client.calls) == 1
 
 
-def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(runtime, objective):
+def test_rejected_and_failed_jobs_leave_the_start_unchanged(runtime, objective):
     value, client = runtime
     payload = prepared(value, objective).payload
     original = value.inference.current_runtime_load_id()
@@ -220,13 +225,18 @@ def test_rejected_and_uncertain_candidates_leave_incumbent_optimizer_unchanged(r
     assert value.training.train_candidate(payload) == candidate
     assert len(client.calls) == 1
     value.training.reject_candidate(candidate)
+    # The same job again reuses its saved checkpoint instead of training a second time.
+    assert prepared(value, objective).payload == payload
+    assert len(client.calls) == 1
     client.fail = True
+    other = TrainingBatch("other", (item(value.inference.serving_runtime_load_id(), group="h"),))
     with pytest.raises(TimeoutError):
-        value.training.train_candidate(payload)
+        value.training.prepare_training_step(other, TrainingMethod(objective.name), {}, SCHEDULING, 0)
     client.fail = False
-    value.training.train_candidate(payload)
+    value.training.prepare_training_step(other, TrainingMethod(objective.name), {}, SCHEDULING, 0)
     assert len(client.calls) == 3
     assert all(call[0].state_path == "tinker://base/state" for call in client.calls)
+    assert value.training.start is None
     assert value.inference.current_runtime_load_id() == original
 
 
@@ -259,12 +269,12 @@ def test_live_versions_and_rollback_bind_exact_snapshots(runtime, objective, tmp
     value.backend(objective).acknowledge_commit(1, candidate.training_job_id)
     live = Artifact(LiveWeightArtifactRef("live", "release", "parent", activated.runtime_load_id), None)
     assert value.inference.snapshot(live)[0] == "tinker://update-1/sampler"
-    assert value.training.incumbent.state_path == "tinker://update-1/state"
+    assert incumbent(value.training).state_path == "tinker://update-1/state"
     base = empty_artifact(tmp_path)
     value.training.restore_checkpoint(base)
     WeightLoader().load(base, value.inference)
     WeightLoader().activate(base, value.inference, source=base)
-    assert value.training.incumbent.state_path == "tinker://base/state"
+    assert incumbent(value.training).state_path == "tinker://base/state"
     assert value.inference.snapshot(live)[1] == activated.runtime_load_id
     assert value.inference.current_runtime_load_id() != activated.runtime_load_id
     with pytest.raises(ValueError, match="incarnation"):
@@ -274,7 +284,7 @@ def test_live_versions_and_rollback_bind_exact_snapshots(runtime, objective, tmp
 def test_exclusive_state_dir_and_model_validation(runtime, tmp_path):
     value, _ = runtime
     with pytest.raises(ValueError, match="already owned"):
-        TinkerTrainingRuntime("Qwen/Qwen3-8B", value.config, RemoteClient())
+        TinkerTrainingComponent("Qwen/Qwen3-8B", value.config, RemoteClient())
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")
     other.write(tmp_path / "other")
     with pytest.raises(ValueError, match="base model"):
@@ -346,12 +356,7 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.supports_multiple_epochs = True
     scheduling = StepScheduling(unit="comparison_set", epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(
-        TrainingJob(batch, TrainingMethod(objective.name), scheduling, {}),
-        runtime_load_id="v",
-        batch_size=2,
-        kl_coef=0.0,
-    )
+    step = prepare_tinker_step(batch, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0)
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -372,8 +377,9 @@ def test_skip_and_unsupported_loss_do_not_mutate_remote(runtime, objective):
     assert prepared(value, objective).action == "skip"
     objective.action = "train"
     objective.loss_family = "sao"
+    other = TrainingBatch("other", (item(value.inference.serving_runtime_load_id(), group="h"),))
     with pytest.raises(ValueError, match="unsupported Tinker loss"):
-        prepared(value, objective)
+        value.training.prepare_training_step(other, TrainingMethod(objective.name), {}, SCHEDULING, 0)
     assert not client.calls
 
 
@@ -558,7 +564,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
             runtime.inference.snapshot(scenario.release_queries.artifact_for_version(published.release_id))[0]
             == "tinker://update-1/sampler"
         )
-        assert runtime.training.incumbent.state_path == "tinker://update-1/state"
+        assert incumbent(runtime.training).state_path == "tinker://update-1/state"
     finally:
         first.close()
 
@@ -572,12 +578,12 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
             restored.inference.snapshot(scenario.release_queries.artifact_for_version(published.release_id))[1]
             == restored.inference.current_runtime_load_id()
         )
-        assert restored.training.incumbent.state_path == "tinker://update-1/state"
+        assert incumbent(restored.training).state_path == "tinker://update-1/state"
         scenario.rollback(base)
         assert scenario.scenario_step == 2
         current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)
         assert restored.inference.snapshot(current)[0] is None
-        assert restored.training.incumbent.state_path == "tinker://base/state"
+        assert incumbent(restored.training).state_path == "tinker://base/state"
     finally:
         second.close()
 
@@ -668,8 +674,10 @@ def test_step_size_respects_error_remainder(objective):
     scheduling = StepScheduling(remainder="error")
     with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
         prepare_tinker_step(
-            TrainingJob(TrainingBatch("batch", (item("v"),)), TrainingMethod(objective.name), scheduling, {}),
-            runtime_load_id="v",
+            TrainingBatch("batch", (item("v"),)),
+            TrainingMethod(objective.name),
+            {},
+            scheduling,
             batch_size=2,
             kl_coef=0.0,
         )
@@ -704,7 +712,7 @@ def scheduled(runtime, objective, schedule, *, step=0):
     version = runtime.inference.serving_runtime_load_id()
     batch = TrainingBatch(f"batch-{step}", tuple(item(version, group=str(index)) for index in range(3)))
     method = TrainingMethod(objective.name, schedule)
-    return runtime.training.prepare_training_step(TrainingJob(batch, method, ONE_SAMPLE_STEPS, {}), step).payload
+    return runtime.training.prepare_training_step(batch, method, {}, ONE_SAMPLE_STEPS, step).payload
 
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(runtime, objective):
@@ -726,7 +734,7 @@ def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(r
     value.shutdown()
     restarted = Deployment(value.config, client)
     try:
-        assert restarted.training.incumbent.learning_rate_schedule_state == LearningRateScheduleState(WARMUP, 3)
+        assert incumbent(restarted.training).learning_rate_schedule_state == LearningRateScheduleState(WARMUP, 3)
         continued = restarted.training.train_candidate(scheduled(restarted, objective, WARMUP, step=2))
         assert client.learning_rates[-1] == pytest.approx((7.5e-5, 1e-4, 1e-4))
         restarted.training.commit_candidate(continued.training_job_id)
@@ -753,7 +761,6 @@ def test_without_a_selected_schedule_every_step_uses_the_configured_rate(runtime
     value.training.commit_candidate(candidate.training_job_id)
     # A checkpoint without a schedule keeps its manifest in the earlier shape.
     assert "learning_rate_schedule_state" not in json.loads((Path(candidate.checkpoint_path) / MANIFEST).read_text())
-    assert "learning_rate_schedule_state" not in json.loads((Path(value.config.state_dir) / INCUMBENT).read_text())
 
 
 def test_each_job_trains_the_loss_of_its_selected_objective(runtime, objective, second_objective):
@@ -772,7 +779,7 @@ def test_a_method_without_a_tinker_loss_is_refused_before_training(runtime):
     value, client = runtime
     batch = TrainingBatch("batch", (item(value.inference.serving_runtime_load_id()),))
     with pytest.raises(ValueError, match="unsupported Tinker loss family 'sft'"):
-        value.training.prepare_training_step(TrainingJob(batch, TrainingMethod("sft"), SCHEDULING, {}), 0)
+        value.training.prepare_training_step(batch, TrainingMethod("sft"), {}, SCHEDULING, 0)
     assert client.calls == []
 
 
@@ -780,10 +787,12 @@ def test_a_method_whose_loss_has_no_kl_penalty_is_refused_before_training(tmp_pa
     client = RemoteClient()
     value = Deployment(TinkerConfig(state_dir=str(tmp_path / "state"), kl_coef=0.1), client)
     try:
-        # TTTD's loss trains the configured KL penalty; importance sampling has none to train.
-        assert scheduled(value, second_objective, None)["loss"] == "tttd"
+        # Importance sampling has no KL penalty to train, so the job is refused before it reaches Tinker.
         with pytest.raises(ValueError, match="importance_sampling does not implement a KL penalty"):
             scheduled(value, objective, None)
         assert client.calls == []
+        # TTTD's loss trains the configured KL penalty.
+        value.training.train_candidate(scheduled(value, second_objective, None))
+        assert client.calls[-1][2] is resolve_tinker_loss("tttd")
     finally:
         value.shutdown()

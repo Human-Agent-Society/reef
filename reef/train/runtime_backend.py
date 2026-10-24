@@ -28,9 +28,9 @@ from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     InferenceRuntime,
     ModelCandidate,
+    PreparedTrainingStep,
     RuntimeContractError,
     StaleCandidate,
-    TrainingJob,
     TrainingMethod,
     TrainingRuntime,
 )
@@ -154,9 +154,7 @@ class RuntimeCandidateBackend(CandidateBackend):
         if not isinstance(method, TrainingMethod):
             selector_name = type(self.training_method_selector).__name__
             raise TypeError(f"{selector_name}.select must return a TrainingMethod, got {type(method).__name__}")
-        prepared = self.scheduler.prepare_training_step(
-            TrainingJob(batch, method, self.scheduling, state), scenario_step
-        )
+        prepared = self.prepare_training_step(batch, method, state, self.scheduling, scenario_step)
         next_state = dict(prepared.next_algorithm_state)
         metrics = {**prepared.metrics, "training_method": method.to_dict()}
         if prepared.action == "skip":
@@ -222,6 +220,16 @@ class RuntimeCandidateBackend(CandidateBackend):
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.reject_candidate(self._prepared_candidate(prepared))
+
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        method: TrainingMethod,
+        algorithm_state: Mapping[str, Any],
+        scheduling: StepScheduling,
+        scenario_step: int,
+    ) -> PreparedTrainingStep:
+        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         return self.scheduler.train_candidate(payload)

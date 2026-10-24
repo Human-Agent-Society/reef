@@ -28,7 +28,7 @@ from reef.evaluation import (
 from reef.recipe import WeightTrainingRecipe
 from reef.record2record import ExclusiveReportRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJob, TrainingMethod
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos import StepScheduling
@@ -74,9 +74,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(
-            TrainingJob(batch, TrainingMethod(self._objective), StepScheduling(), state), step_size=1
-        )
+        prepared = prepare_slime_step(batch, TrainingMethod(self._objective), state, StepScheduling(), step_size=1)
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -418,7 +416,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor.push(inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
     sft_result = prepare_slime_step(
-        TrainingJob(sft_processor.build_batch(1), TrainingMethod("sft"), StepScheduling(), {}), step_size=1
+        sft_processor.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
     )
     assert sft_result.next_algorithm_state == {"steps": 1}
 
@@ -427,8 +425,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
         grpo_processor.push(inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
     result = prepare_slime_step(
-        TrainingJob(grpo_processor.build_batch(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), StepScheduling(), {}),
-        step_size=1,
+        grpo_processor.build_batch(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
     )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
@@ -868,10 +865,12 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         def inference_handler(self):
             return None
 
-        def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
-            prepared = prepare_slime_step(job, step_size=self.batch_size)
+        def prepare_training_step(
+            self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        ):
+            prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
             assert prepared.payload is not None
-            self.calls.append(("prepare", job.batch, job.method))
+            self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
                 action="train",
                 payload={**prepared.payload, "scenario_step": scenario_step},
@@ -983,9 +982,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.push(report("r1", "i1", 1.0))
     batch = processor.build_batch(1)
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(
-        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample"), {}), step_size=1
-    )
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
