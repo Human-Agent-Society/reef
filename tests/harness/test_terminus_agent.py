@@ -27,29 +27,33 @@ from reef.harness.adapters.matchers import Each, IsIn, Key
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
-from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY
+from reef.harness.tree import HarnessTree, render_tree
+from reef.recipe.reefine.scorer import HEALTH_TASK_DIRECTORY
 
 pytest.importorskip("harbor", reason="harbor is not installed")
 
-NODES = [
-    ("rules", {"text": "Be brief."}),
-    ("skill", {"name": "notes", "text": "# Notes\n\nTake notes."}),
-    ("agent_command", {"name": "summarize", "text": "Summarize."}),
-    ("config", {"data": {"max_turns": 12}}),
-    # The model comes from Reef's binding: a tree cannot set model_name.
-    *ModelBinding(base_url="http://127.0.0.1:9", model="openai/stub", api_key="k").compose_nodes(
-        get_adapter("terminus")
-    ),
-]
+TREE = {
+    "rules.md": "Be brief.",
+    "skills/notes/SKILL.md": "# Notes\n\nTake notes.",
+    "commands/summarize.md": "Summarize.",
+    "config/primary.json": json.dumps({"max_turns": 12}),
+}
+#: The model comes from Reef's binding: a tree cannot set model_name.
+BINDING = ModelBinding(base_url="http://127.0.0.1:9", model="openai/stub", api_key="k")
+
+
+def render(files: dict[str, str]) -> dict[str, str]:
+    """``files`` rendered for terminus under ``BINDING``."""
+    descriptor = get_adapter("terminus")
+    return render_tree(HarnessTree(files), descriptor, BINDING.config_overlays(descriptor))
 
 
 def bound_config(base_url: str, served: str, knobs: dict[str, Any] | None = None) -> dict[str, Any]:
     """The terminus config a tree with ``knobs`` renders under the model binding for ``served`` at ``base_url``."""
     descriptor = get_adapter("terminus")
     binding = ModelBinding(base_url=base_url, model=served, api_key="k-1")
-    nodes = [("config", {"data": knobs or {}}), *binding.compose_nodes(descriptor)]
-    return json.loads(render_composition(nodes, descriptor)["terminus/config.json"])
+    tree = HarnessTree({"config/primary.json": json.dumps(knobs or {})})
+    return json.loads(render_tree(tree, descriptor, binding.config_overlays(descriptor))["terminus/config.json"])
 
 
 @pytest.fixture
@@ -91,7 +95,7 @@ def endpoint() -> Iterator[tuple[str, list[tuple[str, dict[str, Any], str]]]]:
 
 
 def _rendered(root: Path) -> dict[str, str]:
-    files = render_composition(NODES, get_adapter("terminus"))
+    files = render(TREE)
     for path, text in files.items():
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -233,8 +237,6 @@ def test_extension_must_remain_a_terminus_agent(monkeypatch) -> None:
 
     monkeypatch.setenv(ISOLATION_ENV, "bwrap")
     monkeypatch.setenv(ENVIRONMENT_ENV, "e2b")
-    files = render_composition(
-        [*NODES, ("code_extension", {"name": "agent", "code": "class Agent: pass\n"})], get_adapter("terminus")
-    )
+    files = render({**TREE, "extensions/agent.py": "class Agent: pass\n"})
     with pytest.raises(TerminusTreeError, match="must inherit Harbor's Terminus2"):
         agent_spec("/root", files)

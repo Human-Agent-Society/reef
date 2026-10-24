@@ -3,19 +3,18 @@ from __future__ import annotations
 import multiprocessing
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_proposer
+from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
 from reef.evaluation.harness import EpisodeScorer, EvaluationWorkerPool, evaluation_selection
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, TrainingPipeline
-from reef.train.cordis_backend.backend import CordisBackend
+from reef.train.backend import ComponentReleases
 from reef.train.trainer import Trainer
 
 
@@ -102,7 +101,7 @@ class IsolationScorer(EpisodeScorer):
 
 @pytest.mark.parametrize("executor_backend, workers", [("uni", 1), ("mp", 2)])
 def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, executor_backend, workers):
-    binary = tmp_path / "fake-pi"
+    binary = tmp_path / "isolation-pi"
     roots = tmp_path / "roots"
     binary.write_text(
         "#!/usr/bin/env python3\nimport os,json\nfrom pathlib import Path\n"
@@ -114,15 +113,15 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         f"with open({str(roots)!r}, 'a') as log: log.write(os.getcwd()+'\\n')\n"
     )
     binary.chmod(0o755)
-    backend = CordisBackend(
-        descriptor=get_adapter("pi"),
-        propose=resolve_proposer(lambda *args: None),
-        score_episode=IsolationScorer(),
+    recipe = harness_recipe(
+        tmp_path,
+        lambda context: None,
+        score=IsolationScorer(),
         tasks=("one",),
-        binary=str(binary),
-        models=ModelBinding(base_url="http://unused", model="unused", api_key="dummy"),
         worker_executor=ExecutorSettings(executor_backend, workers=workers),
     )
+    recipe = replace(recipe, binary=str(binary))
+    backend = recipe.build_backend("test", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
     records = SQLiteRecordStore()
     trainer = Trainer(
         scenario="test",
@@ -136,7 +135,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     try:
         for cycle in range(2):
             pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate", None), ({}, "", None)]
-            scores = backend._episode_evaluator.run_episodes(pairings)
+            scores = backend.evaluator.run_episodes(pairings)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
             assert [row.score for row in scores] == expected
         paths = roots.read_text().splitlines()
@@ -146,6 +145,6 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         trainer.close()
         records.close()
     trainer.close()
-    assert backend._episode_evaluator._worker_pool._closed
+    assert backend.evaluator._worker_pool._closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend._episode_evaluator.run_episodes([({}, "", None)])
+        backend.evaluator.run_episodes([({}, "", None)])

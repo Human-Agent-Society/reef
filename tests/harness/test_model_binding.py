@@ -16,10 +16,10 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 
 
 class _Response(io.BytesIO):
@@ -178,10 +178,10 @@ def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monke
 
 
 def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     record: list[dict[str, Any]] = []
-    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record))
+    budgeted = BudgetedBinding(ModelBinding("http://up", "m"), StepCalls(0, record))
     _capture(
         monkeypatch,
         {
@@ -196,8 +196,8 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
 
 
 def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
-    from reef.harness.tree.nodes import RECORD_TEXT_CAP
-    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+    from reef.harness.tree.checks import RECORD_TEXT_CAP
+    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     response = {
         "id": "response-1",
@@ -214,7 +214,7 @@ def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -
     }
     record: list[dict[str, Any]] = []
     inner = ModelBinding("http://up", "m")
-    budgeted = _BudgetedBinding(inner, _StepCalls(0, record))
+    budgeted = BudgetedBinding(inner, StepCalls(0, record))
     _capture(monkeypatch, response)
     assert budgeted.chat([]) == "the answer"
     assert record[0]["reply"] == "the answer"
@@ -311,7 +311,7 @@ def test_responses_stream_keeps_reasoning_output_items(monkeypatch) -> None:
 
 
 def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     class CustomChat(ModelBinding):
         def chat(self, messages, **params):
@@ -322,7 +322,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
     inner.complete({"messages": []})
     assert inner.last_response() is not None
     record: list[dict[str, Any]] = []
-    assert _BudgetedBinding(inner, _StepCalls(0, record)).chat([]) == "custom text"
+    assert BudgetedBinding(inner, StepCalls(0, record)).chat([]) == "custom text"
     assert "response" not in record[0]
 
 
@@ -340,7 +340,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
     from reef.harness.episodes.model_binding import ModelBindingError
-    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     record: list[dict[str, Any]] = []
     response = {
@@ -354,7 +354,7 @@ def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(mo
     }
     _capture(monkeypatch, response)
     with pytest.raises(ModelBindingError, match="non-text"):
-        _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record)).chat([])
+        BudgetedBinding(ModelBinding("http://up", "m"), StepCalls(0, record)).chat([])
     assert "error" in record[0] and "reply" not in record[0]
     assert record[0]["response"] == response
     assert record[0]["usage"] == {"input_tokens": 3, "output_tokens": 20}
@@ -408,19 +408,23 @@ def test_anthropic_stream_preserves_tool_input_or_its_incomplete_fragments(monke
         assert block["partial_json"] == partial_json
 
 
-def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> None:
+def bound_files(binding: ModelBinding, adapter: str) -> dict[str, str]:
+    """The files the empty tree renders for ``adapter`` with ``binding``'s overlays."""
+    descriptor = get_adapter(adapter)
+    return render_tree(HarnessTree({}), descriptor, binding.config_overlays(descriptor))
+
+
+def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> None:
     """With client models, the provider block lists them all, the served one first
     and still the default; a template with no such list is unchanged."""
     binding = ModelBinding("http://up", "served", api_key="k")
-    pi = binding.compose_nodes(get_adapter("pi"), models=("other/big", "served", "other/small"))
-    providers = next(data for _, data in pi if "providers" in data["data"])["data"]["providers"]["reef"]
-    assert [m["id"] for m in providers["models"]] == ["served", "other/big", "other/small"]
-    primary = next(data for _, data in pi if "defaultModel" in data["data"])["data"]
-    assert primary["defaultModel"] == "reef/served"
-    opencode = binding.compose_nodes(get_adapter("opencode"), models=("other/big",))
-    data = opencode[0][1]["data"]
+    pi = dict(binding.config_overlays(get_adapter("pi"), models=("other/big", "served", "other/small")))
+    assert [m["id"] for m in pi["models"]["providers"]["reef"]["models"]] == ["served", "other/big", "other/small"]
+    assert pi["primary"]["defaultModel"] == "reef/served"
+    ((target, data),) = binding.config_overlays(get_adapter("opencode"), models=("other/big",))
+    assert target == "primary"
     assert list(data["provider"]["reef"]["models"]) == ["served", "other/big"] and data["model"] == "reef/served"
-    assert binding.compose_nodes(get_adapter("opencode")) == binding.compose_nodes(
+    assert binding.config_overlays(get_adapter("opencode")) == binding.config_overlays(
         get_adapter("opencode"), models=("served",)
     )
 
@@ -429,9 +433,9 @@ def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> 
     module = tmp_path / "demo_client_models.py"
     module.write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.cordis_backend.strategies import Proposer\n\n"
+        "from reef.train.harness_backend.contract import Proposer\n\n"
         "class Propose(Proposer):\n"
-        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "    def propose(self, context):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
@@ -449,7 +453,7 @@ def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> 
             },
         }
         runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-        built = CordisRecipe.from_environment({}, config=config, runtime=runtime)
+        built = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
         assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
         codex_config = {
             **config,
@@ -461,12 +465,12 @@ def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> 
                 },
             },
         }
-        codex = CordisRecipe.from_environment({}, config=codex_config, runtime=runtime)
+        codex = HarnessEvolutionRecipe.from_environment({}, config=codex_config, runtime=runtime)
         assert codex.model_binding().metadata.context_window == 640_000
         assert codex.build_surface("s").harness.model_metadata["small"] == codex.model_binding().metadata
         bad = {**config, "evolution": {**config["evolution"], "client_models": "big/one"}}
         with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
-            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
+            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
     finally:
         sys.path.remove(str(tmp_path))
 
@@ -477,10 +481,9 @@ def test_unknown_api_is_refused() -> None:
 
 
 def test_episode_templates_follow_the_dialect() -> None:
-    pi = get_adapter("pi")
-    openai = render_composition(ModelBinding("http://up", "m", api_key="k").compose_nodes(pi), pi)
-    responses = render_composition(ModelBinding("http://up", "m", api_key="k", api="responses").compose_nodes(pi), pi)
-    anthropic = render_composition(ModelBinding("http://up", "m", api_key="k", api="anthropic").compose_nodes(pi), pi)
+    openai = bound_files(ModelBinding("http://up", "m", api_key="k"), "pi")
+    responses = bound_files(ModelBinding("http://up", "m", api_key="k", api="responses"), "pi")
+    anthropic = bound_files(ModelBinding("http://up", "m", api_key="k", api="anthropic"), "pi")
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-completions"
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
     assert json.loads(responses["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-responses"
@@ -498,14 +501,12 @@ def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> No
     "No API key found for the selected model" before reaching the endpoint,
     so both sides of the gate scored 0 and no proposal could ever publish.
     """
-    pi = get_adapter("pi")
-    files = render_composition(ModelBinding("http://127.0.0.1:11434", "m").compose_nodes(pi), pi)
+    files = bound_files(ModelBinding("http://127.0.0.1:11434", "m"), "pi")
     assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == NO_KEY_PLACEHOLDER
 
 
 def test_a_real_key_is_rendered_verbatim_over_the_placeholder() -> None:
-    pi = get_adapter("pi")
-    files = render_composition(ModelBinding("http://up", "m", api_key="sk-real").compose_nodes(pi), pi)
+    files = bound_files(ModelBinding("http://up", "m", api_key="sk-real"), "pi")
     assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == "sk-real"
 
 
@@ -558,9 +559,9 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     module = tmp_path / "demo_models.py"
     module.write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
-        "from reef.train.cordis_backend.strategies import Proposer\n\n"
+        "from reef.train.harness_backend.contract import Proposer\n\n"
         "class Propose(Proposer):\n"
-        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "    def propose(self, context):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
@@ -578,24 +579,24 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
             },
         }
         runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-        built = CordisRecipe.from_environment({"TEACHER_KEY": "sk-t"}, config=config, runtime=runtime)
+        built = HarnessEvolutionRecipe.from_environment({"TEACHER_KEY": "sk-t"}, config=config, runtime=runtime)
         models = built.model_bindings()
         assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
 
         bad = {**config, "evolution": {**config["evolution"], "models": {"served": {"url": "http://x", "model": "m"}}}}
         with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
-            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
+            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
         bad = {**config, "evolution": {**config["evolution"], "models": {"t": {"model": "m"}}}}
         with pytest.raises(RecipeConfigError, match=r"evolution\.models\.t\.url"):
-            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
+            HarnessEvolutionRecipe.from_environment({}, config=bad, runtime=runtime)
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("demo_models", None)
 
 
-def _models_node(binding: ModelBinding) -> dict:
-    """The ``models`` config node a pi tree gets from ``binding``."""
-    return next(node for _, node in binding.compose_nodes(get_adapter("pi")) if node["target"] == "models")
+def models_overlay(binding: ModelBinding) -> dict:
+    """The ``models`` config overlay a pi tree gets from ``binding``."""
+    return dict(binding.config_overlays(get_adapter("pi")))["models"]
 
 
 @pytest.mark.unit
@@ -603,15 +604,15 @@ def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
     """pi falls back to 16384 tokens for a model its config does not size, which a reasoning model spends on its
     reasoning alone; Reef writes the binding's budget instead, and JSON needs it to stay a number."""
     binding = ModelBinding(base_url="http://127.0.0.1:8901", model="anthropic/claude-sonnet-5", api_key="tok")
-    models = _models_node(binding)
-    assert models["data"]["providers"]["reef"]["models"][0] == {
+    models = models_overlay(binding)
+    assert models["providers"]["reef"]["models"][0] == {
         "id": "anthropic/claude-sonnet-5",
         "maxTokens": 32000,
     }
     assert binding.max_output_tokens == 32000
 
-    smaller = _models_node(replace(binding, max_output_tokens=8000))
-    assert smaller["data"]["providers"]["reef"]["models"][0]["maxTokens"] == 8000
+    smaller = models_overlay(replace(binding, max_output_tokens=8000))
+    assert smaller["providers"]["reef"]["models"][0]["maxTokens"] == 8000
 
     for bad in (0, -1, True):
         with pytest.raises(ValueError, match="max_output_tokens"):
@@ -716,8 +717,7 @@ def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pyt
         fallback = binding.with_metadata()
         assert fallback == binding
         assert "Could not read metadata for model 'served'" in caplog.text
-        descriptor = get_adapter("codex")
-        files = render_composition(fallback.compose_nodes(descriptor), descriptor)
+        files = bound_files(fallback, "codex")
         assert "codex/models.json" not in files
         assert "model_catalog_json" not in files["codex/config.toml"]
         assert binding.with_metadata().metadata == ModelMetadata(640_000, False)
@@ -731,8 +731,8 @@ def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pyt
 
 def test_budgeted_binding_keeps_model_metadata() -> None:
     from reef.core.model_metadata import ModelMetadata
-    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+    from reef.train.harness_backend.calls import BudgetedBinding, StepCalls
 
     binding = ModelBinding("http://up", "served", api="responses", metadata=ModelMetadata(640_000, True))
-    budgeted = _BudgetedBinding(binding, _StepCalls(0, []))
-    assert budgeted.compose_nodes(get_adapter("codex")) == binding.compose_nodes(get_adapter("codex"))
+    budgeted = BudgetedBinding(binding, StepCalls(0, []))
+    assert budgeted.config_overlays(get_adapter("codex")) == binding.config_overlays(get_adapter("codex"))

@@ -4,35 +4,35 @@ import copy
 import dataclasses
 
 import pytest
-from tests.recipes.meta_harness.test_meta_harness import (
+from tests.support.harness_methods import (
     IMPROVED,
     SEED,
     QueueChat,
-    _report_once,
-    build_recipe,
-    content_id,
-    make_binary,
-    reply,
-    runtime,
-    sections,
+    meta_harness_sections,
+    proposal_reply,
+    report_once,
+    served_runtime,
 )
+from tests.support.harness_steps import make_pi_binary
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
+from reef.recipe.registry import build_recipe
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 @pytest.fixture(params=["memory", "git"])
 def publication_case(tmp_path, request):
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    chat = QueueChat(reply(content_id(SEED), IMPROVED))
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
+    make_pi_binary(tmp_path)
+    config = meta_harness_sections(tmp_path)
+    chat = QueueChat(proposal_reply(SEED, IMPROVED))
+    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
+    # The base release holds the seed, as a deployment's does.
     initial = tmp_path / "initial"
-    initial.mkdir()
+    recipe.seed.write(initial)
     memory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "memory")
 
     def factory():
@@ -42,6 +42,7 @@ def publication_case(tmp_path, request):
             tmp_path / "artifacts.git",
             work_dir=tmp_path / "work",
             cache_dir=tmp_path / "cache",
+            bootstrap_files=recipe.base_artifact_files(),
         )
 
     return recipe, factory, chat, tmp_path / "records"
@@ -55,7 +56,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
         scenario = dispatcher.get_or_create_scenario("selected-commit")
         previous = copy.deepcopy(scenario.trainer.state)
         head = scenario.current_artifact_ref()
-        _report_once(scenario, "selected-commit", "1")
+        report_once(scenario, "selected-commit", "1")
         result = scenario.prepare_training_step()
         assert result.artifact is not None and len(chat.prompts) == 1
         assert isinstance(scenario.store, CommitHistoryScenarioStore)
@@ -106,7 +107,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
     try:
         scenario = dispatcher.get_or_create_scenario("stale-artifact-head")
         old_head = scenario.current_artifact_ref()
-        _report_once(scenario, "stale-artifact-head", "1")
+        report_once(scenario, "stale-artifact-head", "1")
         result = scenario.prepare_training_step()
 
         def unavailable(*args, **kwargs):
@@ -150,7 +151,7 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
             pytest.fail("a non-journaled publication must commit its backend head directly")
 
         monkeypatch.setattr(scenario.repository.backend, "commit_release", unexpected)
-        _report_once(scenario, "no-journal", "1")
+        report_once(scenario, "no-journal", "1")
         result = scenario.prepare_training_step()
         scenario.commit(result)
 
@@ -171,7 +172,7 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
     dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records))
     try:
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
-        _report_once(scenario, "lost-journal-ack", "1")
+        report_once(scenario, "lost-journal-ack", "1")
         result = scenario.prepare_training_step()
         commit_step = scenario.store.commit_step
 
@@ -214,7 +215,7 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
             unrelated = backend.publish(competing, expected_parent=expected_parent)
             return commit_release(ref, expected_parent=expected_parent)
 
-        _report_once(scenario, "postcommit-head-conflict", "1")
+        report_once(scenario, "postcommit-head-conflict", "1")
         result = scenario.prepare_training_step()
         with monkeypatch.context() as patch:
             patch.setattr(backend, "commit_release", conflict_after_journal)

@@ -1,9 +1,9 @@
 """Server-side vendor resolution of the harness binary: the pin gate, the
-vendor command, and the prefix a client's install script shares with it.
+vendor command, the install prefix, and the backend a recipe builds on it.
 
 Hermetic: the npm-kind tests shim ``npm`` on PATH and run the real
-subprocess path, exactly like the install-script tests; the git-kind test
-records the install steps instead of cloning and building a venv.
+subprocess path; the git-kind test records the install steps instead of
+cloning and building a venv.
 """
 
 from __future__ import annotations
@@ -12,33 +12,29 @@ import os
 import stat
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.reef_service.test_harness_recipe import (
-    MODEL,
-    PI_FAKE,
-    RULES,
-    batch,
-    evaluate,
-    make_binary,
-    run_backend_step,
-)
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import COMPONENT, PI_FAKE, TreeReleases, changed_rules, harness_recipe, make_pi_binary
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
+    AdapterProgram,
     VendorInstallError,
     install_prefix,
     resolve_binary,
 )
+from reef.harness.tree import TreePatch
 from reef.runtime.executor.config import ExecutorSettings
-from reef.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
-from reef.service.install_script import render_install_script
-from reef.train.cordis_backend import CordisBackend, Mutation
+from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.train.backend import ComponentReleases
+from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.types import TrainingBatch, TrainStepResult
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -80,14 +76,9 @@ def test_an_adapter_without_an_install_section_resolves_to_its_bare_binary_name(
 
 
 @pytest.mark.unit
-def test_the_prefix_default_is_the_root_the_served_install_script_bakes_in() -> None:
-    """Server and client on one machine install the pin into one tree, not two."""
-    descriptor = get_adapter("pi")
-    script = render_install_script(descriptor=descriptor, files={}, release_id="v1", content_id="c1")
-    prefix_line = next(line for line in script.splitlines() if line.startswith("PREFIX="))
-    assert DEFAULT_PREFIX_ROOT.replace("~", "$HOME", 1) in prefix_line
-    assert PREFIX_ENV in prefix_line
-    assert install_prefix(descriptor) == Path(DEFAULT_PREFIX_ROOT).expanduser() / "pi"
+def test_the_prefix_default_is_one_directory_per_adapter_under_the_default_root(monkeypatch) -> None:
+    monkeypatch.delenv(PREFIX_ENV, raising=False)
+    assert install_prefix(get_adapter("pi")) == Path(DEFAULT_PREFIX_ROOT).expanduser() / "pi"
 
 
 @pytest.mark.unit
@@ -218,35 +209,34 @@ def _counting_resolver(monkeypatch, result):
     return calls
 
 
-def _backend(binary, propose, *, executor=None, worker_executor=None):
-    return CordisBackend(
-        descriptor=get_adapter("pi"),
-        propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(evaluate),
-        tasks=("task one",),
-        models=MODEL,
-        binary=binary,
-        executor=executor,
-        worker_executor=worker_executor,
-    )
+def _backend(
+    tmp_path: Path,
+    binary: str | None,
+    *,
+    executor: EpisodeExecutor | None = None,
+    worker_executor: ExecutorSettings | None = None,
+) -> HarnessBackend:
+    """The pi backend a recipe builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
+    fields: dict = {"binary": binary}
+    if executor is not None:
+        fields["executor"] = executor
+    if worker_executor is not None:
+        fields["worker_executor"] = worker_executor
+    recipe = replace(harness_recipe(tmp_path, lambda context: TreePatch(changed_rules("marker rules\n"))), **fields)
+    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
 
 
-def _step(backend):
-    return run_backend_step(backend, batch(), {"steps": 0, "entries": []})
-
-
-def _propose(nodes, samples, models):
-    del nodes, samples, models
-    return Mutation("create", "r1", RULES)
+def _step(backend: HarnessBackend) -> TrainStepResult:
+    return backend_step(backend, TrainingBatch("demo:1"), backend.initial_state())
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("workers", [1, 2])
 def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path, workers) -> None:
     """Startup resolves the agent, and every episode reuses that result."""
-    calls = _counting_resolver(monkeypatch, str(make_binary(tmp_path)))
+    calls = _counting_resolver(monkeypatch, str(make_pi_binary(tmp_path)))
 
-    backend = _backend(None, _propose, worker_executor=ExecutorSettings(workers=workers))
+    backend = _backend(tmp_path, None, worker_executor=ExecutorSettings(workers=workers))
     assert calls == ["pi"]
 
     result = _step(backend)
@@ -262,16 +252,16 @@ def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch
 def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp_path) -> None:
     calls = _counting_resolver(monkeypatch, "/should/not/be/used")
 
-    _step(_backend(str(make_binary(tmp_path)), _propose))
+    _step(_backend(tmp_path, str(make_pi_binary(tmp_path))))
     assert calls == []
 
 
-def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
+def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch, tmp_path) -> None:
     from reef.sandbox.e2b import E2BExecutor
 
     calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
-    backend = _backend(None, _propose, executor=E2BExecutor(api_key="test-key"))
+    backend = _backend(tmp_path, None, executor=E2BExecutor(api_key="test-key"))
     try:
         assert calls == []
     finally:
@@ -279,10 +269,10 @@ def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_a_vendor_install_failure_refuses_construction(monkeypatch) -> None:
+def test_a_vendor_install_failure_refuses_construction(monkeypatch, tmp_path) -> None:
     calls = _counting_resolver(monkeypatch, VendorInstallError("npm exited 1: ERR! 404 not found"))
     with pytest.raises(VendorInstallError, match="npm exited 1: ERR! 404 not found"):
-        _backend(None, _propose)
+        _backend(tmp_path, None)
     assert calls == ["pi"]
 
 
@@ -291,7 +281,7 @@ def test_missing_npm_refuses_backend_construction(monkeypatch, tmp_path) -> None
     monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "install"))
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     with pytest.raises(VendorInstallError, match=r"npm.*not on PATH"):
-        _backend(None, _propose)
+        _backend(tmp_path, None)
 
 
 @pytest.mark.unit
@@ -357,7 +347,7 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
     monkeypatch.setattr(SandboxExecutor, "launch", launch)
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     original = SandboxExecutor(egress_hosts=("localhost",))
-    backend = _backend(None, _propose, executor=original)
+    backend = _backend(tmp_path, None, executor=original)
     result = _step(backend)
     assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
     assert len(seen) == 2
@@ -377,9 +367,11 @@ def test_an_explicit_binary_does_not_add_a_vendor_mount(monkeypatch, tmp_path) -
     calls = _counting_resolver(monkeypatch, "/should/not/be/used")
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     sandbox = SandboxExecutor()
-    backend = _backend(str(make_binary(tmp_path)), _propose, executor=sandbox)
+    explicit = str(make_pi_binary(tmp_path))
+    _backend(tmp_path, explicit, executor=sandbox)
+    # The recipe binds the program as the executor does here: an explicit binary keeps the executor's own mounts.
+    assert sandbox.for_program(AdapterProgram(get_adapter("pi")), binary=explicit) == (sandbox, explicit)
     assert calls == []
-    assert backend._executor is sandbox
 
 
 @pytest.mark.integration
@@ -401,12 +393,13 @@ def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatc
     binary = prefix / "node_modules/.bin/pi"
     binary.parent.mkdir(parents=True)
     binary.symlink_to("../package/cli.sh")
-    backend = _backend(None, _propose, executor=sandbox)
+    _backend(tmp_path, None, executor=sandbox)
+    executor, binary = sandbox.for_program(AdapterProgram(get_adapter("pi")))
     root = tmp_path / "episode"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
-    outcome = backend._executor.launch(
-        [backend._binary, str(prefix)],
+    outcome = executor.launch(
+        [binary, str(prefix)],
         root=root,
         workspace=workspace,
         env={},

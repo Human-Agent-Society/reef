@@ -1,4 +1,4 @@
-"""The terminus runner's tree mapping: node kinds to Harbor's native inputs.
+"""The terminus runner's tree mapping: tree kinds to Harbor's native inputs.
 
 Stdlib only, like the module under test: these run wherever the suite runs,
 with no Harbor and no Docker, so the mapping a gated tree change depends on is
@@ -26,15 +26,21 @@ from reef.harness.runners.terminus import (
     terminus_kwargs,
 )
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree, render_tree
+
+#: The model comes from Reef's binding: a tree cannot set model_name.
+BINDING = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
 
 
-def _tree(**nodes: str) -> dict[str, str]:
-    return dict(nodes)
+def _tree(**files: str) -> dict[str, str]:
+    return dict(files)
 
 
-def _render(tmp_path: Path, nodes: list) -> dict[str, str]:
-    files = render_composition(nodes, get_adapter("terminus"))
+def _render(tmp_path: Path, source: dict[str, str], binding: ModelBinding | None = None) -> dict[str, str]:
+    """``source`` rendered for terminus, with ``binding``'s overlays when given, and written under ``tmp_path``."""
+    descriptor = get_adapter("terminus")
+    overlays = () if binding is None else binding.config_overlays(descriptor)
+    files = render_tree(HarnessTree(source), descriptor, overlays)
     for path, text in files.items():
         target = tmp_path / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,14 +99,8 @@ def test_an_absent_skill_root_is_omitted_because_harbor_rejects_an_empty_one() -
 def test_the_agent_spec_names_harbors_own_agent_and_carries_the_tree(tmp_path: Path) -> None:
     files = _render(
         tmp_path,
-        [
-            ("config", {"data": {"max_turns": 12}}),
-            ("skill", {"name": "notes", "text": "# Notes\n\nTake notes."}),
-            # The model comes from Reef's binding: a tree cannot set model_name.
-            *ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k").compose_nodes(
-                get_adapter("terminus")
-            ),
-        ],
+        {"config/primary.json": json.dumps({"max_turns": 12}), "skills/notes/SKILL.md": "# Notes\n\nTake notes."},
+        BINDING,
     )
     spec = runner.agent_spec(str(tmp_path), files)
     # Harbor's terminus-2, not a Reef subclass: no Reef code runs in the agent.
@@ -212,8 +212,7 @@ def test_a_trial_without_a_reward_names_the_mount_problem_only_for_local_docker(
             return SimpleNamespace(rewards=None, tags={"error": missing}, uri=None)
 
     monkeypatch.setitem(sys.modules, "reef_eval", SimpleNamespace(Lab=Lab))
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
-    _render(tmp_path / "root", binding.compose_nodes(get_adapter("terminus")))
+    _render(tmp_path / "root", {}, BINDING)
     monkeypatch.setenv(runner.TREE_DIR_ENV, str(tmp_path / "root"))
     monkeypatch.setenv(runner.SESSION_DIR_ENV, str(tmp_path / "sessions"))
     monkeypatch.setenv(runner.TRIALS_DIR_ENV, str(tmp_path / "trials"))
@@ -252,8 +251,7 @@ def test_a_run_records_only_its_own_trials_steps_in_a_reused_trials_dir(
             return SimpleNamespace(rewards={"reward": 1.0}, tags={}, uri=uri)
 
     monkeypatch.setitem(sys.modules, "reef_eval", SimpleNamespace(Lab=Lab))
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
-    _render(tmp_path / "root", binding.compose_nodes(get_adapter("terminus")))
+    _render(tmp_path / "root", {}, BINDING)
     monkeypatch.setenv(runner.TREE_DIR_ENV, str(tmp_path / "root"))
     monkeypatch.setenv(runner.SESSION_DIR_ENV, str(tmp_path / "sessions"))
     monkeypatch.setenv(runner.TRIALS_DIR_ENV, str(trials))
@@ -295,10 +293,7 @@ def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
 def test_load_tree_reads_both_roots_and_skips_the_run_s_own_output(tmp_path: Path) -> None:
     # terminus-commands is a sibling of terminus, and the episode root also
     # holds the task workspace and, once running, sessions and trials.
-    files = _render(
-        tmp_path,
-        [("rules", {"text": "Be brief."}), ("agent_command", {"name": "summarize", "text": "Summarize."})],
-    )
+    files = _render(tmp_path, {"rules.md": "Be brief.", "commands/summarize.md": "Summarize."})
     for noise in ("workspace/answer.txt", "terminus/sessions/x.json", "terminus/trials/t/trajectory.json"):
         target = tmp_path / noise
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -1,8 +1,8 @@
 """SkillCatalogModule: the pool-serving skills layer and its catalog injection.
 
 Ported from the sealed campaign's test_skill_catalog.py (branch #223, commit
-0c81580e); the module now lives in the skillclaw method package and
-reads the pool from the rendered pi tree's ``skills/`` directory. The
+0c81580e); the module now lives in the skillclaw method package and owns the
+release's ``skills`` layer, whose files are ``<name>/SKILL.md``. The
 expected strings below are the OpenClaw ``system-prompt.ts`` catalog format
 (``buildSkillsSection`` wrapping ``formatSkillsForPrompt`` or
 ``formatSkillsCompact``), byte-pinned: they are what the SkillClaw proxy
@@ -25,7 +25,7 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "recipes" / "skillclaw"
 _ALPHA = "---\nname: alpha\ndescription: Count things\n---\n\nCount carefully.\n"
 _BETA = "---\nname: beta\ndescription: Sort things\n---\n\nSort carefully.\n"
 
-_POOL = {"skills/alpha/SKILL.md": _ALPHA, "skills/beta/SKILL.md": _BETA}
+_POOL = {"alpha/SKILL.md": _ALPHA, "beta/SKILL.md": _BETA}
 
 _FULL_SECTION = """## Skills (mandatory)
 Before replying: scan <available_skills> <description> entries.
@@ -90,9 +90,9 @@ def test_catalog_lists_only_skills_with_frontmatter_name_and_description(module_
     text = _module(module_cls).served_text(
         {
             **_POOL,
-            "skills/bare/SKILL.md": "No frontmatter at all.",
-            "skills/nameless/SKILL.md": "---\ndescription: Only a description\n---\n\nBody.\n",
-            "skills/silent/SKILL.md": (
+            "bare/SKILL.md": "No frontmatter at all.",
+            "nameless/SKILL.md": "---\ndescription: Only a description\n---\n\nBody.\n",
+            "silent/SKILL.md": (
                 "---\nname: silent\ndescription: Hidden\ndisable-model-invocation: true\n---\n\nBody.\n"
             ),
         }
@@ -100,15 +100,15 @@ def test_catalog_lists_only_skills_with_frontmatter_name_and_description(module_
     assert text == _FULL_SECTION
 
 
-def test_catalog_ignores_the_layers_non_skill_files(module_cls) -> None:
-    """The rendered pi tree carries the adapter's own files beside skills/."""
-    text = _module(module_cls).served_text({**_POOL, "settings.json": "{}", "models.json": "{}"})
+def test_catalog_ignores_the_files_beside_a_skill_md(module_cls) -> None:
+    """A skill directory may hold auxiliary files; only its SKILL.md enters the catalog."""
+    text = _module(module_cls).served_text({**_POOL, "alpha/notes.txt": "aux data"})
     assert text == _FULL_SECTION
 
 
 def test_catalog_escapes_xml_in_names_and_descriptions(module_cls) -> None:
     text = _module(module_cls).served_text(
-        {"skills/amp/SKILL.md": '---\nname: a&b\ndescription: Uses <tags> & "quotes"\n---\n\nBody.\n'}
+        {"amp/SKILL.md": '---\nname: a&b\ndescription: Uses <tags> & "quotes"\n---\n\nBody.\n'}
     )
     assert text is not None
     assert "<name>a&amp;b</name>" in text
@@ -164,7 +164,7 @@ def test_catalog_names_recovers_the_listed_skills_from_a_recorded_request(module
 
 def test_catalog_names_unescapes_xml(module_cls) -> None:
     prepared = _module(module_cls).prepare_request(
-        {"skills/amp/SKILL.md": "---\nname: a&b\ndescription: d\n---\n\nBody.\n"},
+        {"amp/SKILL.md": "---\nname: a&b\ndescription: d\n---\n\nBody.\n"},
         "/v1/chat/completions",
         {"messages": []},
     )
@@ -174,11 +174,11 @@ def test_catalog_names_unescapes_xml(module_cls) -> None:
 def test_validate_requires_skill_directories_with_a_skill_md(module_cls) -> None:
     module = _module(module_cls)
     module.validate(_POOL)
-    module.validate({**_POOL, "skills/alpha/notes.txt": "aux data", "settings.json": "{}"})
+    module.validate({**_POOL, "alpha/notes.txt": "aux data"})
     with pytest.raises(ReefError, match="is not under a skill directory"):
-        module.validate({"skills/SKILL.md": "top level"})
+        module.validate({"SKILL.md": "top level"})
     with pytest.raises(ReefError, match=r"must contain SKILL\.md"):
-        module.validate({"skills/alpha/notes.txt": "aux data"})
+        module.validate({"alpha/notes.txt": "aux data"})
 
 
 def test_constructor_rejects_a_blank_public_root_and_a_non_positive_budget(module_cls) -> None:

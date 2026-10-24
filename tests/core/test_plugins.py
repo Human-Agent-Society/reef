@@ -6,7 +6,7 @@ import pytest
 
 from reef.core.plugins import ConfiguredPlugin, PluginConfigError, PluginReference
 from reef.evaluation.harness import EpisodeScorer, VerifierRewardScorer
-from reef.train.cordis_backend.strategies import Proposer
+from reef.train.harness_backend import Proposer
 
 MODULE = "tests.core.test_plugins"
 
@@ -93,7 +93,7 @@ def test_an_unusable_setting_is_refused(setting, match) -> None:
 @pytest.mark.unit
 def test_a_proposer_declares_its_capabilities() -> None:
     class Quiet(Proposer):
-        def propose(self, nodes, samples, models, **keywords):
+        def propose(self, context):
             return None
 
     assert not Quiet().reads_requests and not Quiet().runs_agent

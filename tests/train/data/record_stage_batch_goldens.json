@@ -313,7 +313,7 @@
    "request": null
   }
  ],
- "cordis_hybrid": [
+ "trace_hybrid": [
   {
    "batch_id": "s:batch:1",
    "consumed": [
@@ -466,7 +466,7 @@
    "request": "train-2"
   }
  ],
- "cordis_manual_cap": [
+ "trace_manual_cap": [
   {
    "batch_id": "s:instruction:train-1",
    "consumed": [

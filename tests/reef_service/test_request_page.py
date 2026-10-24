@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import json
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -20,9 +21,11 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
+from tests.support.harness_service import harness_dispatcher
+from tests.support.harness_steps import harness_recipe
 
 from reef.core import AgentRecord, RequestType
+from reef.harness.tree import TreePatch
 from reef.service.app import create_app
 from reef.service.auth import page_key_for_digest
 from reef.service.release_page import build_release_page
@@ -33,15 +36,16 @@ from reef.service.request_page import (
     build_request_page,
     settled_step,
 )
-from reef.train.cordis_backend import Mutation, StepProgress
-from reef.train.cordis_backend.strategies import StepProposal
+from reef.train.harness_backend.capabilities import StepProgress
+from reef.train.harness_backend.contract import TreeProposal
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
 RECORD_ID = "3f1c2a9d0b7e4c5d8e9f0a1b2c3d4e5f"
 TEXT = "text me when the run is blocked"
 SESSION = "3f1c2a9d0b7e"
-MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+#: The patch of the step that answered the request: new rules the scorer prefers.
+PATCH = {"rules.md": "marker rules\n"}
 SCENARIO = "agents"
 #: What a page link the service hands out carries for the token "secret": the scenario and its page key.
 KEY = page_key_for_digest(hashlib.sha256(b"secret").digest(), SCENARIO)
@@ -76,7 +80,11 @@ def _row(metrics: dict, *, release_id: str = "rel-1", parent: str | None = "rel-
 
 
 CREATION = _row({}, release_id="rel-0", parent=None, operation="creation")
-MUTATION = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
+
+
+def request_page(record: dict, rows: list[dict], **options) -> str:
+    """The request page of ``record`` in this module's scenario."""
+    return build_request_page(record, rows, scenario=SCENARIO, **options)
 
 
 def _answered(**extra) -> dict:
@@ -97,7 +105,7 @@ def _section(page: str, name: str) -> str:
 
 def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> None:
     logo = (MODULE.parents[2] / "docs" / "assets" / "reef-logo-light.svg").read_text().strip()
-    page = build_request_page(_record(), [CREATION], now=1_042.0)
+    page = request_page(_record(), [CREATION], now=1_042.0)
     assert logo in page
     # The version page draws with the same layout, so one logo serves both.
     assert logo in build_release_page(0, [CREATION])
@@ -105,8 +113,8 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
 
 def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
-    rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
-    page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
+    rows = [CREATION, _row(_answered(selected=True, patch=PATCH))]
+    page = request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     head = f"/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
@@ -114,12 +122,12 @@ def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> Non
         assert re.match(r"^/reef/harness/releases/\d+/page(\?|$)", href.replace("&amp;", "&")), href
     # A catalog with no served head leaves the crumb as text rather than a broken link.
     pending_only = [_row(_answered(selected=True), release_id="rel-0", parent=None, pending=True)]
-    bare = build_request_page(_record(), pending_only, now=1_100.0)
+    bare = request_page(_record(), pending_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
 
 
 def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
-    page = build_request_page(_record(), [CREATION], now=1_042.0)
+    page = request_page(_record(), [CREATION], now=1_042.0)
     page.encode("ascii")
     assert page.startswith("<!doctype html>") and '<html lang="en">' in page
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in page
@@ -144,7 +152,7 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_size() -> None:
     evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", episodes_total=2)
-    page = build_request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
+    page = request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
     assert "the evaluation is running the candidate through its episodes" in progress
@@ -154,7 +162,7 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
     assert "<dt>Waiting</dt>" not in progress
 
     proposing = StepProgress(RECORD_ID, "proposing", started_at=1_058.0, step_record=None)
-    page = build_request_page(_record(), [CREATION], progress=proposing, now=1_100.0)
+    page = request_page(_record(), [CREATION], progress=proposing, now=1_100.0)
     progress = _section(page, "Progress")
     assert (
         '<span class="proposing">Designing the change</span>' in progress
@@ -165,77 +173,73 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
 
     # Another request's step says nothing about this one, which still waits.
     other = replace(evaluating, request_id="another")
-    page = build_request_page(_record(), [CREATION], progress=other, now=1_100.0)
+    page = request_page(_record(), [CREATION], progress=other, now=1_100.0)
     assert '<span class="queued">Queued</span>' in page and "<dd>100 s</dd>" in page
     assert "Evaluation episodes" not in page
-    page = build_request_page(_record(), [CREATION], consumed=True, now=1_100.0)
+    page = request_page(_record(), [CREATION], consumed=True, now=1_100.0)
     assert '<span class="running">In progress</span>' in page and "its row follows" in page and REFRESH in page
-    page = build_request_page(
-        _record(),
-        [CREATION],
-        progress=StepProgress(RECORD_ID, "settling", started_at=1_099.0, step_record=None),
-        now=1_100.0,
-    )
-    assert (
-        '<span class="settling">Saving the result</span>' in page and "committing its row" in page and REFRESH in page
-    )
 
 
-def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link_with_its_query() -> None:
-    rows = [CREATION, _row(_answered(selected=True, published=True, mutation=MUTATION))]
-    page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
+def test_a_settled_selected_request_carries_the_result_the_patch_and_the_link_with_its_query() -> None:
+    rows = [CREATION, _row(_answered(selected=True, patch=PATCH))]
+    page = request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     page.encode("ascii")
     assert REFRESH not in page and "<title>Harness request 3f1c2a9d</title>" in page
     assert _sections(page) == ["Request", "Result", "What changed"]
     selection_result = _section(page, "Result")
     assert '<span class="selected">Published</span>' in selection_result
-    assert (
-        "Published as release rel-1. Your current session keeps its installed harness until you choose to update."
-        in selection_result
-    )
+    assert "Published as release rel-1. GET /reef/harness serves it from now on." in selection_result
     assert '<dt>Release</dt><dd class="id">rel-1</dd>' in selection_result
     assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result and "Proposer failure" not in selection_result
     changed = _section(page, "What changed")
-    assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in changed
+    # Each file the patch wrote, with its kind in the harness layout.
+    assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in changed
     assert '<span class="tag">rules</span>' in changed
-    assert "<code>/versions v1 install</code>" in selection_result
+    # The next action is the call that pulls the published files.
+    assert "<h3>Pull it</h3><code>GET /reef/harness</code>" in selection_result
     assert settled_step(rows, RECORD_ID) == 1
-    bare = build_request_page(_record(), rows, now=1_100.0)
+    bare = request_page(_record(), rows, now=1_100.0)
     assert 'href="/reef/harness/releases/1/page">View v1' in bare
 
     # A rejected proposal is labeled as proposed, never as an applied change.
-    second = {"op": "update", "id": "ext", "options": {"name": "code_extension", "config": {"code": "x"}}}
     rejected = _row(
         _answered(
             selected=False,
-            mutations=[MUTATION, second],
+            patch={**PATCH, "extensions/notify.ts": "x", "skills/old/SKILL.md": None},
             selection={"reason": "candidate missed the floor on 1 of 1 tasks"},
         )
     )
-    page = build_request_page(_record(), [CREATION, rejected], now=1_100.0)
+    page = request_page(_record(), [CREATION, rejected], now=1_100.0)
     assert '<span class="rejected">Not selected</span>' in page
     assert "did not pass the checks (candidate missed the floor on 1 of 1 tasks). Nothing changed" in page
     assert "rephrase or split the request" in page
     assert "What changed" not in _sections(page)
     changed = _section(page, "Proposed changes")
-    assert changed.count("<li>") == 2
-    assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
+    assert changed.count("<li>") == 3
+    assert '<span class="tag operation-write">write</span><span class="node-id">extensions/notify.ts</span>' in changed
+    assert '<span class="tag">code_extension</span>' in changed
+    assert (
+        '<span class="tag operation-remove">remove</span><span class="node-id">skills/old/SKILL.md</span>' in changed
+    )
+    assert "Pull it" not in page
 
 
 def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_row_names_it() -> None:
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0)
+    pending = _row(_answered(selected=True, patch=PATCH), pending=True)
+    page = request_page(_record(), [CREATION, pending], now=1_100.0)
     assert '<span class="pending">Ready for review</span>' in page
     assert "Proposed changes" in _sections(page)
-    assert "Release rel-1 is ready. This change includes an extension" in page
+    assert "Release rel-1 is ready. The change touches files a person reviews before Reef serves them." in page
     assert REFRESH not in page
-    assert "<code>/versions v1 install</code>" in page
+    # The next action is the promote call, runnable as it stands with the scenario header.
+    promote_call = html.escape(f'POST /reef/scenarios/{SCENARIO}/promote {json.dumps({"release_id": "rel-1"})}')
+    assert f"<h3>Read this page, then promote it</h3><code>{promote_call}</code>" in page
     promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
-    page = build_request_page(_record(), [CREATION, pending, promote], now=1_100.0)
+    page = request_page(_record(), [CREATION, pending, promote], now=1_100.0)
     assert '<span class="promoted">Promoted at v2</span>' in page
     assert "passed the checks and was promoted at v2; the release that step published serves it" in page
-    assert "What changed" in _sections(page)
+    assert "What changed" in _sections(page) and "promote it</h3>" not in page
 
 
 def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
@@ -243,11 +247,9 @@ def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
     episode = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
     notes = {"review": {"result": "partial", "covered": [], "uncovered": ["no off switch"]}}
     row = _row(
-        _answered(
-            selected=False, selection=selection, candidate_episodes=[episode], mutation=MUTATION, proposal_notes=notes
-        )
+        _answered(selected=False, selection=selection, candidate_episodes=[episode], patch=PATCH, proposal_notes=notes)
     )
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     result = _section(page, "Result")
     assert "the task &#x27;[health] echo&#x27; failed: no transcript was read" in result or (
         "the task '[health] echo' failed: no transcript was read" in result
@@ -271,10 +273,10 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     cause = "harness binary reef-terminus not found"
     episode = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
     metrics = _answered(
-        selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, mutation=MUTATION
+        selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, patch=PATCH
     )
     row = _row(metrics)
-    result = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Result")
+    result = _section(request_page(_record(), [CREATION, row], now=1_100.0), "Result")
     assert f"could not be evaluated: {cause}" in result and "did not pass the checks" not in result
     note = "The floor tasks (health) were set before this request"
     assert note in result
@@ -289,8 +291,8 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
 
 def test_what_the_harness_puts_out_of_reach_shows_apart_from_the_uncovered_gaps() -> None:
     notes = {"review": {"result": "partial", "covered": ["chat"], "uncovered": [], "limits": ["no tool lockout"]}}
-    row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
-    review = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Review")
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes=notes))
+    review = _section(request_page(_record(), [CREATION, row], now=1_100.0), "Review")
     assert "Out of reach on this harness" in review and "no tool lockout" in review
     assert "Still uncovered" not in review
     version = _section(build_release_page(1, [CREATION, row]), "Review")
@@ -303,55 +305,20 @@ def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> N
         "review": {"result": "complete", "covered": ["chat"], "uncovered": []},
         "dropped_attempts": ["answer 1: the harness refused the entries: bad frontmatter"],
     }
-    row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes=notes))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     review = _section(page, "Review")
     assert "Answers written again" in review and "the harness refused the entries: bad frontmatter" in review
     version = build_release_page(1, [CREATION, row])
     assert "Answers written again" in version and "bad frontmatter" in version
 
 
-def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_session() -> None:
-    """hermes has no /versions and no reef-pi: a published release is installed with reef-hermes update, a
-    release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
-    note names reef-hermes setup."""
-    selected = _row(_answered(selected=True, published=True, mutation=MUTATION))
-    page = build_request_page(_record(), [CREATION, selected], now=1_100.0, adapter="hermes")
-    result = _section(page, "Result")
-    assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
-    assert "/versions" not in page and "reef-pi" not in page
-    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(), [CREATION, pending], now=1_100.0, adapter="hermes")
-    assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
-    requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
-    metrics = _answered(selected=True, published=True, mutation=MUTATION)
-    metrics["training_request"]["requires"] = requires
-    step = _row(metrics)
-    version = build_release_page(1, [CREATION, step], adapter="dsh")
-    assert "reef-dsh setup lists these" in version and "reef-pi setup" not in version
-    # The install refuses a release whose items are not set up: the request page names setup first.
-    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="dsh")
-    result = _section(page, "Result")
-    # Each command in its own box, as a person can paste it; the order and the reason stay in the prose under them.
-    assert "<code>reef-dsh setup</code><code>reef-dsh update</code>" in result and "DEEPSEEK_API_KEY" in result
-    assert "in this order" in result
-
-
-def test_on_terminus_the_pages_name_no_wrapper_command() -> None:
-    """terminus has no install and no wrapper: a published release says GET /reef/harness serves it, the Setup note
-    says its items must hold in the Harbor task, and no page names reef-terminus setup or update."""
-    requires = [{"name": "task-network", "kind": "service", "prompt": "The task allows network access"}]
-    metrics = _answered(selected=True, published=True, mutation=MUTATION)
-    metrics["training_request"]["requires"] = requires
-    step = _row(metrics)
-    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="terminus")
-    result = _section(page, "Result")
-    assert "GET /reef/harness serves it from now on" in result and "<code>GET /reef/harness</code>" in result
-    assert "must hold in the Harbor task" in result and "current session" not in result
-    version = build_release_page(1, [CREATION, step], adapter="terminus")
-    assert "these must hold in the Harbor task a run uses; nothing checks them" in version
-    for text in (page, version):
-        assert "reef-terminus setup" not in text and "reef-terminus update" not in text
+def test_the_next_action_of_a_published_release_names_what_it_requires_where_the_harness_runs() -> None:
+    metrics = _answered(selected=True, patch=PATCH)
+    metrics["training_request"]["requires"] = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your key"}]
+    result = _section(request_page(_record(), [CREATION, _row(metrics)], now=1_100.0), "Result")
+    assert "<code>GET /reef/harness</code>" in result
+    assert "It requires DEEPSEEK_API_KEY where the harness runs." in result
 
 
 def test_both_pages_say_which_answer_the_step_kept() -> None:
@@ -363,8 +330,8 @@ def test_both_pages_say_which_answer_the_step_kept() -> None:
         ({"review": review, "attempts": 2}, "Kept answer 2 of 2"),
         ({"review": review}, None),
     ):
-        row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
-        request = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Review")
+        row = _row(_answered(selected=True, patch=PATCH, proposal_notes=notes))
+        request = _section(request_page(_record(), [CREATION, row], now=1_100.0), "Review")
         version = _section(build_release_page(1, [CREATION, row]), "Review")
         for text in (request, version):
             assert (words in text) if words else ("Kept answer" not in text)
@@ -373,19 +340,18 @@ def test_both_pages_say_which_answer_the_step_kept() -> None:
 def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_what_it_proposed() -> None:
     """A skip row whose candidate reached its evaluation says where the step failed, on both pages, and lists the
     change that was proposed instead of saying no change was produced."""
-    mutation = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
     metrics = _answered(
         skipped="instruction failed",
         error="AttributeError: 'str' object has no attribute 'get'",
         failed_stage="evaluating",
-        mutations=[mutation],
+        patch=PATCH,
         proposal_notes={"design": "one rules entry"},
     )
     failed = _row(metrics, release_id="rel-0")
-    page = build_request_page(_record(), [CREATION, failed], now=1_100.0)
+    page = request_page(_record(), [CREATION, failed], now=1_100.0)
     result = _section(page, "Result")
     assert "The step failed during its evaluation" in result and "before evaluation" not in result
-    assert "r1" in _section(page, "Proposed changes") and "No changes were produced" not in page
+    assert "rules.md" in _section(page, "Proposed changes") and "No changes were produced" not in page
     version = build_release_page(1, [CREATION, failed])
     assert "The step failed during its evaluation" in version and "before evaluation" not in version
 
@@ -397,7 +363,7 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
         "review": {"result": "partial", "covered": ["the trigger"], "uncovered": ["a way to turn it off"]},
     }
     skipped = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
-    page = build_request_page(_record(), [CREATION, skipped], now=1_100.0)
+    page = request_page(_record(), [CREATION, skipped], now=1_100.0)
     assert REFRESH not in page and '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Request", "Result", "Proposed changes", "Review", "Design"]
     assert "<p>one rules entry</p>" in _section(page, "Design")
@@ -412,14 +378,14 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     assert '<span class="partial">Partial</span>' in review and "<li>a way to turn it off</li>" in review
     assert "the trigger" not in review
     complete = {"review": {"result": "complete", "covered": ["all of it"], "uncovered": []}}
-    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes=complete))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes=complete))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     assert '<span class="complete">Complete</span>' in page and "Nothing left uncovered." in page
-    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "plan"}))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes={"design": "plan"}))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     assert "<h2>Review</h2>" not in page and _sections(page)[-1] == "Design" and "<h2>How to use</h2>" not in page
     failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison proposer"), release_id="rel-0")
-    page = build_request_page(_record(), [CREATION, failed], now=1_100.0)
+    page = request_page(_record(), [CREATION, failed], now=1_100.0)
     assert '<span class="failed">Failed</span>' in page
     assert "<h3>Error</h3><p>RuntimeError: poison proposer</p>" in page
 
@@ -432,8 +398,8 @@ def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> N
         "Restated: read each answer aloud.\n\nTrigger: the /speak command; state: the last answer, from the session.\n\n"
         "## How to use\n\nType /speak after an answer; it plays through <afplay>. /speak off stops it."
     )
-    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": design}))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes={"design": design}))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     assert _sections(page) == ["Request", "Result", "What changed", "Design", "How to use"]
     assert _section(page, "Design").strip() == (
         "<p>Restated: read each answer aloud.\n\nTrigger: the /speak command; state: the last answer, from the session.</p>"
@@ -442,8 +408,8 @@ def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> N
         "<p>Type /speak after an answer; it plays through &lt;afplay&gt;. /speak off stops it.</p>"
     )
     # A plain "How to use:" line splits the same way, wherever the proposer put the heading marks.
-    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "A plan.\nHow to use:\nRun /x."}))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes={"design": "A plan.\nHow to use:\nRun /x."}))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     assert "<p>A plan.</p>" in _section(page, "Design") and "<p>Run /x.</p>" in _section(page, "How to use")
 
 
@@ -452,8 +418,8 @@ def test_a_step_whose_review_did_not_run_says_so_instead_of_dropping_the_section
     """The review is the one check of whether the entries deliver the request; when its call fails the page says
     that nothing checked, rather than reading like a step that simply had no review."""
     notes = {"design": "plan", "review_failure": "model call failed after 91.9 s: non-text content"}
-    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes=notes))
-    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
+    row = _row(_answered(selected=True, patch=PATCH, proposal_notes=notes))
+    page = request_page(_record(), [CREATION, row], now=1_100.0)
     review = _section(page, "Review")
     assert "did not run, so nothing checked whether they deliver it" in review
     assert "non-text content" in review
@@ -468,7 +434,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     ]
     notes = {"failure": "<b>failed</b>", "review": {"result": "partial", "covered": [], "uncovered": ["<i>off</i>"]}}
     row = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
-    page = build_request_page(
+    page = request_page(
         _record(text=text, requires=requires),
         [CREATION, row],
         link_query={"scenario": "a b", "key": "k&<"},
@@ -482,22 +448,22 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th></tr></thead>" in request
     assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>' in request
     assert '<tr><td>&lt;x&gt;</td><td>service</td><td class="id"></td><td>Sign in to &lt;x&gt;</td></tr>' in request
-    assert "Needs from your machine" not in build_request_page(_record(text=text), [CREATION], now=1_100.0)
+    assert "Needs from your machine" not in request_page(_record(text=text), [CREATION], now=1_100.0)
     assert "&lt;b&gt;failed&lt;/b&gt;" in page and "<li>&lt;i&gt;off&lt;/i&gt;</li>" in page
     assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;key=k%26%3C"' in page
     assert '<meta name="referrer" content="no-referrer">' in page
-    queued = build_request_page(_record(text=text), [CREATION], now=1_100.0)
+    queued = request_page(_record(text=text), [CREATION], now=1_100.0)
     queued.encode("ascii")
     assert "<script>" not in queued and "caf&#233;" in queued
 
 
 def _propose_holding(entered: Event, release: Event, failure: bool = False):
-    def propose(nodes, samples, models, *, requests=()):
+    def propose(context):
         entered.set()
         release.wait(30)
         if failure:
-            return StepProposal((), {"failure": "the E2B command connection was interrupted"})
-        return MARKER
+            return TreeProposal(TreePatch({}), notes={"failure": "the E2B command connection was interrupted"})
+        return TreePatch(PATCH)
 
     return propose
 
@@ -509,7 +475,7 @@ def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
         {"at": 1_130.0, "kind": "provider", "text": "/v1/audio/speech not/real -> 400: <no model>", "failed": True},
     )
     proposing = StepProgress(RECORD_ID, "proposing", started_at=1_000.0, step_record=None, activity=activity)
-    page = build_request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
+    page = request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
     assert _sections(page) == ["Request", "Progress", "Activity"]
     listed = _section(page, "Activity")
     lines = re.findall(
@@ -522,7 +488,7 @@ def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
 
     many = tuple({"at": 1_000.0 + i, "kind": "model", "text": f"call {i}"} for i in range(MAX_ACTIVITY_SHOWN + 5))
     listed = _section(
-        build_request_page(_record(), [CREATION], progress=replace(proposing, activity=many), now=1_200.0), "Activity"
+        request_page(_record(), [CREATION], progress=replace(proposing, activity=many), now=1_200.0), "Activity"
     )
     assert (
         listed.count("<li") == MAX_ACTIVITY_SHOWN
@@ -531,10 +497,10 @@ def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
     )
     assert "5 earlier lines not shown" in listed
 
-    quiet = build_request_page(_record(), [CREATION], progress=replace(proposing, activity=()), now=1_200.0)
+    quiet = request_page(_record(), [CREATION], progress=replace(proposing, activity=()), now=1_200.0)
     assert "Nothing yet: the proposer has not called a model." in _section(quiet, "Activity")
     # Another request's step lists nothing here.
-    other = build_request_page(_record(), [CREATION], progress=replace(proposing, request_id="another"), now=1_200.0)
+    other = request_page(_record(), [CREATION], progress=replace(proposing, request_id="another"), now=1_200.0)
     assert _sections(other) == ["Request", "Progress"]
 
 
@@ -543,8 +509,10 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
     tmp_path: Path, failure: bool
 ) -> None:
     entered, release = Event(), Event()
-    recipe = replace(_recipe(tmp_path, _propose_holding(entered, release, failure)), training_mode="manual")
-    dispatcher = _dispatcher(tmp_path, recipe)
+    recipe = harness_recipe(
+        tmp_path, _propose_holding(entered, release, failure), reads_requests=True, training_mode="manual"
+    )
+    dispatcher = harness_dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
     headers = {"x-reef-scenario": SCENARIO, "Authorization": "Bearer secret"}
@@ -636,12 +604,12 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                 assert settled["state"] == "failed"
                 assert '<span class="failed">Failed</span>' in page
                 assert "the E2B command connection was interrupted" in page
-                assert "/versions v1 install" not in page
+                assert "Pull it" not in page
             else:
                 assert settled["state"] == "selected"
                 assert '<span class="selected">Published</span>' in page
-                assert "Published as release " in page and "/versions v1 install" in page
-                assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
+                assert "Published as release " in page and "<code>GET /reef/harness</code>" in page
+                assert '<span class="tag operation-write">write</span><span class="node-id">rules.md</span>' in page
             assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in page
 
             # An unknown id, and a record that is no training instruction, are 404s naming the id.
@@ -676,11 +644,11 @@ def test_a_step_that_declined_on_purpose_reads_as_answered_with_no_change_on_bot
         "review": {"result": "complete", "covered": [], "uncovered": [], "limits": ["a mode a person enters"]},
     }
     step = _row(_answered(skipped="no proposal", proposal_notes=notes))
-    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="terminus")
+    page = request_page(_record(), [CREATION, step], now=1_100.0)
     result = _section(page, "Result")
     assert "answered with a design and no entry" in result and "before retrying" not in result
     assert "Proposer failure" not in result
-    version = build_release_page(1, [CREATION, step], adapter="terminus")
+    version = build_release_page(1, [CREATION, step])
     assert "answered with a design and no entry" in version and "a mode a person enters" in version
     assert "before retrying" not in version
     # The step page words the step the same way throughout: an answer with no change, never a skip.
@@ -691,21 +659,16 @@ def test_a_step_that_declined_on_purpose_reads_as_answered_with_no_change_on_bot
     )
 
 
-def test_a_config_entry_reads_as_text_and_how_to_use_starts_with_a_capital() -> None:
-    """An opencode agent's prompt spans lines and holds non ASCII text: the step page shows it as text under the
-    JSON, not as escapes; and a usage written after 'How to use:' in lower case starts with a capital."""
-    prompt = "You are the chat agent.\n\nOnly search the web \u2014 nothing else."
-    agent = {"agent": {"chat": {"mode": "primary", "prompt": prompt}}}
-    mutation = {
-        "op": "create",
-        "id": "chat-agent",
-        "options": {"name": "config", "config": {"target": "primary", "data": agent}},
-    }
+def test_a_config_file_shows_its_text_and_how_to_use_starts_with_a_capital() -> None:
+    """An opencode agent's prompt holds non ASCII text: the step page shows the file as text, the non ASCII as
+    character references a browser shows as the text itself; and a usage written after 'How to use:' in lower case
+    starts with a capital."""
+    agent = {"agent": {"chat": {"mode": "primary", "prompt": "Only search the web \u2014 nothing else."}}}
+    patch = {"config/primary.json": json.dumps(agent, ensure_ascii=False, indent=2) + "\n"}
     notes = {"design": "A chat agent.\n\nHow to use: open a new session and type /chat."}
-    step = _row(_answered(selected=True, published=True, mutation=mutation, proposal_notes=notes))
-    version = build_release_page(1, [CREATION, step], adapter="opencode")
-    assert "(text below: config.data.agent.chat.prompt)" in version
-    # The page writes non ASCII as character references, which a browser shows as the text itself.
+    step = _row(_answered(selected=True, patch=patch, proposal_notes=notes))
+    version = build_release_page(1, [CREATION, step])
+    version.encode("ascii")
     shown = html.unescape(version.split("<script", 1)[0])
-    assert "Only search the web \u2014 nothing else." in shown and "\\u2014" not in shown and "\\n" not in shown
+    assert '"prompt": "Only search the web \u2014 nothing else."' in shown
     assert "Open a new session and type /chat." in version

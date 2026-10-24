@@ -12,14 +12,15 @@ import hashlib
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import KW_ONLY, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
+from tests.support.harness_service import harness_repository
+from tests.support.harness_steps import PI_SEED, harness_recipe
 from tests.support.runtime_stubs import StubTrainingRuntime, candidate_backend, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
@@ -28,21 +29,15 @@ from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.evaluation.harness import ScoreComparisonPlugin
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.commit_history import RECORD_KIND, CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.surface import Surface
-from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.algos import StepScheduling
-from reef.train.cordis_backend import CordisBackend
-from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
+from reef.train.harness_backend.state import HarnessState
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -440,7 +435,9 @@ class _SavedArtifactBackend(CandidateBackend):
 class _SavedArtifactRecipe(Recipe):
     backend: CandidateBackend
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         del experiment_logger
         return Trainer.build(
             scenario,
@@ -575,7 +572,9 @@ class ProtectAllPipeline(TrainingPipeline):
 
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+    ):
         return Trainer.build(
             scenario,
             records,
@@ -875,68 +874,10 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     assert not list(tmp_path.rglob("*.sqlite3"))
 
 
-@dataclass(frozen=True)
-class _HarnessEvolveTestRecipe(Recipe):
-    """Private harness-evolution stand-in for these mechanics tests.
-
-    These tests exercise commit-history/version-chain mechanics, not
-    harness-evolution semantics specifically; they just need a concrete,
-    artifact-producing Recipe. Constructs CordisBackend and
-    the reported trace pipeline directly, the same shape
-    CordisRecipe.build() has, minus the config-boot layer these
-    tests never touch (see tests/reef_service/test_harness_recipe.py for
-    the backend's own guarantees).
-    """
-
-    propose: object
-    evaluate: object
-    tasks: tuple[str, ...]
-    batch_size: int = 1
-    _: KW_ONLY
-    name: str = "harness_evolve"
-
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
-
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None) -> Trainer:
-        candidate_backend = CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(self.propose),
-            score_episode=resolve_episode_scorer(self.evaluate),
-            tasks=self.tasks,
-            binary="fake-pi",
-            models=ModelBinding(base_url="http://localhost:8000", model="qwen3-8b"),
-        )
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: TrainingPipeline(
-                context,
-                record2record=ReportRecord2Record(context, ReportGrouping()),
-                record2task=TraceTasks(),
-                task2batch=TraceBatches(context, None),
-            ),
-            candidate_backend=candidate_backend,
-            candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            batch_size=self.batch_size,
-        )
-
-
-def build_harness_evolve_dispatcher(
-    runtime,
-    tmp_path,
-    backend_factory,
-    *,
-    propose=lambda nodes, samples, model: None,
-    evaluate=lambda task, result: 0.0,
-    tasks=("task one",),
-    agent_record_dir=None,
-):
-    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, **runtime_bindings(runtime))
+def build_harness_evolve_dispatcher(tmp_path, backend_factory, *, propose=lambda context: None, agent_record_dir=None):
+    """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
     return Dispatcher(
-        recipe,
+        harness_recipe(tmp_path, propose),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
@@ -972,21 +913,14 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
     started = Event()
     release = Event()
 
-    def blocking_proposer(nodes, samples, model):
-        del nodes
-        if source_record_id(samples[0]) != "a-i1":
+    def blocking_proposer(context):
+        if source_record_id(context.samples[0]) != "a-i1":
             return
         started.set()
         assert release.wait(1)
 
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        propose=blocking_proposer,
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), propose=blocking_proposer
     )
     dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
 
@@ -1047,21 +981,14 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
     calls = 0
     should_fail = True
 
-    def proposer(nodes, samples, model):
-        nonlocal calls, should_fail
-        del nodes, samples
+    def proposer(context):
+        nonlocal calls
         calls += 1
         if should_fail:
             raise RuntimeError("proposal failed")
 
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        propose=proposer,
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), propose=proposer
     )
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
@@ -1254,16 +1181,9 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 
 @pytest.mark.unit
 def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        backend_factory,
-        agent_record_dir=agent_record_dir,
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), agent_record_dir=agent_record_dir
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
@@ -1351,12 +1271,10 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     crash loses neither the batch nor the record watermark, and recovery
     resumes without re-training compacted rows.
     """
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    dispatcher = build_harness_evolve_dispatcher(
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), agent_record_dir=agent_record_dir
+    )
 
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
@@ -1372,7 +1290,7 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     assert record.step == 1
     assert record.checkpoint is False
     assert record.artifact_ref == head  # head unchanged: no new artifact published
-    assert record.algorithm_state == {"steps": 1, "entries": []}
+    assert record.algorithm_state == HarnessState(steps=1).to_json()
     assert record.high_water_sequence == 2
     assert record.consumed_ids == frozenset({"i1", "r1"})
     dispatcher.close()
@@ -1381,12 +1299,9 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
 @pytest.mark.unit
 def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     """A no-artifact step must restore step, state, and record progress."""
-    initial = tmp_path / "initial"
-    (initial / "skills").mkdir(parents=True)
-    (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    backend_factory = harness_repository(tmp_path, PI_SEED.files)
+    first = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(trace_inference("i1"))
     first.accept_record(trace_report("r1", "i1"))
     wait_for_step(first, 1, scenario="skills")
@@ -1395,7 +1310,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     assert committed["step"] == 1
     assert committed["metrics"]["skipped"] == "no proposal"
 
-    second = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state["steps"] == 1

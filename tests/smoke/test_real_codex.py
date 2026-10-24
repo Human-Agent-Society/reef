@@ -8,14 +8,12 @@ supplies the pinned binary through ``REEF_REAL_CODEX_BINARY``.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import subprocess
-import sys
 import threading
-import tomllib
+from collections.abc import Mapping
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,8 +26,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.episodes.trajectory import final_assistant_text
-from reef.harness.tree.render import render_composition
-from reef.service.install_script import render_install_script
+from reef.harness.tree import HarnessTree, render_tree
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
 
@@ -136,9 +133,10 @@ def model_binding(base_url: str) -> ModelBinding:
     return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses").with_metadata()
 
 
-def _bound_files(*nodes: tuple[str, dict[str, Any]], binding: ModelBinding) -> dict[str, str]:
+def _bound_files(files: Mapping[str, str] | None = None, *, binding: ModelBinding) -> dict[str, str]:
+    """The source tree ``files`` rendered for codex under ``binding``."""
     descriptor = get_adapter("codex")
-    return render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
+    return render_tree(HarnessTree(dict(files or {})), descriptor, binding.config_overlays(descriptor))
 
 
 def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
@@ -157,23 +155,16 @@ def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
 def test_real_codex_accepts_every_admitted_tuning_key() -> None:
     server, base_url = _server()
     try:
-        files = _bound_files(
-            (
-                "config",
-                {
-                    "data": {
-                        "model_auto_compact_token_limit": 100_000,
-                        "model_auto_compact_token_limit_scope": "total",
-                        "model_context_window": 200_000,
-                        "model_reasoning_effort": "low",
-                        "model_reasoning_summary": "none",
-                        "model_verbosity": "low",
-                        "tool_output_token_limit": 1_000,
-                    }
-                },
-            ),
-            binding=model_binding(base_url),
-        )
+        tuning = {
+            "model_auto_compact_token_limit": 100_000,
+            "model_auto_compact_token_limit_scope": "total",
+            "model_context_window": 200_000,
+            "model_reasoning_effort": "low",
+            "model_reasoning_summary": "none",
+            "model_verbosity": "low",
+            "tool_output_token_limit": 1_000,
+        }
+        files = _bound_files({"config/primary.json": json.dumps(tuning)}, binding=model_binding(base_url))
         result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
     finally:
         server.shutdown()
@@ -185,9 +176,11 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     server, base_url = _server()
     try:
         files = _bound_files(
-            ("rules", {"text": RULES_MARKER}),
-            ("skill", {"name": "reef-smoke", "text": f"# Reef smoke skill\n\n{SKILL_MARKER}"}),
-            ("agent_command", {"name": "reef-command", "text": "Reef smoke command"}),
+            {
+                "rules.md": RULES_MARKER,
+                "skills/reef-smoke/SKILL.md": f"# Reef smoke skill\n\n{SKILL_MARKER}",
+                "commands/reef-command.md": "Reef smoke command",
+            },
             binding=model_binding(base_url),
         )
         capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
@@ -215,8 +208,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert RULES_MARKER in body
     # Codex advertises skill metadata first and reads the body only when the
     # model chooses the skill; discovery is the adapter contract here. A
-    # command is a skill in the same root under $CODEX_HOME, which a
-    # reef-codex session lists too.
+    # command is a skill in the same root under $CODEX_HOME.
     assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
     assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
     assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
@@ -231,8 +223,8 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
 
 
 def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> None:
-    """The tree's web_search is for a person's session; the episode argv turns it off again, and without that
-    override the same tree offers the model the hosted web_search tool."""
+    """The tree's web_search holds for an interactive session on the rendered config; the episode argv turns it off
+    again, and without that override the same tree offers the model the hosted web_search tool."""
     descriptor = get_adapter("codex")
     pin = descriptor.argv.index('web_search="disabled"')
     unpinned = replace(descriptor, argv=descriptor.argv[: pin - 1] + descriptor.argv[pin + 1 :])
@@ -240,7 +232,9 @@ def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> 
     for label, adapter in (("pinned", descriptor), ("unpinned", unpinned)):
         server, base_url = _server()
         try:
-            files = _bound_files(("config", {"data": {"web_search": "live"}}), binding=model_binding(base_url))
+            files = _bound_files(
+                {"config/primary.json": json.dumps({"web_search": "live"})}, binding=model_binding(base_url)
+            )
             result = run_episode(adapter, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
         finally:
             server.shutdown()
@@ -252,9 +246,9 @@ def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> 
 
 
 def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sandbox(tmp_path: Path) -> None:
-    """A reef-codex session runs the interactive CLI on the rendered config.toml, which sets no approval_policy:
-    Codex keeps its on-request default and tells the model how to ask the person before a command runs outside
-    the sandbox, which the wrapper's calls to reef need. The rendered tree holds no rule that skips that ask."""
+    """An interactive session on the rendered config.toml, which sets no approval_policy, keeps Codex's on-request
+    default and tells the model how to ask the person before a command runs outside the sandbox. The rendered tree
+    holds no rule that skips that ask."""
     files = _bound_files(binding=model_binding("http://127.0.0.1:9"))
     assert not any(path.startswith("codex/rules/") for path in files)
     for relative, text in files.items():
@@ -277,78 +271,6 @@ def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sa
         if "<permissions instructions>" in part.get("text", "")
     )
     assert "# Escalation Requests" in permissions and "Approval policy is currently never" not in permissions
-
-
-@pytest.mark.parametrize("selected_model", [MODEL, "gpt-5.4", "gpt-6-astra"])
-def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path, selected_model: str) -> None:
-    server, base_url = _server()
-    try:
-        descriptor = get_adapter("codex")
-        composition = render_composition([("rules", {"text": RULES_MARKER})], descriptor)
-        bound = _bound_files(("rules", {"text": RULES_MARKER}), binding=model_binding(base_url))
-        script = tmp_path / "install.sh"
-        script.write_text(
-            render_install_script(
-                descriptor=descriptor,
-                files=composition,
-                release_id="v-test",
-                content_id="c-test",
-                scenario="smoke",
-                binding_files={path: bound[path] for path in ("codex/config.toml", "codex/models.json")},
-            )
-        )
-        prefix = tmp_path / "prefix"
-        binary = prefix / "node_modules/.bin/codex"
-        binary.parent.mkdir(parents=True)
-        binary.symlink_to(Path(REAL_CODEX).resolve())
-        dest = tmp_path / "installed"
-        env = {**os.environ, "HOME": str(tmp_path / "home"), "REEF_PYTHON": sys.executable}
-        env.pop("REEF_TOKEN", None)
-        installed = subprocess.run(
-            ["sh", str(script), str(dest), str(prefix)], env=env, capture_output=True, text=True, timeout=30
-        )
-        assert installed.returncode == 0, installed.stderr
-        config = tomllib.loads((dest / "codex/config.toml").read_text())
-        assert config["model_catalog_json"] == "models.json"
-        # The install writes the wrapper outside the tree, beside its record in the fake home.
-        root_digest = hashlib.sha256(os.fsencode(os.path.realpath(dest))).hexdigest()
-        run = subprocess.run(
-            [
-                str(tmp_path / "home" / ".reef" / "installs" / root_digest / "reef-codex"),
-                "exec",
-                "--json",
-                "--strict-config",
-                "--skip-git-repo-check",
-                "--model",
-                selected_model,
-                "Reply READY",
-            ],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        assert run.returncode == 0, (run.stdout, run.stderr)
-        assert "fallback metadata" not in run.stdout + run.stderr
-        assert '"text":"READY"' in run.stdout
-        sessions = [
-            json.loads(line)
-            for path in (dest / "codex/sessions").rglob("*.jsonl")
-            for line in path.read_text().splitlines()
-        ]
-        started = next(
-            event["payload"] for event in sessions if event.get("payload", {}).get("type") == "task_started"
-        )
-        expected_window = 608_000 if selected_model == MODEL else 258_400
-        assert started["model_context_window"] == expected_window
-        request_body = json.loads(server.requests[-1][2])
-        assert request_body["model"] == selected_model
-        if selected_model == "gpt-5.4":
-            assert any(tool.get("name") == "apply_patch" for tool in request_body["tools"])
-    finally:
-        server.shutdown()
-        server.server_close()
 
 
 @pytest.mark.parametrize("reasoning", [True, False])
@@ -424,7 +346,7 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     descriptor = get_adapter("codex")
     result = run_episode(
         replace(descriptor, argv=("debug", "models", "--bundled")),
-        render_composition([], descriptor),
+        render_tree(HarnessTree({}), descriptor),
         "",
         binary=REAL_CODEX,
         timeout=30.0,

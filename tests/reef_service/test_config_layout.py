@@ -272,7 +272,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
 def test_declared_recipe_sections_support_leaf_overrides():
     config = {
         "reef": {
-            "recipe": "reef.recipe.cordis:CordisRecipe",
+            "recipe": "reef.recipe.harness:HarnessEvolutionRecipe",
             "data": {"training_mode": "auto"},
             "evolution": {"adapter": "pi", "tasks": ["one"], "episode_repeats": 2},
         }

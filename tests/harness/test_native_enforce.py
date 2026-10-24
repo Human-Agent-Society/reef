@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from tests.support.harness_render import native_tool
 
 from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
@@ -24,7 +25,6 @@ from reef.harness.runners.native.enforce import (
     denied,
     select_enforcer,
 )
-from reef.harness.tree.render import render_native_module
 from reef.sandbox.process import SandboxExecutor, SandboxUnavailable
 
 
@@ -206,23 +206,22 @@ def test_a_sandboxed_call_runs_the_child_protocol_and_keeps_the_error_codes(tmp_
 def test_a_tool_module_is_read_at_load_and_imported_only_where_the_call_runs(tmp_path: Path, monkeypatch) -> None:
     marker = tmp_path / "imported"
     options = {
-        "name": "probe",
         "description": "writes its pid when imported",
         "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
         "capabilities": ["write"],
-        "code": (
-            f"import os\nfrom pathlib import Path\n\nPath({str(marker)!r}).write_text(str(os.getpid()))\n\n\n"
-            "def run(args, workdir):\n    return 'ran'\n"
-        ),
     }
+    code = (
+        f"import os\nfrom pathlib import Path\n\nPath({str(marker)!r}).write_text(str(os.getpid()))\n\n\n"
+        "def run(args, workdir):\n    return 'ran'\n"
+    )
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
     module = tools_dir / "probe.py"
-    module.write_text(render_native_module("native_tool", options))
+    module.write_text(native_tool("probe", code, **options)["native/tools/probe.py"])
     work = tmp_path / "work"
     work.mkdir()
     tools = load_tools(tools_dir)
-    # The load read the declaration the render wrote; the module's top level ran nowhere.
+    # The load read the declaration the file holds; the module's top level ran nowhere.
     assert not marker.exists()
     tool = tools["probe"]
     assert (tool.name, tool.description, tool.capabilities) == ("probe", options["description"], ("write",))
@@ -239,7 +238,7 @@ def test_a_tool_module_is_read_at_load_and_imported_only_where_the_call_runs(tmp
     assert not marker.exists()
     # A top level that raises is found where the call runs, under either enforcer, and fails that call only.
     boom = "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n"
-    module.write_text(render_native_module("native_tool", {**options, "code": boom}))
+    module.write_text(native_tool("probe", boom, **options)["native/tools/probe.py"])
     tools = load_tools(tools_dir)
     assert _invoke(tools, "probe", "{}", work, enforcer=BwrapEnforcer())["error"] == {
         "code": "TOOL_FAILED",

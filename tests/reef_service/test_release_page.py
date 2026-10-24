@@ -5,8 +5,8 @@ the step being the row's position oldest first with the creation row as 0. The
 chain driven here runs in ``training_mode: hybrid``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
 rejected automatic step from a scored report with no request, and one pending
-extension update, again from a request, whose page diffs the file against the
-head.
+extension update, again from a request, whose page diffs the source file
+against the head's.
 """
 
 from __future__ import annotations
@@ -20,42 +20,35 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
-from tests.reef_service.test_harness_requests import _post, _request
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support.harness_service import harness_dispatcher, report_records, wait_for_rows
+from tests.support.harness_steps import harness_recipe
 
-from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.step_result import design_sections
-from reef.recipe.cordis import CordisRecipe
+from reef.harness.tree import HarnessTree, TreeKind, TreePatch
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
 
 OLD_CODE = "export default function hello(pi) {\n  if (1 < 2) return;\n}\n"
 NEW_CODE = 'export default function hello(pi) {\n  if (1 < 2) return;\n  pi.on("session_start", () => {});\n}\n'
-SEED_RULES = {"id": "r1", "name": "rules", "config": {"text": "Answer briefly."}}
-SEED_EXTENSION = {"id": "ext", "name": "code_extension", "config": {"name": "hello", "code": OLD_CODE}}
-SEED = (SEED_MODELS, SEED_SETTINGS, SEED_RULES, SEED_EXTENSION)
+EXTENSION_PATH = "extensions/hello.ts"
+SEED = HarnessTree({"rules.md": "Answer briefly.\n", EXTENSION_PATH: OLD_CODE})
 
-MARKER = Mutation("update", "r1", {"config": {"text": "marker rules"}})
-PLAIN = Mutation("update", "r1", {"config": {"text": "Answer briefly, with care."}})
-TWO_MARKERS = Mutation("update", "r1", {"config": {"text": "marker marker rules"}})
-EXTENSION = Mutation("update", "ext", {"config": {"name": "hello", "code": NEW_CODE}})
-NOTES = Mutation("create", "s1", {"name": "skill", "config": {"name": "notes", "text": "# notes"}})
+MARKER = {"rules.md": "marker rules\n"}
+PLAIN = {"rules.md": "Answer briefly, with care.\n"}
+TWO_MARKERS_AND_EXTENSION = {"rules.md": "marker marker rules\n", EXTENSION_PATH: NEW_CODE}
+NOTES = {"skills/notes/SKILL.md": "# notes\n"}
 
 FIRST = "run the tests before you answer"
 SECOND = "answer with more care"
 FOURTH = "log a note when a < b, before the turn ends"
 # What the proposer answers each request with; an automatic step, with no request, proposes NOTES from the failure.
-ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: (TWO_MARKERS, EXTENSION)}
+ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: TWO_MARKERS_AND_EXTENSION}
 SCENARIO = "agents"
 
 
@@ -64,64 +57,25 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-def _propose(nodes, samples, models, *, requests=()):
-    return ANSWERS[requests[0]["text"]] if requests else NOTES
+def propose(context) -> TreePatch:
+    return TreePatch(ANSWERS[context.request.text] if context.request is not None else NOTES)
 
 
-def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
-    recipe = CordisRecipe(
-        resolve_proposer(_propose),
-        resolve_episode_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
+def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "release_id": release_id}
+
+
+def _dispatcher(tmp_path: Path) -> Dispatcher:
+    recipe = harness_recipe(
+        tmp_path,
+        propose,
         seed=SEED,
-        runtime=runtime(),
-        proposals_dir=str(tmp_path / "inbox"),
-        step_record_dir=str(tmp_path / "steps") if keep_records else None,
-        review_kinds=("code_extension",),
+        score=evaluate,
+        reads_requests=True,
+        review_kinds=(TreeKind.CODE_EXTENSION,),
         training_mode="hybrid",
     )
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in (recipe.base_artifact_files() or {}).items():
-        target = bootstrap / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    factory = InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository")
-    return Dispatcher(
-        recipe,
-        factory,
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-
-
-def _report(dispatcher: Dispatcher, suffix: str) -> None:
-    """One scored exchange through the dispatcher: what wakes an automatic step in ``hybrid`` mode."""
-    inference = AgentRecord.create(
-        scenario=SCENARIO,
-        request_type=RequestType.INFERENCE,
-        payload={"messages": [{"role": "user", "content": "q"}]},
-        agent_record_id=f"i{suffix}",
-    )
-    report = AgentRecord.create(
-        scenario=SCENARIO,
-        request_type=RequestType.REPORT,
-        payload={"score": 0.0, "references": [f"i{suffix}"]},
-        agent_record_id=f"r{suffix}",
-    )
-    dispatcher.accept_record(inference)
-    dispatcher.accept_record(report)
-
-
-async def _committed(scenario, count: int, seconds: float = 30.0) -> None:
-    """Returns once the catalog holds ``count`` rows; the dispatcher's worker runs the steps on its own thread."""
-    for _ in range(int(seconds / 0.05)):
-        if len(scenario.releases()) >= count:
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {scenario.releases()}")
+    return harness_dispatcher(tmp_path, recipe)
 
 
 def _chain(tmp_path: Path) -> Dispatcher:
@@ -133,17 +87,20 @@ def _chain(tmp_path: Path) -> Dispatcher:
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
+        headers = {"x-reef-scenario": SCENARIO}
         try:
             # One step at a time, so the rows land in the order the pages are counted by.
-            for count, body in ((2, _request(FIRST)), (3, _request(SECOND, session="s2"))):
-                response = await _post(client, body, SCENARIO)
+            for count, body in ((2, train_request(FIRST)), (3, train_request(SECOND, session="s2"))):
+                response = await client.post("/reef/train", headers=headers, json=body)
                 assert response.status == 200, await response.text()
-                await _committed(scenario, count)
-            _report(dispatcher, "3")
-            await _committed(scenario, 4)
-            response = await _post(client, _request(FOURTH, session="s4", release_id="rel-1"), SCENARIO)
+                await wait_for_rows(scenario, count)
+            for record in report_records(SCENARIO, "3"):
+                dispatcher.accept_record(record)
+            await wait_for_rows(scenario, 4)
+            body = train_request(FOURTH, session="s4", release_id="rel-1")
+            response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
-            await _committed(scenario, 5)
+            await wait_for_rows(scenario, 5)
         finally:
             await client.close()
 
@@ -220,8 +177,12 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
         assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
         assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-update">update</span><span class="node-id">r1</span>' in changed
-        assert '<span class="tag">rules</span>' in changed and "<pre>marker rules</pre>" in changed
+        # The patch file by file, each updated file diffed against the release the step ran on.
+        assert '<span class="tag operation-update">update</span><span class="node-id">rules.md</span>' in changed
+        assert (
+            '<span class="del">-Answer briefly.</span>' in changed
+            and '<span class="add">+marker rules</span>' in changed
+        )
         selection_result = _section(page, "Result")
         assert '<span class="selected">Published</span>' in selection_result
         assert "<dt>Wins</dt><dd>1</dd>" in selection_result and "<dt>Losses</dt><dd>0</dd>" in selection_result
@@ -250,15 +211,16 @@ def test_the_page_for_a_pending_extension_step_diffs_the_file_against_the_head(t
         assert "<title>Harness v4</title>" in page
         assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
-        assert '<span class="tag">code_extension</span>' in changed
-        # A unified diff of the rendered file against the head's copy, the added line marked.
-        assert f"--- pi-agent/extensions/hello.ts ({rows[1]['release_id'][:8]})" in changed
-        assert f"+++ pi-agent/extensions/hello.ts ({rows[4]['release_id'][:8]})" in changed
+        assert (
+            f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
+        )
+        # A unified diff of the source file against the head's copy, the added line marked.
+        assert f"--- {EXTENSION_PATH} ({rows[1]['release_id'][:8]})" in changed
+        assert f"+++ {EXTENSION_PATH} ({rows[4]['release_id'][:8]})" in changed
         assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
         assert "if (1 &lt; 2) return;" in changed
-        # The rules bump that made the composite win rides beside it.
-        assert "<pre>marker marker rules</pre>" in changed
+        # The rules bump that made the patch win rides beside it.
+        assert '<span class="add">+marker marker rules</span>' in changed
         selection_result = _section(page, "Result")
         assert '<span class="pending">Ready for review</span>' in selection_result
         assert "waits for a promote" in selection_result
@@ -266,7 +228,7 @@ def test_the_page_for_a_pending_extension_step_diffs_the_file_against_the_head(t
         assert f'<dt>Parent</dt><dd class="id">{rows[1]["release_id"]}</dd>' in chain
         assert rows[4]["release_id"] in chain and "<li>" not in chain
         data = _data(page)
-        assert data["pending"] is True and data["metrics"]["mutations"][1]["options"]["config"]["code"] == NEW_CODE
+        assert data["pending"] is True and data["metrics"]["patch"][EXTENSION_PATH] == NEW_CODE
     finally:
         dispatcher.close()
 
@@ -277,7 +239,10 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 2)
         assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
-        assert "<pre>Answer briefly, with care.</pre>" in _section(page, "What changed")
+        # A rejected step ran on the head, so its patch reads against the head's files.
+        changed = _section(page, "What changed")
+        assert '<span class="del">-marker rules</span>' in changed
+        assert '<span class="add">+Answer briefly, with care.</span>' in changed
         selection_result = _section(page, "Result")
         assert '<span class="rejected">Not selected</span>' in selection_result
         assert "Did not pass the checks" in selection_result and "The head stayed" in selection_result
@@ -296,9 +261,11 @@ def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_
         page = _page(dispatcher, 3)
         assert "A failure in the batch" in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-create">create</span><span class="node-id">s1</span>' in changed
-        assert '<span class="tag">skill</span>' in changed
-        assert "<pre># notes</pre>" in changed and "notes" in changed
+        assert (
+            '<span class="tag operation-create">create</span><span class="node-id">skills/notes/SKILL.md</span>'
+            in changed
+        )
+        assert "<pre># notes\n</pre>" in changed
         assert '<span class="rejected">Not selected</span>' in _section(page, "Result")
         # The trainer writes training_request on every request step's row; an automatic step has none.
         assert "training_request" not in _data(page)["metrics"]
@@ -313,7 +280,7 @@ def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(t
         page = _page(dispatcher, 0)
         assert "<title>Harness v0</title>" in page
         assert "no step made it" in _section(page, "Why")
-        assert "the seed as the recipe rendered it" in _section(page, "What changed")
+        assert "this release is the seed tree" in _section(page, "What changed")
         assert '<span class="creation">Starting point</span>' in _section(page, "Result")
         chain = _section(page, "Chain")
         # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
@@ -496,7 +463,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             },
             "step_record": "/srv/reef/steps/agents/1",
             "selection": {"reason": "candidate won 2 of 3"},
-            "mutation": {"op": "create", "id": "n1", "options": {"name": "rules", "config": {"text": "<b>bold</b>"}}},
+            "patch": {"rules.md": "<b>bold</b>"},
             "training_request": {
                 "id": "q-1",
                 "session": "s1",
@@ -539,7 +506,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
         "<td>Allow &lt;notifications&gt; &amp; &quot;more&quot;</td></tr>" in setup
     )
     assert '<tr><td>calendar</td><td>service</td><td class="id"></td><td></td></tr>' in setup
-    assert "reef-pi setup" in setup and "Carried from earlier steps" not in setup
+    assert "Reef does not check them" in setup and "Carried from earlier steps" not in setup
     assert "Refused by the step" not in setup
     # No proposal notes on the row: no Design and no Review section.
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
@@ -551,7 +518,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
 
 
 def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carries() -> None:
-    """The same union the install script reads (required_by), shown by the step that named each item."""
+    """The same union ``GET /reef/harness`` answers (required_by), shown by the step that named each item."""
     twilio = {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}
     notify = {"name": "notify", "kind": "permission", "check": "test -d /", "prompt": "Allow notifications"}
     never = {"name": "never", "kind": "service"}
@@ -596,7 +563,7 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     own, _, carried = pending.partition("<h3>Carried from earlier steps</h3>")
     assert notify_row in own and twilio_row not in own
     assert twilio_row in carried and notify_row not in carried
-    assert "reef-pi setup" in carried
+    assert "Reef does not check them" in carried
     # The promote row names nothing itself; through its target it carries the whole chain.
     promoted = _section(build_release_page(4, rows), "Setup")
     own, _, carried = promoted.partition("<h3>Carried from earlier steps</h3>")
@@ -604,33 +571,35 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     assert carried.index(twilio_row) < carried.index(notify_row)
 
 
-def test_an_extension_update_without_the_parents_file_shows_its_new_text() -> None:
+def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    patch = {EXTENSION_PATH: NEW_CODE, "skills/notes/SKILL.md": "# notes\n", "rules.md": None}
     row = {
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
         "pending": True,
-        "metrics": {
-            "selected": True,
-            "mutation": {"op": "update", "id": "ext", "options": {"config": {"code": NEW_CODE}}},
-        },
+        "metrics": {"selected": True, "patch": patch},
     }
-    without = build_release_page(1, [creation, row], before_entries=[SEED_EXTENSION])
-    assert "<pre>export default function hello(pi) {" in without and "+++ " not in without
-    assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in without
-    assert '<span class="tag">code_extension</span>' in without
-    files = {"pi-agent/extensions/hello.ts": OLD_CODE}
-    paths = {"code_extension": "pi-agent/extensions/{name}.ts"}
-    with_diff = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=files, node_paths=paths
-    )
-    assert "+++ pi-agent/extensions/hello.ts (rel-1)" in with_diff and '<span class="add">+  pi.on(' in with_diff
-    unchanged = {"pi-agent/extensions/hello.ts": NEW_CODE}
-    same = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=unchanged, node_paths=paths
-    )
-    assert "pi-agent/extensions/hello.ts is unchanged" in same
+
+    def change(page: str, operation: str, path: str) -> str:
+        head = f'<span class="tag operation-{operation}">{operation}</span><span class="node-id">{path}</span>'
+        assert head in page, (operation, path)
+        return page.partition(f"{head}</div>")[2].partition('<div class="change">')[0]
+
+    # The release the step ran on is not restorable: a written file shows its new text, an update or a creation.
+    without = _section(build_release_page(1, [creation, row]), "What changed")
+    assert change(without, "write", EXTENSION_PATH).startswith("<pre>export default function hello(pi) {")
+    assert "+++ " not in without
+    change(without, "remove", "rules.md")
+    before = {EXTENSION_PATH: OLD_CODE, "rules.md": "Answer briefly.\n"}
+    with_files = _section(build_release_page(1, [creation, row], before_files=before), "What changed")
+    update = change(with_files, "update", EXTENSION_PATH)
+    assert f"+++ {EXTENSION_PATH} (rel-1)" in update and '<span class="add">+  pi.on(' in update
+    assert change(with_files, "create", "skills/notes/SKILL.md").startswith("<pre># notes")
+    assert change(with_files, "remove", "rules.md") == "</div>"
+    unchanged = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: NEW_CODE})
+    assert f"{EXTENSION_PATH} is unchanged" in _section(unchanged, "What changed")
 
 
 def test_current_marks_the_served_head_and_not_the_pending_row(tmp_path: Path) -> None:
@@ -668,7 +637,7 @@ def test_a_promoted_pending_step_reads_promoted_at_the_promote_step(tmp_path: Pa
         )
         assert "waits for a promote" not in selection_result
         # The step still diffs against the head it was evaluated on; the promote's own page names it as the target.
-        assert f"+++ pi-agent/extensions/hello.ts ({pending_id[:8]})" in _section(page, "What changed")
+        assert f"+++ {EXTENSION_PATH} ({pending_id[:8]})" in _section(page, "What changed")
         promoted = _page(dispatcher, 5)
         assert '<span class="chip">Currently served</span>' in _sub(promoted)
         assert f"A person promoted release {pending_id} after reading it" in _section(promoted, "Why")
@@ -718,19 +687,12 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {
-            "selected": True,
-            "mutation": {"op": "update", "id": "ext", "options": {"config": {"code": "let n = 0;\n++n;\n"}}},
-        },
+        "metrics": {"selected": True, "patch": {EXTENSION_PATH: "let n = 0;\n++n;\n"}},
     }
-    files = {"pi-agent/extensions/hello.ts": "let n = 0;\n--n;\n"}
-    paths = {"code_extension": "pi-agent/extensions/{name}.ts"}
-    page = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=files, node_paths=paths
-    )
+    page = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: "let n = 0;\n--n;\n"})
     changed = _section(page, "What changed")
-    assert '<span class="hunk">--- pi-agent/extensions/hello.ts (rel-0)</span>' in changed
-    assert '<span class="hunk">+++ pi-agent/extensions/hello.ts (rel-1)</span>' in changed
+    assert f'<span class="hunk">--- {EXTENSION_PATH} (rel-0)</span>' in changed
+    assert f'<span class="hunk">+++ {EXTENSION_PATH} (rel-1)</span>' in changed
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
@@ -972,7 +934,7 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
     setup = _section(page, "Setup")
     own, _, refused = setup.partition("<h3>Refused by the step</h3>")
     assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>' in own
-    assert "reef-pi setup" in own
+    assert "Reef does not check them" in own
     assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>" in refused
     assert (
         '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td><td></td>'

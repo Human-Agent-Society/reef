@@ -8,15 +8,13 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support._strategies import resolve_proposer
+from tests.support.harness_steps import PI_SEED, harness_backend
 
 from reef.evaluation.harness import EpisodeScorer, HarnessCandidate
-from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.tree import TreePatch
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
-from reef.train.cordis_backend.backend import CordisBackend
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -50,36 +48,25 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
         log_to_driver=False,
         runtime_env={"env_vars": {"PYTHONPATH": str(Path(tests.__file__).parent.parent)}},
     )
-    binary = tmp_path / "fake-pi"
-    binary.write_text(
-        "#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
-        "root = Path(os.environ['PI_CODING_AGENT_SESSION_DIR'])\n"
-        "root.mkdir(parents=True, exist_ok=True)\n"
-        "(root / 'session.jsonl').write_text('{\"type\":\"agent_end\"}\\n')\n"
-    )
-    binary.chmod(0o755)
     try:
-        backend = CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(lambda *args: None),
-            score_episode=GPUScorer(),
+        backend, _ = harness_backend(
+            tmp_path,
+            lambda context: None,
+            score=GPUScorer(),
             tasks=("one",),
-            models=ModelBinding(base_url="http://127.0.0.1:8000", model="unused", api_key="dummy"),
-            binary=str(binary),
             worker_executor=executor_settings(
                 {}, {"backend": "ray", "workers": 1, "resources": {"cpus_per_worker": 2}}
             ),
         )
         candidate = HarnessCandidate(
             candidate_id="test",
-            candidate_files={},
-            current_files={},
-            candidate_entries=(),
-            current_entries=(),
-            mutations=(),
+            candidate_tree=PI_SEED,
+            current_tree=PI_SEED,
+            patch=TreePatch({}),
+            evaluation_tasks=("one",),
             record_dir=tmp_path / "first-record",
         )
-        assert backend._episode_evaluator.worker_selection.settings.backend == "ray"
+        assert backend.evaluator.worker_selection.settings.backend == "ray"
         result = backend.evaluate(candidate)
         assert result.metrics["candidate_scores"] == (1.0,)
         assert result.metrics["current_scores"] == (1.0,)

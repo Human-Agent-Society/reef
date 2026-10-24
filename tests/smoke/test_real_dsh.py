@@ -20,7 +20,7 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree, render_tree
 
 REAL_DSH = os.environ.get("REEF_REAL_DSH_BINARY", "")
 
@@ -87,8 +87,7 @@ def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
         binding = ModelBinding(
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key"
         )
-        nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(descriptor)]
-        files = render_composition(nodes, descriptor)
+        files = render_tree(HarnessTree({"rules.md": RULES_SENTENCE}), descriptor, binding.config_overlays(descriptor))
         # The task starts with a dash on purpose: it must pass both commander layers as a positional.
         result = run_episode(descriptor, files, "- Reply with exactly the word READY", binary=REAL_DSH, timeout=180.0)
     finally:
@@ -133,15 +132,13 @@ def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key"
         )
         skill = "---\nname: notes\ndescription: Keep short notes\n---\nKeep short notes.\n"
-        nodes = [
-            ("skill", {"name": "notes", "text": skill}),
-            *(
-                ("agent_command", {"name": name, "text": f"{header}Start with {name}-63.\n"})
-                for name, header in headers.items()
-            ),
-            *binding.compose_nodes(descriptor),
-        ]
-        files = render_composition(nodes, descriptor)
+        tree = HarnessTree(
+            {
+                "skills/notes/SKILL.md": skill,
+                **{f"commands/{name}.md": f"{header}Start with {name}-63.\n" for name, header in headers.items()},
+            }
+        )
+        files = render_tree(tree, descriptor, binding.config_overlays(descriptor))
         task = " ".join(f"/{name}" for name in headers) + " say hi"
         result = run_episode(descriptor, files, task, binary=REAL_DSH, timeout=180.0)
     finally:

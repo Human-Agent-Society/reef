@@ -14,26 +14,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from recipes.gepa.archive import Archive
-from recipes.gepa.method import GEPAProposer, ScoreFeedback
 from reef.evaluation.harness import EpisodeEvaluationWorker, EpisodeScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import run_episode
 from reef.harness.episodes.vendor_install import AdapterProgram
-from reef.harness.tree.render import render_composition
+from reef.harness.tree import HarnessTree, render_tree
 from reef.recipe.reefine.agent import launch_pi
 from reef.sandbox.config import build_executor
 from reef.sandbox.e2b import E2BExecutor
 from reef.sandbox.process import EpisodeTimeout
-from reef.train.cordis_backend.backend import _StepCalls
-from reef.train.cordis_backend.strategies import AgentHost
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")
 
 
+def bound_files(binding: ModelBinding, adapter: str) -> dict[str, str]:
+    """The empty tree rendered for ``adapter`` with ``binding`` as its model: an episode with the harness's own
+    defaults."""
+    descriptor = get_adapter(adapter)
+    return render_tree(HarnessTree({}), descriptor, binding.config_overlays(descriptor))
+
+
 class MarkerScorer(EpisodeScorer):
-    def __call__(self, task, result):
+    def score(self, task, result):
         for event in result.trajectory:
             message = event.get("message", event)
             if message.get("role") == "assistant" and "REEF_E2B_OK" in str(message.get("content", "")):
@@ -97,10 +100,9 @@ def test_real_agent_episode_through_generic_executor(adapter, api, model_endpoin
         api=api,
         max_output_tokens=256,
     )
-    files = render_composition(binding.compose_nodes(descriptor), descriptor)
     result = run_episode(
         descriptor,
-        files,
+        bound_files(binding, adapter),
         "Reply exactly REEF_E2B_OK. Do not use tools.",
         executor=executor,
         timeout=180,
@@ -163,7 +165,8 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
         session.close()
 
 
-def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
+def test_the_evaluation_worker_scores_a_real_remote_episode(model_endpoint, tmp_path):
+    """The harness backend's evaluation episodes and a method's trial episodes run through this same worker."""
     descriptor = get_adapter("pi")
     configured = build_executor({"executor": "e2b", "sandbox": {"forward_ports": [model_endpoint]}})
     executor, _ = configured.for_program(AdapterProgram(descriptor))
@@ -176,39 +179,21 @@ def test_cordis_and_gepa_score_real_remote_episodes(model_endpoint, tmp_path):
     scorer = MarkerScorer()
     task = "Reply exactly REEF_E2B_OK. Do not use tools."
     worker = EpisodeEvaluationWorker(descriptor, scorer, None, 180, executor, True)
-    scored = worker.run(
-        render_composition(binding.compose_nodes(descriptor), descriptor), task, models=ModelBindings(binding)
-    )
-    assert scored.score == 1.0
-    proposer = GEPAProposer(
-        archive=Archive(tmp_path / "gepa.json"),
-        descriptor=descriptor,
-        binary=None,
-        executor=executor,
-        score_episode=scorer,
-        feedback=ScoreFeedback(),
-        minibatch_size=1,
-        rng_seed=0,
-        skip_perfect_score=True,
-        perfect_score=1.0,
-        max_metric_calls=2,
-        kinds=("rules",),
-        valset_size=1,
-    )
-    score, output, error = proposer._score((), {}, task, ModelBindings(binding))
-    assert score == 1.0 and not error and "REEF_E2B_OK" in output
+    scored = worker.run(bound_files(binding, "pi"), task, models=ModelBindings(binding))
+    assert scored.score == 1.0 and scored.failure is None
+    assert scored.reply is not None and "REEF_E2B_OK" in scored.reply
 
 
 def test_reefine_scripted_trial_uses_node_in_the_shared_session(tmp_path):
     executor, _ = build_executor({"executor": "e2b"}).for_program(AdapterProgram(get_adapter("pi")))
     assert isinstance(executor, E2BExecutor)
-    host = AgentHost(get_adapter("pi"), "/host-only/pi", executor, None, _StepCalls(0, []), 90, 60)
     session = executor.open()
     root = tmp_path / "trial"
     root.mkdir()
     try:
         outcome = launch_pi(
-            host,
+            get_adapter("pi"),
+            "/host-only/pi",
             session,
             {},
             "",

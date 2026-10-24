@@ -5,7 +5,7 @@ from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 
 from reef.evaluation.harness import evaluation_executor_config, evaluation_selection
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import executor_settings, select_executor
 from reef.runtime.executor.requirements import ExecutionRequirements
@@ -20,7 +20,7 @@ def recipe_config(execution, **evolution):
     return {
         "execution": {"evolution": execution},
         "evolution": {
-            "propose": resolve_proposer(lambda *args: None),
+            "propose": resolve_proposer(lambda context: None),
             "evaluate": resolve_episode_scorer(scorer),
             "tasks": ["one"],
             **evolution,
@@ -31,7 +31,7 @@ def recipe_config(execution, **evolution):
 @pytest.mark.parametrize("workers, backend", [(1, "uni"), (8, "mp"), ("8", "mp")])
 def test_generic_sizing_drives_real_recipe(workers, backend):
     config = recipe_config({"workers": workers, "resources": {"cpus_per_worker": "2", "gpus_per_worker": "0"}})
-    recipe = CordisRecipe.from_environment(
+    recipe = HarnessEvolutionRecipe.from_environment(
         {}, config=config, runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy")
     )
     selected, needs = evaluation_selection(recipe.score_episode, recipe.worker_executor)

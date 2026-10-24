@@ -2,56 +2,55 @@
 
 A fake Reef on localhost plays the model (a scripted reply per request, the
 receipt and release headers on every answer), the release catalog, one
-manifest per release, the proposals route and the report route, so every
-path of ``reef-native serve`` runs hermetically."""
+source tree per release, and the proposals route, so every path of
+``reef-native serve`` runs hermetically."""
 
 from __future__ import annotations
 
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from tests.support.harness_render import native_hook, native_json, native_tool
 
-from reef.harness.client import wrapper as harness_wrapper
-from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, ReleaseObserver
+from reef.harness.adapters import get_adapter
+from reef.harness.capture import CaptureProxy, ReleaseObserver
 from reef.harness.runners.native import serve
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
-from reef.harness.runners.native.selftools import RESERVED_NAMES
-from reef.harness.runners.native.serve import ServeError, Server, admit_mutations
-from reef.harness.tree.mutations import Mutation
+from reef.harness.runners.native.serve import HARNESS_RELEASE_FILE, ServeError, Server
+from reef.harness.tree import HarnessTree, render_tree, validate_tree
+from reef.harness.tree.checks import NATIVE_RESERVED_TOOL_NAMES
 
 SCENARIO = "serve-demo"
+NATIVE = get_adapter("native")
+RULES = {"rules.md": "Be brief."}
 
 
-def _entry(id_: str, kind: str, **config: Any) -> dict[str, Any]:
-    return {"id": id_, "name": kind, "config": config}
-
-
-def _tool(name: str, body: str = "    return 'ok'", id_: str | None = None) -> dict[str, Any]:
-    return _entry(
-        id_ or name,
-        "native_tool",
-        name=name,
+def _tool(name: str, body: str = "    return 'ok'") -> dict[str, str]:
+    """The file of a tool that takes no arguments and runs ``body``."""
+    return native_tool(
+        name,
+        f"def run(args, workdir):\n{body}\n",
         description=f"the {name} tool",
         parameters={"type": "object", "properties": {}},
-        code=f"def run(args, workdir):\n{body}\n",
     )
 
 
-def _graph(stages: dict[str, Any], edges: list[dict[str, str]], start: str = "think") -> dict[str, Any]:
-    return _entry("main", "native_graph", name="main", start=start, max_steps=8, stages=stages, edges=edges)
+def _graph(stages: dict[str, Any], edges: list[dict[str, str]], start: str = "think") -> dict[str, str]:
+    return native_json("graphs", {"name": "main", "start": start, "max_steps": 8, "stages": stages, "edges": edges})
 
 
 SEED_STAGES: dict[str, Any] = {
@@ -78,7 +77,7 @@ def _call(name: str, arguments: dict[str, Any], call_id: str) -> dict[str, Any]:
 
 
 class _FakeReef(ThreadingHTTPServer):
-    """The model, the release catalog, one manifest per release, the proposals route and the report route."""
+    """The model, the release catalog, one source tree per release, and the proposals route."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -87,7 +86,6 @@ class _FakeReef(ThreadingHTTPServer):
         self.head = ""
         self.replies: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
-        self.reports: list[dict[str, Any]] = []
         self.proposals: list[dict[str, Any]] = []
         self.proposals_route = True
         self.fail_releases = False
@@ -101,7 +99,7 @@ class _FakeReef(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}"
 
     def release(
-        self, release_id: str, entries: list[dict], parent: str | None = None, **evaluation_metrics: Any
+        self, release_id: str, files: Mapping[str, str], parent: str | None = None, **evaluation_metrics: Any
     ) -> None:
         self.releases[release_id] = {
             "release_id": release_id,
@@ -109,7 +107,7 @@ class _FakeReef(ThreadingHTTPServer):
             "content_id": f"content-{release_id}",
             "operation": "training",
             "pending": False,
-            "files": {"native/tree.json": json.dumps(entries, indent=2, sort_keys=True) + "\n"},
+            "files": dict(files),
             "metrics": {"wins": 1, **evaluation_metrics},
         }
         self.order.append(release_id)
@@ -147,12 +145,16 @@ class _Handler(BaseHTTPRequestHandler):
             if reef.hang_manifest_s:
                 hang, reef.hang_manifest_s = reef.hang_manifest_s, 0.0
                 time.sleep(hang)
-            release_id = parse_qs(split.query).get("release_id", [reef.head])[0]
+            query = parse_qs(split.query)
+            release_id = query.get("release_id", [reef.head])[0]
             row = reef.releases.get(release_id)
             if row is None:
                 self._json(404, {"error": {"message": f"unknown release {release_id}"}})
                 return
             manifest = {k: v for k, v in row.items() if k not in ("metrics", "operation", "pending")}
+            if query.get("form", ["rendered"])[0] != "source":
+                # As Reef serves it: the release rendered for the adapter; the serve process asks for the source.
+                manifest["files"] = render_tree(HarnessTree(row["files"]), NATIVE)
             manifest["evaluation"] = row["metrics"]
             self._json(200, manifest, x_reef_release_id=release_id)
         else:
@@ -181,9 +183,6 @@ class _Handler(BaseHTTPRequestHandler):
                 200,
                 {"proposal_id": f"p{len(reef.proposals)}", "admitted": True, "reason": None, "release_id": reef.head},
             )
-        elif self.path == "/reef/report":
-            reef.reports.append(body)
-            self._json(200, {"ok": True})
         else:
             self._json(404, {"error": {"message": "no route"}})
 
@@ -201,12 +200,12 @@ def reef() -> Iterator[_FakeReef]:
 
 
 def _tree(tmp_path: Path, reef: _FakeReef, release_id: str) -> Path:
-    """The pulled tree of one release: native/tree.json, the model binding at the fake reef, the release file."""
+    """The pulled tree: the model binding at the fake reef and the release file naming ``release_id``.
+
+    No source tree is stored yet, so the process fetches the release's source tree at boot.
+    """
     dest = tmp_path / "reef-harness"
     (dest / "native").mkdir(parents=True)
-    (dest / "native" / "tree.json").write_text(
-        reef.releases[release_id]["files"]["native/tree.json"], encoding="utf-8"
-    )
     (dest / "native" / "models.json").write_text(
         json.dumps({"api": "openai", "base_url": reef.base_url, "api_key": "tok", "model": "fake"}) + "\n",
         encoding="utf-8",
@@ -266,19 +265,31 @@ def _session_file(server: Server, session: str) -> Path:
     return server.sessions_dir / session / "session.jsonl"
 
 
+def mounted_tools(server: Server) -> list[str]:
+    """The tool files of every mount directory left on disk: only the current mount stays."""
+    return sorted(path.name for path in server.mounts_dir.glob("*/native/tools/*.py"))
+
+
 # -- sessions and turns ------------------------------------------------------------------------------------
 
 
 def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_entry("r", "rules", text="Be brief."), _tool("shout", "    return 'LOUD'")])
+    reef.release("r1", {**RULES, **_tool("shout", "    return 'LOUD'")})
     reef.replies = [_reply("hi"), _reply(tool_calls=[_call("shout", {}, "c1")]), _reply("still here")]
     with _running(_tree(tmp_path, reef, "r1")) as server:
         first, streamed = _turn(server, "say hi")
-        assert first == {"exit": 0, "session": first["session"], "turn": 1, "text": "hi"}
+        assert first == {"exit": 0, "session": first["session"], "turn": 1, "text": "hi", "receipts": ["r-1"]}
         assert len(first["session"]) == 12
         assert [event["type"] for event in streamed][:3] == ["session", "turn/start", "stage/enter"]
         second, _ = _turn(server, "and again", session=first["session"])
-        assert second == {"exit": 0, "session": first["session"], "turn": 2, "text": "still here"}
+        # Each turn returns the receipts of its own model calls, so its caller reports against them.
+        assert second == {
+            "exit": 0,
+            "session": first["session"],
+            "turn": 2,
+            "text": "still here",
+            "receipts": ["r-2", "r-3"],
+        }
         assert server.status()["sessions"] == 1
 
     assert [message["content"] for message in reef.requests[1]["body"]["messages"]] == [
@@ -291,7 +302,7 @@ def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_pat
     assert [event["seq"] for event in events] == list(range(len(events)))
     assert len(_typed(events, "session")) == 1
     header = _typed(events, "session")[0]
-    assert header["mode"] == "serve" and header["release_id"] == "r1" and header["tree"] == "tree.json"
+    assert header["mode"] == "serve" and header["release_id"] == "r1"
     assert [start["turn"] for start in _typed(events, "turn/start")] == [1, 2]
     assert [start["prompt"] for start in _typed(events, "turn/start")] == ["say hi", "and again"]
     assert [end["turn"] for end in _typed(events, "turn/end")] == [1, 2]
@@ -302,28 +313,25 @@ def test_two_turns_in_one_session_keep_the_messages_and_number_the_turns(tmp_pat
     assert {request["headers"]["x-reef-tag-release"] for request in reef.requests} == {"r1"}
     assert {request["headers"]["x-reef-scenario"] for request in reef.requests} == {SCENARIO}
     assert list(server.sessions_dir.glob("*/session.jsonl")) == [_session_file(server, first["session"])]
-    assert (
-        not server.mount_dir.exists() and not server.socket_path.exists()
-    )  # stop took the modules and the socket down
+    # stop took the mounts and the socket down
+    assert not server.mounts_dir.exists() and not server.socket_path.exists()
 
 
 def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    rule = _entry("r", "rules", text="Be brief.")
-    reef.release("r1", [rule, _tool("whisper", "    return 'quiet'")])
+    reef.release("r1", {**RULES, **_tool("whisper", "    return 'quiet'")})
     reef.replies = [
         _reply(tool_calls=[_call("shout", {}, "c1")]),
         _reply(tool_calls=[_call("shout", {}, "c2")]),
         _reply("ok"),
     ]
     dest = _tree(tmp_path, reef, "r1")
+    r2 = {**RULES, **_tool("whisper", "    return 'quiet'"), **_tool("shout", "    return 'LOUD'")}
     with _running(dest) as server:
         # The head moves after the boot poll: the only way this process learns of r2 is the answer's header.
         _wait(lambda: reef.polls >= 1)
-        reef.release(
-            "r2", [rule, _tool("whisper", "    return 'quiet'"), _tool("shout", "    return 'LOUD'")], parent="r1"
-        )
+        reef.release("r2", r2, parent="r1")
         result, _ = _turn(server, "shout")
         assert result["exit"] == 0 and server.status()["release_id"] == "r2"
         assert sorted(server.host.tools) == ["shout", "whisper"]
@@ -333,31 +341,41 @@ def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     assert kinds.index(("harness/mount", "r2")) > kinds.index(("step/end", 1))
     assert kinds.index(("harness/mount", "r2")) < kinds.index(("step/start", 2))
     mount = _typed(events, "harness/mount")[0]
-    assert mount == {"release_id": "r2", "parent_release_id": "r1", "source": "release", "entries": 3}
+    assert mount == {"release_id": "r2", "parent_release_id": "r1", "source": "release", "files": 3}
     headers = _typed(events, "request/header")
     assert [[t["function"]["name"] for t in h["tools"]] for h in headers] == [["whisper"], ["shout", "whisper"]]
     results = _typed(events, "tool/result")
     assert results[0]["error"]["code"] == "UNKNOWN_TOOL" and results[1]["content"] == "LOUD"
     assert [request["headers"]["x-reef-tag-release"] for request in reef.requests] == ["r1", "r2", "r2"]
-    # What a restart boots from: the tree file and the release file name the mounted release.
+    # What a restart boots from: the stored source tree and the release file name the mounted release.
     assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["release_id"] == "r2"
-    assert [entry["id"] for entry in json.loads((dest / "native" / "tree.json").read_text())] == [
-        "r",
-        "whisper",
-        "shout",
-    ]
+    assert HarnessTree.read(dest / serve.SOURCE_DIR) == HarnessTree(r2)
+
+
+def test_a_restart_boots_from_the_stored_source_tree_without_asking_reef(tmp_path: Path, reef: _FakeReef) -> None:
+    reef.release("r1", {**RULES, **_tool("shout")})
+    dest = _tree(tmp_path, reef, "r1")
+    with _running(dest) as server:
+        assert server.status()["release_id"] == "r1"
+    # Reef no longer knows r1: the next start boots from source/ as the release file names it.
+    reef.releases.pop("r1")
+    reef.order.remove("r1")
+    with _running(dest) as server:
+        log = server.sessions_dir / serve.SERVE_LOG
+        assert server.status()["release_id"] == "r1" and list(server.host.tools) == ["shout"]
+        assert [(m["release_id"], m["source"]) for m in _typed(_events(log), "harness/mount")][-1] == ("r1", "boot")
 
 
 def test_the_poll_mounts_a_new_head_at_the_turn_boundary_and_the_next_turn_runs_the_new_graph(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    reef.release("r1", [_graph(SEED_STAGES, SEED_EDGES)])
+    reef.release("r1", _graph(SEED_STAGES, SEED_EDGES))
     reef.replies = [_reply("one"), _reply("two")]
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
         first, _ = _turn(server, "first")
         stages = {**SEED_STAGES, "hello": {"kind": "message", "text": "Hello from r2."}}
         edges = [*SEED_EDGES, {"from": "hello", "when": "done", "to": "think"}]
-        reef.release("r2", [_graph(stages, edges, start="hello")], parent="r1")
+        reef.release("r2", _graph(stages, edges, start="hello"), parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")))
         assert server.status()["release_id"] == "r2" and server.status()["pending_mount"] is None
@@ -370,39 +388,38 @@ def test_the_poll_mounts_a_new_head_at_the_turn_boundary_and_the_next_turn_runs_
     assert reef.requests[1]["body"]["messages"][-1]["content"] == "Hello from r2."
 
 
-def test_a_failed_mount_rolls_back_and_the_previous_composition_keeps_serving(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("good"), _tool("spare")])
+def test_a_failed_mount_keeps_the_previous_tree_serving(tmp_path: Path, reef: _FakeReef) -> None:
+    reef.release("r1", {**_tool("good"), **_tool("spare")})
     reef.replies = [_reply(tool_calls=[_call("good", {}, "c1")]), _reply("fine")]
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest, poll_interval_s=0.1) as server:
-        broken = _tool("broken", "    return 1")
-        broken["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
-        # r2 changes good, drops spare and adds an entry that cannot load: the whole of it must come undone.
-        reef.release("r2", [_tool("good", "    return 'changed'"), broken], parent="r1")
+        broken = native_tool("broken", "def helper(args, workdir):\n    return 1\n")
+        # r2 changes good, drops spare and adds a file that cannot load: none of it may reach the host.
+        reef.release("r2", {**_tool("good", "    return 'changed'"), **broken}, parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
         failed = _typed(_events(log), "harness/mount-failed")[0]
-        assert failed["release_id"] == "r2" and failed["source"] == "release" and failed["entry"] == "broken"
+        assert failed["release_id"] == "r2" and failed["source"] == "release"
         assert "no top level statement of broken.py binds run" in failed["error"]
         assert server.status()["release_id"] == "r1" and sorted(server.host.tools) == ["good", "spare"]
         assert server.host.tools["good"].run({}, ".") == "ok"
-        assert sorted(p.name for p in (server.mount_dir / "tools").glob("*.py")) == ["good.py", "spare.py"]
+        assert mounted_tools(server) == ["good.py", "spare.py"]
         result, streamed = _turn(server, "go")
         assert result["exit"] == 0 and _typed(streamed, "tool/result")[0]["content"] == "ok"
         # Announced once: the head that failed is not retried every poll while it stands.
         time.sleep(0.35)
         assert len(_typed(_events(log), "harness/mount-failed")) == 1
 
-    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text()) == {"release_id": "r1"}
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["release_id"] == "r1"
     assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1"]
     assert reef.requests[0]["headers"]["x-reef-tag-release"] == "r1"
 
 
 def test_follow_pinned_announces_the_head_and_the_mount_control_applies_it(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("one")])
+    reef.release("r1", _tool("one"))
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest, follow="pinned", poll_interval_s=0.1) as server:
-        reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
+        reef.release("r2", {**_tool("one"), **_tool("two")}, parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: bool(_typed(_events(log), "release/available")))
         assert _typed(_events(log), "release/available") == [{"release_id": "r2"}]
@@ -418,7 +435,7 @@ def test_follow_pinned_announces_the_head_and_the_mount_control_applies_it(tmp_p
 
 
 def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("one")])
+    reef.release("r1", _tool("one"))
     reef.replies = [_reply("served")]
     reef.fail_releases = True
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
@@ -429,7 +446,7 @@ def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp
         result, _ = _turn(server, "go")
         assert result["text"] == "served"
         reef.fail_releases = False
-        reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
+        reef.release("r2", {**_tool("one"), **_tool("two")}, parent="r1")
         _wait(lambda: server.status()["release_id"] == "r2")
 
 
@@ -476,11 +493,11 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 def test_a_manifest_fetch_that_times_out_is_retried_by_the_next_poll(tmp_path: Path, reef: _FakeReef) -> None:
     """The head moved, the poll saw it, and the manifest read then waited behind the next step's lock: the mount
     fails on the timeout, and the next poll that names the head announces it again instead of leaving it."""
-    reef.release("r1", [_tool("one")])
+    reef.release("r1", _tool("one"))
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1, release_timeout_s=0.2) as server:
         log = server.sessions_dir / serve.SERVE_LOG
         reef.hang_manifest_s = 0.6
-        reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
+        reef.release("r2", {**_tool("one"), **_tool("two")}, parent="r1")
         # The release ID changes before installation and the mount log write finish.
         _wait(
             lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")),
@@ -512,7 +529,7 @@ def test_a_release_request_that_times_out_is_marked_busy_and_a_refused_one_is_no
 
 
 def test_the_turn_timeout_ends_the_turn_before_the_next_step(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("slow")])
+    reef.release("r1", _tool("slow"))
     reef.replies = [_reply(tool_calls=[_call("slow", {}, "c1")]), _reply("never")]
     reef.delay_s = 0.15
     with _running(_tree(tmp_path, reef, "r1"), turn_timeout_s=0.05) as server:
@@ -525,7 +542,7 @@ def test_the_turn_timeout_ends_the_turn_before_the_next_step(tmp_path: Path, ree
 def test_a_malformed_request_answers_an_error_and_the_socket_path_falls_back_to_tmp(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    reef.release("r1", [])
+    reef.release("r1", {})
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest) as server:
         assert serve.request(server.socket_path, {"nothing": 1}) == {
@@ -551,8 +568,10 @@ def test_a_malformed_request_answers_an_error_and_the_socket_path_falls_back_to_
     assert serve.tree_layout(dest / "native") == (dest, dest / "native")
     with pytest.raises(ServeError, match="scenario is required"):
         Server(dest, scenario="")
-    (dest / "native" / "tree.json").unlink()
-    with pytest.raises(ServeError, match=r"tree\.json is missing"):
+    # No stored source tree, and a release Reef does not know: nothing to boot.
+    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"release_id": "r9"}) + "\n", encoding="utf-8")
+    shutil.rmtree(dest / serve.SOURCE_DIR)
+    with pytest.raises(ServeError, match=r"no source tree under .* and Reef answered none"):
         Server(dest, scenario=SCENARIO).start()
 
 
@@ -572,7 +591,7 @@ def _launcher(tmp_path: Path) -> Path:
 
 
 def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_entry("r", "rules", text="Be brief."), _tool("shout", "    return 'LOUD'")])
+    reef.release("r1", {**RULES, **_tool("shout", "    return 'LOUD'")})
     reef.replies = [_reply("hello"), _reply(tool_calls=[_call("shout", {}, "c1")]), _reply("loud enough")]
     dest = _tree(tmp_path, reef, "r1")
     binary = _launcher(tmp_path)
@@ -598,8 +617,7 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
             "release_id": "r1",
             "parent_release_id": None,
             "follow": "head",
-            "entries": 2,
-            "degraded": [],
+            "files": 2,
             "pending_mount": None,
             "sessions": 0,
             "socket": str(socket_path),
@@ -610,16 +628,12 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
         lines = [json.loads(line) for line in turn.stdout.splitlines()]
         assert lines[0]["type"] == "session" and lines[-1]["type"] == "turn/result"
         session = lines[-1]["data"]["session"]
-        assert lines[-1]["data"] == {"exit": 0, "session": session, "turn": 1, "text": "hello"}
+        assert lines[-1]["data"] == {"exit": 0, "session": session, "turn": 1, "text": "hello", "receipts": ["r-1"]}
         quiet = run("turn", "-p", "shout", "--session", session, "--quiet")
         assert (quiet.returncode, quiet.stdout) == (0, "loud enough\n")
         assert len(reef.requests) == 3 and reef.requests[2]["body"]["messages"][1]["content"] == "say hello"
 
-        reef.release(
-            "r2",
-            [_entry("r", "rules", text="Be brief."), _tool("shout", "    return 'LOUD'"), _tool("hum")],
-            parent="r1",
-        )
+        reef.release("r2", {**RULES, **_tool("shout", "    return 'LOUD'"), **_tool("hum")}, parent="r1")
         _wait(lambda: json.loads(run("status").stdout)["release_id"] == "r2", timeout_s=10.0)
         mounted = run("mount", "r1")
         assert mounted.returncode == 0 and json.loads(mounted.stdout)["mounted"] is True
@@ -640,31 +654,25 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
 
 # -- the self tools ----------------------------------------------------------------------------------------
 
-
-def _whisper_mutation() -> dict[str, Any]:
-    tool = _tool("whisper", "    return 'quiet'")
-    return {"op": "create", "id": "whisper", "options": {"name": tool["name"], "config": tool["config"]}}
+WHISPER = _tool("whisper", "    return 'quiet'")
 
 
-def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(
-    tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    reef.release("r1", [_entry("r", "rules", text="Be brief."), _tool("shout", "    return 'LOUD'")])
+def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(tmp_path: Path, reef: _FakeReef) -> None:
+    served = {**RULES, **_tool("shout", "    return 'LOUD'")}
+    reef.release("r1", served)
     reef.replies = [
-        _reply(tool_calls=[_call("harness_try", {"mutations": [_whisper_mutation()]}, "c1")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": WHISPER}, "c1")]),
         _reply(tool_calls=[_call("whisper", {}, "c2")]),
         _reply("done"),
     ]
     dest = _tree(tmp_path, reef, "r1")
-    captures = tmp_path / "captures"
-    monkeypatch.setenv("REEF_HARNESS_CAPTURES_DIR", str(captures))
     with _running(dest, self_tools=True) as server:
         assert sorted(server.host.tools) == ["harness_inspect", "harness_propose", "harness_try", "shout"]
         result, streamed = _turn(server, "try a whisper")
         assert result["exit"] == 0 and result["text"] == "done"
         assert sorted(server.host.tools) == ["harness_inspect", "harness_propose", "harness_try", "shout"]
-        assert [entry["id"] for entry in server.live_entries()] == ["r", "shout"]
-        assert not (server.mount_dir / "tools" / "whisper.py").exists()
+        assert server.live_tree() == HarnessTree(served)
+        assert "whisper.py" not in mounted_tools(server)
 
     results = _typed(streamed, "tool/result")
     tried = json.loads(results[0]["content"])
@@ -672,7 +680,7 @@ def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(
     assert results[0]["enforcement"] == {"mode": "none", "denied": []} and results[1]["content"] == "quiet"
     mount = _typed(streamed, "harness/mount")[0]
     assert mount["source"] == "try" and mount["try_id"] == tried["try_id"] and mount["release_id"] == "r1"
-    assert mount["mutations"] == [_whisper_mutation()]
+    assert mount["paths"] == ["native/tools/whisper.py"] and mount["files"] == 3
     headers = _typed(streamed, "request/header")
     assert [t["function"]["name"] for t in headers[1]["tools"]][-2:] == ["shout", "whisper"]
     types = [event["type"] for event in streamed]
@@ -680,49 +688,68 @@ def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(
     assert _typed(streamed, "harness/unmount")[0]["try_id"] == tried["try_id"]
     assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None, tried["try_id"], tried["try_id"]]
     assert {r["headers"]["x-reef-tag-release"] for r in reef.requests} == {"r1"}
-    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text()) == {"release_id": "r1"}
-    # report claims the turn's spool and sends the one receipt that was not a trial's.
-    monkeypatch.setenv("REEF_HARNESS_COMPOSE", str(dest / "native"))
-    harness_wrapper.report(SCENARIO, "native", 1.0, "tried it")
-    assert [report["references"] for report in reef.reports] == [["r-1"]]
-    assert reef.reports[0]["metadata"] == {"client_release": "r1"}
+    # A trial is not served: the release file and the stored source tree still name r1.
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["release_id"] == "r1"
+    assert HarnessTree.read(dest / serve.SOURCE_DIR) == HarnessTree(served)
 
 
-def test_a_trial_that_fails_admission_or_load_is_refused_and_rolled_back(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("shout", "    return 'LOUD'")])
-    bad_kind = {"op": "update", "id": "shout", "options": {"name": "skill", "config": {"name": "shout", "text": "x"}}}
-    broken = _whisper_mutation()
-    broken["options"]["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
+def test_a_turns_receipts_leave_out_the_calls_a_trial_made(tmp_path: Path, reef: _FakeReef) -> None:
+    reef.release("r1", {**RULES, **_tool("shout", "    return 'LOUD'")})
     reef.replies = [
-        _reply(tool_calls=[_call("harness_try", {"mutations": [bad_kind]}, "c1")]),
-        _reply(tool_calls=[_call("harness_try", {"mutations": [broken]}, "c2")]),
-        _reply(tool_calls=[_call("harness_try", {"mutations": [{"op": "explode", "id": "x"}]}, "c3")]),
-        _reply(tool_calls=[_call("harness_try", {"mutations": "nope"}, "c4")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": WHISPER}, "c1")]),
+        _reply(tool_calls=[_call("whisper", {}, "c2")]),
+        _reply("done"),
+    ]
+    with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
+        result, _ = _turn(server, "try a whisper")
+    assert result["receipts"] == ["r-1"]
+
+
+def test_a_trial_that_fails_validation_or_load_is_refused_and_the_served_tree_stays(
+    tmp_path: Path, reef: _FakeReef
+) -> None:
+    reef.release("r1", _tool("shout", "    return 'LOUD'"))
+    off_layout = {"native/tools/shout.md": "not a tool"}
+    broken = native_tool("whisper", "def helper(args, workdir):\n    return 1\n")
+    # Validation passes it (listen is bound, EVENT is a literal), and its top level raises when the mount imports it.
+    raising = native_hook(
+        "boom", "pre_step", "raise RuntimeError('boom')\ndef listen(payload, next):\n    return next()\n"
+    )
+    loop = native_json("graphs", {"name": "x"}) | {"native/loops/main.py": "def run_turn(ctx):\n    return\n"}
+    reef.replies = [
+        _reply(tool_calls=[_call("harness_try", {"patch": off_layout}, "c1")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": broken}, "c2")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": raising}, "c6")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": loop}, "c3")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": {}}, "c4")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": "nope"}, "c5")]),
         _reply("done"),
     ]
     with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
         result, streamed = _turn(server, "try things")
-        assert result["exit"] == 0 and [entry["id"] for entry in server.live_entries()] == ["shout"]
+        assert result["exit"] == 0 and server.live_tree() == HarnessTree(_tool("shout", "    return 'LOUD'"))
     results = _typed(streamed, "tool/result")
-    assert "cannot change the entry's kind" in json.loads(results[0]["content"])["error"]
-    second = json.loads(results[1]["content"])
-    assert second["entry"] == "whisper" and "no top level statement of whisper.py binds run" in second["error"]
+    assert "native/tools/shout.md: not a path of the harness layout" in json.loads(results[0]["content"])["error"]
+    assert "binds no run(args, workdir) at its top level" in json.loads(results[1]["content"])["error"]
+    assert "boom.py failed to import: RuntimeError: boom" in json.loads(results[2]["content"])["error"]
+    # A native loop is reviewed code: a trial never mounts one.
+    assert results[3]["error"]["code"] == "TOOL_FAILED" and "is reviewed code" in results[3]["content"]
     assert (
-        results[2]["error"]["code"] == "TOOL_FAILED" and "mutations[0]: mutation op must be" in results[2]["content"]
+        results[4]["error"]["code"] == "TOOL_FAILED" and "patch must change at least one path" in results[4]["content"]
     )
-    assert results[3]["error"]["code"] == "INVALID_ARGS"  # the declaration's schema holds before run sees the call
+    assert results[5]["error"]["code"] == "INVALID_ARGS"  # the declaration's schema holds before run sees the call
+    # Validation refuses the first two before a mount; only the hook that raises on import reaches one and fails.
     failed = _typed(streamed, "harness/mount-failed")
-    assert [f["source"] for f in failed] == ["try"] and failed[0]["entry"] == "whisper"
+    assert [f["source"] for f in failed] == ["try"]
     assert "harness/unmount" not in {event["type"] for event in streamed}
-    assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None] * 5
+    assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None] * 7
 
 
 def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r0", [_tool("shout")])
-    rejected = [
-        {"step": 2, "mutations": [{"op": "create", "id": "x", "options": {"name": "skill"}}], "reason": "lost"}
-    ]
-    reef.release("r1", [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)], parent="r0", rejected=rejected)
+    reef.release("r0", _tool("shout"))
+    rejected = [{"step": 2, "patch": {"skills/x/SKILL.md": "# x"}, "reason": "lost"}]
+    served = {**_tool("shout"), **_graph(SEED_STAGES, SEED_EDGES)}
+    reef.release("r1", served, parent="r0", rejected=rejected)
     reef.replies = [
         _reply(tool_calls=[_call("harness_inspect", {"what": what}, f"c-{what}")])
         for what in ("tree", "graph", "results", "status", "nope")
@@ -733,13 +760,7 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(tm
         socket_path = server.socket_path
     assert result["text"] == "looked"
     tree, graph, results, status, nope = _typed(streamed, "tool/result")
-    assert json.loads(tree["content"]) == {
-        "release_id": "r1",
-        "entries": [
-            {"id": "shout", "kind": "native_tool", "config": _tool("shout")["config"]},
-            {"id": "main", "kind": "native_graph", "config": _graph(SEED_STAGES, SEED_EDGES)["config"]},
-        ],
-    }
+    assert json.loads(tree["content"]) == {"release_id": "r1", "files": served}
     graphs = json.loads(graph["content"])
     assert graphs["main"]["start"] == "think" and list(graphs["graphs"]) == ["main"]
     seen = json.loads(results["content"])
@@ -748,10 +769,9 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(tm
     assert seen["rejected"] == rejected
     assert json.loads(status["content"]) == {
         "release_id": "r1",
-        "parent_release_id": None,
+        "parent_release_id": "r0",
         "follow": "head",
-        "entries": 2,
-        "degraded": [],
+        "files": 2,
         "pending_mount": None,
         "sessions": 1,
         "socket": str(socket_path),
@@ -760,11 +780,11 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(tm
     assert nope["error"]["code"] == "TOOL_FAILED" and "what must be one of" in nope["content"]
 
 
-def test_harness_propose_sends_the_proposal_and_a_reef_without_the_route_is_a_tool_error(
+def test_harness_propose_sends_the_patch_and_a_reef_without_the_route_is_a_tool_error(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    reef.release("r1", [_tool("shout")])
-    proposal = {"mutations": [_whisper_mutation()], "reason": "a quieter tool"}
+    reef.release("r1", _tool("shout"))
+    proposal = {"patch": WHISPER, "reason": "a quieter tool"}
     reef.replies = [
         _reply(tool_calls=[_call("harness_propose", proposal, "c1")]),
         _reply("proposed"),
@@ -786,121 +806,38 @@ def test_harness_propose_sends_the_proposal_and_a_reef_without_the_route_is_a_to
     assert second["exit"] == 0
 
 
-def test_a_tree_entry_with_a_reserved_name_does_not_mount(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("shout")])
+def test_a_tree_tool_with_a_self_tools_name_does_not_mount(tmp_path: Path, reef: _FakeReef) -> None:
+    reef.release("r1", _tool("shout"))
     dest = _tree(tmp_path, reef, "r1")
-    with _running(dest, poll_interval_s=0.1) as server:
-        reef.release("r2", [_tool("shout"), _tool(RESERVED_NAMES[0])], parent="r1")
+    with _running(dest, self_tools=True, poll_interval_s=0.1) as server:
+        reef.release("r2", {**_tool("shout"), **_tool(NATIVE_RESERVED_TOOL_NAMES[0])}, parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
         failed = _typed(_events(log), "harness/mount-failed")[0]
-        assert failed["entry"] == "harness_inspect" and "reserved name" in failed["error"]
-        assert server.status()["release_id"] == "r1" and list(server.host.tools) == ["shout"]
-    (dest / "native" / "tree.json").write_text(json.dumps([_tool(RESERVED_NAMES[2])]), encoding="utf-8")
-    with pytest.raises(ServeError, match="reserved name"):
-        Server(dest, scenario=SCENARIO).start()
+        assert failed["release_id"] == "r2" and "'harness_inspect' is already installed" in failed["error"]
+        assert server.status()["release_id"] == "r1" and "shout" in server.host.tools
+    # A stored source tree that holds one does not boot either.
+    (dest / serve.SOURCE_DIR / "native" / "tools" / "harness_try.py").write_text(
+        _tool(NATIVE_RESERVED_TOOL_NAMES[2])["native/tools/harness_try.py"], encoding="utf-8"
+    )
+    with pytest.raises(ServeError, match="'harness_try' is already installed"):
+        Server(dest, scenario=SCENARIO, self_tools=True).start()
     assert not (dest / "native" / "serve.sock").exists()
 
 
-def test_a_group_wrapped_entry_is_neither_tried_nor_mounted_nor_booted(tmp_path: Path, reef: _FakeReef) -> None:
-    graph_only = [_tool("shout", "    return 'LOUD'"), _graph(SEED_STAGES, SEED_EDGES)]
-    loop = {
-        "name": "main",
-        "code": "def run_turn(ctx):\n    while ctx.model() == 'tool_calls':\n        ctx.run_tools()\n",
-    }
-    # A group entry: children in place of a config, which the compose loader would mount through the same plugins.
-    group = {
-        "id": "g",
-        "name": "rules",
-        "group": True,
-        "config": [{"id": "hidden", "name": "native_loop", "config": loop}],
-    }
-    reef.release("r1", graph_only)
-    mutation = {"op": "create", "id": "g", "options": {key: value for key, value in group.items() if key != "id"}}
-    reef.replies = [
-        _reply(tool_calls=[_call("harness_try", {"mutations": [mutation]}, "c1")]),
-        _reply("done"),
-        _reply("again"),
-    ]
-    with _running(_tree(tmp_path, reef, "r1"), self_tools=True, poll_interval_s=0.1) as server:
-        result, streamed = _turn(server, "try a hidden loop")
-        assert result["exit"] == 0 and result["text"] == "done"
-        (refused,) = _typed(streamed, "tool/result")
-        assert refused["error"]["code"] == "TOOL_FAILED"
-        assert refused["content"] == "Error: create 'g': the tree is flat: a group entry is not admitted"
-        assert [m["source"] for m in _typed(streamed, "harness/mount")] == [] and server.host.loop is None
-        log = server.sessions_dir / serve.SERVE_LOG
-        reef.release("r2", [*graph_only, group], parent="r1")
-        _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
-        failed = _typed(_events(log), "harness/mount-failed")[0]
-        assert (failed["release_id"], failed["source"], failed["entry"], failed["kind"]) == (
-            "r2",
-            "release",
-            "g",
-            "rules",
-        )
-        assert failed["error"] == "the tree is flat: a group entry is not admitted"
-        assert server.status()["release_id"] == "r1" and server.host.loop is None
-        second, streamed = _turn(server, "again")
-        assert second["text"] == "again" and _typed(streamed, "session")[0]["loop"] is None
-        assert "loop/enter" not in {event["type"] for event in streamed}
-    with pytest.raises(ServeError, match="does not mount: g: the tree is flat: a group entry is not admitted"):
-        Server(_tree(tmp_path / "boot", reef, "r2"), scenario=SCENARIO).start()
+def test_validation_refuses_a_tree_tool_with_a_self_tools_name() -> None:
+    for name in NATIVE_RESERVED_TOOL_NAMES:
+        (problem,) = validate_tree(HarnessTree(_tool(name)), NATIVE).problems
+        assert problem == f"native/tools/{name}.py: tool name {name!r} is reserved for a built-in tool"
 
 
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 
-def test_admit_mutations_refuses_what_the_backend_refuses() -> None:
-    from dataclasses import replace
-
-    from reef.harness.adapters import get_adapter
-
-    # The stage 2 descriptor renders no agent_command; until it lands, the same check runs on this copy.
-    base = get_adapter("native")
-    descriptor = replace(base, node_paths={k: v for k, v in base.node_paths.items() if k != "agent_command"})
-    entries = [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)]
-    created = {"name": "native_tool", "config": _tool("hum")["config"]}
-    after, reason = admit_mutations(entries, [Mutation("create", "hum", created)], descriptor)
-    assert reason is None and [entry["id"] for entry in after] == ["shout", "main", "hum"]
-    assert [entry["id"] for entry in entries] == ["shout", "main"]  # the input is never touched
-    cases = [
-        (Mutation("create", "shout", created), "already exists"),
-        (Mutation("update", "nope", created), "cannot resolve entry nope"),
-        (Mutation("remove", "nope"), "cannot resolve entry nope"),
-        (Mutation("update", "shout", {"name": "skill"}), "cannot change the entry's kind"),
-        (Mutation("update", "shout", {"config": {"name": "shout", "description": "", "code": "x"}}), "rejected"),
-        (
-            Mutation("create", "cmd", {"name": "agent_command", "config": {"name": "cmd", "text": "t"}}),
-            "does not render",
-        ),
-        (Mutation("create", "why", {"name": "no_such_kind", "config": {}}), "unknown node kind"),
-        (
-            Mutation(
-                "update",
-                "main",
-                {
-                    "config": {
-                        **_graph({**SEED_STAGES, "act": {"kind": "tools", "allow": ["gone"]}}, SEED_EDGES)["config"]
-                    }
-                },
-            ),
-            "allows tools the tree lacks",
-        ),
-    ]
-    for mutation, expected in cases:
-        same, reason = admit_mutations(entries, [mutation], descriptor)
-        assert reason is not None and expected in reason, (mutation, reason)
-        assert same == entries
-
-
-def test_the_capture_proxy_tags_calls_live_and_publishes_per_turn(
-    tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(reef: _FakeReef) -> None:
     import urllib.request
 
-    monkeypatch.setenv("REEF_HARNESS_CAPTURES_DIR", str(tmp_path / "captures"))
-    reef.release("r1", [])
+    reef.release("r1", {})
     seen: list[str] = []
 
     class Observer(ReleaseObserver):
@@ -924,32 +861,22 @@ def test_the_capture_proxy_tags_calls_live_and_publishes_per_turn(
         proxy.tags["trial"] = "t1"
         call()
         proxy.tags.pop("trial")
-        assert proxy.publish_turn() == 2
-        assert proxy.publish_turn() == 0
+        first = [(capture["receipt"], capture["tags"]) for capture in proxy.drain()]
+        assert proxy.drain() == []
         call()
-        assert proxy.publish_turn() == 1
+        second = [(capture["receipt"], capture["tags"]) for capture in proxy.drain()]
     finally:
         proxy.stop()
     assert seen == ["r1", "r1", "r1"]
     tags = [(r["headers"].get("x-reef-tag-release"), r["headers"].get("x-reef-tag-trial")) for r in reef.requests]
     assert tags == [("r1", None), ("r1", "t1"), ("r1", None)]
     assert {r["headers"]["authorization"] for r in reef.requests} == {"Bearer tok"}
-    spools = sorted((tmp_path / "captures").glob("*.pending.json"))
-    turns = [json.loads(spool.read_text())["turns"] for spool in spools]
-    assert [[(t["receipt"], t["tags"]) for t in turn] for turn in turns] == [
-        [("r-1", {"release": "r1"}), ("r-2", {"release": "r1", "trial": "t1"})],
-        [("r-3", {"release": "r1"})],
-    ]
-    harness_wrapper.report(SCENARIO, "native", 0.5, "first turn")
-    harness_wrapper.report(SCENARIO, "native", 0.5, "second turn")
-    assert [report["references"] for report in reef.reports] == [["r-1"], ["r-3"]]
-
-
-# -- what the refuter pass found -----------------------------------------------------------------------------
+    assert first == [("r-1", {"release": "r1"}), ("r-2", {"release": "r1", "trial": "t1"})]
+    assert second == [("r-3", {"release": "r1"})]
 
 
 def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp_path: Path, reef: _FakeReef) -> None:
-    helper = _entry("helper", "native_agent", name="helper", prompt="You help.", max_steps=1)
+    helper = native_json("agents", {"name": "helper", "prompt": "You help.", "max_steps": 1})
     stages = {
         "think": {"kind": "model"},
         "act": {"kind": "tools"},
@@ -965,13 +892,13 @@ def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp
             for outcome in ("completed", "gave_up", "budget", "ask")
         ),
     ]
-    reef.release("r1", [_tool("shout", "    return 'LOUD'"), helper, _graph(stages, edges)])
+    reef.release("r1", {**_tool("shout", "    return 'LOUD'"), **helper, **_graph(stages, edges)})
     dest = _tree(tmp_path, reef, "r1")
     # The first answer names r2, which drops the helper and the delegate stage; the graph this turn walks is r1's.
     reef.replies = [_reply(tool_calls=[_call("shout", {}, "c1")]), _reply("thinking done"), _reply("helper")]
     with _running(dest) as server:
         _wait(lambda: reef.polls >= 1)
-        reef.release("r2", [_tool("shout", "    return 'LOUD'"), _graph(SEED_STAGES, SEED_EDGES)], parent="r1")
+        reef.release("r2", {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}, parent="r1")
         result, streamed = _turn(server, "go")
         assert result["exit"] == 1 and result["text"] == ""
         ended = _typed(streamed, "turn/end")[-1]
@@ -984,43 +911,38 @@ def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp
         assert again["exit"] == 0 and again["text"] == "second" and again["turn"] == 2
 
 
-def test_a_rollback_that_cannot_reimport_is_logged_and_named_by_status(
+def test_a_failed_mount_keeps_the_current_host_without_importing_it_again(
     tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     marker = tmp_path / "once.marker"
     monkeypatch.setenv("ONCE_MARKER", str(marker))
     # A hook imports at mount (a tool module imports only where a call runs), and this import is not idempotent:
-    # the second import of the same module fails on the marker it left.
-    once = _entry(
+    # a second import of the same module fails on the marker it left.
+    once = native_hook(
         "once",
-        "native_hook",
-        name="once",
-        event="pre_step",
-        code="import os\nopen(os.environ['ONCE_MARKER'], 'x').close()\n\n\ndef listen(payload, next):\n    return next()\n",
+        "pre_step",
+        "import os\nopen(os.environ['ONCE_MARKER'], 'x').close()\n\n\ndef listen(payload, next):\n    return next()\n",
     )
-    reef.release("r1", [once, _tool("other")])
+    reef.release("r1", {**once, **_tool("other")})
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest, poll_interval_s=0.1) as server:
         assert [hook.name for hook in server.host.hooks["pre_step"]] == ["once"] and marker.exists()
-        broken = _tool("broken")
-        broken["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
-        reef.release("r2", [broken], parent="r1")
+        reef.release("r2", native_tool("broken", "def helper(args, workdir):\n    return 1\n"), parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
-        _wait(lambda: bool(_typed(_events(log), "harness/rollback-failed")))
-        failed = _typed(_events(log), "harness/rollback-failed")[0]
-        assert failed["entry"] == "once" and "FileExistsError" in failed["error"] and failed["release_id"] == "r1"
-        assert server.status()["degraded"] == ["once"] and sorted(server.host.tools) == ["other"]
-        assert server.host.hooks["pre_step"] == []
-        # A mount that lands clears the mark: the composition is again what the release says.
-        marker.unlink()
-        reef.release("r3", [once, _tool("other")], parent="r1")
-        _wait(lambda: server.status()["release_id"] == "r3")
-        assert server.status()["degraded"] == [] and sorted(server.host.tools) == ["other"]
+        _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
+        # The new tree was built beside the current one, so the current host stands as it was.
+        assert server.status()["release_id"] == "r1" and sorted(server.host.tools) == ["other"]
         assert [hook.name for hook in server.host.hooks["pre_step"]] == ["once"]
+        assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1"]
+        # A mount of a tree with the hook imports it afresh in its own directory.
+        marker.unlink()
+        reef.release("r3", {**once, **_tool("other")}, parent="r1")
+        _wait(lambda: server.status()["release_id"] == "r3")
+        assert [hook.name for hook in server.host.hooks["pre_step"]] == ["once"] and marker.exists()
 
 
 def test_a_session_from_a_previous_process_is_not_silently_resumed(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_graph(SEED_STAGES, SEED_EDGES)])
+    reef.release("r1", _graph(SEED_STAGES, SEED_EDGES))
     dest = _tree(tmp_path, reef, "r1")
     reef.replies = [_reply("first")]
     with _running(dest) as server:
@@ -1055,15 +977,6 @@ def test_the_release_client_poll_skips_rows_pending_review() -> None:
     assert _Catalog([{"release_id": "r1", "pending": True}]).poll() is None
 
 
-def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:
-    from reef.harness.tree.nodes import NODE_KINDS
-
-    for name in RESERVED_NAMES:
-        config = {**_tool(name)["config"]}
-        with pytest.raises(ValueError, match="reserved for built-in tools"):
-            NODE_KINDS["native_tool"](None, config)
-
-
 def test_the_self_tools_run_in_process_when_the_environment_names_bwrap(
     tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1073,7 +986,7 @@ def test_the_self_tools_run_in_process_when_the_environment_names_bwrap(
     (fake / "bwrap").chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
-    reef.release("r1", [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)])
+    reef.release("r1", {**_tool("shout"), **_graph(SEED_STAGES, SEED_EDGES)})
     reef.replies = [_reply(tool_calls=[_call("harness_inspect", {"what": "status"}, "c1")]), _reply("seen")]
     with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
         result, streamed = _turn(server, "look")

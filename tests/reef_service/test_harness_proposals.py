@@ -1,4 +1,4 @@
-"""The proposals route and inbox: an agent's proposed tree change is admitted at the route, waits as a file, and the next evolve step takes it into the evaluation."""
+"""The proposals route and inbox: a client's patch is validated at the route, waits as a file, and the next automatic step evaluates it."""
 
 from __future__ import annotations
 
@@ -8,214 +8,148 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_recipe import (
-    SEED_MODELS,
-    SEED_SETTINGS,
-    _report_once,
-    evaluate,
-    make_binary,
-    runtime,
-)
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support.harness_service import EchoInference, harness_dispatcher, run_step
+from tests.support.harness_steps import harness_recipe
 
-from reef.artifact import InMemoryRepositoryBackend
-from reef.dispatcher import Dispatcher
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.adapters import get_adapter
+from reef.harness.delivery import create_harness_surface
 from reef.recipe import Recipe
-from reef.recipe.cordis import CordisRecipe
-from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_harness_surface
-from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
-from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.surface import Surface
+from reef.train.harness_backend.inbox import ProposalInbox
 
-CREATE_RULES = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
+MARKER_RULES = {"rules.md": "marker rules\n"}
 
 
-def test_proposals_and_step_records_are_independent_opt_in_capabilities() -> None:
-    class Records(StepRecords):
-        def read_step_records(self, directory, relative):
-            return {"files": []}
-
-    class Evaluation(ProposalValidator):
-        @property
-        def proposals(self):
-            return None
-
-        def admit(self, entries, mutations):
-            return [], None
-
-    assert isinstance(Records(), StepRecords)
-    assert not isinstance(Records(), ProposalValidator)
-    assert isinstance(Evaluation(), ProposalValidator)
-    assert not isinstance(Evaluation(), StepRecords)
+def proposal(patch: dict, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0", reason: str = "because"):
+    return {"patch": patch, "reason": reason, "session": session, "release_id": release_id}
 
 
-def _recipe(
-    tmp_path: Path, propose, *, max_pending: int = 8, seed: tuple = (SEED_MODELS, SEED_SETTINGS)
-) -> CordisRecipe:
-    return CordisRecipe(
-        resolve_proposer(propose),
-        resolve_episode_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=seed,
-        runtime=runtime(),
-        proposals_dir=str(tmp_path / "inbox"),
-        max_pending_proposals=max_pending,
-    )
-
-
-def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
-    initial = tmp_path / "initial"
-    initial.mkdir(parents=True, exist_ok=True)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    return Dispatcher(
-        recipe,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-    )
-
-
-def _proposal(*mutations: dict, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0", reason: str = "because"):
-    return {"mutations": list(mutations), "reason": reason, "session": session, "release_id": release_id}
-
-
-async def _post(client: TestClient, body: dict, scenario: str = "agents"):
+async def post(client: TestClient, body: object, scenario: str = "agents"):
     return await client.post("/reef/harness/proposals", headers={"x-reef-scenario": scenario}, json=body)
 
 
-class _EchoBackend(InferenceHandler):
-    async def inference(self, artifact, path, payload):
-        del artifact, path, payload
-        return {"choices": [{"message": {"content": "ok"}}]}
+def answers(dispatcher, *bodies: object) -> list[tuple[int, dict | str]]:
+    """Each body's status and answer, posted in order to one app over ``dispatcher``."""
 
-
-class _FilesOnly(Recipe):
-    """A pull delivery recipe with no training backend: files to serve, nothing to take a proposal."""
-
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
-
-
-def test_the_route_admits_against_the_head_and_stores_the_proposal(tmp_path: Path) -> None:
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
-
-    async def run() -> None:
-        scenario = dispatcher.get_or_create_scenario("agents")
-        assert scenario is not None
-        head = scenario.repository.require_current_artifact().release_id
-        client = TestClient(TestServer(create_app(dispatcher)))
+    async def run() -> list[tuple[int, dict | str]]:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=EchoInference())))
         await client.start_server()
         try:
-            response = await _post(client, _proposal(CREATE_RULES))
-            assert response.status == 200
-            answer = await response.json()
-            assert answer["admitted"] is True and answer["reason"] is None and answer["release_id"] == head
-            inbox = tmp_path / "inbox" / "agents"
-            stored = json.loads((inbox / f"{answer['proposal_id']}.json").read_text(encoding="utf-8"))
-            assert stored["mutations"] == [CREATE_RULES] and stored["reason"] == "because"
-            assert stored["session"] == "3f1c2a9d0b7e" and stored["release_id"] == "rel-0"
-            assert stored["proposal_id"] == answer["proposal_id"] and stored["head_release_id"] == head
-            assert isinstance(stored["received_at"], float)
-            assert sorted(path.name for path in inbox.iterdir()) == [f"{answer['proposal_id']}.json"]
-
-            # The rules every mutation meets, answered as the refusal, with nothing stored.
-            tool = {"name": "t", "description": "d", "parameters": {}, "code": "def run(a, w):\n    return 1\n"}
-            cases = [
-                ({"op": "update", "id": "x", "options": {"config": {"text": "y"}}}, "cannot resolve entry x"),
-                (
-                    {"op": "update", "id": "models", "options": {"name": "rules", "config": {"text": "y"}}},
-                    "cannot change the entry's kind from 'config' to 'rules'",
-                ),
-                (
-                    {"op": "create", "id": "t", "options": {"name": "native_tool", "config": tool}},
-                    "adapter 'pi' does not render native_tool nodes",
-                ),
-                ({"op": "rename", "id": "r1"}, "mutation op must be one of"),
-                ({"op": "create", "id": "s", "options": {"name": "skill", "config": {"name": "s"}}}, "'text'"),
-                ({"op": "remove", "id": "r1", "options": {}}, "remove mutation takes no options"),
-            ]
-            for mutation, rule in cases:
-                answer = await (await _post(client, _proposal(mutation))).json()
-                assert answer["admitted"] is False and rule in answer["reason"], answer
-                assert answer["release_id"] == head
-            assert len(list(inbox.glob("*.json"))) == 1
+            results: list[tuple[int, dict | str]] = []
+            for body in bodies:
+                response = await post(client, body)
+                results.append(
+                    (response.status, await response.json() if response.status == 200 else await response.text())
+                )
+            return results
         finally:
             await client.close()
 
+    return asyncio.run(run())
+
+
+class FilesOnly(Recipe):
+    """A delivery recipe with no training backend: files to serve, nothing to take a proposal."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        return create_harness_surface(get_adapter("pi"))
+
+
+def test_the_route_validates_the_patch_against_the_head_and_stores_it(tmp_path: Path) -> None:
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    scenario = dispatcher.get_or_create_scenario("agents")
+    assert scenario is not None
+    head = scenario.repository.require_current_artifact().release_id
+    refused = {
+        "notes.txt": "notes.txt: not a path of the harness layout",
+        "rules.md": "the patch changes nothing",
+        "config/other.json": "adapter 'pi' declares no config target 'other'",
+        "native/tools/t.py": "adapter 'pi' does not render native_tool files",
+        "config/primary.json": "config field 'config.apiKey' carries an inline credential",
+    }
+    texts = {"rules.md": "Answer briefly.\n", "config/primary.json": json.dumps({"apiKey": "abcd"})}
     try:
-        asyncio.run(run())
+        results = answers(
+            dispatcher,
+            proposal(MARKER_RULES),
+            *(proposal({path: texts.get(path, "x\n")}) for path in refused),
+        )
+        (status, admitted), *refusals = results
+        assert status == 200
+        assert admitted["admitted"] is True and admitted["reason"] is None and admitted["release_id"] == head
+        inbox = tmp_path / "proposals" / "agents"
+        stored = json.loads((inbox / f"{admitted['proposal_id']}.json").read_text(encoding="utf-8"))
+        assert stored["patch"] == MARKER_RULES and stored["reason"] == "because"
+        assert stored["session"] == "3f1c2a9d0b7e" and stored["release_id"] == "rel-0"
+        assert stored["proposal_id"] == admitted["proposal_id"] and stored["head_release_id"] == head
+        assert isinstance(stored["received_at"], float)
+        for (status, answer), problem in zip(refusals, refused.values(), strict=True):
+            assert status == 200 and answer["admitted"] is False and problem in answer["reason"], answer
+            assert answer["release_id"] == head
+        assert sorted(path.name for path in inbox.iterdir()) == [f"{admitted['proposal_id']}.json"]
     finally:
         dispatcher.close()
 
 
 def test_the_inbox_holds_max_pending_proposals_and_refuses_the_rest(tmp_path: Path) -> None:
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None, max_pending=1))
-
-    async def run() -> None:
-        dispatcher.get_or_create_scenario("agents")
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            first = await (await _post(client, _proposal(CREATE_RULES))).json()
-            second = await (await _post(client, _proposal(CREATE_RULES))).json()
-            assert first["admitted"] is True
-            assert second == {**second, "admitted": False, "reason": "inbox full"}
-            assert second["proposal_id"] != first["proposal_id"]
-            assert [path.stem for path in (tmp_path / "inbox" / "agents").glob("*.json")] == [first["proposal_id"]]
-        finally:
-            await client.close()
-
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None, max_pending_proposals=1))
+    dispatcher.get_or_create_scenario("agents")
     try:
-        asyncio.run(run())
+        (_, first), (_, second) = answers(dispatcher, proposal(MARKER_RULES), proposal(MARKER_RULES))
+        assert first["admitted"] is True
+        assert second == {**second, "admitted": False, "reason": "inbox full"}
+        assert second["proposal_id"] != first["proposal_id"]
+        assert [path.stem for path in (tmp_path / "proposals" / "agents").glob("*.json")] == [first["proposal_id"]]
+    finally:
+        dispatcher.close()
+
+
+def test_a_manual_scenario_takes_instructions_only(tmp_path: Path) -> None:
+    recipe = harness_recipe(tmp_path, lambda context: None, reads_requests=True, training_mode="manual")
+    dispatcher = harness_dispatcher(tmp_path, recipe)
+    dispatcher.get_or_create_scenario("agents")
+    try:
+        [(status, answer)] = answers(dispatcher, proposal(MARKER_RULES))
+        assert status == 200
+        assert answer["admitted"] is False and answer["reason"] == "manual mode takes instructions only"
+        assert not (tmp_path / "proposals" / "agents").exists()
     finally:
         dispatcher.close()
 
 
 def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(tmp_path: Path) -> None:
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
-    plain = _dispatcher(tmp_path / "plain", Recipe())
-    files_only = _dispatcher(tmp_path / "files", _FilesOnly())
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
+    dispatcher.get_or_create_scenario("agents")
+    plain = harness_dispatcher(tmp_path / "plain", Recipe())
+    files_only = harness_dispatcher(tmp_path / "files", FilesOnly())
+    try:
+        malformed = [
+            ({"patch": {}, "reason": "", "session": "s", "release_id": "r"}, "patch must change at least one path"),
+            ({"patch": ["rules.md"], "reason": "", "session": "s", "release_id": "r"}, "must be a JSON object"),
+            ({"patch": {"rules.md": 1}, "reason": "", "session": "s", "release_id": "r"}, "must hold text"),
+            ({"patch": {"/etc/passwd": "x"}, "reason": "", "session": "s", "release_id": "r"}, "must be relative"),
+            ({"patch": MARKER_RULES, "reason": "", "release_id": "r"}, "session must be a string"),
+            ([MARKER_RULES], "must be an object"),
+        ]
+        results = answers(dispatcher, *(body for body, _ in malformed))
+        for (status, text), (_, message) in zip(results, malformed, strict=True):
+            assert status == 400 and message in text, text
 
-    async def run() -> None:
-        dispatcher.get_or_create_scenario("agents")
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            for body, message in (
-                ({"mutations": [], "reason": "", "session": "s", "release_id": "r"}, "non-empty list"),
-                ({"mutations": [CREATE_RULES], "reason": "", "release_id": "r"}, "session must be a string"),
-                (
-                    {"mutations": [{"op": "create"}], "reason": "", "session": "s", "release_id": "r"},
-                    "string op and id",
-                ),
-                (
-                    {"mutations": [{**CREATE_RULES, "options": 1}], "reason": "", "session": "s", "release_id": "r"},
-                    "options must be an object",
-                ),
-                ([CREATE_RULES], "must be an object"),
-            ):
-                response = await _post(client, body)
-                assert response.status == 400 and message in await response.text()
-            response = await _post(client, _proposal(CREATE_RULES), scenario="unknown")
-            assert response.status == 404
-            assert list((tmp_path / "inbox").rglob("*.json")) == []
-        finally:
-            await client.close()
-        for other, message in ((plain, "carries no harness surface"), (files_only, "takes no proposals")):
-            other.get_or_create_scenario("agents")
-            client = TestClient(TestServer(create_app(other, inference_handler=_EchoBackend())))
+        async def unknown_scenario() -> int:
+            client = TestClient(TestServer(create_app(dispatcher)))
             await client.start_server()
             try:
-                response = await _post(client, _proposal(CREATE_RULES))
-                assert response.status == 404 and message in await response.text()
+                return (await post(client, proposal(MARKER_RULES), scenario="unknown")).status
             finally:
                 await client.close()
 
-    try:
-        asyncio.run(run())
+        assert asyncio.run(unknown_scenario()) == 404
+        assert list((tmp_path / "proposals").rglob("*.json")) == []
+        for other, message in ((plain, "carries no harness surface"), (files_only, "takes no proposals")):
+            other.get_or_create_scenario("agents")
+            [(status, text)] = answers(other, proposal(MARKER_RULES))
+            assert status == 404 and message in text
     finally:
         dispatcher.close()
         plain.close()
@@ -223,10 +157,10 @@ def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(t
 
 
 def test_inference_responses_carry_no_release_header_on_a_scenario_that_serves_no_files(tmp_path: Path) -> None:
-    plain = _dispatcher(tmp_path, Recipe())
+    plain = harness_dispatcher(tmp_path, Recipe())
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(plain, inference_handler=_EchoBackend())))
+        client = TestClient(TestServer(create_app(plain, inference_handler=EchoInference())))
         await client.start_server()
         try:
             for stream in (False, True):
@@ -248,58 +182,45 @@ def test_inference_responses_carry_no_release_header_on_a_scenario_that_serves_n
 
 
 def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it(tmp_path: Path) -> None:
-    """Two proposals admitted against one head: the first passes the checks and publishes; the second meets the
-    moved head at the step's own admission and is refused; the method is asked only once the inbox is empty."""
+    """Two proposals validated against one head: the first wins and publishes; the second meets the moved head at
+    the step's own validation and is refused; the method is asked only once the inbox is empty."""
     asked: list[int] = []
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda nodes, s, m: asked.append(len(nodes)) or None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: asked.append(context.step)))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
-
-    async def run() -> tuple[dict, dict]:
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            first = await (await _post(client, _proposal(CREATE_RULES, session="s1"))).json()
-            second = await (await _post(client, _proposal(CREATE_RULES, session="s2"))).json()
-        finally:
-            await client.close()
-        return first, second
-
-    inbox = tmp_path / "inbox" / "agents"
+    inbox = tmp_path / "proposals" / "agents"
     try:
-        first, second = asyncio.run(run())
+        (_, first), (_, second) = answers(
+            dispatcher, proposal(MARKER_RULES, session="s1"), proposal(MARKER_RULES, session="s2")
+        )
         assert first["admitted"] and second["admitted"] and first["proposal_id"] < second["proposal_id"]
 
-        _report_once(scenario, "agents", "1")
-        result = scenario.prepare_training_step()
-        assert result is not None
-        scenario.commit(result)
-        assert result.metrics["proposal"] == {
-            "id": first["proposal_id"],
-            "session": "s1",
-            "release_id": "rel-0",
-            "reason": "because",
-        }
-        assert result.metrics["published"] is True
-        assert [entry["id"] for entry in result.state["entries"]] == ["models", "settings", "r1"]
+        result = run_step(scenario, "1")
+        proposal_metrics = result.metrics["proposal"]
+        assert (proposal_metrics["id"], proposal_metrics["session"], proposal_metrics["reason"]) == (
+            first["proposal_id"],
+            "s1",
+            "because",
+        )
+        assert result.metrics["selected"] is True
+        head = scenario.repository.require_current_artifact()
+        assert result.artifact is not None and head.release_id != first["release_id"]
         settled = json.loads((inbox / "settled" / f"{first['proposal_id']}.json").read_text(encoding="utf-8"))
         assert settled["session"] == "s1"
         assert settled["result"] == {"step": 1, "selected": True, "reason": result.metrics["selection"]["reason"]}
+        # The route validates against the head the step published: the same patch now changes nothing.
+        [(_, again)] = answers(dispatcher, proposal(MARKER_RULES))
+        assert again["admitted"] is False and again["reason"] == "the patch changes nothing"
+        assert again["release_id"] == head.release_id
 
-        _report_once(scenario, "agents", "2")
-        result = scenario.prepare_training_step()
-        assert result is not None
-        scenario.commit(result)
+        result = run_step(scenario, "2")
         assert result.metrics["proposal"]["id"] == second["proposal_id"]
-        assert result.metrics["skipped"] == "entry 'r1' already exists" and "published" not in result.metrics
+        assert result.metrics["skipped"] == "the patch changes nothing" and "selected" not in result.metrics
         refused = json.loads((inbox / "refused" / f"{second['proposal_id']}.json").read_text(encoding="utf-8"))
-        assert refused["session"] == "s2" and refused["refused"] == "entry 'r1' already exists"
+        assert refused["session"] == "s2" and refused["refused"] == "the patch changes nothing"
         assert asked == []
 
-        _report_once(scenario, "agents", "3")
-        result = scenario.prepare_training_step()
-        assert result is not None
-        scenario.commit(result)
+        result = run_step(scenario, "3")
         assert asked == [3] and result.metrics["skipped"] == "no proposal" and "proposal" not in result.metrics
         assert sorted(path.name for path in inbox.iterdir()) == ["claimed", "refused", "settled"]
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
@@ -309,7 +230,6 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it
             row["metrics"]["steps"]: row["metrics"] for row in scenario.releases() if row["operation"] == "training"
         }
         assert by_step[1]["proposal"]["session"] == "s1" and by_step[2]["proposal"]["session"] == "s2"
-        assert by_step[1]["proposal"]["reason"] == "because"
         assert "proposal" not in by_step[3]
     finally:
         dispatcher.close()
@@ -322,13 +242,13 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     assert inbox.pending() == [] and inbox.claim() is None and not inbox.directory.exists()
     older, newer = ProposalInbox.new_id(), ProposalInbox.new_id()
     assert older < newer
-    assert inbox.submit(newer, _proposal(CREATE_RULES, session="b")) is None
-    assert inbox.submit(older, _proposal(CREATE_RULES, session="a")) is None
-    assert inbox.submit(ProposalInbox.new_id(), _proposal(CREATE_RULES)) == "inbox full"
+    assert inbox.submit(newer, proposal(MARKER_RULES, session="b")) is None
+    assert inbox.submit(older, proposal(MARKER_RULES, session="a")) is None
+    assert inbox.submit(ProposalInbox.new_id(), proposal(MARKER_RULES)) == "inbox full"
     assert inbox.pending() == [older, newer]
     claimed = inbox.claim()
     assert claimed is not None and claimed.id == older and claimed.session == "a"
-    assert claimed.mutations == (CREATE_RULES,) and claimed.reason == "because" and claimed.release_id == "rel-0"
+    assert claimed.patch.to_json() == MARKER_RULES and claimed.reason == "because" and claimed.release_id == "rel-0"
     assert inbox.pending() == [newer] and (inbox.directory / "claimed" / f"{older}.json").is_file()
     inbox.settle(older, {"step": 1, "selected": False, "reason": "lost"})
     assert json.loads((inbox.directory / "settled" / f"{older}.json").read_text(encoding="utf-8"))["result"] == {
@@ -338,15 +258,14 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     }
     second = inbox.claim()
     assert second is not None and second.id == newer and inbox.claim() is None
-    inbox.refuse(newer, "entry 'r1' already exists")
-    assert json.loads((inbox.directory / "refused" / f"{newer}.json").read_text(encoding="utf-8"))["refused"] == (
-        "entry 'r1' already exists"
-    )
+    inbox.refuse(newer, "the patch changes nothing")
+    refused = json.loads((inbox.directory / "refused" / f"{newer}.json").read_text(encoding="utf-8"))
+    assert refused["refused"] == "the patch changes nothing"
     assert sorted(path.name for path in inbox.directory.iterdir()) == ["claimed", "refused", "settled"]
     assert list((inbox.directory / "claimed").iterdir()) == []
     # A claimed file an operator removed by hand still gets its result filed, and no staging file stays behind.
     third = ProposalInbox.new_id()
-    assert inbox.submit(third, _proposal(CREATE_RULES, session="c")) is None
+    assert inbox.submit(third, proposal(MARKER_RULES, session="c")) is None
     claimed = inbox.claim()
     assert claimed is not None and claimed.id == third
     (inbox.directory / "claimed" / f"{third}.json").unlink()
@@ -358,114 +277,22 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     assert list(inbox.directory.rglob(".*.part")) == []
 
 
-def test_the_route_admits_against_the_head_commits_entries_not_the_live_state(tmp_path: Path) -> None:
-    """A step in flight moves the trainer's state before it commits; the route admits against the entries the head
-    commit logged, which the served tree.json carries, so an agent on that release is refused for what it sees."""
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
-    scenario = dispatcher.get_or_create_scenario("agents")
-    assert scenario is not None
-
-    async def post(body: dict) -> dict:
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            return await (await _post(client, body)).json()
-        finally:
-            await client.close()
-
-    try:
-        assert asyncio.run(post(_proposal(CREATE_RULES)))["admitted"] is True
-        _report_once(scenario, "agents", "1")
-        result = scenario.prepare_training_step()
-        assert result is not None
-        scenario.commit(result)
-        head = scenario.repository.require_current_artifact().release_id
-        logged = scenario.release_queries.entries_for_version(head)
-        assert logged is not None and [entry["id"] for entry in logged] == ["models", "settings", "r1"]
-        state = scenario.trainer.state
-        assert isinstance(state, dict)
-        state["entries"] = [entry for entry in state["entries"] if entry["id"] != "r1"]
-        update = {"op": "update", "id": "r1", "options": {"config": {"text": "again"}}}
-        answer = asyncio.run(post(_proposal(update, release_id=head)))
-        assert answer["admitted"] is True and answer["release_id"] == head, answer
-    finally:
-        dispatcher.close()
-
-
 def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, monkeypatch) -> None:
-    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
+    dispatcher = harness_dispatcher(tmp_path, harness_recipe(tmp_path, lambda context: None))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
-
-    async def post(body: dict) -> dict:
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            return await (await _post(client, body)).json()
-        finally:
-            await client.close()
 
     def die(self, prepared, decision):
         raise RuntimeError("evaluator died")
 
     try:
-        proposal_id = asyncio.run(post(_proposal(CREATE_RULES)))["proposal_id"]
-        backend = scenario.trainer.candidate_backend
-        monkeypatch.setattr(type(backend), "settle_step", die)
-        _report_once(scenario, "agents", "1")
+        [(_, admitted)] = answers(dispatcher, proposal(MARKER_RULES))
+        monkeypatch.setattr(type(scenario.trainer.candidate_backend), "settle_step", die)
         with pytest.raises(RuntimeError, match="evaluator died"):
-            scenario.prepare_training_step()
-        inbox = tmp_path / "inbox" / "agents"
-        refused = json.loads((inbox / "refused" / f"{proposal_id}.json").read_text(encoding="utf-8"))
+            run_step(scenario, "1")
+        inbox = tmp_path / "proposals" / "agents"
+        refused = json.loads((inbox / "refused" / f"{admitted['proposal_id']}.json").read_text(encoding="utf-8"))
         assert refused["refused"] == "step aborted before a result" and refused["session"] == "3f1c2a9d0b7e"
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
-    finally:
-        dispatcher.close()
-
-
-def test_the_route_refuses_every_op_on_a_reserved_entry_id(tmp_path: Path) -> None:
-    """Reef's own entries ride the seed; a proposal cannot create, update or remove one, whether or not the
-    tree holds it, and a mutation beside them is admitted as before."""
-    notice = version_check_entry("pi")
-    recipe = _recipe(tmp_path, lambda n, s, m: None, seed=(SEED_MODELS, SEED_SETTINGS, notice))
-    dispatcher = _dispatcher(tmp_path, recipe)
-    assert dispatcher.get_or_create_scenario("agents") is not None
-    code = "export default function (pi) {}\n"
-    reserved = [
-        {
-            "op": "create",
-            "id": "reef-requests",
-            "options": {"name": "code_extension", "config": {"name": "x", "code": code}},
-        },
-        {
-            "op": "create",
-            "id": "reef-pi-extension-api",
-            "options": {"name": "skill", "config": {"name": "x", "text": "y"}},
-        },
-        {"op": "update", "id": "reef-version-check", "options": {"config": {"code": code}}},
-        {"op": "update", "id": "reef-version-check", "options": {"disabled": True}},
-        {"op": "remove", "id": "reef-version-check"},
-        {"op": "remove", "id": "reef-requests"},
-    ]
-
-    async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            for mutation in reserved:
-                answer = await (await _post(client, _proposal(mutation))).json()
-                assert answer["admitted"] is False, answer
-                assert answer["reason"] == (
-                    f"mutation {mutation['op']} '{mutation['id']}' rejected: entry '{mutation['id']}' is reef's own, "
-                    "and a proposal cannot create, update or remove it"
-                )
-            answer = await (await _post(client, _proposal(CREATE_RULES))).json()
-            assert answer["admitted"] is True and answer["reason"] is None
-            assert len(list((tmp_path / "inbox" / "agents").glob("*.json"))) == 1
-        finally:
-            await client.close()
-
-    try:
-        asyncio.run(run())
     finally:
         dispatcher.close()

@@ -13,7 +13,7 @@ import reef.harness.adapters
 from reef.harness.adapters import BUILTIN_ADAPTERS, builtin_descriptor_path, get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
 from reef.harness.adapters.matchers import ABSENT, parse_matcher
-from reef.harness.tree.render import RenderError, render_composition
+from reef.harness.tree import HarnessTree, RenderError, render_tree
 
 OPENCODE = "opencode/opencode.json"
 
@@ -135,7 +135,7 @@ def checked(
 
 
 def render_config(descriptor: AdapterDescriptor, data: dict[str, object]) -> dict[str, object]:
-    return json.loads(render_composition([("config", {"data": data})], descriptor)[OPENCODE])
+    return json.loads(render_tree(HarnessTree({"config/primary.json": json.dumps(data)}), descriptor)[OPENCODE])
 
 
 def test_is_default_keeps_the_value_the_defaults_set(tmp_path: Path) -> None:
@@ -188,7 +188,7 @@ def test_a_refusal_names_the_failing_key_and_the_reason_but_not_the_value(tmp_pa
     with pytest.raises(RenderError) as refusal:
         render_config(descriptor, {"env": {"A": "1", "MY_TOKEN": "secret-value"}})
     assert str(refusal.value) == (
-        "opencode composition fails the check on env key 'MY_TOKEN' in opencode/opencode.json: "
+        "opencode harness tree fails the check on env key 'MY_TOKEN' in opencode/opencode.json: "
         "the binding owns credentials"
     )
     # Without a reason, the refusal gives the match expression, on one line however the descriptor wraps it.
@@ -241,4 +241,4 @@ def test_checks_change_no_rendered_file() -> None:
         descriptor,
         config_targets={name: replace(target, checks=()) for name, target in descriptor.config_targets.items()},
     )
-    assert render_composition([], unchecked) == render_composition([], descriptor)
+    assert render_tree(HarnessTree({}), unchecked) == render_tree(HarnessTree({}), descriptor)

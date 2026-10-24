@@ -3,95 +3,49 @@
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_methods import (
+    ALTERNATE,
+    IMPROVED,
+    SAMPLE,
+    SEED,
+    TASK,
+    QueueChat,
+    meta_harness_sections,
+    proposal_reply,
+    report_once,
+    served_runtime,
+)
+from tests.support.harness_steps import TreeReleases, make_pi_binary
 
-from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
-from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
-from recipes.meta_harness.population import Population, PopulationStore, content_id
-from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_path
+from recipes.meta_harness.population import POPULATION_KEY, Population, population_for_step
+from recipes.meta_harness.proposer import MetaHarnessProposer, MetaHarnessSettings, parse_proposal
+from recipes.meta_harness.recipe import MetaHarnessRecipe
+from recipes.meta_harness.selection import MetaHarnessSelection
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import EvaluationResult, UpdateCandidate
-from reef.core.trajectories import recorded_payload
+from reef.core.evaluation import EvaluationResult
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import HarnessCandidate
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
-from reef.harness.tree.mutations import Mutation
-from reef.inference.http import InferenceProxyRuntime
+from reef.harness.tree import HarnessTree, TreeKind, TreePatch
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.train.backend import ComponentReleases
+from reef.train.harness_backend.contract import ProposalContext, SampleSource, StepOutcome, TreeProposal
+from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
-
-PI_FAKE = """\
-#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-
-agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
-session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
-session_dir.mkdir(parents=True, exist_ok=True)
-rules_path = agent_dir / "AGENTS.md"
-event = {"type": "agent_end", "rules": rules_path.read_text() if rules_path.exists() else ""}
-(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
-"""
-
-MARKER = "META-HARNESS-WINNER"
-SEED = ({"id": "rules", "name": "rules", "config": {"text": "Answer carefully."}},)
-IMPROVED = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER}"}},)
-ALTERNATE = ({"id": "rules", "name": "rules", "config": {"text": f"Answer carefully. {MARKER} Check twice."}},)
-TASK = "Solve the supplied task."
-SAMPLE = recorded_trajectory(
-    "trace-1",
-    {
-        "messages": [{"role": "user", "content": TASK}],
-        "response": {"choices": [{"message": {"role": "assistant", "content": "attempt"}}]},
-    },
-    0.0,
-    feedback="the attempt failed",
-)
 
 
 class ServedModel(ModelBinding):
     def __init__(self) -> None:
         super().__init__(base_url="http://127.0.0.1:9", model="served-model", api_key="dummy")
-
-
-class QueueChat(ModelBinding):
-    def __init__(self, *replies: str) -> None:
-        super().__init__(base_url="http://127.0.0.1:9", model="proposer", api_key="dummy")
-        object.__setattr__(self, "replies", list(replies))
-        object.__setattr__(self, "prompts", [])
-
-    def chat(self, messages, **params):
-        self.prompts.append(messages[-1]["content"])
-        return self.replies.pop(0)
-
-
-def reply(parent_id: str, entries: tuple[dict[str, Any], ...], *, hypothesis: str = "improve rules") -> str:
-    return json.dumps(
-        {
-            "parent_id": parent_id,
-            "hypothesis": hypothesis,
-            "changes": "revise the general instruction",
-            "entries": entries,
-        }
-    )
-
-
-class DecideOnlyBackend:
-    """Stands in for the training backend: these cases exercise ``decide`` only."""
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        raise AssertionError("this case exercises decide(), not evaluate()")
 
 
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
@@ -102,19 +56,8 @@ def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
     )
 
 
-def runtime(api: str = "openai") -> InferenceProxyRuntime:
-    return InferenceProxyRuntime(
-        model_path="served-model",
-        base_url="http://127.0.0.1:9",
-        api_key="dummy",
-        api=api,
-    )
-
-
-def score_rules(task: str, result: EpisodeResult) -> float:
-    del task
-    last = result.trajectory[-1] if result.trajectory else {}
-    return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
+def outcome(step: int, selected: bool, candidate=(1.0,), current=(0.0,)) -> StepOutcome:
+    return StepOutcome(step, TreePatch({"rules.md": "x"}), selected, "decided", candidate, current)
 
 
 def non_finite_score(task: str, result: EpisodeResult) -> float:
@@ -122,321 +65,301 @@ def non_finite_score(task: str, result: EpisodeResult) -> float:
     return float("nan")
 
 
-def make_binary(tmp_path: Path) -> Path:
-    binary = tmp_path / "fake-pi"
-    binary.write_text(PI_FAKE)
-    binary.chmod(0o755)
-    return binary
+def proposer(**settings: Any) -> MetaHarnessProposer:
+    return MetaHarnessProposer(MetaHarnessSettings(evaluation_cost=2, **settings))
 
 
-def sections(tmp_path: Path, *, scorer=score_rules, adapter: str = "pi", **method: Any) -> dict[str, Any]:
-    block = {"archive": str(tmp_path / "meta-harness")}
-    block.update(method)
-    return {
-        "implementation": "recipes.meta_harness.recipe:MetaHarnessRecipe",
-        "model": {"path": "served-model"},
-        "evolution": {
-            "adapter": adapter,
-            "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(scorer),
-            "tasks": [TASK],
-            "seed": list(SEED),
-            "meta_harness": block,
-            "batch_size": 1,
-        },
-    }
-
-
-def _report_once(scenario, name: str, suffix: str) -> None:
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.INFERENCE,
-            payload=recorded_payload(SAMPLE),
-            agent_record_id=f"i{suffix}",
-        )
-    )
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.REPORT,
-            payload={"score": 0.0, "feedback": SAMPLE.metadata.get("feedback"), "references": [f"i{suffix}"]},
-            agent_record_id=f"r{suffix}",
-        )
+def context(population: Population, chat: ModelBinding, *, tree: HarnessTree = SEED, step: int = 2) -> ProposalContext:
+    """A step over ``tree`` with ``population`` as the committed method state and ``chat`` as the proposer model."""
+    return ProposalContext(
+        step=step,
+        tree=tree,
+        descriptor=get_adapter("pi"),
+        samples=(SAMPLE,),
+        sources=(SampleSource("trace-1", "untagged"),),
+        request=None,
+        evaluation_tasks=(TASK,),
+        models=ModelBindings(served=ServedModel(), named={"proposer": chat}),
+        method_state={POPULATION_KEY: population.to_dict()},
     )
 
 
-# -- composition translation ------------------------------------------------
+def population_of(proposal: TreeProposal) -> Population:
+    assert proposal.method_state is not None
+    return Population.from_dict(proposal.method_state[POPULATION_KEY])
 
 
-def test_complete_compositions_use_minimal_mutations_when_order_is_stable() -> None:
-    target = (
-        {"id": "rules", "name": "rules", "config": {"text": "better"}},
-        {"id": "notes", "name": "skill", "config": {"name": "notes", "text": "read first"}},
-    )
-
-    assert mutations_between(SEED, target) == (
-        Mutation("update", "rules", {"config": {"text": "better"}}),
-        Mutation(
-            "create",
-            "notes",
-            {"name": "skill", "config": {"name": "notes", "text": "read first"}},
-        ),
-    )
+def retained_population() -> tuple[Population, str, str]:
+    """A population whose served seed beat the one candidate it was offered: the seed's id and the candidate's."""
+    population = Population()
+    genesis = population.sync_served(SEED, step=1)
+    losing, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
+    population.settle(outcome(1, False, candidate=(0.0,), current=(0.5,)))
+    return population, genesis.candidate_id, losing.candidate_id
 
 
-def test_a_reordered_composition_is_replaced_atomically_in_target_order() -> None:
-    before = (
-        {"id": "a", "name": "rules", "config": {"text": "a"}},
-        {"id": "b", "name": "rules", "config": {"text": "b"}},
-    )
-    after = tuple(reversed(before))
-
-    assert mutations_between(before, after) == (
-        Mutation("remove", "a"),
-        Mutation("remove", "b"),
-        Mutation("create", "b", {"name": "rules", "config": {"text": "b"}}),
-        Mutation("create", "a", {"name": "rules", "config": {"text": "a"}}),
-    )
-
-
-def test_changing_a_node_kind_is_admitted_as_remove_and_create() -> None:
-    from reef.harness.tree.mutations import admit_mutations
-
-    target = ({"id": "rules", "name": "skill", "config": {"name": "review", "text": "Check the result."}},)
-    admitted, refusal = admit_mutations(SEED, mutations_between(SEED, target), get_adapter("pi"))
-
-    assert refusal is None
-    assert tuple(admitted) == target
-
-
-# -- population and history-aware proposal ----------------------------------
+# -- population ------------------------------------------------------------------
 
 
 def test_population_retains_a_losing_candidate_as_a_future_parent() -> None:
+    population, genesis, losing = retained_population()
+
+    assert population.served_id == genesis
+    assert population.by_id(losing).outcome == "retained"
+    assert population.by_id(losing).scores == (0.0,)
+    # The incumbent takes its first scores from the step that measured it beside the candidate.
+    assert population.by_id(genesis).scores == (0.5,)
+    assert population.episode_calls == 2 and population.pending_id is None
+
+
+def test_a_served_tree_the_population_does_not_hold_joins_it_as_a_new_root() -> None:
+    """A rollback or an operator's edit serves a tree the search never proposed: it becomes a parentless member."""
     population = Population()
-    genesis = population.sync_served(SEED, step=0)
-    losing, is_new = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    population.record_decision(candidate_scores=(0.0,), current_scores=(1.0,), selected=False)
+    population.sync_served(SEED, step=1)
+    rolled = population.sync_served(IMPROVED, step=2)
 
-    assert is_new
-    assert population.served_id == genesis.candidate_id
-    assert population.by_id(losing.candidate_id).outcome == "retained"
-    assert population.by_id(losing.candidate_id).scores == (0.0,)
+    assert rolled.parent_id is None and rolled.outcome == "selected"
+    assert population.served_id == IMPROVED.checksum() and len(population.candidates) == 2
 
 
-def test_store_refuses_to_adopt_state_that_never_reached_commit_applied(tmp_path: Path) -> None:
-    store = PopulationStore(tmp_path / "mirror.json")
-    speculative = Population()
-    speculative.sync_served(SEED, step=0)
-
-    with pytest.raises(RuntimeError, match="differs from the last applied commit"):
-        store.begin(speculative.to_dict())
-
-    assert store.committed.candidates == []
-
-
-def test_population_refuses_a_served_composition_that_disagrees_with_committed_state() -> None:
+def test_a_step_folds_in_only_the_outcome_of_the_step_that_proposed_its_pending_candidate() -> None:
     population = Population()
-    population.sync_served(SEED, step=0)
+    genesis = population.sync_served(SEED, step=1)
+    population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=3)
+    state = {POPULATION_KEY: population.to_dict()}
 
-    with pytest.raises(ValueError, match="does not match Reef's served composition"):
-        population.sync_served(IMPROVED, step=1)
-
-
-def test_full_history_proposer_can_branch_from_a_retained_candidate(tmp_path: Path) -> None:
-    store = PopulationStore(tmp_path / "mirror.json")
-    population = Population()
-    genesis = population.sync_served(SEED, step=0)
-    retained, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    population.record_decision(candidate_scores=(0.0,), current_scores=(0.5,), selected=False)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
-    chat = QueueChat(reply(retained.candidate_id, ALTERNATE))
-    proposer = MetaHarnessProposer(
-        store=store,
-        descriptor=get_adapter("pi"),
-        tasks=(TASK,),
-        episode_repeats=1,
-    )
-
-    mutations = proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat}))
-
-    assert mutations == (Mutation("update", "rules", {"config": ALTERNATE[0]["config"]}),)
-    assert store.active.pending.parent_id == retained.candidate_id
-    assert genesis.candidate_id in chat.prompts[0]
-    assert retained.candidate_id in chat.prompts[0]
-    assert TASK in chat.prompts[0]
+    settled = population_for_step(state, outcome(3, True))
+    assert settled.served_id == IMPROVED.checksum() and settled.by_id(IMPROVED.checksum()).scores == (1.0,)
+    # The proposing step never reached an evaluation: the candidate is dropped, unscored.
+    for last in (outcome(2, True), None):
+        dropped = population_for_step(state, last)
+        assert dropped.pending_id is None and [candidate.candidate_id for candidate in dropped.candidates] == [
+            SEED.checksum()
+        ]
 
 
-def test_an_undeclared_proposer_model_is_refused_rather_than_silently_served(tmp_path: Path) -> None:
+def test_the_population_state_round_trips_and_checks_its_members() -> None:
+    population, _, _ = retained_population()
+    assert Population.from_dict(population.to_dict()) == population
+    corrupted = population.to_dict()
+    corrupted["candidates"][1]["files"] = {"rules.md": "another tree"}
+    with pytest.raises(ValueError, match="candidate id does not match its tree"):
+        Population.from_dict(corrupted)
+    with pytest.raises(ValueError, match="schema_version"):
+        Population.from_dict({**population.to_dict(), "schema_version": 1})
+
+
+# -- proposer -----------------------------------------------------------------
+
+
+def test_full_history_proposer_can_branch_from_a_retained_candidate() -> None:
+    population, genesis, retained = retained_population()
+    chat = QueueChat(proposal_reply(IMPROVED, ALTERNATE))
+
+    proposal = proposer().propose(context(population, chat))
+
+    # The patch is stated against the served tree, whatever parent the tree came from.
+    assert proposal.patch == SEED.diff(ALTERNATE)
+    proposed = population_of(proposal)
+    assert proposed.pending.parent_id == retained and proposed.pending_step == 2
+    assert proposal.notes["status"] == "proposed" and proposal.notes["parent_id"] == retained
+    assert genesis in chat.prompts[0] and retained in chat.prompts[0]
+    assert TASK in chat.prompts[0] and "the attempt failed" in chat.prompts[0]
+
+
+def test_an_undeclared_proposer_model_is_refused_rather_than_silently_served() -> None:
     # Meta-Harness improves a fixed model's harness with a separate proposer.
     # Falling back to the served model would let a typo in evolution.models
     # turn the harness under test into its own author, measuring a different
     # experiment with nothing in the record to say so.
-    store = PopulationStore(tmp_path / "mirror.json")
     population = Population()
-    population.sync_served(SEED, step=0)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
-    proposer = MetaHarnessProposer(
-        store=store,
-        descriptor=get_adapter("pi"),
-        tasks=(TASK,),
-        episode_repeats=1,
-        model="typo",
-    )
+    population.sync_served(SEED, step=1)
 
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
-        proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": QueueChat()}))
+        proposer(model="typo").propose(context(population, QueueChat()))
 
 
-def test_incumbent_only_mode_rejects_a_historical_parent_without_losing_the_attempt(tmp_path: Path) -> None:
-    store = PopulationStore(tmp_path / "mirror.json")
+def test_incumbent_only_mode_rejects_a_historical_parent_without_losing_the_attempt() -> None:
+    population, _, retained = retained_population()
+    chat = QueueChat(proposal_reply(IMPROVED, ALTERNATE))
+
+    proposal = proposer(mode="incumbent_only").propose(context(population, chat))
+
+    assert proposal.patch == TreePatch({}) and proposal.notes["status"] == "invalid"
+    kept = population_of(proposal)
+    assert kept.attempts[-1]["status"] == "invalid" and kept.pending_id is None
+    assert kept.proposer_calls == 1  # the attempt is spent and recorded
+    assert retained not in chat.prompts[0]  # the prompt shows the incumbent alone
+
+
+def test_component_scope_keeps_non_evolvable_parent_files_fixed() -> None:
+    parent = HarnessTree({**SEED.files, "skills/notes/SKILL.md": "fixed"})
+    changed = HarnessTree({**IMPROVED.files, "skills/notes/SKILL.md": "changed"})
     population = Population()
-    genesis = population.sync_served(SEED, step=0)
-    retained, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    population.record_decision(candidate_scores=(0.0,), current_scores=(1.0,), selected=False)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
-    chat = QueueChat(reply(retained.candidate_id, ALTERNATE))
-    proposer = MetaHarnessProposer(
-        store=store,
-        descriptor=get_adapter("pi"),
-        tasks=(TASK,),
-        episode_repeats=1,
-        mode="incumbent_only",
+    population.sync_served(parent, step=1)
+
+    proposal = proposer(kinds=(TreeKind.RULES,)).propose(
+        context(population, QueueChat(proposal_reply(parent, changed)), tree=parent)
     )
 
-    assert proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
-    assert store.active.attempts[-1]["status"] == "invalid"
-    assert store.active.pending_id is None
+    assert proposal.patch == TreePatch({})
+    error = population_of(proposal).attempts[-1]["error"]
+    assert "may change only the files of kinds ['rules']" in error
 
 
-def test_component_scope_keeps_non_evolvable_parent_nodes_fixed(tmp_path: Path) -> None:
-    parent = (
-        *SEED,
-        {"id": "notes", "name": "skill", "config": {"name": "notes", "text": "fixed"}},
-    )
-    changed_fixed_node = (
-        *IMPROVED,
-        {"id": "notes", "name": "skill", "config": {"name": "notes", "text": "changed"}},
-    )
-    store = PopulationStore(tmp_path / "mirror.json")
+def test_a_proposal_that_fails_validation_or_repeats_a_candidate_is_recorded_and_skipped() -> None:
+    population, genesis, retained = retained_population()
+    empty_skill = HarnessTree({**SEED.files, "skills/empty/SKILL.md": "\n"})
+    duplicate = proposer().propose(context(population, QueueChat(proposal_reply(SEED, IMPROVED))))
+    assert duplicate.patch == TreePatch({}) and duplicate.notes == {"status": "duplicate", "candidate_id": retained}
+    invalid = proposer().propose(context(population, QueueChat(proposal_reply(SEED, empty_skill))))
+    assert invalid.patch == TreePatch({})
+    assert "proposal fails validation: skills/empty/SKILL.md" in invalid.notes["error"]
+    unknown = proposer().propose(context(population, QueueChat("not json at all")))
+    assert unknown.notes == {"status": "invalid", "error": "proposer response contains no JSON object"}
+    assert population_of(unknown).served_id == genesis
+
+
+def test_candidate_and_episode_budgets_stop_before_another_model_call() -> None:
     population = Population()
-    genesis = population.sync_served(parent, step=0)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
-    chat = QueueChat(reply(genesis.candidate_id, changed_fixed_node))
-    proposer = MetaHarnessProposer(
-        store=store,
-        descriptor=get_adapter("pi"),
-        tasks=(TASK,),
-        episode_repeats=1,
-        kinds=("rules",),
-    )
+    genesis = population.sync_served(SEED, step=1)
+    population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
+    population.settle(outcome(1, True))
+    chat = QueueChat(proposal_reply(IMPROVED, ALTERNATE))
 
-    assert proposer.propose(parent, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
-    assert store.active.attempts[-1]["status"] == "invalid"
-    assert "may change only configured components" in store.active.attempts[-1]["error"]
-
-
-def test_candidate_and_episode_budgets_stop_before_another_model_call(tmp_path: Path) -> None:
-    store = PopulationStore(tmp_path / "mirror.json")
-    population = Population()
-    genesis = population.sync_served(SEED, step=0)
-    candidate, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    population.record_decision(candidate_scores=(1.0,), current_scores=(0.0,), selected=True)
-    assert candidate.outcome == "selected"
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
-    chat = QueueChat(reply(candidate.candidate_id, ALTERNATE))
-    proposer = MetaHarnessProposer(
-        store=store,
-        descriptor=get_adapter("pi"),
-        tasks=(TASK,),
-        episode_repeats=1,
-        max_candidates=1,
-    )
-
-    assert proposer.propose(IMPROVED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
-    assert chat.prompts == []
-    assert store.active.attempts[-1] == {
+    exhausted = proposer(max_candidates=1).propose(context(population, chat, tree=IMPROVED))
+    assert exhausted.patch == TreePatch({}) and chat.prompts == []
+    assert population_of(exhausted).attempts[-1] == {
         "step": 1,
         "status": "budget_exhausted",
         "budget": "max_candidates",
     }
+    # Two episodes spent and two more for the next evaluation reach a budget of three.
+    episodes = proposer(max_target_episodes=3).propose(context(population, chat, tree=IMPROVED))
+    assert episodes.notes == {"status": "budget_exhausted", "budget": "max_target_episodes"} and chat.prompts == []
 
 
-def test_selector_judges_against_the_frontier_the_incumbent_was_admitted_on(tmp_path: Path) -> None:
+def test_the_reply_is_one_object_of_the_four_proposal_fields() -> None:
+    fenced = "```json\n" + proposal_reply(SEED, IMPROVED) + "\n```"
+    assert parse_proposal(fenced)["files"] == dict(IMPROVED.files)
+    with pytest.raises(ValueError, match="unknown fields"):
+        parse_proposal('{"parent_id": "p", "files": {}, "entries": []}')
+    with pytest.raises(ValueError, match="requires a files object"):
+        parse_proposal('{"parent_id": "p"}')
+
+
+# -- selection -------------------------------------------------------------------
+
+
+def harness_candidate(population: Population, proposal_id: str | None = None) -> HarnessCandidate:
+    return HarnessCandidate(
+        candidate_id="backend-candidate",
+        candidate_tree=IMPROVED,
+        current_tree=SEED,
+        patch=SEED.diff(IMPROVED),
+        evaluation_tasks=(TASK,),
+        proposal_id=proposal_id,
+        method_state={POPULATION_KEY: population.to_dict()},
+    )
+
+
+def test_selection_judges_against_the_frontier_the_incumbent_was_admitted_on() -> None:
     # Upstream keeps a high-water frontier and never re-runs the incumbent, so
     # a candidate must beat the score the incumbent was admitted on, not the
     # one it happens to post in this batch. Reproducing the search means
     # reproducing that, including its bias against a lucky incumbent.
-    store = PopulationStore(tmp_path / "mirror.json")
     population = Population()
-    genesis = population.sync_served(SEED, step=0)
+    genesis = population.sync_served(SEED, step=1)
     genesis.scores = (0.8,)
     proposed, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
 
-    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
-        UpdateCandidate("backend-candidate"),
-        evaluation(candidate=(0.7,), current=(0.1,)),
+    decision = MetaHarnessSelection(None).decide(
+        harness_candidate(population), evaluation(candidate=(0.7,), current=(0.1,))
     )
 
-    assert not decision.selected
+    assert not decision.selected and decision.policy == "meta_harness"
     assert decision.metrics["incumbent_mean"] == 0.8
-    # The frontier does not drift down to this batch's measurement.
-    assert store.active.by_id(genesis.candidate_id).scores == (0.8,)
-    assert store.active.by_id(proposed.candidate_id).outcome == "retained"
-    assert store.active.episode_calls == 2
+    assert decision.metrics["population_candidate_id"] == proposed.candidate_id
+    assert decision.metrics["target_episode_calls"] == 2
+    # The next step records the result; the frontier does not drift down to this batch's measurement.
+    population.settle(outcome(1, False, candidate=(0.7,), current=(0.1,)))
+    assert population.by_id(genesis.candidate_id).scores == (0.8,)
+    assert population.by_id(proposed.candidate_id).outcome == "retained"
+    assert population.served_id == genesis.candidate_id
 
 
-def test_selector_retains_a_non_winner_as_a_future_parent(tmp_path: Path) -> None:
-    store = PopulationStore(tmp_path / "mirror.json")
+def test_the_first_selection_compares_against_the_incumbents_own_run() -> None:
     population = Population()
-    genesis = population.sync_served(SEED, step=0)
-    proposed, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
-    store.restore_committed(population.to_dict())
-    store.begin(population.to_dict())
+    genesis = population.sync_served(SEED, step=1)
+    population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
 
-    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
-        UpdateCandidate("backend-candidate"),
-        evaluation(candidate=(0.2,), current=(0.6,)),
-    )
+    decision = MetaHarnessSelection(None).decide(harness_candidate(population), evaluation((0.6,), (0.2,)))
 
-    assert not decision.selected
-    assert store.active.by_id(proposed.candidate_id).outcome == "retained"
-    assert store.active.served_id == genesis.candidate_id
+    assert decision.selected and decision.metrics["incumbent_mean"] == 0.2
 
 
-# -- recipe and transactional lifecycle ------------------------------------
+def test_selection_refuses_scores_it_cannot_compare() -> None:
+    population = Population()
+    genesis = population.sync_served(SEED, step=1)
+    population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
+    selection = MetaHarnessSelection(None)
+    with pytest.raises(ValueError, match="only finite values"):
+        selection.decide(harness_candidate(population), evaluation((float("nan"),), (0.0,)))
+    with pytest.raises(ValueError, match="equal lengths"):
+        selection.decide(harness_candidate(population), evaluation((1.0, 1.0), (0.0,)))
+
+
+def test_a_client_proposal_from_the_inbox_is_judged_against_the_incumbent() -> None:
+    population = Population()
+    population.sync_served(SEED, step=1)
+    decision = MetaHarnessSelection(None).decide(harness_candidate(population, proposal_id="p1"), evaluation())
+    assert decision.selected
+
+
+# -- recipe and the committed lifecycle ----------------------------------------------
 
 
 @pytest.mark.parametrize("adapter", ["pi", "codex"])
 def test_recipe_is_adapter_agnostic(tmp_path: Path, adapter: str) -> None:
-    config = sections(tmp_path, adapter=adapter)
+    config = meta_harness_sections(tmp_path, adapter=adapter)
     built = build_recipe(
         config["implementation"],
         {},
         config=config,
-        runtime=runtime("responses" if adapter == "codex" else "openai"),
+        runtime=served_runtime("responses" if adapter == "codex" else "openai"),
     )
 
     assert isinstance(built, MetaHarnessRecipe)
-    assert built.adapter == adapter
-    assert built.mode == "full_history"
-    assert isinstance(built.build("general-task", SQLiteRecordStore()), Trainer)
+    assert built.adapter == adapter and built.seed == SEED
+    assert isinstance(built.propose, MetaHarnessProposer) and built.propose.settings.mode == "full_history"
+    # Both sides of the one task: the cost the episode budget counts per evaluation.
+    assert built.propose.settings.evaluation_cost == 2
+    assert built.selection.plugin_class is MetaHarnessSelection
+    releases = ComponentReleases(TreeReleases(built.seed), "harness")
+    assert isinstance(built.build("general-task", SQLiteRecordStore(), releases=releases), Trainer)
 
 
 def test_recipe_rejects_a_selection_override_that_would_split_population_from_serving(tmp_path: Path) -> None:
-    config = sections(tmp_path)
+    config = meta_harness_sections(tmp_path)
     config["evolution"]["selection"] = "always"
 
     with pytest.raises(RecipeConfigError, match=r"owns evolution\.selection"):
-        build_recipe(config["implementation"], {}, config=config, runtime=runtime())
+        build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        ({"archive": "meta-harness"}, r"unknown key\(s\) archive"),
+        ({"mode": "greedy"}, "mode must be one of"),
+        ({"components": "rules"}, "must be a list of tree kinds"),
+        ({"max_files": 0}, "max_files must be a positive integer"),
+    ],
+)
+def test_recipe_rejects_an_invalid_meta_harness_block(tmp_path: Path, block: dict[str, Any], message: str) -> None:
+    config = meta_harness_sections(tmp_path, **block)
+    with pytest.raises(RecipeConfigError, match=message):
+        build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
 
 
 @pytest.mark.parametrize(
@@ -444,62 +367,56 @@ def test_recipe_rejects_a_selection_override_that_would_split_population_from_se
     [("publish", "review"), ("review_kinds", ["rules"]), ("recheck_every", 1), ("promote_failures", True)],
 )
 def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, option, value):
-    config = sections(tmp_path)
+    config = meta_harness_sections(tmp_path)
     config["evolution"][option] = value
 
     with pytest.raises((ValueError, RecipeConfigError), match="Meta-Harness requires"):
-        build_recipe(config["implementation"], {}, config=config, runtime=runtime())
+        build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
 
 
-def test_scenario_population_path_cannot_escape_its_directory(tmp_path: Path) -> None:
-    directory = tmp_path / "meta-harness"
-    traversal = scenario_population_path(directory, "../outside")
-    absolute = scenario_population_path(directory, "/tmp/outside")
-
-    assert traversal.parent == directory
-    assert absolute.parent == directory
-    assert traversal != absolute
-    assert "/" not in traversal.name and ".." not in traversal.name
-
-
-def test_one_step_commits_population_and_composition_together(tmp_path: Path) -> None:
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
-    chat = QueueChat(reply(content_id(SEED), IMPROVED))
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
+def meta_harness_dispatcher(tmp_path: Path, recipe: MetaHarnessRecipe, storage: Path | None = None) -> Dispatcher:
+    """A dispatcher whose base release is the recipe's seed, as a deployment's is."""
     initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = Dispatcher(
+    if not initial.exists():
+        recipe.seed.write(initial)
+    return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(storage),
     )
-    scenario_name = "../general-meta-harness"
+
+
+def built_recipe(tmp_path: Path, *replies: str, **sections: Any) -> MetaHarnessRecipe:
+    make_pi_binary(tmp_path)
+    config = meta_harness_sections(tmp_path, **sections)
+    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
+    assert isinstance(recipe, MetaHarnessRecipe)
+    return dataclasses.replace(recipe, models={"proposer": QueueChat(*replies)})
+
+
+def test_one_step_commits_the_population_with_the_tree(tmp_path: Path) -> None:
+    recipe = built_recipe(tmp_path, proposal_reply(SEED, IMPROVED))
+    dispatcher = meta_harness_dispatcher(tmp_path, recipe, tmp_path / "records")
     try:
-        scenario = dispatcher.get_or_create_scenario(scenario_name)
+        scenario = dispatcher.get_or_create_scenario("general-meta-harness")
         assert scenario is not None
-        _report_once(scenario, scenario_name, "1")
+        report_once(scenario, "general-meta-harness", "1")
         result = scenario.prepare_training_step()
         assert result is not None and result.state is not None
-        backend = scenario.trainer._candidate_backend
-        assert isinstance(backend, MetaHarnessBackend)
-        with pytest.raises(RuntimeError, match="no active step"):
-            _ = backend._population_store.active
-        mirror = scenario_population_path(tmp_path / "meta-harness", scenario_name)
-        assert not mirror.exists()
-        assert result.metrics["selected"] is True
+        assert result.metrics["selected"] is True and result.metrics["patch"] == dict(IMPROVED.files)
         assert result.metrics["selection"]["policy"] == "meta_harness"
-        assert result.state[POPULATION_STATE_KEY]["served_id"] == content_id(IMPROVED)
+        assert result.metrics["population_candidate_id"] == IMPROVED.checksum()
+        assert result.state["method_state"][POPULATION_KEY]["pending_id"] == IMPROVED.checksum()
         scenario.commit(result)
-        committed = scenario.trainer.state[POPULATION_STATE_KEY]
+        committed = HarnessState.from_json(scenario.trainer.state)
     finally:
         dispatcher.close()
 
-    assert json.loads(mirror.read_text()) == committed
-    assert committed["pending_id"] is None
-    assert committed["episode_calls"] == 2
-    assert [row["outcome"] for row in committed["candidates"]] == ["selected", "selected"]
+    # The next step folds the evaluation into the committed population.
+    population = population_for_step(committed.method_state, committed.last_outcome)
+    assert population.served_id == IMPROVED.checksum() and population.pending_id is None
+    assert population.episode_calls == 2
+    assert [candidate.outcome for candidate in population.candidates] == ["selected", "selected"]
 
 
 def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tmp_path, monkeypatch) -> None:
@@ -517,7 +434,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     from reef.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
-    proposed = (*SEED, {"id": "agent", "name": "code_extension", "config": {"name": "agent", "code": code}})
+    proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})
     launches, agents = [], []
     monkeypatch.setattr(Terminus2, "_get_completion_confirmation_message", lambda self, output: "stock")
 
@@ -532,7 +449,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
             assert config.environment.type.value == "e2b"
             assert config.agent.model_name == "served-model"
             assert config.agent.kwargs["llm_kwargs"]["api_key"] == "dummy"
-            assert config.extra_instruction_paths[0].read_text() == SEED[0]["config"]["text"] + "\n"
+            assert config.extra_instruction_paths[0].read_text() == SEED.files["rules.md"]
             agents.append(config.agent)
             if config.agent.import_path:
                 cls = import_class(config.agent.import_path)
@@ -555,7 +472,9 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     monkeypatch.setattr("reef_eval.Lab", Lab)
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     monkeypatch.setattr(SandboxExecutor, "launch", launch)
-    config = sections(tmp_path, adapter="terminus", scorer=lambda task, result: result.trajectory[0]["reward"])
+    config = meta_harness_sections(
+        tmp_path, adapter="terminus", scorer=lambda task, result: result.trajectory[0]["reward"]
+    )
     config["evolution"].pop("binary")
     config["evolution"].update(
         executor="sandbox",
@@ -568,24 +487,19 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
         config["implementation"],
         {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},
         config=config,
-        runtime=runtime(),
+        runtime=served_runtime(),
     )
-    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), proposed))})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(),
-    )
+    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(proposal_reply(SEED, proposed))})
+    dispatcher = meta_harness_dispatcher(tmp_path, recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
-        _report_once(scenario, "terminus-meta", "1")
+        report_once(scenario, "terminus-meta", "1")
         result = scenario.prepare_training_step()
         assert result.metrics["selected"] is True
         scenario.commit(result)
-        assert scenario.trainer.state[POPULATION_STATE_KEY]["served_id"] == content_id(proposed)
-        assert next((tmp_path / "repository").rglob("context/agent.py")).read_text() == code
+        committed = HarnessState.from_json(scenario.trainer.state)
+        assert population_for_step(committed.method_state, committed.last_outcome).served_id == proposed.checksum()
+        assert next((tmp_path / "repository").rglob("extensions/agent.py")).read_text() == code
     finally:
         dispatcher.close()
     assert len(agents) == len(launches) == 2
@@ -593,109 +507,33 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     assert all(not root.exists() for root in launches)
 
 
-def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Path) -> None:
-    make_binary(tmp_path)
-    config = sections(tmp_path, scorer=non_finite_score)
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
-    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), IMPROVED))})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
+def test_failed_evaluation_restores_the_committed_state(tmp_path: Path) -> None:
+    recipe = built_recipe(tmp_path, proposal_reply(SEED, IMPROVED), scorer=non_finite_score)
+    dispatcher = meta_harness_dispatcher(tmp_path, recipe, tmp_path / "records")
     try:
         scenario = dispatcher.get_or_create_scenario("failed-evaluation")
         assert scenario is not None
         initial_state = scenario.trainer.state
-        _report_once(scenario, "failed-evaluation", "1")
-        with pytest.raises(ValueError, match="non-finite score"):
+        report_once(scenario, "failed-evaluation", "1")
+        with pytest.raises(ValueError, match="finite"):
             scenario.prepare_training_step()
         assert scenario.trainer.state == initial_state
-        assert not scenario_population_path(tmp_path / "meta-harness", "failed-evaluation").exists()
     finally:
         dispatcher.close()
-
-
-def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_stale_mirror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
-    chat = QueueChat(
-        reply(content_id(SEED), IMPROVED),
-        reply(content_id(IMPROVED), ALTERNATE),
-    )
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    records = tmp_path / "records"
-    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
-    mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
-    try:
-        scenario = dispatcher.get_or_create_scenario("commit-failure")
-        assert scenario is not None
-        _report_once(scenario, "commit-failure", "1")
-        first = scenario.prepare_training_step()
-        assert first is not None
-        scenario.commit(first)
-        committed = json.loads(mirror.read_text())
-
-        _report_once(scenario, "commit-failure", "2")
-        second = scenario.prepare_training_step()
-        assert second is not None and second.artifact is None
-        backend = scenario.trainer._candidate_backend
-        assert isinstance(backend, MetaHarnessBackend)
-        with pytest.raises(RuntimeError, match="no active step"):
-            _ = backend._population_store.active
-        assert isinstance(scenario.store, CommitHistoryScenarioStore)
-        history = scenario.store.commit_history
-        assert history is not None
-        monkeypatch.setattr(history, "append", lambda record: (_ for _ in ()).throw(RuntimeError("offline")))
-        with pytest.raises(RuntimeError, match="offline"):
-            scenario.commit(second)
-        assert json.loads(mirror.read_text()) == committed
-    finally:
-        dispatcher.close()
-
-    # A stale/corrupt mirror is never loaded as search state.  Recovery gets
-    # the prior durable commit and rewrites the mirror from that value.
-    mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
-    try:
-        recovered = restarted.get_or_create_scenario("commit-failure")
-        assert recovered is not None
-        assert recovered.scenario_step == 1
-        assert recovered.trainer.state[POPULATION_STATE_KEY] == committed
-        assert json.loads(mirror.read_text()) == committed
-    finally:
-        restarted.close()
 
 
 @pytest.mark.parametrize("failure", ["activation", "publication", "commit"])
-def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monkeypatch, failure):
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
-    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), IMPROVED))})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
+def test_failed_publication_does_not_advance_population_or_head(tmp_path, monkeypatch, failure):
+    recipe = built_recipe(tmp_path, proposal_reply(SEED, IMPROVED))
+    dispatcher = meta_harness_dispatcher(tmp_path, recipe, tmp_path / "records")
     try:
         scenario = dispatcher.get_or_create_scenario("publish-failure")
-        previous = json.loads(json.dumps(scenario.trainer.state))
-        _report_once(scenario, "publish-failure", "1")
+        previous = dict(scenario.trainer.state)
+        report_once(scenario, "publish-failure", "1")
         result = scenario.prepare_training_step()
         assert result.artifact is not None
         backend = scenario.trainer.candidate_backend
-        assert tuple(backend._entries()) == SEED
+        assert HarnessTree(backend.releases.head().files) == SEED
         head = scenario.current_artifact_ref()
         checkpoint = scenario.repository.require_checkpoint_artifact()
         durable_head = scenario.repository.backend.current()
@@ -713,10 +551,9 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         with pytest.raises(RuntimeError, match="unavailable"):
             scenario.commit(result)
         assert scenario.trainer.state == previous
-        assert tuple(backend._entries()) == SEED
+        assert HarnessTree(backend.releases.head().files) == SEED
         assert scenario.current_artifact_ref() == head
         assert scenario.repository.require_checkpoint_artifact() == checkpoint
         assert scenario.repository.backend.current() == durable_head
-        assert not scenario_population_path(tmp_path / "meta-harness", "publish-failure").exists()
     finally:
         dispatcher.close()

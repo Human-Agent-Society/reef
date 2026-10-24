@@ -13,18 +13,19 @@ from threading import Thread
 import pytest
 from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_service import harness_repository
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation
 from reef.train.types import TrainingBatch
 
 
@@ -110,12 +111,12 @@ def make_recipe(platform, tmp_path):
     binary.write_text(FAKE_AGENT)
     binary.chmod(0o755)
 
-    def propose(nodes, samples, models):
-        assert models["teacher"].chat([{"role": "user", "content": "proposer"}]) == "OK"
-        return Mutation("create", "improvement", {"name": "rules", "config": {"text": "marker"}})
+    def propose(context):
+        assert context.models["teacher"].chat([{"role": "user", "content": "proposer"}]) == "OK"
+        return TreePatch({"rules.md": "marker\n"})
 
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")
-    return CordisRecipe(
+    return HarnessEvolutionRecipe(
         resolve_proposer(propose),
         resolve_episode_scorer(judge),
         ("test task",),
@@ -123,7 +124,7 @@ def make_recipe(platform, tmp_path):
         models={"teacher": managed, "judge": managed},
         binary=str(binary),
         client_models=("managed-alternative",),
-        seed=({"id": "initial", "name": "skill", "config": {"name": "notes", "text": "notes"}},),
+        seed=HarnessTree({"skills/notes/SKILL.md": "notes\n"}),
         proposals_dir=str(tmp_path / "proposals"),
     )
 
@@ -134,11 +135,9 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-episodes")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-episodes")
     recipe = replace(make_recipe(platform, tmp_path), worker_executor=ExecutorSettings(backend=executor))
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        harness_repository(tmp_path, recipe.base_artifact_files() or {}),
         scenario_storage=SQLiteScenarioStorage(),
     )
     try:
@@ -179,7 +178,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             else:
                 assert headers["authorization"] == "Bearer scoped-alpha-1"
             assert "platform-key" not in json.dumps(raw_headers)
-        assert "scoped-alpha" not in json.dumps(prepared.candidate.candidate_files)
+        assert "scoped-alpha" not in json.dumps(dict(prepared.candidate.candidate_tree.files))
         assert "scoped-alpha" not in json.dumps(result.state)
         result.publication.artifact.discard()
         asyncio.run(
@@ -262,23 +261,15 @@ def test_model_auth_failure_never_falls_back(platform, tmp_path):
     assert platform["calls"][0][0].startswith("/alpha/")
 
 
-def test_http_contract_updates_model_and_installs_selected_protocol(platform, tmp_path):
+def test_http_contract_updates_the_model_and_serves_no_provider(platform, tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
-    from reef.harness.adapters import get_adapter
     from reef.service.app import create_app
-    from reef.service.request_service import RequestService
 
     recipe = make_recipe(platform, tmp_path)
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    for path, content in recipe.base_artifact_files().items():
-        output = initial / path
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(content)
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        harness_repository(tmp_path, recipe.base_artifact_files() or {}),
         scenario_storage=SQLiteScenarioStorage(),
     )
 
@@ -325,20 +316,13 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
             assert (await updated.json())["model"]["api"] == "anthropic"
             fresh = await client.post("/v1/messages", headers=headers, json={"model": "custom-alpha", "messages": []})
             assert fresh.status == 200, await fresh.text()
-            service = RequestService(dispatcher)
             scenario = dispatcher.get_or_create_scenario("alpha")
-            # The live config takes precedence over the old release's model dialect.
-            binding = service._install_binding(
-                scenario,
-                {"release_id": scenario.repository.require_current_artifact().release_id},
-                get_adapter("pi"),
-                {"host": "platform.example", "x-forwarded-proto": "https"},
-            )
-            rendered = json.dumps(binding)
-            assert "anthropic-messages" in rendered
-            assert "https://platform.example" in rendered
-            assert "scoped-alpha" not in rendered
-            assert "managed-alternative" not in rendered
+            # The served tree carries no provider: neither the scenario's key nor the deployment's reaches a client.
+            for form in ("rendered", "source"):
+                served = await client.get("/reef/harness", headers=headers, params={"form": form})
+                assert served.status == 200, await served.text()
+                files = json.dumps((await served.json())["files"])
+                assert "scoped-alpha" not in files and "platform-key" not in files
             reset = await client.post("/reef/scenarios/alpha/update", headers=headers, json={"model": None})
             assert reset.status == 200
             assert (await reset.json())["model"] is None
@@ -365,7 +349,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert scenario.runtime.api_key == "scoped-alpha-1"
-        assert scenario.trainer.candidate_backend._models["judge"].api_key == "scoped-alpha-1"
+        assert scenario.trainer.candidate_backend.models["judge"].api_key == "scoped-alpha-1"
         config = scenario.model_config
         previous_runtime = config.runtime
         reloaded = recovered.registry.reload("alpha")

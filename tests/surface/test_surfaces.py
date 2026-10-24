@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from reef.core.errors import ReefError
+from reef.harness.adapters import get_adapter
+from reef.harness.delivery import create_harness_surface
 from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
@@ -18,7 +20,6 @@ from reef.surface import (
     WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
-    create_harness_surface,
     create_skill_surface,
     create_weight_surface,
 )
@@ -60,7 +61,7 @@ def test_recipe_default_surface_is_noop() -> None:
 
 def test_surface_factories_return_composed_surface_instances() -> None:
     assert type(create_weight_surface()) is Surface
-    assert type(create_harness_surface()) is Surface
+    assert type(create_harness_surface(get_adapter("pi"))) is Surface
     assert type(create_skill_surface([_PullOnlyModule()])) is Surface
 
 

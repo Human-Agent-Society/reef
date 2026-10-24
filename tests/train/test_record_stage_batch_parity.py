@@ -49,11 +49,12 @@ from reef.record2record import (
 from reef.record2task import JudgedTasks, Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.distill import DistillTasks
+from reef.record2task.traces import TraceTasks
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.task2batch import BufferSettings, DistillBatches, Task2Batch
+from reef.task2batch.traces import TraceBatches
 from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
@@ -689,7 +690,7 @@ def computed_steps() -> list[Step]:
     ]
 
 
-def cordis_steps(mode_requests: bool) -> list[Step]:
+def trace_steps(mode_requests: bool) -> list[Step]:
     steps: list[Step] = []
     for index in range(6):
         steps += scored("c", index, float(index))
@@ -729,13 +730,13 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
         "sdpo": (StreamRun(SDPORecipe.pipeline_spec(), sdpo, SDPOReport), sdpo_steps()),
         "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, batch_size=2), computed_steps()),
         "computed_window": (StreamRun(TOY_COMPUTED_STAGES, max_staleness=1, batch_size=2), computed_steps()),
-        "cordis_manual_cap": (
+        "trace_manual_cap": (
             StreamRun(TRACE_STAGES, training_mode="manual"),
-            cordis_steps(True),
+            trace_steps(True),
         ),
-        "cordis_hybrid": (
+        "trace_hybrid": (
             StreamRun(TRACE_STAGES, training_mode="hybrid", batch_size=2),
-            cordis_steps(True),
+            trace_steps(True),
         ),
     }
 
