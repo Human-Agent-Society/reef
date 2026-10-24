@@ -224,6 +224,9 @@ def _install_metric_capture() -> None:
         return
 
     def log(args, metrics, step_key):
+        from reef.train.slime_backend.reef_adapters.critic_metrics import finalize_critic_metrics
+
+        metrics = finalize_critic_metrics(metrics)
         learning_rate = APPLIED_LEARNING_RATE.value
         if learning_rate is not None and step_key == "train/step":
             # The recipe's schedule set this step's rate, not Slime's scheduler.
@@ -297,12 +300,18 @@ def _install_critic_metrics(args) -> None:
                     raise RuntimeError(f"{mask_key}/returns length mismatch: {selected.numel()} vs {returns.numel()}")
                 returns = returns[selected]
                 old_values = old_values[selected]
-            if returns.numel() == 0 or returns.var(unbiased=False) == 0:
-                explained_variance = returns.new_tensor(0.0)
-            else:
-                explained_variance = 1.0 - (returns - old_values).var(unbiased=False) / returns.var(unbiased=False)
+            # Additive statistics survive Slime's microbatch and DP/CP
+            # reductions. Averaging microbatch EVs does not compute global EV.
+            returns = returns.double()
+            errors = returns - old_values.double()
         metrics = dict(metrics)
-        metrics["explained_variance"] = explained_variance.detach()
+        metrics.update(
+            ev_count=returns.new_tensor(returns.numel()),
+            ev_return_sum=returns.sum(),
+            ev_return_square_sum=returns.square().sum(),
+            ev_error_sum=errors.sum(),
+            ev_error_square_sum=errors.square().sum(),
+        )
         return value, metrics
 
     marked_value_loss: Any = value_loss_function
@@ -507,6 +516,8 @@ def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
     into the durable training-job marker with ``allow_nan=False``.
     """
     for name, value in metrics.items():
+        if name.endswith("explained_variance_valid") and value == 0:
+            _WORKER_METRICS.pop(name.removesuffix("_valid"), None)
         if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
             _WORKER_METRICS[str(name)] = float(value)
 

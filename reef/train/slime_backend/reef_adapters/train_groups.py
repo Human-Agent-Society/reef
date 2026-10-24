@@ -439,6 +439,11 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
         critic_args.override_opt_param_scheduler = True
         load, reason = critic_init, "starts from the checkpoint in --critic-init"
     else:
+        if critic_init:
+            raise ValueError(
+                f"critic-init {critic_init!r} has no latest_checkpointed_iteration.txt; "
+                "provide a checkpoint root or omit critic-init for a fresh critic"
+            )
         logger.info(
             "critic checkpoint root %s has no checkpoint yet; using the inherited load fallback",
             critic_save,

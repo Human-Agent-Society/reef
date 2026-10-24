@@ -389,6 +389,22 @@ def test_sao_critic_only_warmup_commits_without_moving_the_policy(tmp_path, _loc
 
 
 @pytest.mark.unit
+def test_ten_valid_batches_warm_up_critic_before_first_actor_update(tmp_path, _local_ray_get) -> None:
+    actor, actor_group, critic_group, payload = _sao_actor(tmp_path, critic_only_steps=10)
+    parent = SERVING_VERSION
+    for step in range(11):
+        payload = _payload([_sao_row(f"task-{step}", producing_runtime_load_id=parent)])
+        payload.update(scenario_step=step, parent_runtime_load_id=parent)
+        result = _execute_and_update_weights(actor, payload)
+        assert result.outcome == "complete"
+        assert result.metrics["sao/actor_trained"] == int(step == 10)
+        actor.acknowledge_training_commit(result.training_job_id)
+        parent = result.runtime_load_id
+    assert len(critic_group.train_calls) == 22
+    assert [rollout for rollout, _ in actor_group.train_calls] == [10]
+
+
+@pytest.mark.unit
 def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_path, _local_ray_get) -> None:
     # The other components of a composite advance the scenario step between two weight steps.
     actor, actor_group, _, payload = _sao_actor(tmp_path)
@@ -630,11 +646,11 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
     assert critic_args.load == str(critic_save)
 
-    # An init directory without a checkpoint changes nothing.
+    # An explicitly requested initialization must not silently start cold.
     empty = tmp_path / "empty"
     empty.mkdir()
-    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
-    assert critic_args.load == "/ckpt/megatron"
+    with pytest.raises(ValueError, match=r"critic-init.*has no latest"):
+        prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
 
 
 @pytest.mark.unit
