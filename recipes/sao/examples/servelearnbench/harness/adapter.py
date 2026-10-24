@@ -100,14 +100,18 @@ class ReefLLM(llm.LLM):
 
 
 def training_releases(client: ReefClient, scenario: str) -> list[dict]:
-    """Return committed training releases; an uncreated scenario has none."""
+    """Return committed training releases oldest first; an uncreated scenario has none."""
     try:
         response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
     except ReefClientError as error:
         if error.status == 404:
             return []
         raise
-    return [release for release in response["releases"] if release["operation"] == "training"]
+    return [
+        release
+        for release in reversed(response["releases"])
+        if release["operation"] == "training" and not release.get("pending", False)
+    ]
 
 
 def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_seconds: float) -> dict:
@@ -116,16 +120,24 @@ def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_
     while time.monotonic() < deadline:
         try:
             releases = training_releases(client, scenario)
+            status = client.get("/reef/status")
         except TimeoutError:
             continue  # Registry reads can wait behind an in-flight update.
         except urllib.error.URLError as error:
             if isinstance(error.reason, TimeoutError):
                 continue
             raise
+        if status["error"]:
+            raise RuntimeError(f"Training failed: {status['error']}")
         if len(releases) > expected:
             raise RuntimeError("Unexpected training release; use a dedicated scenario for this run")
         if len(releases) == expected:
-            return releases[-1]
+            current = status["scenarios"][scenario]
+            version = current["current_runtime_load_id"]
+            # Saved-artifact release rows do not carry runtime_load_id.
+            # Read the published version only after admission reopens.
+            if current["inference_admission"]["open"] and isinstance(version, str) and version:
+                return {**releases[-1], "runtime_load_id": version}
         time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(f"Training did not commit release {expected} within {timeout_seconds}s")
 

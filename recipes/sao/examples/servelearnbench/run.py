@@ -61,6 +61,7 @@ def main() -> None:
     oracle.setup(bundle)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     expected_releases = 0
+    expected_version: str | None = None
     test_rewards: list[float] = []
     model_name = Path(os.environ.get("MODEL_DIR", "reef")).name
     config = {
@@ -101,7 +102,7 @@ def main() -> None:
                     raise RuntimeError("Model changed during an episode")
                 reason = episode_end_reason(trace)
                 version = episode_runtime_load_id(model) if args.method == "sao" else None
-                if releases_before and version != releases_before[-1]["runtime_load_id"]:
+                if expected_version is not None and version != expected_version:
                     raise RuntimeError("Episode did not use the latest committed training weights")
                 row = {
                     "type": "episode",
@@ -135,6 +136,7 @@ def main() -> None:
                     report = report_episode(model, args.scenario, task.task_id, reward.reward, reason)
                     expected_releases += 1
                     release = wait_for_training(client, args.scenario, expected_releases, args.training_timeout)
+                    expected_version = release["runtime_load_id"]
                     output.write(
                         json.dumps({"type": "training", "task_id": task.task_id, "report": report, "release": release})
                         + "\n"

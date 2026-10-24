@@ -171,12 +171,47 @@ def test_context_overflow_is_scored_but_service_failure_aborts(bundle, status, b
 
 def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
     client = Mock(spec=ReefClient)
-    client.get.return_value = {"releases": []}
+    client.get.return_value = {"releases": [], "error": None}
     clock = iter([0, 0, 2, 2])
     monkeypatch.setattr(adapter.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(adapter.time, "sleep", lambda _: None)
     with pytest.raises(TimeoutError, match="did not commit"):
         adapter.wait_for_training(client, "retail", 1, 1)
+
+
+def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeypatch):
+    client = Mock(spec=ReefClient)
+    newest = {"operation": "training", "release_id": "second", "content_kind": "saved_artifact"}
+    older = {"operation": "training", "release_id": "first", "content_kind": "saved_artifact"}
+    pending = {"operation": "training", "release_id": "pending", "pending": True}
+    admissions = iter([False, True])
+
+    def get(path):
+        if path.endswith("/releases"):
+            return {"releases": [pending, newest, older, {"operation": "creation"}]}
+        open_for_inference = next(admissions)
+        return {
+            "error": None,
+            "scenarios": {
+                "retail": {
+                    "current_runtime_load_id": "v2" if open_for_inference else "v1",
+                    "inference_admission": {"open": open_for_inference},
+                }
+            },
+        }
+
+    client.get.side_effect = get
+    monkeypatch.setattr(adapter.time, "sleep", lambda _: None)
+    assert adapter.training_releases(client, "retail") == [older, newest]
+    release = adapter.wait_for_training(client, "retail", 2, 10)
+    assert release == {**newest, "runtime_load_id": "v2"}
+
+
+def test_training_failure_does_not_wait_for_timeout():
+    client = Mock(spec=ReefClient)
+    client.get.side_effect = [{"releases": []}, {"error": "optimizer failed"}]
+    with pytest.raises(RuntimeError, match="optimizer failed"):
+        adapter.wait_for_training(client, "retail", 1, 10)
 
 
 def test_mixed_weight_versions_fail_before_reporting():
