@@ -37,6 +37,7 @@ from reef.runtime.interfaces import (
     InferenceRuntime,
     ModelCandidate,
     PreparedTrainingJob,
+    PreparedTrainingStep,
     RuntimeContractError,
     StaleCandidate,
     TrainingBackend,
@@ -44,7 +45,6 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingJobState,
     TrainingJobStore,
-    TrainingPayload,
     TrainingRuntime,
     TrainingRuntimeError,
 )
@@ -290,8 +290,8 @@ class RuntimeScheduler:
 
     # -- Training
 
-    def build_training_payload(self, job: TrainingJob, scenario_step: int) -> TrainingPayload:
-        return self.training_runtime.build_training_payload(
+    def prepare_training_step(self, job: TrainingJob, scenario_step: int) -> PreparedTrainingStep:
+        return self.training_runtime.prepare_training_step(
             job, scenario_step, parent_runtime_load_id=self.inference_runtime.current_runtime_load_id()
         )
 
@@ -477,8 +477,8 @@ class TrainingCoordinator:
         recovered = self._execution.recover()
         self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(recovered)
 
-    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
-        return self._training.build_training_payload(job)
+    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
+        return self._training.prepare_training_step(job)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""

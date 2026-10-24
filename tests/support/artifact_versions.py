@@ -11,7 +11,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, TrainingPayload
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -31,8 +31,13 @@ class RollbackRuntime(StubTrainingRuntime):
     def inference_handler(self):
         return None
 
-    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
-        return TrainingPayload({"scenario_step": scenario_step})
+    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
+        return PreparedTrainingStep(
+            action="train",
+            payload={"scenario_step": scenario_step},
+            next_algorithm_state={"steps": int(job.algorithm_state.get("steps", 0)) + 1},
+            metrics={},
+        )
 
     def train_candidate(self, payload):
         self.trained += 1

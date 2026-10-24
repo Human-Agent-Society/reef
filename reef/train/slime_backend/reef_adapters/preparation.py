@@ -1,43 +1,60 @@
-"""Slime-owned payload building: materialize Slime's wire rows from a ``TrainingJob``.
+"""Slime-owned step preparation: resolve an objective signal and build the payload.
 
-Reef's service process resolves the objective and runs its backend-neutral
-``prepare`` (``reef.train.algos``); this module only lays out the job's rows
-in Slime's optimizer steps.
+Backend-agnostic step signals (which loss family, what advantages) live in
+``reef.train.algos`` and are reusable by any training backend.
+The only thing left here is ``_build_payload``, which materializes Slime's
+own wire tuples from a resolved signal.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from reef.runtime.interfaces import TrainingJob, TrainingPayload
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingJob
 from reef.train.algos import StepScheduling
+from reef.train.algos.registry import run_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 
-def build_slime_payload(job: TrainingJob, *, step_size: int, sampler_topk: bool = False) -> TrainingPayload:
-    """The complete Slime training payload of ``job``, with the metrics of its step layout.
+def prepare_slime_step(job: TrainingJob, *, step_size: int, sampler_topk: bool = False) -> PreparedTrainingStep:
+    """Run the job's training objective and produce its complete Slime training payload.
 
     The payload records ``job.method``, so the method is part of the job's
-    identity. ``step_size`` is Slime's ``--global-batch-size``, the rollouts in
-    one optimizer step. ``sampler_topk`` adds each row's recorded sampler
-    top-K, which score centering reads.
+    identity. The objective rejects a scheduling its loss cannot train before
+    any payload is built. ``step_size`` is Slime's ``--global-batch-size``, the
+    rollouts in one optimizer step. ``sampler_topk`` adds each row's recorded
+    sampler top-K, which score centering reads.
     """
-    schedule = _materialize(job.batch, job.scheduling, step_size)
+    objective, signal = run_objective(job)
+    batch, scheduling = job.batch, job.scheduling
+    if signal.action == "skip":
+        return PreparedTrainingStep(
+            action="skip",
+            next_algorithm_state=signal.next_algorithm_state,
+            metrics=signal.metrics,
+        )
+    schedule = _materialize(batch, scheduling, step_size)
     payload = _build_payload(
-        job.batch, job.loss_family, job.advantages, job.scheduling, step_size=step_size, sampler_topk=sampler_topk
+        batch, objective.loss_family, signal.advantages, scheduling, step_size=step_size, sampler_topk=sampler_topk
     )
     payload["method"] = job.method.to_dict()
-    metrics: dict[str, Any] = {"optimizer_steps": schedule.optimizer_steps}
+    metrics = dict(signal.metrics)
     if schedule.epochs > 1:
-        metrics["epochs"] = schedule.epochs
+        metrics.setdefault("epochs", schedule.epochs)
+    metrics.setdefault("optimizer_steps", schedule.optimizer_steps)
     if schedule.dropped_rollouts:
-        metrics["dropped_rollouts"] = schedule.dropped_rollouts
+        metrics.setdefault("dropped_rollouts", schedule.dropped_rollouts)
     if schedule.tail_rollouts:
-        metrics["partial_step_rollouts"] = schedule.tail_rollouts
-    return TrainingPayload(payload, metrics)
+        metrics.setdefault("partial_step_rollouts", schedule.tail_rollouts)
+    return PreparedTrainingStep(
+        action="train",
+        payload=payload,
+        next_algorithm_state=signal.next_algorithm_state,
+        metrics=metrics,
+    )
 
 
 def _materialize(batch: TrainingBatch, scheduling: StepScheduling, step_size: int) -> MaterializedSchedule:
@@ -75,6 +92,8 @@ def _build_payload(
     """
     samples = trajectories(batch)
     shape_row = resolve_loss_family(loss_family).shape_sample_row
+    if advantages is not None and len(advantages) != len(samples):
+        raise ValueError(f"advantages length {len(advantages)} does not match sample count {len(samples)}")
     schedule = _materialize(batch, scheduling, step_size)
     payload: dict[str, Any] = {
         "samples": [shape_row(samples[row]) for row in schedule.row_indices],

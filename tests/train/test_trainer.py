@@ -7,7 +7,6 @@ import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
-from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
 
 import reef.record2task.assembly as reported_module
@@ -29,12 +28,12 @@ from reef.evaluation import (
 from reef.recipe import WeightTrainingRecipe
 from reef.record2record import ExclusiveReportRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, TrainingMethod, TrainingPayload
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJob, TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectory_groups
 
 NUM_GPUS = 0
@@ -75,7 +74,9 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, TrainingMethod(self._objective), state, StepScheduling(), step_size=1)
+        prepared = prepare_slime_step(
+            TrainingJob(batch, TrainingMethod(self._objective), StepScheduling(), state), step_size=1
+        )
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -417,7 +418,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor.push(inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
     sft_result = prepare_slime_step(
-        sft_processor.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
+        TrainingJob(sft_processor.build_batch(1), TrainingMethod("sft"), StepScheduling(), {}), step_size=1
     )
     assert sft_result.next_algorithm_state == {"steps": 1}
 
@@ -426,7 +427,8 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
         grpo_processor.push(inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
     result = prepare_slime_step(
-        grpo_processor.build_batch(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1
+        TrainingJob(grpo_processor.build_batch(1), TrainingMethod(_GROUPED_PG_OBJECTIVE), StepScheduling(), {}),
+        step_size=1,
     )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
@@ -866,10 +868,16 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         def inference_handler(self):
             return None
 
-        def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
-            built = build_slime_payload(job, step_size=self.batch_size)
+        def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
+            prepared = prepare_slime_step(job, step_size=self.batch_size)
+            assert prepared.payload is not None
             self.calls.append(("prepare", job.batch, job.method))
-            return TrainingPayload({**built.payload, "scenario_step": scenario_step}, built.metrics)
+            return PreparedTrainingStep(
+                action="train",
+                payload={**prepared.payload, "scenario_step": scenario_step},
+                next_algorithm_state=prepared.next_algorithm_state,
+                metrics=prepared.metrics,
+            )
 
         def train_candidate(self, payload):
             self.calls.append(("execute", payload))
@@ -975,7 +983,9 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.push(report("r1", "i1", 1.0))
     batch = processor.build_batch(1)
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"), step_size=1)
+    prepared = prepare_slime_step(
+        TrainingJob(batch, TrainingMethod("sao"), StepScheduling(unit="sample"), {}), step_size=1
+    )
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)

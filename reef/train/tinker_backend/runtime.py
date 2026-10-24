@@ -22,10 +22,10 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.runtime.interfaces import (
     ModelCandidate,
+    PreparedTrainingStep,
     StaleCandidate,
     TrainingJob,
     TrainingMethod,
-    TrainingPayload,
     TrainingRuntime,
     learning_rate_metrics,
 )
@@ -34,7 +34,7 @@ from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
-from reef.train.tinker_backend.preparation import build_tinker_payload, job_learning_rates
+from reef.train.tinker_backend.preparation import job_learning_rates, prepare_tinker_step
 
 INCUMBENT = "incumbent.json"
 
@@ -96,16 +96,23 @@ class TinkerTrainingRuntime(TrainingRuntime):
     def _candidate_directory(self, identity: str) -> Path:
         return self._root / "candidates" / identity
 
-    def build_training_payload(
+    def prepare_training_step(
         self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
-    ) -> TrainingPayload:
-        built = build_tinker_payload(
+    ) -> PreparedTrainingStep:
+        prepared = prepare_tinker_step(
             job,
             batch_size=self._config.batch_size,
             kl_coef=self._config.kl_coef,
             runtime_load_id=parent_runtime_load_id,
         )
-        return TrainingPayload({**built.payload, "scenario_step": scenario_step}, built.metrics)
+        if prepared.payload is None:
+            return prepared
+        return PreparedTrainingStep(
+            prepared.action,
+            prepared.next_algorithm_state,
+            prepared.metrics,
+            {**prepared.payload, "scenario_step": scenario_step},
+        )
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         identity = hashlib.sha256(json.dumps(dict(payload), sort_keys=True, allow_nan=False).encode()).hexdigest()

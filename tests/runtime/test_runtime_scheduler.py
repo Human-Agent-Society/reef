@@ -12,10 +12,10 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     InferenceRuntime,
     ModelCandidate,
+    PreparedTrainingStep,
     StaleCandidate,
     TrainingJob,
     TrainingMethod,
-    TrainingPayload,
     TrainingRuntime,
 )
 from reef.runtime.scheduler import RuntimeScheduler
@@ -42,9 +42,9 @@ class CheckpointTrainer(TrainingRuntime):
     def training_job_status(self):
         return self.journal
 
-    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
         self.calls.append(("prepare", parent_runtime_load_id))
-        return TrainingPayload({"scenario_step": scenario_step})
+        return PreparedTrainingStep("train", job.algorithm_state, {}, {"scenario_step": scenario_step})
 
     def train_candidate(self, payload):
         self.calls.append(("train", payload))
@@ -241,8 +241,8 @@ def test_preparation_passes_the_published_version_that_the_job_trains_from():
     scheduler = RuntimeScheduler(training, inference)
     # The engine loaded engine:1, but Reef has published only engine:0.
     inference.loaded = "engine:1"
-    prepared = scheduler.build_training_payload(
-        TrainingJob(TrainingBatch("batch-1"), TrainingMethod("test"), StepScheduling(), "test"), 0
+    prepared = scheduler.prepare_training_step(
+        TrainingJob(TrainingBatch("batch-1"), TrainingMethod("test"), StepScheduling(), {}), 0
     )
     assert prepared.payload == {"scenario_step": 0}
     assert training.calls == [("prepare", "engine:0")]

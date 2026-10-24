@@ -7,7 +7,6 @@ import time
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLBatches, OpenClawRLRecipe
@@ -21,12 +20,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
 
 
@@ -324,7 +324,9 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = TrainingBatch("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"), step_size=4)
+    result = prepare_slime_step(
+        TrainingJob(batch, TrainingMethod("openclawrl"), StepScheduling(unit="sample"), {}), step_size=4
+    )
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"

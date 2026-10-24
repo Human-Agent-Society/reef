@@ -21,6 +21,7 @@ from typing import Any
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
     PreparedTrainingJob,
+    PreparedTrainingStep,
     TrainingBackend,
     TrainingCheckpoint,
     TrainingContext,
@@ -29,7 +30,6 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
-    TrainingPayload,
     WeightFiles,
     learning_rate_metrics,
 )
@@ -39,7 +39,7 @@ from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import BACKEND, TinkerLoss, TokenRow, resolve_tinker_loss, row_from_payload
-from reef.train.tinker_backend.preparation import build_tinker_payload, job_learning_rates
+from reef.train.tinker_backend.preparation import job_learning_rates, prepare_tinker_step
 
 #: Where a checkpoint directory keeps the PEFT adapter the engines load.
 ADAPTER_DIR = "adapter"
@@ -135,9 +135,9 @@ class TinkerTrainingBackend(TrainingBackend):
             raise RuntimeError("the Tinker backend seeds its base checkpoint in start()")
         return self._base
 
-    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
+    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
         # Staleness admission is the coordinator's; the payload carries only the rows.
-        return build_tinker_payload(job, batch_size=self._config.batch_size, kl_coef=self._config.kl_coef)
+        return prepare_tinker_step(job, batch_size=self._config.batch_size, kl_coef=self._config.kl_coef)
 
     @contextmanager
     def prepare(

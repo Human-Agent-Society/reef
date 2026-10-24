@@ -141,8 +141,8 @@ class Trainer(TrainingBackend):
     def context(self):
         return self._context
 
-    def build_training_payload(self, job):
-        raise AssertionError("unexpected build_training_payload in this fixture")
+    def prepare_training_step(self, job):
+        raise AssertionError("unexpected prepare_training_step in this fixture")
 
     def activate_scenario(self, scenario):
         raise AssertionError("unexpected activate_scenario in this fixture")

@@ -10,9 +10,9 @@ from reef.runtime.interfaces import (
     ActivatedModel,
     InferenceHandler,
     ModelCandidate,
+    PreparedTrainingStep,
     TrainingJob,
     TrainingMethod,
-    TrainingPayload,
     TrainingRuntime,
 )
 from reef.train.algos import StepScheduling
@@ -44,10 +44,10 @@ class StubTrainingRuntime(TrainingRuntime):
         """No backend: smoke tests never route inference through the stub."""
         return None
 
-    def build_training_payload(
+    def prepare_training_step(
         self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
-    ) -> TrainingPayload:
-        raise NotImplementedError("StubTrainingRuntime does not build training payloads")
+    ) -> PreparedTrainingStep:
+        raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         raise NotImplementedError("StubTrainingRuntime does not train candidates")
@@ -139,8 +139,6 @@ def candidate_backend(value, objective, scheduling, **kwargs):
     )
 
 
-from tests.support.training_steps import prepare_runtime_step
-
 from reef.train.runtime_backend import RuntimeCandidateBackend
 
 
@@ -207,18 +205,6 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
 
     async def acquire_inference(self):
         return await self.inference_runtime.acquire_inference()
-
-    def prepare_training_step(self, batch, method, algorithm_state, scheduling, scenario_step):
-        """Run the objective and build the runtime payload, as ``prepare_step`` does before it trains."""
-        return prepare_runtime_step(
-            self.training_runtime,
-            batch,
-            method,
-            algorithm_state,
-            scheduling,
-            scenario_step,
-            parent_runtime_load_id=self.inference_runtime.current_runtime_load_id(),
-        )
 
     def reconcile_training_job(self, scenario_step, **kwargs):
         self._scenario = kwargs.pop("scenario", None)

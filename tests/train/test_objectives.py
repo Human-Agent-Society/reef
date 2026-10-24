@@ -7,7 +7,6 @@ from dataclasses import replace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.backend_steps import prepare_slime_step, prepare_tinker_step
 
 from recipes.sao.objective import SaoObjective
 from recipes.tttd.objective import TttdObjective
@@ -15,6 +14,8 @@ from reef.recipe import WeightTrainingSpec
 from reef.runtime.interfaces import TrainingJob, TrainingMethod
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
 from reef.train.algos.registry import ObjectiveRegistry, register_objective, resolve_objective, unregister_objective
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.tinker_backend.preparation import prepare_tinker_step
 from reef.train.types import TrainingBatch
 
 
@@ -115,9 +116,11 @@ def test_recipe_owns_the_step_schedule_and_the_objective_rejects_unsupported_epo
     # Both backends check the schedule before touching the batch.
     batch = TrainingBatch("two-groups", ())
     with pytest.raises(ValueError, match="does not support StepScheduling"):
-        prepare_slime_step(batch, TrainingMethod("tttd"), {"steps": 0}, two_passes, step_size=1)
+        prepare_slime_step(TrainingJob(batch, TrainingMethod("tttd"), two_passes, {"steps": 0}), step_size=1)
     with pytest.raises(ValueError, match="does not support StepScheduling"):
-        prepare_tinker_step(batch, TrainingMethod("tttd"), {"steps": 0}, two_passes, batch_size=1, kl_coef=0.0)
+        prepare_tinker_step(
+            TrainingJob(batch, TrainingMethod("tttd"), two_passes, {"steps": 0}), batch_size=1, kl_coef=0.0
+        )
 
 
 def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss():
@@ -127,9 +130,11 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
     try:
         state = {"steps": 7}
         batch = TrainingBatch("empty", ())
-        slime = prepare_slime_step(batch, TrainingMethod(objective.name), state, StepScheduling(), step_size=1)
+        slime = prepare_slime_step(
+            TrainingJob(batch, TrainingMethod(objective.name), StepScheduling(), state), step_size=1
+        )
         tinker = prepare_tinker_step(
-            batch, TrainingMethod(objective.name), state, StepScheduling(), batch_size=1, kl_coef=0.0
+            TrainingJob(batch, TrainingMethod(objective.name), StepScheduling(), state), batch_size=1, kl_coef=0.0
         )
         assert slime == tinker
         assert slime.action == "skip" and slime.payload is None
@@ -141,25 +146,23 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
 
 
 @pytest.mark.parametrize(
-    ("changes", "error", "message"),
+    ("changes", "message"),
     [
-        ({"loss_family": ""}, ValueError, "loss_family must be a non-empty string"),
-        ({"advantages": (1.0,)}, ValueError, "advantages length 1 does not match sample count 2"),
-        ({"advantages": [1.0, 0.0]}, TypeError, "advantages must be a tuple or None"),
-        ({"method": "sft"}, TypeError, "method must be a TrainingMethod"),
+        ({"batch": ()}, "batch must be a TrainingBatch"),
+        ({"method": "sft"}, "method must be a TrainingMethod"),
+        ({"scheduling": "sample"}, "scheduling must be a StepScheduling"),
+        ({"algorithm_state": [("steps", 1)]}, "algorithm_state must be a mapping"),
     ],
 )
-def test_a_training_job_checks_its_values_at_construction(changes, error, message):
-    sample = policy_trajectory("s", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
+def test_a_training_job_checks_its_values_at_construction(changes, message):
     values = {
-        "batch": TrainingBatch("batch", (sample, sample)),
+        "batch": TrainingBatch("batch"),
         "method": TrainingMethod("sft"),
         "scheduling": StepScheduling(),
-        "loss_family": "pg",
-        "advantages": (1.0, 0.0),
+        "algorithm_state": {"steps": 1},
     }
     TrainingJob(**values)
-    with pytest.raises(error, match=message):
+    with pytest.raises(TypeError, match=message):
         TrainingJob(**{**values, **changes})
 
 
@@ -181,8 +184,10 @@ def test_group_advantages_are_shared_across_backends_before_optimizer_partitioni
         for group in (rewards[:2], rewards[2:])
         for advantage in TttdObjective.adaptive_entropic_advantages(list(group))[0]
     )
-    slime = prepare_slime_step(batch, TrainingMethod("tttd"), state, one_sample_steps, step_size=1)
-    tinker = prepare_tinker_step(batch, TrainingMethod("tttd"), state, one_sample_steps, batch_size=1, kl_coef=0.0)
+    slime = prepare_slime_step(TrainingJob(batch, TrainingMethod("tttd"), one_sample_steps, state), step_size=1)
+    tinker = prepare_tinker_step(
+        TrainingJob(batch, TrainingMethod("tttd"), one_sample_steps, state), batch_size=1, kl_coef=0.0
+    )
     assert slime.payload["loss"] == tinker.payload["loss"] == "tttd"
     assert slime.payload["advantages"] == pytest.approx(expected)
     assert [rows[0]["advantage"] for rows in tinker.payload["batches"]] == pytest.approx(expected)

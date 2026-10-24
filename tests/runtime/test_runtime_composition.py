@@ -16,9 +16,9 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     InferenceRuntime,
     ModelCandidate,
+    PreparedTrainingStep,
     TrainingBackend,
     TrainingMethod,
-    TrainingPayload,
     TrainingRuntime,
 )
 from reef.service.runtime import connect_executor_runtimes
@@ -36,8 +36,8 @@ class CheckpointTrainer(TrainingRuntime):
     def batch_size(self) -> int:
         return 1
 
-    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
-        return TrainingPayload({"value": 7})
+    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
+        return PreparedTrainingStep("train", job.algorithm_state, {}, {"value": 7})
 
     def train_candidate(self, payload):
         self.checkpoint.write_text(str(payload["value"]))

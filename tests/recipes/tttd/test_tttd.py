@@ -7,7 +7,6 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.tttd import (
@@ -27,12 +26,13 @@ from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
 from reef.record2record import NoRecordSets
 from reef.record2task.assembly import SampleAssemblySettings
-from reef.runtime.interfaces import TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrajectoryItem, trajectory_groups
 
 
@@ -440,7 +440,9 @@ def test_tttd_keeps_one_group_when_all_rewards_are_constant() -> None:
             processor.push(_report(0, group, rollout, 1.0))
 
     batch = processor.build_batch(6)
-    result = prepare_slime_step(batch, TrainingMethod("tttd"), {}, StepScheduling(unit="sample"), step_size=6)
+    result = prepare_slime_step(
+        TrainingJob(batch, TrainingMethod("tttd"), StepScheduling(unit="sample"), {}), step_size=6
+    )
 
     assert len(trajectory_groups(batch)) == 1
     assert result.payload is not None

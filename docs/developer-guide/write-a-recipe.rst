@@ -177,9 +177,9 @@ configured learning rate. To train several phases in one run, override
 
 - ``select`` must depend only on its arguments. A retry calls it again, and
   the method is part of the job's identity.
-- Reef's service process resolves the objective and runs its ``prepare``.
-  Use a dotted reference for an objective from another package, such as the
-  built-in `SFT <../user-guide/recipes/sft.rst>`__ objective above.
+- The backend resolves the objective in its own process. Use a dotted
+  reference for an objective from another package, such as the built-in
+  `SFT <../user-guide/recipes/sft.rst>`__ objective above.
 - The backend refuses a method that it cannot train before the job starts.
   `Per-job families <loss-families.rst#per-job-families>`__ and `Train with
   Tinker <../user-guide/tinker.rst>`__ list what each backend supports.

@@ -54,7 +54,7 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
     def close(self):
         return
 
-    def build_training_payload(self, job):
+    def prepare_training_step(self, job):
         raise NotImplementedError
 
     def prepare_weights(self, runtime_load_id, *, force_full):

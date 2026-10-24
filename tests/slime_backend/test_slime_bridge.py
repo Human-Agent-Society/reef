@@ -1898,16 +1898,27 @@ def test_to_slime_rollout_data_validates_step_layout() -> None:
 
 
 @pytest.mark.unit
-def test_build_slime_payload_reports_schedule_metrics() -> None:
-    from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
+def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.train.algos import StepSignal, TrainingObjective, registry
+    from reef.train.slime_backend.reef_adapters import preparation
 
-    job = TrainingJob(
-        _grouped_batch(8, 1), TrainingMethod("any"), StepScheduling(epochs=2, remainder="drop"), "pg", tuple(range(8))
+    class ScheduleObjective(TrainingObjective):
+        name = "test-schedule"
+        loss_family = "pg"
+        supports_multiple_epochs = True
+
+        def prepare(self, batch, state):
+            return StepSignal("train", {}, {"steps": 1}, tuple(range(8)))
+
+    monkeypatch.setattr(registry, "resolve_objective", lambda _name: ScheduleObjective())
+
+    result = preparation.prepare_slime_step(
+        TrainingJob(_grouped_batch(8, 1), TrainingMethod("any"), StepScheduling(epochs=2, remainder="drop")),
+        step_size=3,
     )
-    result = build_slime_payload(job, step_size=3)
 
-    assert result.metrics == {"epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
-    assert len(result.payload["samples"]) == 12
+    assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
+    assert result.payload is not None and len(result.payload["samples"]) == 12
 
 
 @pytest.mark.unit

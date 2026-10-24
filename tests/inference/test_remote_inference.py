@@ -364,7 +364,7 @@ class Coordinator(CoordinatorClient):
     def health(self):
         return {"ok": True}
 
-    def build_training_payload(self, job):
+    def prepare_training_step(self, job):
         raise AssertionError("unused")
 
     def execute_training_job(self, payload):

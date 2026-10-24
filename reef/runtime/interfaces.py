@@ -4,7 +4,7 @@ Who implements what:
 
 - Recipes and the dispatcher *use* ``InferenceRuntime`` and ``TrainingRuntime``
   and the values they exchange (``TrainingMethod``, ``ModelCandidate``,
-  ``ActivatedModel``, ``TrainingJob``, ``TrainingPayload``, ``TrainingJobResult``). These
+  ``ActivatedModel``, ``TrainingJob``, ``PreparedTrainingStep``, ``TrainingJobResult``). These
   are the backbone.
 - A training integration *implements* ``TrainingBackend`` (with
   ``PreparedTrainingJob``) so Reef's coordinator can drive it.
@@ -39,7 +39,7 @@ from threading import Condition
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.batches import StepScheduling, TrainingBatch, trajectories
+from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import UpdateCandidate
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
@@ -240,12 +240,13 @@ class TrainingMethod:
     """The objective one training job trains with, and the learning-rate schedule it selects.
 
     A recipe selects one for every job (``reef.train.runtime_backend``); the
-    runtime carries it to the backend in the ``TrainingJob``, and the job's
-    payload records it, so it is part of the job's identity and stays fixed
-    across the job's retries. ``objective`` is a registered objective name or a
-    dotted ``package.module:Objective`` reference; Reef's service process
-    resolves it, so a name that another package registers must be registered
-    there. ``learning_rate_schedule`` ``None`` keeps the active schedule.
+    runtime carries it to the backend beside the batch, and the job's payload
+    records it, so it is part of the job's identity and stays fixed across the
+    job's retries. ``objective`` is a registered objective name or a dotted
+    ``package.module:Objective`` reference; the backend resolves it in its own
+    process, so a name another package registers is only known where that
+    package was imported. ``learning_rate_schedule`` ``None`` keeps the active
+    schedule.
     """
 
     objective: str
@@ -392,24 +393,22 @@ class TrainingJobResult:
 
 @dataclass(frozen=True)
 class TrainingJob:
-    """One reserved batch with the method and the objective output that a backend trains.
+    """The request of one training step: a reserved batch, the method and schedule it trains, and the committed state.
 
     A value has a ``TrainingBatch``, the ``TrainingMethod`` that the recipe
-    selected for it, the recipe's ``StepScheduling``, the non-empty
-    ``loss_family`` of the method's objective, and ``advantages``: ``None``, or
-    one value for each trajectory of the batch, in batch order.
+    selected for it, the recipe's ``StepScheduling``, and ``algorithm_state``,
+    the algorithm state of the scenario's last commit.
 
-    ``RuntimeCandidateBackend`` makes it after it resolves the objective, checks
-    the scheduling against it and runs ``TrainingObjective.prepare``, so only
-    steps that train make a value. A backend reads it to build its own training
-    payload with its loss implementation of ``loss_family``.
+    ``RuntimeCandidateBackend`` makes one for each step, and every trainer layer
+    passes it on unchanged. The backend runs the method's objective on it in its
+    own process (``reef.train.algos.registry.run_objective``) and builds its
+    payload, so a retry of the same job prepares the same payload.
     """
 
     batch: TrainingBatch
     method: TrainingMethod
     scheduling: StepScheduling
-    loss_family: str
-    advantages: tuple[float, ...] | None = None
+    algorithm_state: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.batch, TrainingBatch):
@@ -418,36 +417,31 @@ class TrainingJob:
             raise TypeError("TrainingJob.method must be a TrainingMethod")
         if not isinstance(self.scheduling, StepScheduling):
             raise TypeError("TrainingJob.scheduling must be a StepScheduling")
-        _require_non_empty(self.loss_family, "TrainingJob.loss_family")
-        if self.advantages is not None:
-            if not isinstance(self.advantages, tuple):
-                raise TypeError("TrainingJob.advantages must be a tuple or None")
-            sample_count = len(trajectories(self.batch))
-            if len(self.advantages) != sample_count:
-                raise ValueError(
-                    f"advantages length {len(self.advantages)} does not match sample count {sample_count}"
-                )
+        if not isinstance(self.algorithm_state, Mapping):
+            raise TypeError("TrainingJob.algorithm_state must be a mapping")
 
 
-@dataclass(frozen=True)
-class TrainingPayload:
-    """A backend's training payload for one ``TrainingJob``, with the metrics of its step layout.
+@dataclass(frozen=True, slots=True)
+class PreparedTrainingStep:
+    """Backend-prepared work for one reserved Reef training batch.
 
-    ``payload`` is the backend's own job description, which a later
-    ``execute_training_job`` or ``train_candidate`` call receives; the runtime
-    may add fields to it, and its contents identify the job. ``metrics`` is the
-    backend's telemetry of the layout, such as ``optimizer_steps``; the
-    objective's own metrics take precedence over it.
+    Algorithm selection, data-only signal construction, and backend payload
+    shaping all happen before this value crosses back into Reef's dispatcher.
+    Reef keeps ownership of the reserved batch and commits ``next_algorithm_state``
+    only after the backend job succeeds. ``skip`` supports state-only algorithm
+    transitions without handing a payload to the executor.
     """
 
-    payload: Mapping[str, Any]
-    metrics: Mapping[str, Any] = field(default_factory=dict)
+    action: Literal["train", "skip"]
+    next_algorithm_state: Mapping[str, Any]
+    metrics: Mapping[str, Any]
+    payload: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.payload, Mapping):
-            raise TypeError("TrainingPayload.payload must be a mapping")
-        if not isinstance(self.metrics, Mapping):
-            raise TypeError("TrainingPayload.metrics must be a mapping")
+        if self.action == "train" and self.payload is None:
+            raise ValueError("a train step requires a backend payload")
+        if self.action == "skip" and self.payload is not None:
+            raise ValueError("a skipped step cannot carry a backend payload")
 
 
 @dataclass(frozen=True)
@@ -901,15 +895,15 @@ class TrainingRuntime(ABC):
         raise ReefError(f"{type(self).__name__} does not support durable rejection recovery")
 
     @abstractmethod
-    def build_training_payload(
+    def prepare_training_step(
         self, job: TrainingJob, scenario_step: int, *, parent_runtime_load_id: str | None = None
-    ) -> TrainingPayload:
-        """Build the backend payload that trains ``job``.
+    ) -> PreparedTrainingStep:
+        """Turn ``job`` into backend work, or a state-only skip.
 
-        The backend refuses a method or loss family that it cannot train, and
-        records ``job.method`` in the payload. ``scenario_step`` is the scenario
-        step the job trains. ``parent_runtime_load_id`` is the published version
-        that the job trains from, if known.
+        The backend resolves ``job.method``'s objective in its own process,
+        refuses a method it cannot train, and records the method in the job's
+        payload. ``scenario_step`` is the scenario step the job trains.
+        ``parent_runtime_load_id`` is the published version that the job trains from, if known.
         """
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -1044,8 +1038,8 @@ class TrainingBackend(ABC):
     def check_health(self) -> None: ...
 
     @abstractmethod
-    def build_training_payload(self, job: TrainingJob) -> TrainingPayload:
-        """Build the native payload that trains ``job``; refuse a method or loss family the workers cannot train."""
+    def prepare_training_step(self, job: TrainingJob) -> PreparedTrainingStep:
+        """Run ``job``'s objective and build the native payload; refuse a method the workers cannot train."""
 
     @abstractmethod
     def prepare(

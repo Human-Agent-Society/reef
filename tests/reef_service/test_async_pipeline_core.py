@@ -21,9 +21,9 @@ from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
     InferenceHandler,
     ModelCandidate,
+    PreparedTrainingStep,
     StaleCandidate,
     TrainingJobResult,
-    TrainingPayload,
 )
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -65,15 +65,19 @@ class DurableRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self.serving_version
 
-    def build_training_payload(self, job, scenario_step, *, parent_runtime_load_id=None):
+    def prepare_training_step(self, job, scenario_step, *, parent_runtime_load_id=None):
         sample = job.batch.items[0]
-        return TrainingPayload(
-            {
-                "scenario_step": scenario_step,
-                "loss": job.loss_family,
-                "source": source_record_id(sample),
-                "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
-            }
+        payload = {
+            "scenario_step": scenario_step,
+            "loss": job.method,
+            "source": source_record_id(sample),
+            "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
+        }
+        return PreparedTrainingStep(
+            action="train",
+            payload=payload,
+            next_algorithm_state={"steps": int(job.algorithm_state.get("steps", 0)) + 1},
+            metrics={},
         )
 
     def train_candidate(self, payload):
@@ -450,10 +454,11 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     assert scenario.records.count("math") == 4
     receipts = scenario.records.consumption_receipts("math")
     assert len(receipts) == 1
-    assert receipts[0]["metadata"]["outcome"] == "stale"
-    # The receipt keeps the stale metrics and the method the dropped batch was prepared with.
-    expected_metrics = {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}}
-    assert receipts[0]["metadata"]["metrics"].items() >= expected_metrics.items()
+    assert receipts[0]["metadata"] == {
+        "outcome": "stale",
+        # The receipt keeps the method the dropped batch was prepared with.
+        "metrics": {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}},
+    }
     assert receipts[0]["consumed_ids"] == ("inference-1", "report-1")
 
 

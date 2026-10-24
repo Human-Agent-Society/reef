@@ -12,7 +12,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from tests.support.backend_steps import prepare_slime_step
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact.artifact import LiveWeightArtifactRef
@@ -22,7 +21,7 @@ from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.recipe.sft import SftObjective, SFTRecipe, SFTRecord2Record, SFTSettings, SFTTasks
-from reef.runtime.interfaces import TrainingMethod
+from reef.runtime.interfaces import TrainingJob, TrainingMethod
 from reef.task2batch import DistillBatches
 from reef.train import PipelineContext
 from reef.train.algos import StepScheduling, registry
@@ -30,6 +29,7 @@ from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.slime_backend.sft import SftAlgorithm
 
 TOKENIZER_PATH = "/models/served"
@@ -329,10 +329,12 @@ def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
     pipeline.push(_report("r1", ("i1",)))
 
     step = prepare_slime_step(
-        pipeline.build_batch(1),
-        TrainingMethod(SFTRecipe.training_spec().objective),
-        {},
-        StepScheduling(unit="sample"),
+        TrainingJob(
+            pipeline.build_batch(1),
+            TrainingMethod(SFTRecipe.training_spec().objective),
+            StepScheduling(unit="sample"),
+            {},
+        ),
         step_size=1,
     )
 
@@ -347,7 +349,7 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     pipeline.push(_report("r1", ("i1",)))
 
     payload = prepare_slime_step(
-        pipeline.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(unit="sample"), step_size=1
+        TrainingJob(pipeline.build_batch(1), TrainingMethod("sft"), StepScheduling(unit="sample"), {}), step_size=1
     ).payload
 
     assert payload is not None

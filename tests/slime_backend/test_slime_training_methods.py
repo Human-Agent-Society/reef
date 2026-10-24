@@ -14,12 +14,11 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.slime_coordinator import build_slime_coordinator
 
 from reef.core.trajectories import trajectory_reward
-from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
+from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingJob, TrainingMethod
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
 from reef.train.algos.helpers import next_steps
-from reef.train.runtime_backend import prepare_training_job
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.loss_families import register_loss_family, unregister_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -124,9 +123,9 @@ class Stack:
                 policy_trajectory(f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), 1.0, "v1") for index in range(2)
             ),
         )
-        _, job = prepare_training_job(batch, method, {}, ONE_SAMPLE_STEPS)
-        built = self.coordinator.build_training_payload(job)
-        return {**built.payload, "scenario_step": step, "parent_runtime_load_id": "v1"}
+        prepared = self.coordinator.prepare_training_step(TrainingJob(batch, method, ONE_SAMPLE_STEPS, {}))
+        assert prepared.payload is not None
+        return {**prepared.payload, "scenario_step": step, "parent_runtime_load_id": "v1"}
 
     def run(self, method: TrainingMethod, *, step: int):
         result = self.coordinator.execute_training_job(self.payload(method, step=step))

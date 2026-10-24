@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support.backend_steps import prepare_tinker_step
-from tests.support.training_steps import prepare_runtime_step
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
@@ -24,6 +22,7 @@ from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
+    TrainingJob,
     TrainingMethod,
     TrainingRuntimeError,
     UpstreamStatusError,
@@ -41,6 +40,7 @@ from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
+from reef.train.tinker_backend.preparation import prepare_tinker_step
 from reef.train.tinker_backend.runtime import INCUMBENT, TinkerTrainingRuntime
 
 
@@ -171,7 +171,9 @@ def item(version, group="g"):
 
 def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return prepare_runtime_step(runtime.training, batch, TrainingMethod(objective.name), {}, SCHEDULING, step)
+    return runtime.training.prepare_training_step(
+        TrainingJob(batch, TrainingMethod(objective.name), SCHEDULING, {}), step
+    )
 
 
 def decision(selected):
@@ -345,7 +347,10 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     scheduling = StepScheduling(unit="comparison_set", epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
     step = prepare_tinker_step(
-        batch, TrainingMethod(objective.name), {}, scheduling, runtime_load_id="v", batch_size=2, kl_coef=0.0
+        TrainingJob(batch, TrainingMethod(objective.name), scheduling, {}),
+        runtime_load_id="v",
+        batch_size=2,
+        kl_coef=0.0,
     )
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
@@ -663,10 +668,7 @@ def test_step_size_respects_error_remainder(objective):
     scheduling = StepScheduling(remainder="error")
     with pytest.raises(ValueError, match="do not form complete optimizer steps of 2"):
         prepare_tinker_step(
-            TrainingBatch("batch", (item("v"),)),
-            TrainingMethod(objective.name),
-            {},
-            scheduling,
+            TrainingJob(TrainingBatch("batch", (item("v"),)), TrainingMethod(objective.name), scheduling, {}),
             runtime_load_id="v",
             batch_size=2,
             kl_coef=0.0,
@@ -702,7 +704,7 @@ def scheduled(runtime, objective, schedule, *, step=0):
     version = runtime.inference.serving_runtime_load_id()
     batch = TrainingBatch(f"batch-{step}", tuple(item(version, group=str(index)) for index in range(3)))
     method = TrainingMethod(objective.name, schedule)
-    return prepare_runtime_step(runtime.training, batch, method, {}, ONE_SAMPLE_STEPS, step).payload
+    return runtime.training.prepare_training_step(TrainingJob(batch, method, ONE_SAMPLE_STEPS, {}), step).payload
 
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(runtime, objective):
@@ -770,7 +772,7 @@ def test_a_method_without_a_tinker_loss_is_refused_before_training(runtime):
     value, client = runtime
     batch = TrainingBatch("batch", (item(value.inference.serving_runtime_load_id()),))
     with pytest.raises(ValueError, match="unsupported Tinker loss family 'sft'"):
-        prepare_runtime_step(value.training, batch, TrainingMethod("sft"), {}, SCHEDULING, 0)
+        value.training.prepare_training_step(TrainingJob(batch, TrainingMethod("sft"), SCHEDULING, {}), 0)
     assert client.calls == []
 
 
