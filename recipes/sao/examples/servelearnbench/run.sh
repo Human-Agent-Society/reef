@@ -28,6 +28,14 @@ for value in sys.argv[1:]:
         raise SystemExit(f"Use a fresh empty directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
 PY
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$CHECKPOINT_DIR/cache}
+export HF_HOME=${HF_HOME:-$XDG_CACHE_HOME/huggingface}
+export MEGATRON_CONFIG_LOCK_DIR=${MEGATRON_CONFIG_LOCK_DIR:-$XDG_CACHE_HOME/megatron-locks}
+export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$XDG_CACHE_HOME/torch-extensions}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-$XDG_CACHE_HOME/triton}
+export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$XDG_CACHE_HOME/inductor}
+export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-$XDG_CACHE_HOME/cuda}
+mkdir -p "$MEGATRON_CONFIG_LOCK_DIR"
 export REEF_TOKEN=${REEF_TOKEN:-$("$python" -c 'import secrets; print(secrets.token_hex(24))')}
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send

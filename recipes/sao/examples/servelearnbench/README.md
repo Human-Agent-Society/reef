@@ -53,13 +53,13 @@ Install Reef and its runtime pin as described there. From the repository root, i
 uv pip install -e recipes/sao/examples/servelearnbench
 ```
 
-Put model files and training checkpoints on scratch storage. Keep logs in persistent storage.
+Keep the code in project storage. Put model files, checkpoints, logs, and runtime caches on scratch storage.
 Set paths to a downloaded Qwen3-8B checkpoint and two fresh, empty directories:
 
 ```bash
 export MODEL_DIR=/scratch/your-project/models/Qwen3-8B
 export CHECKPOINT_DIR=/scratch/your-project/retail-w1/sao-seed42
-export REEF_WORK=/work/your-project/retail-w1/sao-seed42
+export REEF_WORK=/scratch/your-project/retail-w1/runs/sao-seed42
 export SAO_GPUS=4
 bash recipes/sao/examples/servelearnbench/run.sh
 ```
