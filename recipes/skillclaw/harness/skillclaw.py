@@ -30,13 +30,14 @@ import json
 import re
 import shutil
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from reef.core.batches import TrajectoryItem
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree import TreePatch
 
 from . import evolver, night, prompts
 from .config import RUN, SUCCESS_THRESHOLD, UNSCORED_SENTINEL, WORKDIR
@@ -136,43 +137,37 @@ def digest(sample: TrajectoryItem, meta: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _materialize_incumbent(nodes: tuple[tuple[str, Any], ...], root: Path) -> None:
-    """The skill nodes as the on-disk pool the sealed night reads."""
-    for kind, options in nodes:
-        if kind != "skill" or not isinstance(options, dict):
+def _materialize_incumbent(files: Mapping[str, str], root: Path) -> None:
+    """The tree's skills as the on-disk pool the sealed night reads: its ``skills/<name>/SKILL.md`` files."""
+    for path, text in files.items():
+        parts = path.split("/")
+        if len(parts) != 3 or parts[0] != "skills" or parts[2] != "SKILL.md":
             continue
-        name = str(options.get("name") or "").strip()
-        if not name:
-            continue
-        skill_md = root / "skills" / name / "SKILL.md"
+        skill_md = root / path
         skill_md.parent.mkdir(parents=True, exist_ok=True)
-        skill_md.write_text(str(options.get("text") or ""), encoding="utf-8")
+        skill_md.write_text(text, encoding="utf-8")
 
 
-def _pool_mutations(incumbent: dict[str, str], evolved: dict[str, str]) -> Sequence[object]:
-    """The night's pool diff as node mutations, name order.
+def _pool_patch(incumbent: dict[str, str], evolved: dict[str, str]) -> TreePatch:
+    """The night's pool diff as a tree patch, one ``skills/<name>/SKILL.md`` file per changed skill.
 
-    The sealed night only adds or rewrites ``skills/<name>/SKILL.md``
-    entries, so the diff is creates and updates; there is no remove.
+    The sealed night only adds or rewrites skills, so the patch removes nothing.
     """
-    from reef.train.cordis_backend import Mutation  # lazy: this module imports without reef installed
-
-    mutations = []
-    for name in sorted(evolved):
-        text = evolved[name]
-        if name in incumbent and incumbent[name] == text:
-            continue
-        op = "update" if name in incumbent else "create"
-        mutations.append(Mutation(op, name, {"name": "skill", "config": {"name": name, "text": text}}))
-    return tuple(mutations)
+    return TreePatch(
+        {
+            f"skills/{name}/SKILL.md": text
+            for name, text in sorted(evolved.items())
+            if not (name in incumbent and incumbent[name] == text)
+        }
+    )
 
 
 def propose(
-    nodes: tuple[tuple[str, Any], ...],
+    files: Mapping[str, str],
     samples: tuple[TrajectoryItem, ...],
     models: ModelBindings,
-) -> Sequence[object] | None:
-    """One night step over a day of traffic: incumbent pool in, mutations out.
+) -> TreePatch | None:
+    """One night step over a day of traffic: incumbent pool in, the pool's patch out, ``None`` for no change.
 
     Rebuilds the digests the sealed experiment feeds the evolver and runs
     the unchanged night pipeline (summarize, judge backfill, group, one
@@ -193,7 +188,7 @@ def propose(
     work_dir = WORKDIR / RUN / f"round-{round_index}" / "night"
     incumbent = Path(tempfile.mkdtemp(prefix="skillclaw-incumbent-"))
     try:
-        _materialize_incumbent(nodes, incumbent)
+        _materialize_incumbent(files, incumbent)
         # The evolver is the model under test: reef's served binding, wrapped
         # in their chat loop. Resolved at call time so a test can swap it.
         evolved = night.night_step(
@@ -210,8 +205,8 @@ def propose(
         )
         if not evolved["advanced"]:
             return None
-        mutations = _pool_mutations(night.read_pool(incumbent), night.read_pool(Path(evolved["pool"])))
-        return mutations or None
+        patch = _pool_patch(night.read_pool(incumbent), night.read_pool(Path(evolved["pool"])))
+        return patch if patch.changes else None
     finally:
         shutil.rmtree(incumbent, ignore_errors=True)
 

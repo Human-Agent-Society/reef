@@ -71,8 +71,6 @@ from harness.sessions import slugify
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness.adapters import get_adapter
-from reef.harness.tree.render import render_composition
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.registry import build_recipe
@@ -377,7 +375,7 @@ def run_day(
         task_file = day.WILDCLAWBENCH_ROOT / str(entry["file"])
         result = day.run_task(
             task_file=task_file,
-            pool=pool / "pi-agent",
+            pool=pool,
             image=day.image_tag(),
             brave_key=key,
             output_dir=round_dir / str(entry["id"]),
@@ -519,27 +517,23 @@ def _committed_pool(run_dir: Path, scenario: str) -> Path | None:
     if not history:
         return None
     candidate = run_dir / "artifacts" / history[-1].artifact_ref.release_id
-    return candidate if (candidate / "pi-agent" / "skills").is_dir() else None
+    return candidate if (candidate / "skills").is_dir() else None
 
 
 def _bootstrap_pool(run_dir: Path, scenario: str, recipe: Any) -> Path:
     """The tree the repository boots from: last commit, else the persisted
-    pool, else the seed composition rendered fresh."""
+    pool, else the seed tree written fresh."""
     committed = _committed_pool(run_dir, scenario)
     if committed is not None:
         return committed
     persisted = run_dir / "pool-current"
     if persisted.is_dir():
         return persisted
-    rendered = run_dir / "bootstrap"
-    if rendered.exists():
-        shutil.rmtree(rendered)
-    nodes = tuple((str(entry["name"]), entry.get("config")) for entry in recipe.seed if not entry.get("disabled"))
-    for relative, text in render_composition(nodes, get_adapter(recipe.adapter)).items():
-        path = rendered / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    return rendered
+    bootstrap = run_dir / "bootstrap"
+    if bootstrap.exists():
+        shutil.rmtree(bootstrap)
+    recipe.seed.write(bootstrap)
+    return bootstrap
 
 
 def main() -> None:
