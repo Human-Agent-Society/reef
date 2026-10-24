@@ -56,6 +56,7 @@ training:
     num-rollout: "100000000"
     rollout-batch-size: ${SAO_BATCH}
     global-batch-size: ${SAO_BATCH}
+    # Fixed micro batches: accumulate eight tasks without packing them together.
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: ${SAO_GPUS}
@@ -79,8 +80,6 @@ training:
     recompute-num-layers: "1"
     attention-dropout: "0.0"
     hidden-dropout: "0.0"
-    use-dynamic-batch-size: true
-    max-tokens-per-gpu: "131072"
     log-probs-chunk-size: "1024"
     optimizer: adam
     lr: "1e-6"
