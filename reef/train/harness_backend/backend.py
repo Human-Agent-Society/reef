@@ -37,6 +37,7 @@ from reef.evaluation.harness import EVALUATION_SIDES, FailureObservation, Harnes
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBindings, ModelBindingsResolver
 from reef.harness.tree import HarnessTree, TreeKind, TreePatch, ValidationResult, locate, validate_patch
+from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 from reef.sandbox.process import EpisodeExecutor
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
@@ -104,8 +105,12 @@ class StepLimits:
 
 @dataclass(frozen=True)
 class AgentExecution:
-    """Where an agent proposer runs: the executor built for it, the harness binary, and its two timeouts (seconds).
+    """Where an agent proposer runs.
 
+    Values: ``executor`` is the one the recipe built for the agent,
+    ``binary`` the installed harness binary it runs, ``timeout_s`` > 0 the
+    seconds of the whole agent run, and ``trial_timeout_s`` > 0 the seconds
+    of each trial.
     Purpose: the recipe builds it from ``evolution.proposer_agent``; the
     backend makes an ``AgentHost`` from it for each step.
     """
@@ -114,6 +119,10 @@ class AgentExecution:
     binary: str
     timeout_s: float
     trial_timeout_s: float
+
+    def __post_init__(self) -> None:
+        if self.timeout_s <= 0 or self.trial_timeout_s <= 0:
+            raise ValueError("AgentExecution timeouts must be positive")
 
 
 class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgressReader):
@@ -173,7 +182,9 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             prepared = self.prepare(batch, HarnessState.from_json(state))
         except BaseException:
             if self.progress is not None:
-                self.failed_step = {"failed_stage": self.progress.phase}
+                # The failed row keeps the phase it reached and the record directory the attempt wrote.
+                record = {} if self.progress.step_record is None else {"step_record": self.progress.step_record}
+                self.failed_step = {"failed_stage": self.progress.phase, **record}
             self.progress = None
             raise
         if prepared.outcome != "candidate" or self.progress is None:
@@ -239,7 +250,12 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
         claimed = None if self.inbox is None or not automatic else self.inbox.claim()
         if claimed is not None:
-            metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "reason": claimed.reason}
+            metrics["proposal"] = {
+                "id": claimed.id,
+                "session": claimed.session,
+                "release_id": claimed.release_id,
+                "reason": claimed.reason,
+            }
             proposal: TreeProposal | None = TreeProposal(claimed.patch)
             validation = validate_patch(head_tree, claimed.patch, self.descriptor)
             if not validation.passed:
@@ -260,10 +276,13 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
         if not validation.passed:
             return skipped(state, metrics, validation.message())
         if batch.request is not None:
-            requires = merge_requires(batch.request.requires, proposal.requires)
+            added, refused = screened_requires(batch.request.requires, proposal.requires)
+            requires = merge_requires(batch.request.requires, added)
             if len(requires) > MAX_REQUIRES:
                 return skipped(state, metrics, f"proposal requires {len(requires)} items; at most {MAX_REQUIRES}")
             metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+            if refused:
+                metrics["training_request"]["refused_requires"] = refused
         candidate = HarnessCandidate(
             candidate_id=f"{batch.batch_id}:candidate",
             candidate_tree=head_tree.apply(proposal.patch),
@@ -378,10 +397,10 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
             rejected=rejected,
             rollback_release_id=rollback_release_id,
             rollback_context=rollback_context,
-            # A recheck evaluated no proposal, so the method's latest outcome stays the one it had.
+            # A recheck and a client's proposal evaluated nothing the method proposed, so its latest outcome stays.
             last_outcome=(
                 state.last_outcome
-                if candidate.recheck
+                if candidate.recheck or candidate.proposal_id is not None
                 else StepOutcome(
                     state.steps, candidate.patch, decision.selected, decision.reason, candidate_scores, current_scores
                 )
@@ -414,7 +433,13 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None
         candidate = require_harness_candidate(prepared.candidate)
-        self.failed_step = {"failed_stage": "evaluating", "patch": bounded(candidate.patch.to_json())}
+        # The candidate reached its evaluation: the failed row keeps what was proposed, the method's notes and the
+        # record directory, and says where it stopped.
+        self.failed_step = {
+            "failed_stage": "evaluating",
+            "patch": bounded(candidate.patch.to_json()),
+            **{key: prepared.metrics[key] for key in ("proposal_notes", "step_record") if key in prepared.metrics},
+        }
         if candidate.proposal_id is not None:
             self.inbox_refuse(candidate.proposal_id, "step aborted before a result")
 
@@ -486,6 +511,31 @@ class HarnessBackend(CandidateBackend, PatchAdmission, StepRecords, StepProgress
     def inbox_refuse(self, proposal_id: str, reason: str) -> None:
         if self.inbox is not None:
             self.inbox.refuse(proposal_id, reason)
+
+
+def screened_requires(
+    base: Sequence[Mapping[str, Any]], added: Sequence[Mapping[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The items a proposer added that pass the screens a person's items pass, and the ones they refuse.
+
+    An added item whose name a person's item in ``base`` already has is dropped: the person's copy wins. An item
+    whose name, check or prompt carries a credential-shaped literal or an instruction override is refused, each
+    refusal as ``{item, reason}``, so the step records it; the others are kept in order.
+    """
+    names = {str(item.get("name")) for item in base}
+    kept: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    for item in added:
+        if str(item.get("name")) in names:
+            continue
+        texts = (str(item.get("name") or ""), str(item.get("check") or ""), str(item.get("prompt") or ""))
+        if any(secret_shaped(text) for text in texts):
+            refused.append({"item": bounded(dict(item)), "reason": "carries a credential shaped literal"})
+        elif any(directive_shaped(text) for text in texts):
+            refused.append({"item": bounded(dict(item)), "reason": "carries an instruction override phrasing"})
+        else:
+            kept.append(dict(item))
+    return kept, refused
 
 
 def skipped(state: HarnessState, metrics: Mapping[str, Any], reason: str) -> PreparedStep:

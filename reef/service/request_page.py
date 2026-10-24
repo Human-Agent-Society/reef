@@ -10,8 +10,7 @@ version page; it ends with the proposer's design and its How to use
 section, the plan and the usage of the change, when the step recorded them. Until then the page names the state the request is in
 (``queued`` before a step takes it, ``proposing`` and ``evaluating`` from the
 backend's progress, ``running`` while the trainer holds the request and the
-backend reports no phase, ``settling`` while the row that consumed the
-record lands), lists what the proposer has done so far (the step's
+backend reports no phase), lists what the proposer has done so far (the step's
 activity: model calls, and an agent's tool calls, checks and trials), and
 reloads itself every ``REFRESH_SECONDS``, so a person opens the link right
 after asking and watches. The layout, the palette and
@@ -109,7 +108,6 @@ STATE_WORDS = {
     "proposing": "the proposer is writing the change; the activity shows what it has done so far",
     "evaluating": "the evaluation is running the candidate through its episodes",
     "running": "the step holds the request and reports no phase; its row follows",
-    "settling": "the step that consumed the request is committing its row",
 }
 
 
@@ -409,7 +407,7 @@ def build_request_page(
                 f'<section class="card activity-card">\n<h2>Activity</h2>\n{activity_html(progress, now)}</section>\n'
             )
         subtitle = "Follow your request from instruction to outcome."
-        current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1, "settling": 2}.get(state, 1)
+        current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1}.get(state, 1)
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}

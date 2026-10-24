@@ -927,8 +927,8 @@ class RequestService:
         """Where a filed request stands, as JSON, for a client with no browser to open its page.
 
         The same reading the page renders: the state
-        (``queued``, ``proposing``, ``evaluating``, ``running``, ``settling``,
-        else the settled row's result), what it means in the page's words,
+        (``queued``, ``proposing``, ``evaluating``, ``running``, else the
+        settled row's result), what it means in the page's words,
         and, once a row answers the request, the step it landed as. A client
         polls this to show a phase; the page itself stays the readable view.
         An unknown id, or one that is not a training instruction, raises

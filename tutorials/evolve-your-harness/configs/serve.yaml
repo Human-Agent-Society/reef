@@ -57,10 +57,11 @@ recipe:
           8,74
           9,30
           Reply with the median as a plain integer alone on the last line.
-      # The first tree, beside this directory: the starter skill gives the
-      # proposer a file to improve. It carries no provider: Reef renders its own
-      # model binding (reef.upstream_url / reef.upstream_model below) into each
-      # evaluation episode, and the published tree never names an endpoint.
+      # The first tree, a directory relative to the one run.sh starts Reef in:
+      # the starter skill gives the proposer a file to improve. It carries no
+      # provider: Reef renders its own model binding (inference.upstream-url and
+      # inference.upstream-model below) into each evaluation episode, and the
+      # published tree never names an endpoint.
       seed: seeds/pi
 
     # The default: nobody asks in this demo, and auto refuses POST /reef/train.

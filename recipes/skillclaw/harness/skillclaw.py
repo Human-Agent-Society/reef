@@ -1,4 +1,4 @@
-"""SkillClaw as a pool method on harness evolution: the method module skillclaw.yaml references.
+"""SkillClaw as a pool method on harness evolution: the functions ``harness.plugins`` delegates to.
 
 ``propose`` runs the sealed night flow (benchmarks/skill_claw at commit
 0519eefb) over the day's batched traffic: rebuild each task's session
@@ -7,16 +7,15 @@ referenced skill, then one decision per skill group plus the no-skill
 bucket - ``improve_skill``, ``optimize_description``, ``create_skill``, or
 ``skip``, exactly the sealed action set. The decisions land on a scratch
 pool (night.night_step, merge and registry semantics included) and the
-pool diff maps to one composite mutation sequence: one ``create`` or
-``update`` per changed skill, applied under one snapshot and settled under
-one gate verdict. The sealed night never removes a skill, so no ``remove``
-mutation is ever proposed. A night that applies nothing returns ``None``
-and the pool version stands.
+pool diff maps to one patch: one ``skills/<name>/SKILL.md`` file per added
+or rewritten skill, evaluated as one candidate tree. The sealed night never
+removes a skill, so the patch removes no file. A night that applies nothing
+returns ``None`` and the served pool stands.
 
 ``evaluate`` grades the probe episodes by exact final answer. With
-``selection: always`` in skillclaw.yaml those scores are recorded, never
-gating: SkillClaw publishes every non-skip night and the next day's
-traffic judges the pool, so the ungated mode is the method's own regime.
+``selection: always`` in skillclaw.yaml those scores are recorded, but they
+do not decide the publish: SkillClaw publishes every non-skip night and the
+next day's traffic judges the pool, which is the method's own regime.
 
 The day's task metadata (score, success, error, breakdown) travels through
 the report files the driver writes per task (``round-<n>/reports/``); a
@@ -148,7 +147,7 @@ def _materialize_incumbent(files: Mapping[str, str], root: Path) -> None:
         skill_md.write_text(text, encoding="utf-8")
 
 
-def _pool_patch(incumbent: dict[str, str], evolved: dict[str, str]) -> TreePatch:
+def pool_patch(incumbent: dict[str, str], evolved: dict[str, str]) -> TreePatch:
     """The night's pool diff as a tree patch, one ``skills/<name>/SKILL.md`` file per changed skill.
 
     The sealed night only adds or rewrites skills, so the patch removes nothing.
@@ -205,7 +204,7 @@ def propose(
         )
         if not evolved["advanced"]:
             return None
-        patch = _pool_patch(night.read_pool(incumbent), night.read_pool(Path(evolved["pool"])))
+        patch = pool_patch(night.read_pool(incumbent), night.read_pool(Path(evolved["pool"])))
         return patch if patch.changes else None
     finally:
         shutil.rmtree(incumbent, ignore_errors=True)

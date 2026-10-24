@@ -13,7 +13,7 @@ everything the shared engines need to drive one harness binary:
   dropped.
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
   episode) and the relocation environment (``{root}`` substituted per
-  episode) that points the binary's whole composition at the episode root.
+  episode) that points the binary's whole configuration at the episode root.
 - ``trajectory``: which session-log reader applies and where it reads.
 - ``cleanup_whitelist``: root-relative patterns for files the harness
   legitimately creates (session storage, boot mutations); anything else

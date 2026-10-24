@@ -3,7 +3,7 @@
 The method is the recipe (``gepa.yaml``); this file is only the benchmark
 around it. It owns the Reef service in process the way ``recipes/skillclaw``
 does, so every problem it solves is real recorded traffic against the served
-composition and the method reflects on transcripts it actually produced.
+tree and the method reflects on transcripts it actually produced.
 
 One round is one GEPA step: pull the served tree, run the next epoch-shuffled
 minibatch of three training problems as Pi episodes against it with a model
@@ -12,7 +12,7 @@ that episode recorded, and wait. The third report closes the batch
 (``evolution.batch_size: 3``), which is what schedules the step where the method
 proposes, evaluates on the 45 validation problems, and publishes on a strict
 mean improvement. Rounds stop at ``--budget`` metric calls; then the seed and
-the served compositions are each scored on the sealed 150-problem test split
+the served trees are each scored on the sealed 150-problem test split
 through per-example checkpoints and ``summary.json`` puts those numbers beside
 the retained official record.
 
@@ -430,7 +430,7 @@ def search(
 
 
 def test_passes(service: RunService, recipe: Any, client: Any, binary: str, testset: list) -> dict[str, float]:
-    """The sealed split, once on the seed composition and once on the served one."""
+    """The sealed split, once on the seed tree and once on the served one."""
     evaluator = CheckpointedEvaluator(WORK / "heldout", workers=WORKERS)
     tasks = [str(example["input"]) for example in testset]
     binding = service.binding()

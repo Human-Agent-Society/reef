@@ -15,8 +15,8 @@
 # right level for a hermetic episode root.
 name: claude
 binary: claude
-# The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the episodes unless evolution.binary names a binary.
 install:
   kind: npm
   package: "@anthropic-ai/claude-code"

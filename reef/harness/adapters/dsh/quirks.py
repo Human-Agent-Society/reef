@@ -5,7 +5,7 @@ per profile, ``profiles/<profile>/cordis.patch.yml``: a YAML list of entries
 addressed by plugin id. Config nodes write each layer as a JSON object keyed
 by id, so two nodes touching one plugin deep merge, and ``finalize_render``
 emits the list for the headless profile an episode runs and the web profile
-``reef-dsh web`` boots: one entry per id (a string starting with ``!!js ``
+``dsh web`` boots: one entry per id (a string starting with ``!!js ``
 becomes a js expression, the form dsh's own bundles use), then one
 ``insert`` entry per rendered code extension so the loader boots it from its
 path relative to the profile, the web profile loading the headless

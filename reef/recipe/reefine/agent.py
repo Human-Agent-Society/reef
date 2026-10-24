@@ -39,7 +39,7 @@ from reef.core.training_request import TrainingRequest
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.trajectory import final_assistant_text, reader_for
-from reef.harness.tree import HarnessTree, TreePatch, TreeWorkspace, locate, render_tree, validate_patch
+from reef.harness.tree import HarnessTree, TreePatch, TreeWorkspace, locate, render_tree, validate_tree
 from reef.recipe.reefine import proposer
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.recipe.reefine.multimodal import MultimodalProvider
@@ -197,6 +197,9 @@ class AgentRun(WorkspaceTools):
     ``workspace`` is the run's directory: ``harness/`` holds the copy of
     ``tree``, beside ``requires.json``, ``design.md``, ``progress.md`` and the
     read-only ``reference/``.
+    Purpose: ``AgentProposer`` makes one per agent run; the gateway calls
+    ``check`` and ``trial`` while the agent works, and the proposer reads the
+    agent's patch with ``snapshot`` when it stops.
     """
 
     def __init__(self, host: AgentHost, tree: HarnessTree, workspace: Path, served: ModelBinding) -> None:
@@ -275,7 +278,8 @@ class AgentRun(WorkspaceTools):
 
     def check(self) -> dict[str, Any]:
         patch, unread = self.snapshot()
-        validation = validate_patch(self.tree, patch, self.host.descriptor)
+        # The tree as it stands, the head included: the step itself refuses an empty patch, the agent's checks do not.
+        validation = validate_tree(self.tree.apply(patch), self.host.descriptor)
         result: dict[str, Any] = {
             "valid": validation.passed,
             "files": {path: "removed" if text is None else "written" for path, text in patch.changes.items()},
@@ -285,7 +289,9 @@ class AgentRun(WorkspaceTools):
             result["problems"] = list(validation.problems)
             self.host.calls.note("check", f"validation refused the workspace: {validation.message()}", failed=True)
         else:
-            self.host.calls.note("check", f"validation passed: {', '.join(patch.changes)}")
+            self.host.calls.note(
+                "check", f"validation passed: {', '.join(patch.changes) or 'the head tree, unchanged'}"
+            )
         if unread:
             result["unread"] = unread
         return self.record_check("check", result)
@@ -294,7 +300,7 @@ class AgentRun(WorkspaceTools):
         if self.gateway is None:
             raise RuntimeError("the agent gateway is not running")
         patch, unread = self.snapshot()
-        validation = validate_patch(self.tree, patch, self.host.descriptor)
+        validation = validate_tree(self.tree.apply(patch), self.host.descriptor)
         if not validation.passed:
             self.host.calls.note(
                 "trial", f"not run, validation refused the workspace: {validation.message()}", failed=True

@@ -70,15 +70,16 @@ class RejectedProposal:
 
 @dataclass(frozen=True)
 class StepOutcome:
-    """What the previous evaluated step did with its candidate.
+    """What an evaluated step did with a candidate the method proposed.
 
     Values: ``step`` is that step's positive number, ``patch`` the change it
     evaluated, ``selected`` whether the candidate was published, ``reason``
     the selection's reason, and the two score tuples the evaluation's
     per-task scores in pairing order, ``None`` for an episode that could not
     run. ``current_scores`` is empty when the selection ran the candidate alone.
-    Purpose: the backend hands the outcome of the latest evaluated step to
-    the next proposal, so a method updates its own state from the result.
+    Purpose: the backend hands the outcome of the latest step that evaluated
+    the method's own proposal to the next proposal, so a method updates its
+    own state from the result.
     """
 
     step: int
@@ -117,6 +118,7 @@ class ProposerCalls(ABC):
     through the bindings. The gateway spends from and records into the same
     budget and ``proposer.json`` as the bindings, and notes what the agent
     does, for the request page to show while the step runs.
+    Purpose: ``AgentHost.calls`` hands it to an agent proposer.
     """
 
     @abstractmethod
@@ -194,7 +196,9 @@ class ProposalContext:
     proposal of a step and holds the validation problems of the previous
     proposal on the retry. ``method_state`` is the state the method committed
     with the latest step, empty before its first. ``last_outcome`` is the
-    result of the latest evaluated step, ``None`` before the first.
+    result of the latest step that evaluated this method's proposal, ``None``
+    before the first; a recheck and a client's proposal from the inbox leave it
+    as it was.
     ``trials`` runs trial episodes, ``None`` when the deployment allows none.
     ``agent_host`` is set exactly when the proposer runs an agent and the
     deployment configured an agent executor.
@@ -255,8 +259,10 @@ class Proposer(ConfiguredPlugin, ABC):
 
     ``propose`` returns the patch for the step, or ``None`` to skip it with
     nothing to record; a ``TreeProposal`` with the empty patch skips it and
-    records the method's state. A deployment names the class in
-    ``evolution.propose``, and the recipe builds it with ``from_config``.
+    records the method's state.
+    Purpose: a deployment names the class in ``evolution.propose``, the
+    recipe builds it with ``from_config``, and the backend calls ``propose``
+    once per step, and once more with the validation problems.
     """
 
     @property
@@ -280,6 +286,8 @@ class Promoter(ConfiguredPlugin, ABC):
     ``promote`` receives the step's trace samples and the previous step's
     failure manifest, and returns the prompts to promote. Reef still dedupes,
     screens for credentials and instruction overrides, and caps them.
+    Purpose: a deployment names the class in ``evolution.promote``; the
+    backend calls it in a step that promotes failures.
     """
 
     @abstractmethod

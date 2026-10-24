@@ -12,8 +12,8 @@
 # opencode's own zen provider.
 name: opencode
 binary: opencode
-# The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the episodes unless evolution.binary names a binary.
 install:
   kind: npm
   package: "opencode-ai"

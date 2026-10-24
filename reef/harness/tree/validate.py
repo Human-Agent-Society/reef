@@ -17,13 +17,14 @@ from typing import Any
 
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tree.checks import (
-    NATIVE_RESERVED_TOOL_NAMES,
     reject_inline_secret,
     reject_secret_shaped_text,
     reject_unguarded_console_write,
     validate_native_agent,
     validate_native_graph,
+    validate_native_hook,
     validate_native_loop,
+    validate_native_tool,
 )
 from reef.harness.tree.layout import TreeKind, TreeLocation, extension_suffix, locate
 from reef.harness.tree.render import RenderError, render_tree
@@ -130,9 +131,12 @@ def check_file(location: TreeLocation, text: str, descriptor: AdapterDescriptor)
     if kind is TreeKind.CODE_EXTENSION:
         reject_unguarded_console_write(text, "the extension")
     elif kind in (TreeKind.NATIVE_TOOL, TreeKind.NATIVE_HOOK):
-        declared = declared_name(text, location.name)
-        if kind is TreeKind.NATIVE_TOOL and declared in NATIVE_RESERVED_TOOL_NAMES:
-            raise ValueError(f"tool name {declared!r} is reserved for a built-in tool")
+        # Every NAME the module assigns is the file's, so a file cannot pass for another tool or hook.
+        declared_name(text, location.name)
+        if kind is TreeKind.NATIVE_TOOL:
+            validate_native_tool(text, location.name)
+        else:
+            validate_native_hook(text, location.name)
     elif kind is TreeKind.NATIVE_LOOP:
         validate_native_loop({"name": declared_name(text, location.name), "code": text})
     elif kind in (TreeKind.NATIVE_GRAPH, TreeKind.NATIVE_AGENT):

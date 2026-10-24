@@ -43,6 +43,7 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.delivery import create_harness_surface
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, TreeKind, validate_tree
@@ -60,7 +61,6 @@ from reef.sandbox.process import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.storage.records import RecordStore
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
-from reef.surface.harnesses import create_harness_surface
 from reef.task2batch.traces import TraceBatches
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import AgentExecution, HarnessBackend, StepLimits
@@ -732,6 +732,9 @@ class HarnessEvolutionRecipe(Recipe):
             if task_storage is None:
                 raise RecipeConfigError("evolution.eval_task_store needs the task storage of a scenario session")
             task_store = task_storage.open(self.eval_task_store)
+            # A step evaluates the eval split as it reads it then; an empty split would evaluate nothing at all.
+            if not task_store.tasks(split="eval"):
+                raise RecipeConfigError(f"the eval split of task store {self.eval_task_store!r} holds no task")
         agent = None
         if self.agent_executor is not None:
             agent_executor, agent_binary = self.agent_executor.for_program(program, binary=self.binary)

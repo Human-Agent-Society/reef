@@ -43,10 +43,25 @@ class MetaHarnessSelection(BackendEvaluateMixin, SelectionPlugin):
         current_scores = finite_scores(evaluation.metrics.get("current_scores", ()))
         if len(candidate_scores) != len(current_scores):
             raise ValueError("Meta-Harness evaluation score vectors must have equal lengths")
-        incumbent_scores = population.served.scores or current_scores
+        served = None if population.served_id is None else population.served
+        incumbent_scores = (None if served is None else served.scores) or current_scores
         candidate_mean = fmean(candidate_scores)
         incumbent_mean = fmean(incumbent_scores)
-        proposed = population.pending
+        metrics: dict[str, Any] = {
+            "candidate_mean": candidate_mean,
+            "incumbent_mean": incumbent_mean,
+            "population_size": len(population.candidates),
+            "proposer_calls": population.proposer_calls,
+        }
+        # A client's proposal and a recheck are no candidate of the population: only the method's own is pending.
+        if not candidate.recheck and candidate.proposal_id is None and population.pending_id is not None:
+            proposed = population.pending
+            metrics["population_candidate_id"] = proposed.candidate_id
+            metrics["population_parent_id"] = proposed.parent_id
+            # The next step records this evaluation; the count includes it already.
+            metrics["target_episode_calls"] = population.episode_calls + len(candidate_scores) + len(current_scores)
+        else:
+            metrics["target_episode_calls"] = population.episode_calls
         return SelectionDecision(
             selected=candidate_mean > incumbent_mean,
             policy="meta_harness",
@@ -55,16 +70,7 @@ class MetaHarnessSelection(BackendEvaluateMixin, SelectionPlugin):
                 f"over {len(candidate_scores)} episode results"
             ),
             evaluation=evaluation,
-            metrics={
-                "candidate_mean": candidate_mean,
-                "incumbent_mean": incumbent_mean,
-                "population_candidate_id": proposed.candidate_id,
-                "population_parent_id": proposed.parent_id,
-                "population_size": len(population.candidates),
-                "proposer_calls": population.proposer_calls,
-                # The next step records this evaluation; the count includes it already.
-                "target_episode_calls": population.episode_calls + len(candidate_scores) + len(current_scores),
-            },
+            metrics=metrics,
         )
 
 

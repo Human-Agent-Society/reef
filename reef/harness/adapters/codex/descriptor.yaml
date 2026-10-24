@@ -2,8 +2,8 @@
 #
 # CODEX_HOME relocates user configuration, rules, hooks, skills, and session
 # rollouts into the episode root. Codex lists the skills below
-# $CODEX_HOME/skills in exec and in its TUI, so a reef-codex session, which
-# keeps the person's own HOME, finds the same skills an episode does. The CLI
+# $CODEX_HOME/skills in exec and in its TUI, so a person's session on the
+# rendered tree finds the same skills an episode does. The CLI
 # keeps model-generated commands in a workspace-write sandbox and never waits
 # for an approval during a benchmark episode.
 name: codex
@@ -55,10 +55,9 @@ files:
         sandbox_workspace_write:
           network_access: false
       # web_search may take any value Codex reads, because the episode argv
-      # pins it disabled and only a person's reef-codex session reads the
-      # tree's value.
+      # pins it disabled and only a person's session reads the tree's value.
       checks:
-        # The episode argv pins never, and a reef-codex session keeps Codex's
+        # The episode argv pins never, and a person's session keeps Codex's
         # on-request default, so the person approves each command that leaves
         # the sandbox.
         - key: approval_policy

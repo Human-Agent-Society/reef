@@ -57,7 +57,7 @@ MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
-#: A tool's declaration as the render writes it after the code: literal constants the loop reads without running it.
+#: A tool's declaration: the literal constants its module assigns, which the loop reads without running it.
 TOOL_FIELDS: tuple[str, ...] = ("NAME", "DESCRIPTION", "PARAMETERS", "CAPABILITIES")
 _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "string": str,
@@ -123,7 +123,7 @@ class ToolModule(Tool):
         # first in process call; a tool built in code has none.
         self._path = path
         # Reef's own code rather than the tree's (the serve form's self tools): it runs in process whatever
-        # enforcer the environment names, since the enforcer confines what a tree entry may do.
+        # enforcer the environment names, since the enforcer confines what a tree file may do.
         self.builtin_tool = builtin_tool
 
     @property
@@ -317,7 +317,7 @@ def _bindings(node: ast.AST) -> Iterator[str]:
 
 
 def tool_from_source(path: Path) -> ToolModule:
-    """The tool a rendered module declares, read from its source without running it: the last module scope assignment to a declaration constant binds (compound statement bodies are followed, function and class bodies are not, and the render writes its constants last), and ``run`` is what the enforcer imports where the call runs."""
+    """The tool a rendered module declares, read from its source without running it: the last module scope assignment to a declaration constant binds (compound statement bodies are followed, function and class bodies are not), and ``run`` is what the enforcer imports where the call runs."""
     try:
         tree = ast.parse(path.read_bytes(), filename=str(path))  # bytes: the coding cookie and BOM apply
     except OSError as exc:
@@ -348,7 +348,7 @@ def tool_from_source(path: Path) -> ToolModule:
 
 
 def hook_from_module(path: Path, module: ModuleType) -> HookModule:
-    """The hook a rendered module declares: ``listen`` at the event the render wrote after the code."""
+    """The hook a rendered module declares: ``listen`` at the ``EVENT`` the module assigns."""
     listen = getattr(module, "listen", None)
     event = str(getattr(module, "EVENT", ""))
     if not callable(listen) or event not in NATIVE_EVENTS:
@@ -373,7 +373,7 @@ def _admit_loop(path: Path, options: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _loop_header(path: Path, code: str) -> dict[str, Any]:
-    """The ``NAME`` and ``MAX_STEPS`` literals the render wrote after the code, read without running it.
+    """The ``NAME`` and ``MAX_STEPS`` literals the module assigns, read without running it.
 
     Any other binding of the two names at module scope is refused: the import would set what this read
     could not, and the module's top level would have run before admission saw it."""
@@ -395,7 +395,7 @@ def _loop_header(path: Path, code: str) -> dict[str, Any]:
                         header["max_steps"] = node.value.value
     for name, binding in scope_bindings(tree):
         if name in ("NAME", "MAX_STEPS") and not any(binding is target for target in written):
-            raise LoadError(f"loop {path.name} cannot run: the header is not the literals the render wrote")
+            raise LoadError(f"loop {path.name} cannot run: NAME and MAX_STEPS must be plain literal assignments")
     return header
 
 

@@ -51,10 +51,17 @@ class GEPASelection(BackendEvaluateMixin, SelectionPlugin):
             served_mean = fmean(served_scores) if served_scores else 0.0
         else:
             served_mean = archive.mean_val(served)
-        pending = archive.pending
-        fronts = archive.fronts()
+        # A client's proposal and a recheck are no candidate of the archive: only the method's own is pending.
+        own = not candidate.recheck and candidate.proposal_id is None
+        pending = archive.pending if own else None
+        selected = candidate_mean > served_mean
+        # The next step folds this validation into the committed archive; the numbers report it already.
+        settled = Archive.from_state(candidate.method_state.get(ARCHIVE_KEY))
+        if own:
+            settled.settle(candidate_scores, served_scores, selected)
+        fronts = settled.fronts()
         return SelectionDecision(
-            selected=candidate_mean > served_mean,
+            selected=selected,
             policy="gepa",
             reason=(
                 f"candidate scored {candidate_mean:.4f} against {served_mean:.4f} served "
@@ -65,10 +72,9 @@ class GEPASelection(BackendEvaluateMixin, SelectionPlugin):
                 "candidate_val_mean": candidate_mean,
                 "served_val_mean": served_mean,
                 "parent": None if pending is None else archive.candidates[pending].parent,
-                "archive_size": len(archive.candidates),
+                "archive_size": len(settled.candidates),
                 "front_size": len({index for front in fronts.values() for index in front}),
-                # The validation pass is charged when the next step folds it in; the count includes it already.
-                "metric_calls": archive.metric_calls + (len(candidate_scores) if pending is not None else 0),
+                "metric_calls": settled.metric_calls,
             },
         )
 

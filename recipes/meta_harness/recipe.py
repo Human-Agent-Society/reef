@@ -13,7 +13,7 @@ Example recipe section::
         evolution:
           adapter: pi
           seed: seed/
-          evaluate: harness.scoring:score_episode
+          evaluate: harness.benchmark:VerifierScorer
           tasks: ["validation task one", "validation task two"]
           models:
             proposer: {url: https://api.openai.com, model: gpt-5, api_key_env: OPENAI_API_KEY}

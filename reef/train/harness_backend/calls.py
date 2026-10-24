@@ -28,8 +28,14 @@ MAX_ACTIVITY = 300
 class StepCalls(ProposerCalls):
     """One step's model-call budget, record and live activity, shared by the budgeted bindings and an agent's gateway.
 
-    A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``; the activity is what the
-    request page shows while the step runs, read from another thread through :meth:`activity`.
+    Values: ``cap`` ≥ 0 is the step's call budget, 0 for none, and ``spent``
+    ≤ ``cap`` when ``cap`` > 0 counts the calls so far. ``entries`` is the
+    list the step writes to ``proposer.json``, one mapping per call in call
+    order. ``lines`` holds the latest ``MAX_ACTIVITY`` activity lines, each
+    ``{at, kind, text}`` with ``failed`` on a line that went wrong.
+    Purpose: the backend makes one per step; the budgeted bindings and an
+    agent's gateway spend and record through it, and the request page reads
+    :meth:`activity` from another thread.
     """
 
     def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
@@ -60,17 +66,18 @@ class StepCalls(ProposerCalls):
 
 
 class BudgetedBinding(ModelBinding):
-    """A ModelBinding that delegates ``chat`` to a wrapped binding under a
-    shared per-step call budget and records every call in the step record.
+    """A ModelBinding that delegates ``chat`` and ``complete`` to a wrapped binding under the step's call budget.
 
-    A subclass so the proposer still receives ModelBinding values, but it
-    holds the real binding and forwards to its ``chat`` (never the base
-    implementation), so a method's own binding behavior is preserved. The
-    shared counter is a mutable one-element list so every binding in the set
-    decrements the same budget; a cap of 0 is no budget. The record is the
-    step's list: one entry per call with the model, the request, the reply
-    or the error, the provider response when available, the seconds it took and the
-    ``usage`` (input and output tokens), every text cut at the record cap.
+    Values: ``inner`` is the binding the calls go to, and ``step_calls`` the
+    step's ``StepCalls``; the endpoint fields repeat ``inner``'s. Every
+    binding of one step shares one ``StepCalls``, so they spend one budget.
+    Purpose: ``budgeted_bindings`` wraps every binding a proposer receives.
+    Each call spends from the budget first, then lands in the step record:
+    one entry with the model, the request, the reply or the error, the
+    provider response when available, the seconds it took and the ``usage``
+    (input and output tokens), every text cut at the record cap. A subclass,
+    so the proposer still receives ModelBinding values; it forwards to the
+    wrapped binding, so a method's own binding behavior is preserved.
     """
 
     inner: ModelBinding

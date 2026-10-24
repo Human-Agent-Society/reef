@@ -1,8 +1,9 @@
 # Run from the repository root:
 # reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
-# This is the long-running pi deployment used by the root README. The separate
-# serve.yaml and serve-native.yaml files remain inputs to the short-lived
-# ./run.sh demo for its pi and native variants.
+# This is the long-running pi deployment: it takes training requests
+# (hybrid) and holds extensions for a promote. The separate serve.yaml and
+# serve-native.yaml files remain inputs to the short-lived ./run.sh demo for
+# its pi and native variants.
 reef:
   host: 127.0.0.1
   port: 8901

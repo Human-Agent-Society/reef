@@ -13,8 +13,8 @@
 name: hermes
 binary: hermes
 # The vendor's channel is a git checkout installed editable into a venv:
-# PyPI is stale and upstream refuses wheel builds. Consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# PyPI is stale and upstream refuses wheel builds. Harness evolution startup
+# installs it for the episodes unless evolution.binary names a binary.
 install:
   kind: git
   package: hermes-agent
@@ -31,13 +31,13 @@ files:
       path: "hermes/config.yaml"
       defaults:
         # security.tirith_enabled downloads a scanner binary from GitHub at
-        # boot, and the scanner blocks a command it cannot resolve, such as
-        # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
-        # call per episode; the memory and skill nudges spawn a background
-        # review agent, which makes model calls and writes skills into the
-        # tree; the curator writes its state into the tree's skills at the
-        # first start and later archives and backs up skills there; the
-        # snapshot is the trajectory the reader parses.
+        # boot, and the scanner blocks a command it cannot resolve;
+        # title_generation is one extra model call per episode; the memory
+        # and skill nudges spawn a background review agent, which makes model
+        # calls and writes skills into the tree; the curator writes its state
+        # into the tree's skills at the first start and later archives and
+        # backs up skills there; the snapshot is the trajectory the reader
+        # parses.
         auxiliary:
           title_generation:
             enabled: false

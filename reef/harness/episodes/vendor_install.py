@@ -1,12 +1,11 @@
 """Server-side resolution of the harness binary through the vendor's channel.
 
-Reef runs evaluation episodes with the same pinned binary the served install
-script hands a client, and gets it the same way: the adapter descriptor's
-``install`` section names the vendor's channel, the pinned version, and where
-the installed binary lands under the install prefix. This module is that
-step's Python twin - the same default prefix, the same "is the pin already
-installed" gate, the same vendor command - so a harness-evolving deployment
-does not ask its operator to install the agent by hand before ``reef serve``.
+Reef runs evaluation episodes with the binary pinned in the adapter
+descriptor: its ``install`` section names the vendor's channel, the pinned
+version, and where the installed binary lands under the install prefix. This
+module installs the pin there unless it is already installed, with the
+vendor's own command, so a harness-evolving deployment does not ask its
+operator to install the agent by hand before ``reef serve``.
 
 Reef still never hosts or proxies binary bytes: the install runs the vendor's
 own command. An adapter that declares no ``install`` section (reef's native
@@ -28,18 +27,15 @@ from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 from reef.sandbox.process import SandboxProgram
 
-#: Where per-adapter install prefixes live, matching the ``PREFIX`` default the
-#: served install script bakes in; ``REEF_HARNESS_PREFIX`` moves the root, and
-#: an adapter's own prefix is that root plus the adapter name. A server and a
-#: client on one machine therefore share the installed binary.
+#: Where per-adapter install prefixes live; ``REEF_HARNESS_PREFIX`` moves the
+#: root, and an adapter's own prefix is that root plus the adapter name.
 DEFAULT_PREFIX_ROOT = "~/.local/share/reef-harness"
 
 #: Environment override for :data:`DEFAULT_PREFIX_ROOT`.
 PREFIX_ENV = "REEF_HARNESS_PREFIX"
 
-#: Beside the prefix, the ``git`` kind's installed ``repository@ref``; the
-#: install script writes the same file, because ``--version`` reports the
-#: package version, which a ref moves independently of.
+#: Beside the prefix, the ``git`` kind's installed ``repository@ref``, because
+#: ``--version`` reports the package version, which a ref moves independently of.
 PIN_FILE = ".reef-install-pin"
 
 #: A vendor install clones, builds and downloads; a version probe only execs.
@@ -139,9 +135,8 @@ def _pin(install: InstallSpec) -> str:
 def _is_pinned(install: InstallSpec, binary: Path, prefix: Path, *, env: Mapping[str, str]) -> bool:
     """Whether the installed binary already answers the descriptor's pin.
 
-    The same gate the install script applies: an executable at the expected
-    path whose ``--version`` reports the pinned version, and, for the ``git``
-    kind, whose recorded ref matches too.
+    An executable at the expected path whose ``--version`` reports the
+    pinned version, and, for the ``git`` kind, whose recorded ref matches too.
     """
     if not os.access(binary, os.X_OK):
         return False
@@ -150,7 +145,7 @@ def _is_pinned(install: InstallSpec, binary: Path, prefix: Path, *, env: Mapping
     reported = f" {_reported_version(binary, env=env)} "
     if install.kind == "git":
         # A Python CLI prints its version inside a label ("Hermes Agent
-        # v0.21.0"), so the match is a substring, as in the install script.
+        # v0.21.0"), so the match is a substring.
         return install.version in reported
     return f" {install.version} " in reported
 
@@ -191,8 +186,7 @@ def _install_git(install: InstallSpec, prefix: Path) -> None:
     The recorded ref goes first, so an interrupted install never reads back
     as current, and the checkout and venv are cleared before the clone, which
     refuses a non-empty target. The checkout's ``.git`` goes so the agent's
-    own startup update check has nothing to fetch. Unlike the install script,
-    which can assume no interpreter but ``python3``, the venv is built by the
+    own startup update check has nothing to fetch. The venv is built by the
     interpreter running Reef.
     """
     prefix.joinpath(PIN_FILE).unlink(missing_ok=True)

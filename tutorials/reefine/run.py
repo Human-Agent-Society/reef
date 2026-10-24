@@ -67,6 +67,8 @@ WORK = HERE / "work"
 INSTALL_ROOT = WORK / "harness"
 DEMOS = HERE / "demos"
 RELEASE_FILE = ".reef-harness-release"
+#: pi's provider file: the model binding writes provider reef there, and pi sends that provider's headers.
+PI_MODELS = "pi-agent/models.json"
 SHOW_TIMEOUT_S = 600.0
 CHECK_TIMEOUT_S = 30.0
 
@@ -301,6 +303,11 @@ def install(release_id=None):
     descriptor = get_adapter("pi")
     binding = ModelBinding(base_url=SERVICE_URL, model=MODEL, api_key=TOKEN)
     files = render_tree(HarnessTree(manifest["files"]), descriptor, binding.config_overlays(descriptor))
+    # Reef answers a model call only with the scenario header. The render refuses a tree that sets provider
+    # headers, so the client adds its own to its binding after the render; pi sends them on every call.
+    models = json.loads(files[PI_MODELS])
+    models["providers"]["reef"]["headers"] = _scenario_headers()
+    files[PI_MODELS] = json.dumps(models, indent=2, sort_keys=True) + "\n"
     shutil.rmtree(INSTALL_ROOT, ignore_errors=True)
     for relative, content in files.items():
         target = INSTALL_ROOT / relative

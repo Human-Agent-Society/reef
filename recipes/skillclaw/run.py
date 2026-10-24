@@ -200,7 +200,7 @@ class RunService:
         return f"http://host.docker.internal:{self.port}/v1"
 
     def current_pool(self) -> Path:
-        """The served artifact tree on disk (the rendered composition)."""
+        """The served release's source tree on disk: the pool, one ``skills/<name>/SKILL.md`` per skill."""
         artifact = self.dispatcher.current_artifact(self.scenario).materialize()
         assert artifact.local_path is not None
         return artifact.local_path

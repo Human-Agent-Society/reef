@@ -2,7 +2,7 @@
 # evolution.tasks with the pinned validation split, builds the implementation
 # below, and serves it from its own embedded Reef service. The Pi episodes the
 # driver runs point at that service, so the problems it solves are recorded
-# traffic and the method reflects on the composition's own transcripts.
+# traffic and the method reflects on the served tree's own transcripts.
 #
 # ${REEF_*} values interpolate from the environment through reef's config
 # loader; run.sh exports the defaults.

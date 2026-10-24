@@ -33,8 +33,9 @@ class HarnessState:
     ``rollback_release_id`` names the release the latest publish replaced,
     which a recheck evaluates again; ``rollback_context`` is the evaluation
     context of that publish, and the two are both ``None`` or both set.
-    ``last_outcome`` is the latest evaluated step's outcome, ``None`` before
-    the first. ``method_state`` is the method's JSON state.
+    ``last_outcome`` is the outcome of the latest step that evaluated the
+    method's own proposal, ``None`` before the first. ``method_state`` is the
+    method's JSON state.
     Purpose: ``HarnessBackend`` reads it from the committed algorithm state
     with ``from_json`` and returns ``to_json`` of the next one in each
     ``TrainStepResult``.

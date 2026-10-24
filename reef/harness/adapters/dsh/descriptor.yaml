@@ -11,10 +11,10 @@
 # as an object keyed by plugin id and the quirks module emits the list.
 name: dsh
 binary: dsh
-# The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs. The pin follows
-# the alpha tag: the source line that was mapped and the binary that was
-# measured.
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the episodes unless evolution.binary names a binary. The pin
+# follows the alpha tag: the source line that was mapped and the binary that
+# was measured.
 install:
   kind: npm
   package: "@deepseek-ai/dsh"
@@ -115,7 +115,7 @@ files:
     env:
       path: "dsh/.env"
       defaults: {}
-    # The profile `reef-dsh web` boots, a person's session in the browser.
+    # The profile `dsh web` boots, a person's session in the browser.
     # The same defaults as the headless patch: the web template compresses
     # its session log, and a compressed profile refuses a sessions root that
     # holds a headless profile's plain one.

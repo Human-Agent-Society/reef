@@ -1,10 +1,10 @@
 ---
-name: reef-pi-extension-api
-description: The pi 0.84.2 extension API in brief. Read before writing or changing a code_extension entry for reef-pi. Covers the file shape, tools with typebox parameters, commands, events, ctx.ui, messages, exec, and the rules a reef tree entry must keep.
+name: pi-extension-api
+description: The pi 0.84.2 extension API in brief. Read before writing or changing a code_extension file for pi. Covers the file shape, tools with typebox parameters, commands, events, ctx.ui, messages, exec, and the rules an extension in a Reef tree must keep.
 ---
 # pi extension API (0.84.2)
 
-An extension is one module at pi-agent/extensions/<name>.ts. pi loads it with jiti, so plain JavaScript in a .ts file runs as is; type annotations are allowed but not needed. A tree entry has no npm install: import only node: modules, typebox, @earendil-works/pi-coding-agent, @earendil-works/pi-ai and @earendil-works/pi-tui.
+An extension is one module at pi-agent/extensions/<name>.ts. pi loads it with jiti, so plain JavaScript in a .ts file runs as is; type annotations are allowed but not needed. An extension file has no npm install: import only node: modules, typebox, @earendil-works/pi-coding-agent, @earendil-works/pi-ai and @earendil-works/pi-tui.
 
 This summary is versioned with Reef's pi installation pin. For a missing detail, locate `pi` on PATH,
 resolve its symlink and check the owning `package.json`. In that package, use these specific references:
@@ -80,7 +80,7 @@ The handler gets the text after /standup as args. A command runs no model call b
 
 Registered commands appear in pi's native `/` autocomplete dropdown alongside built-in commands; `description` tells the user what each does. Register at extension load, after the required `PI_OFFLINE` guard, not inside an event handler or behind `ctx.hasUI`. Guard UI operations inside the handler instead. An `input` hook that recognizes `/name` does not register it for the dropdown. Avoid names already used by built-in commands, prompt templates or other extensions.
 
-For a command that only expands a prompt, use an `agent_command` entry instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
+For a command that only expands a prompt, use an `agent_command` file (`commands/<name>.md` in the tree) instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
 
 ## Events: pi.on(name, handler)
 
@@ -164,15 +164,15 @@ Models beyond the session's chat model are Reef routes too, when the Reef recipe
 
 Name the model in the body. These routes do not stream, and answer 501 when the Reef recipe configures no multimodal provider or its provider serves no such route.
 
-## Rules for a reef tree entry
+## Rules for an extension in a Reef tree
 
 - Return before registering anything when process.env.PI_OFFLINE is set: evaluation episodes are hermetic and must see no network calls, prompts or timers.
-- Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
+- Credentials come from process.env at run time, never from the file: validation refuses a credential shaped literal, and the tree persists every version.
 - Choose state lifetime deliberately. Transient mode state can live in the extension factory and reset when
   the session runtime is recreated. State that must survive resume/fork needs session entries or tool result
   details and explicit reconstruction. Do not persist a mode the user requested to be session-only.
 - Never throw out of an event handler for an expected condition: log with ctx.ui.notify or return nothing.
-- Never write to the session's own stdout or stderr while it has a UI. The harness process owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame and leave the session without its input box. Admission refuses an unguarded write. Show text with ctx.ui.notify, a footer with ctx.ui.setStatus, progress with ctx.ui.setWidget, and keep console output for the no-UI path: `if (ctx.hasUI) ctx.ui.notify(text, "warning"); else console.error(text);`
+- Never write to the session's own stdout or stderr while it has a UI. The harness process owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame and leave the session without its input box. Validation refuses an unguarded write. Show text with ctx.ui.notify, a footer with ctx.ui.setStatus, progress with ctx.ui.setWidget, and keep console output for the no-UI path: `if (ctx.hasUI) ctx.ui.notify(text, "warning"); else console.error(text);`
 - A failure the person would otherwise wait for in silence reaches them through ctx.ui: an empty `catch {}` around pi.exec, fetch or a dialog turns a broken feature into one that does nothing and says nothing.
 - One file, no dependencies, ASCII text.
 

@@ -1,8 +1,9 @@
 """What a settled harness step means for the person who asked, as the harness pages say it.
 
 The request and version pages read a catalog row's metrics through these
-functions, so a rejected step names the same cause and a release offers the
-same next action on either page.
+functions, so a rejected step names the same cause on either page. The
+request page also offers the next action for a release, from
+``next_action``.
 """
 
 from __future__ import annotations

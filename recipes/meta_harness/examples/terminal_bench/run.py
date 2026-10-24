@@ -38,7 +38,7 @@ SEED = HERE / "seed"
 
 
 def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int | None) -> dict[str, Any]:
-    """Fill the stack's dataset and keep the gate budget consistent with it."""
+    """Fill the stack's dataset and keep the evaluation episode budget consistent with it."""
     sections = recipe_config_from_file_layout(load_config(HERE / "terminal_bench.yaml"))
     evolution = sections["evolution"]
     evolution["seed"] = str(SEED)
@@ -79,13 +79,17 @@ def load_recipe(sections: Mapping[str, Any]) -> MetaHarnessRecipe:
 
 
 def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
-    """Use persistent artifacts and SQLite records so a new process can resume."""
+    """Use persistent artifacts and SQLite records so a new process can resume.
+
+    The recipe's seed is the base release of a new scenario, as the service makes it, so the search starts there.
+    """
     return Dispatcher(
         recipe,
         GitLFSRepositoryBackend.factory(
             directory / "artifacts.git",
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
+            bootstrap_files=recipe.base_artifact_files() or {},
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
     )
@@ -174,7 +178,7 @@ def write_summary(scenario: Scenario, directory: Path) -> dict[str, Any]:
         "served_id": search.served_id,
         "generated_candidates": search.generated_candidates,
         "proposer_calls": search.proposer_calls,
-        "gate_episodes": search.episode_calls,
+        "evaluation_episodes": search.episode_calls,
         "candidates": [
             {
                 "id": candidate.candidate_id,
@@ -215,7 +219,9 @@ def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> di
         scenario.commit(result)
         summary = write_summary(scenario, directory)
         print(
-            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "gate_episodes", "served_id")})
+            json.dumps(
+                {key: summary[key] for key in ("step", "generated_candidates", "evaluation_episodes", "served_id")}
+            )
         )
     return summary
 
@@ -252,7 +258,7 @@ def main() -> None:
                 "tasks": len(tasks),
                 "repeats": evolution["episode_repeats"],
                 "candidate_limit": evolution["meta_harness"]["max_candidates"],
-                "gate_episode_limit": evolution["meta_harness"]["max_target_episodes"],
+                "evaluation_episode_limit": evolution["meta_harness"]["max_target_episodes"],
                 "rollout_limit": evolution["max_steps"],
                 "seed_files": sorted(files),
             },

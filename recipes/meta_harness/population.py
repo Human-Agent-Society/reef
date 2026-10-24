@@ -37,9 +37,16 @@ def finite_scores(values: Sequence[float | None]) -> tuple[float, ...]:
 class CandidateRecord:
     """One unique tree and the results collected for it.
 
-    ``candidate_id`` is the tree's checksum, so two proposals of the same
-    tree are one candidate. ``outcome`` is ``pending`` until the step that
-    proposed it is evaluated, then ``selected`` or ``retained``.
+    Values: ``candidate_id`` is the checksum of the tree ``files`` holds, so
+    two proposals of the same tree are one candidate. ``parent_id`` is the
+    candidate it was proposed from, ``None`` for a tree the population took
+    as served (the seed, a rollback). ``proposed_at`` ≥ 0 is the step that
+    proposed or took it. ``outcome`` is ``pending`` until the step that
+    proposed it is evaluated, then ``selected`` or ``retained``. ``scores``
+    are its finite per-task scores, ``None`` before its evaluation.
+    ``hypothesis`` and ``changes`` are the proposer's own words.
+    Purpose: ``Population`` holds one per tree; the proposer shows them to
+    the model, and the selection reads the served one's scores.
     """
 
     candidate_id: str
@@ -123,7 +130,19 @@ class CandidateRecord:
 
 @dataclass
 class Population:
-    """Every proposed candidate, the served one, the pending one with the step that proposed it, and the budgets."""
+    """Every proposed candidate, the served one, the pending one with the step that proposed it, and the budgets.
+
+    Values: ``candidates`` have unique ids, each parent before its child.
+    ``served_id`` and ``pending_id`` name candidates the list holds, or are
+    ``None``; ``pending_id`` and ``pending_step`` are both set or both
+    ``None``, and a pending candidate has the ``pending`` outcome.
+    ``proposer_calls`` and ``episode_calls`` ≥ 0 count the model calls and
+    the evaluation episodes the search spent. ``attempts`` records each
+    proposal attempt, kept or not.
+    Purpose: the method state of a Meta-Harness scenario under
+    ``POPULATION_KEY``; the proposer reads and updates it each step, and the
+    selection reads it.
+    """
 
     candidates: list[CandidateRecord] = field(default_factory=list)
     served_id: str | None = None

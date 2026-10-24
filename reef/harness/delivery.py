@@ -1,4 +1,9 @@
-"""Serve a harness release to a client: the release's source tree, rendered for the scenario's adapter."""
+"""Serve a harness release to a client: the release's source tree, rendered for the scenario's adapter.
+
+The surface contracts are ``reef.surface``'s; this module binds them to the
+harness tree and its render, so the surface package stays free of harness
+code.
+"""
 
 from __future__ import annotations
 

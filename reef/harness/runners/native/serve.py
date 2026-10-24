@@ -309,7 +309,7 @@ class Server(ServeState, ReleaseUpdateListener):
         except (OSError, ValueError, KeyError) as exc:
             raise ServeError(f"{self.native / 'models.json'} does not bind a model: {exc}") from exc
         self.reef_url = _without_v1(reef_url or self._installed_binding.base_url)
-        #: The token the wrapper convention names wins; the binding's key is what an installed tree carries.
+        #: An explicit token wins, then REEF_TOKEN, then the key the directory's own binding carries.
         self.token = (
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
@@ -588,7 +588,7 @@ class Server(ServeState, ReleaseUpdateListener):
         release with its ``manifest`` is stored for the next start.
         """
         try:
-            host, directory = self._build_host(tree)
+            host, directory = self.build_host(tree)
         except (RenderError, LoadError, GraphError) as exc:
             self._log.write("harness/mount-failed", {"release_id": release_id, "source": source, "error": str(exc)})
             return {"error": str(exc)}
@@ -619,7 +619,7 @@ class Server(ServeState, ReleaseUpdateListener):
         )
         return None
 
-    def _build_host(self, tree: HarnessTree) -> tuple[NativeHost, Path]:
+    def build_host(self, tree: HarnessTree) -> tuple[NativeHost, Path]:
         """``tree`` rendered for the native adapter into a fresh mount directory, and the host its files make.
 
         The built-in tools join every host; a tree file that takes one of their
@@ -723,7 +723,8 @@ class Server(ServeState, ReleaseUpdateListener):
 
         The result holds the exit status, the session, the turn number, the
         final text, and ``receipts``: the receipts of the model calls the turn
-        made, in order, which a report references.
+        made on the served tree, in order, which a report references; the
+        calls of a ``harness_try`` trial are left out.
         """
         if session_id is not None and not _SESSION_NAME.fullmatch(session_id):
             raise ServeError(f"session id {session_id!r} must match {_SESSION_NAME.pattern}")
@@ -763,8 +764,13 @@ class Server(ServeState, ReleaseUpdateListener):
                 self._current = None
                 session.close()
                 self._drain_pending()
-            # The receipts of the model calls this turn made, so its caller reports feedback against them.
-            result["receipts"] = [capture["receipt"] for capture in self._proxy.drain() if capture.get("receipt")]
+            # The receipts of the model calls this turn made on the served tree, so its caller reports feedback
+            # against them; a trial's calls answered another tree and carry the trial tag.
+            result["receipts"] = [
+                capture["receipt"]
+                for capture in self._proxy.drain()
+                if capture.get("receipt") and "trial" not in capture["tags"]
+            ]
         self._drain_if_idle()
         return result
 

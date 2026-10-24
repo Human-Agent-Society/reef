@@ -18,7 +18,11 @@ from reef.train.harness_backend.inbox import ProposalInbox
 
 
 class PatchAdmission(ABC):
-    """Validate a client's patch against the head tree and hold it for the next automatic step."""
+    """Validate a client's patch against the head tree and hold it for the next automatic step.
+
+    Purpose: ``POST /reef/harness/proposals`` validates a patch with
+    ``admit`` and files an admitted one in ``proposals``.
+    """
 
     @property
     @abstractmethod
@@ -31,7 +35,10 @@ class PatchAdmission(ABC):
 
 
 class StepRecords(ABC):
-    """Read a scenario's retained step records."""
+    """Read a scenario's retained step records.
+
+    Purpose: the release pages read a step's record directory through it.
+    """
 
     @abstractmethod
     def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
@@ -68,7 +75,11 @@ class StepProgress:
 
 
 class StepProgressReader(ABC):
-    """Report where the running step stands."""
+    """Report where the running step stands.
+
+    Purpose: the request page reads ``step_progress`` while a step runs;
+    ``None`` when no step runs.
+    """
 
     @property
     @abstractmethod

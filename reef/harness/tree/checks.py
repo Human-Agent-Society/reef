@@ -508,6 +508,82 @@ def scope_bindings(node: ast.AST) -> Iterator[tuple[str, ast.AST]]:
         yield node.rest, node
 
 
+def module_declarations(code: str, constants: Sequence[str]) -> tuple[frozenset[str], dict[str, Any]]:
+    """The names a module binds at its top level, and the literal value of the last top-level assignment to each of
+    ``constants`` it assigns, read without running it.
+
+    The top level follows the bodies of ``if``, ``for``, ``while``, ``with``, ``try`` and ``match``, never a function,
+    class or lambda body, as the native loop's loader reads a tool module. Raises ValueError when the module does
+    not compile, or when the last assignment to one of ``constants`` is not a literal."""
+    try:
+        module = ast.parse(code.encode("utf-8"))
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError(f"the module does not compile: {exc}") from exc
+    values: dict[str, ast.expr] = {}
+    stack: list[ast.AST] = [*reversed(module.body)]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name) and target.id in constants:
+                    values[target.id] = node.value
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            stack.extend(list(ast.iter_child_nodes(node))[::-1])
+    literals: dict[str, Any] = {}
+    for name, value in values.items():
+        try:
+            literals[name] = ast.literal_eval(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{name} must be assigned a literal") from exc
+    return frozenset(name for name, _ in scope_bindings(module)), literals
+
+
+def declared_file_name(declared: Mapping[str, Any], file_name: str) -> None:
+    """Refuse a ``NAME`` that is not the file name; a file without one takes its file name."""
+    name = declared.get("NAME", file_name)
+    if name != file_name:
+        raise ValueError(f"NAME {name!r} must be the file name {file_name!r}")
+
+
+def validate_native_tool(code: str, file_name: str) -> None:
+    """The rules a native_tool module must pass: what the loop reads from it without running it.
+
+    The module binds ``run(args, workdir)`` at its top level. Its declaration constants are literals:
+    ``NAME`` (optional) is the file name and no self tool's name, ``DESCRIPTION`` is text, ``PARAMETERS`` is a
+    JSON schema object, and ``CAPABILITIES`` holds distinct names from ``NATIVE_CAPABILITIES``. Raises ValueError
+    naming the first problem."""
+    bound, declared = module_declarations(code, ("NAME", "DESCRIPTION", "PARAMETERS", "CAPABILITIES"))
+    if "run" not in bound:
+        raise ValueError("the module binds no run(args, workdir) at its top level")
+    declared_file_name(declared, file_name)
+    if file_name in NATIVE_RESERVED_TOOL_NAMES:
+        raise ValueError(f"tool name {file_name!r} is reserved for a built-in tool")
+    if not isinstance(declared.get("DESCRIPTION", ""), str):
+        raise ValueError("DESCRIPTION must be text")
+    if not isinstance(declared.get("PARAMETERS", {}), dict):
+        raise ValueError("PARAMETERS must be a JSON schema object")
+    capabilities = declared.get("CAPABILITIES", [])
+    if (
+        not isinstance(capabilities, (list, tuple))
+        or any(capability not in NATIVE_CAPABILITIES for capability in capabilities)
+        or len(set(capabilities)) != len(capabilities)
+    ):
+        raise ValueError(f"CAPABILITIES must be distinct names from {', '.join(NATIVE_CAPABILITIES)}")
+
+
+def validate_native_hook(code: str, file_name: str) -> None:
+    """The rules a native_hook module must pass: what the loop reads from it, checked without running it.
+
+    The module binds ``listen(payload, next)`` at its top level and assigns ``EVENT`` one of ``NATIVE_EVENTS`` as
+    a literal; ``NAME`` (optional) is the file name. Raises ValueError naming the first problem."""
+    bound, declared = module_declarations(code, ("NAME", "EVENT"))
+    if "listen" not in bound:
+        raise ValueError("the module binds no listen(payload, next) at its top level")
+    declared_file_name(declared, file_name)
+    if declared.get("EVENT") not in NATIVE_EVENTS:
+        raise ValueError(f"EVENT must be one of {', '.join(NATIVE_EVENTS)}")
+
+
 def defines_run_turn(code: str) -> bool:
     """Whether ``run_turn``, as the module body leaves it, is a plain ``def`` taking the context, read off the syntax tree."""
     # The bytes require_python_field compiled: a coding cookie or a BOM parses here as it compiled there.

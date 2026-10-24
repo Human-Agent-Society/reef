@@ -22,10 +22,12 @@ TRIALS_DIR = "trials"
 class EpisodeTrials(TrialRunner):
     """The trials of one step: episodes of proposed trees, on the evaluation's own machinery.
 
-    ``evaluator`` is the step's evaluator, ``calls`` the step's activity and
-    budget, and ``record_dir`` the step's record directory (``None`` with the
-    record off). Trial ``n`` of the step keeps task ``i``'s trajectory in
+    Values: ``evaluator`` is the step's evaluator, ``calls`` the step's
+    activity and budget, ``record_dir`` the step's record directory
+    (``None`` with the record off), and ``trial_count`` ≥ 0 the trials run
+    so far. Trial ``n`` of the step keeps task ``i``'s trajectory in
     ``trials/<n>-<i>``.
+    Purpose: the backend makes one per step for ``ProposalContext.trials``.
     """
 
     def __init__(self, evaluator: HarnessEpisodeEvaluator, calls: ProposerCalls, record_dir: Path | None) -> None:

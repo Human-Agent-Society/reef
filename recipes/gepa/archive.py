@@ -29,7 +29,14 @@ from typing import Any
 
 @dataclass
 class Candidate:
-    """One program GEPA proposed: its texts, where it came from, how it scored."""
+    """One program GEPA proposed: its texts, where it came from, how it scored.
+
+    Values: ``texts`` maps each component key to its text. ``parent`` is
+    the index of the candidate it was proposed from, ``None`` for the seed.
+    ``val_scores`` and ``minibatch_scores`` are its scores, ``None`` until
+    measured; ``cursor`` ≥ 0 and ``discovered_at`` ≥ 0 are described below.
+    Purpose: ``Archive.candidates`` holds one per program.
+    """
 
     texts: dict[str, str]
     parent: int | None = None
@@ -73,6 +80,9 @@ class Candidate:
 class Archive:
     """Every candidate the search has produced, and the budget it has spent.
 
+    Values: ``served`` and ``pending`` are indexes into ``candidates`` or
+    ``None``; ``pending_step`` is set exactly when ``pending`` is. The
+    counts are ≥ 0, and the fields below say what each one holds.
     Purpose: the GEPA proposer reads it from the committed method state with
     ``from_state``, folds in the latest evaluation with ``settle``, runs one
     iteration on it, and returns ``to_state``; the selection reads it.

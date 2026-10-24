@@ -33,11 +33,10 @@ _CONFIG = "hermes/config.yaml"
 ENV_PATH = "hermes/.env"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
-# The commands root beside the home: HERMES_HOME/.. in an episode, and REEF_HARNESS_DEST, the install root, in a
-# reef-hermes session, whose home is a temp copy. hermes skips an entry that names no directory, such as the second
-# one where REEF_HARNESS_DEST is unset. A config node's list replaces the one below it, so both follow the tree's own
-# skills.external_dirs, which hermes reads as one entry when it is a string.
-COMMAND_ROOTS = ("${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands")
+# The commands root beside the home, HERMES_HOME/.. in an episode and in a person's session on the rendered tree. A
+# config file's list replaces the one below it, so the root follows the tree's own skills.external_dirs, which hermes
+# reads as one entry when it is a string.
+COMMAND_ROOTS = ("${HERMES_HOME}/../hermes-commands",)
 SOUL_PATH = "hermes/SOUL.md"
 #: The identity hermes writes to SOUL.md on first run when the file is absent (DEFAULT_SOUL_MD in
 #: hermes_cli/default_soul.py of the pinned v2026.8.31; the real hermes smoke checks it against the install).
@@ -85,7 +84,7 @@ def string_list(value: object, key: str) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise RenderError(f"hermes composition must keep {key} a list of strings")
+        raise RenderError(f"hermes harness tree must keep {key} a list of strings")
     return value
 
 
@@ -98,7 +97,7 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
         or any(not isinstance((entries or {}).get(name), dict | None) for name in plugins)
     ):
         raise RenderError(
-            "hermes composition must keep plugins, plugins.entries and each rendered plugin's entry objects, "
+            "hermes harness tree must keep plugins, plugins.entries and each rendered plugin's entry objects, "
             "so the plugin can be granted"
         )
     section = dict(section or {})

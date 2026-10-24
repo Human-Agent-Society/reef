@@ -21,17 +21,20 @@ The map, one subpackage per job:
     the trajectory readers, and Harbor task episodes (``tasks``).
 ``runners/``
     the programs an adapter's ``binary`` points at when Reef ships them:
-    ``native`` (the loop, its graph, its seed and the resident ``serve`` form)
-    and ``terminus`` (the Harbor runner).
+    ``native`` (the loop, its graph and the resident ``serve`` form) and
+    ``terminus`` (the Harbor runner).
 ``capture``
     the capture proxy between a harness and Reef: tags and receipts.
+``delivery``
+    the surface that serves a release to a client: its source tree rendered
+    for the scenario's adapter.
 ``step_result``
     what a settled step means for the person who asked, in the words the
     harness pages render.
 
-This package depends on core values, runtime contracts and sandbox
-execution, never on training, recipes, scenario coordination, or the HTTP
-service. The evolution loop is ``reef.train.harness_backend``; versioning
+This package depends on core values, runtime and surface contracts, and
+sandbox execution, never on training, recipes, scenario coordination, or the
+HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
 (staging, publishing, the commit history, recovery and rollback) is Reef's
 artifact stack (``reef.artifact``, ``reef.scenario``).
 """

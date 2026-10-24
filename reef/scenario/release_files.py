@@ -25,8 +25,9 @@ class ScenarioReleaseFiles(CommittedReleases):
     or that moved the head (a rollback or a promote). A training commit that
     published nothing records the served head, so it never moves the head
     here: under review, the next step still builds on the latest pending
-    release. Without a durable history, the head is the repository's current
-    release.
+    release. Before any such commit, and without a durable history, the head
+    is the repository's current release: the release the scenario was created
+    on, as the catalog lists it.
     """
 
     def __init__(self, *, name: str, store: ScenarioStore, repository: Repository, surface: Surface) -> None:
@@ -36,15 +37,17 @@ class ScenarioReleaseFiles(CommittedReleases):
         self.surface = surface
 
     def head(self, component: str) -> ReleaseFiles:
-        if not self.store.durable:
-            return self.files(self.repository.require_current_artifact(), component)
-        records = [record for record in self.store.history() if moves_head(record, component)]
-        ref = records[-1].artifact_ref if records else self.repository.base_artifact
+        history = self.store.history() if self.store.durable else ()
+        records = [record for record in history if moves_head(record, component)]
+        ref = records[-1].artifact_ref if records else self.repository.require_current_artifact()
         return self.files(ref, component)
 
     def release(self, release_id: str, component: str) -> ReleaseFiles:
         if release_id == self.repository.base_artifact.release_id:
             return self.files(self.repository.base_artifact, component)
+        current = self.repository.require_current_artifact()
+        if release_id == current.release_id:
+            return self.files(current, component)
         for record in self.store.history():
             if record.artifact_ref.release_id == release_id:
                 return self.files(record.artifact_ref, component)

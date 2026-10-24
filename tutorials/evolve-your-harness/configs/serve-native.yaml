@@ -45,7 +45,7 @@ recipe:
           8,74
           9,30
           Reply with the median as a plain integer alone on the last line.
-      # The first tree, beside this directory: the loop's starter tools
+      # The first tree, a directory relative to the one run.sh starts Reef in: the loop's starter tools
       # (read_file, write_file, run_bash, execute), its loop guard hook and main
       # graph, which the proposer may retune or replace, plus the starter skill.
       # It carries no provider: Reef renders its own model binding into each

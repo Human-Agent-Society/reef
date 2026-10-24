@@ -47,7 +47,12 @@ ARCHIVE_KEY = "archive"
 
 
 class Feedback(ConfiguredPlugin, ABC):
-    """The ``evolution.feedback`` hook: what the reflection model is told."""
+    """The ``evolution.feedback`` hook: what the reflection model is told.
+
+    Purpose: ``feedback(task, output, score)`` returns the sentence the
+    reflective record shows for one minibatch example; ``GEPARecipe`` builds
+    the configured class, ``ScoreFeedback`` when none is named.
+    """
 
     @abstractmethod
     def feedback(self, task: str, output: str, score: float) -> str: ...
@@ -74,8 +79,12 @@ def default_feedback(task: str, output: str, score: float) -> str:
 class Example:
     """One minibatch example as reflection sees it: input, output, grade.
 
-    ``error`` is set when the episode produced no score; it replaces the
-    feedback hook, because the failure is the only feedback there is.
+    Values: ``task`` is the prompt, ``output`` the final answer the episode
+    gave, and ``score`` its grade. ``error`` is set when the episode produced
+    no score; it replaces the feedback hook, because the failure is the only
+    feedback there is.
+    Purpose: the proposer makes one per minibatch episode and renders them
+    into the reflective record.
     """
 
     task: str

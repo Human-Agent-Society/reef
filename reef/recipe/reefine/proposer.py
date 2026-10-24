@@ -442,8 +442,15 @@ class ParsedAnswer:
 
 @dataclass(frozen=True)
 class WrittenAnswer:
-    """An answer whose files pass validation: its patch, the requires items the reply added and the notes the step
-    records (the design, the review, what was refused or undeclared)."""
+    """An answer whose files pass validation.
+
+    Values: ``patch`` is the change, and the patched head tree passes
+    validation; ``added`` are the requires items the reply added; ``notes``
+    are what the step records (the design, the review, what was refused or
+    undeclared).
+    Purpose: ``answer_request`` makes one per usable answer; the loop keeps
+    the one with the fewest uncovered points, and the proposer returns it.
+    """
 
     patch: TreePatch
     added: list[dict[str, Any]]
@@ -452,9 +459,16 @@ class WrittenAnswer:
 
 @dataclass(frozen=True)
 class UnusableAnswer:
-    """An answer the loop may ask again: why it could not be used, the design it carried and, when its files
-    parsed and something refused them, those files in short, for the retry to start from; ``dropped`` names why
-    the parser dropped each file, for the retry alone (the step's failure keeps the reason)."""
+    """An answer the loop may ask again.
+
+    Values: ``reason`` is why it could not be used; ``design`` is
+    the design it carried, if any; ``files`` shows, when its files parsed and
+    something refused them, those files in short, for the retry to start
+    from; ``dropped`` names why the parser dropped each file, for the retry
+    alone (the step's failure keeps the reason).
+    Purpose: ``answer_request`` makes it; the loop writes the next retry
+    section from it.
+    """
 
     reason: str
     design: str | None = None
@@ -464,15 +478,26 @@ class UnusableAnswer:
 
 @dataclass(frozen=True)
 class DeclinedAnswer:
-    """A design that says no file of the kinds this harness takes can deliver the request: its notes hold the
-    design, ``declined`` and the review that names what is out of reach."""
+    """A design that says no file of the kinds this harness takes can deliver the request.
+
+    Values: ``notes`` hold the design, ``declined`` and the review that
+    names what is out of reach.
+    Purpose: ``declined_answer`` makes it; the proposer records the notes
+    with the empty patch.
+    """
 
     notes: dict[str, Any]
 
 
 @dataclass(frozen=True)
 class FailedCall:
-    """A call that ended the loop, a failed request or a reply with nothing to apply: the notes saying why."""
+    """A call that ended the loop: a failed request, or a reply with nothing to apply.
+
+    Values: ``notes`` say why, under ``failure``, with the design when the
+    reply held one.
+    Purpose: ``answer_request`` makes it; the loop stops and the proposer
+    records the notes with the empty patch.
+    """
 
     notes: dict[str, Any]
 
@@ -488,7 +513,9 @@ class RequestAnswers:
     deliver the request; ``unusable`` the last answer that could not be used
     and ``failed`` the call that ended the loop. ``dropped_attempts`` says
     why each unusable answer was dropped, and ``reviewed`` holds the last
-    review's findings, which stay in every later retry."""
+    review's findings, which stay in every later retry.
+    Purpose: the request loop updates one per request and makes the
+    proposal from it when the loop ends."""
 
     kept: WrittenAnswer | None = None
     kept_attempt: int = 0
@@ -720,11 +747,34 @@ def clipped(text: str, limit: int) -> str:
 
 
 def files_in_short(patch: TreePatch) -> str:
-    """A patch for a retry prompt: one line per path, each new text cut, so the model can rewrite from it."""
-    return "\n".join(
-        f"- {path}: {'(removed)' if text is None else json.dumps(clipped(text, EARLIER_TEXT_CHARS), ensure_ascii=False)}"
-        for path, text in patch.changes.items()
-    )
+    """A patch for a retry prompt: one line per path, so the model can rewrite from it.
+
+    A config file shows its JSON object with every long text cut, so each of its keys stays in view; any other
+    file shows the start of its text, as a JSON string.
+    """
+    lines = []
+    for path, text in patch.changes.items():
+        location = locate(path)
+        data = json_object_of(text) if location is not None and location.kind is TreeKind.CONFIG else {}
+        if text is None:
+            shown = "(removed)"
+        elif data:
+            shown = json.dumps(short_texts(data), ensure_ascii=False)
+        else:
+            shown = json.dumps(clipped(text, EARLIER_TEXT_CHARS), ensure_ascii=False)
+        lines.append(f"- {path}: {shown}")
+    return "\n".join(lines)
+
+
+def short_texts(value: Any) -> Any:
+    """``value`` with every string longer than ``EARLIER_TEXT_CHARS`` cut, at any depth."""
+    if isinstance(value, str):
+        return clipped(value, EARLIER_TEXT_CHARS)
+    if isinstance(value, Mapping):
+        return {key: short_texts(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [short_texts(item) for item in value]
+    return value
 
 
 def files_view(tree: HarnessTree) -> str:
@@ -1232,7 +1282,8 @@ def slipped_json(reply: str) -> str | None:
         return None
     except json.JSONDecodeError as error:
         failure = error
-    found = json_found(reply)
+    # The answer is one object, so an array nested in it (its requires list) never stands for the reply.
+    found = json_found(reply, openers=("{",))
     if found is not None and open_brackets(reply[start : found[0]]) <= 0:
         return None
     return f"the reply's JSON does not parse ({failure.msg} at line {failure.lineno} column {failure.colno})"

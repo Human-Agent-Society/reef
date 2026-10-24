@@ -70,7 +70,7 @@ def load_tree(root: Path | str) -> dict[str, str]:
 
     Only rendered paths are read back. The episode root also holds the task
     workspace and, once the run starts, the session and trial directories,
-    none of which are the composition under evaluation.
+    none of which are the tree under evaluation.
     """
     base = Path(root)
     if not base.is_dir():
@@ -112,8 +112,8 @@ def instruction_paths(root: Path | str, files: Mapping[str, str]) -> list[Path]:
 def skill_roots(root: Path | str, files: Mapping[str, str]) -> list[Path]:
     """The skill roots Harbor should load, skipping any the tree left empty.
 
-    Harbor rejects an empty root, and a composition that carries no skill and
-    no command is the stock agent rather than an error.
+    Harbor rejects an empty root, and a tree that carries no skill and no
+    command is the stock agent rather than an error.
     """
     base = Path(root)
     return [
