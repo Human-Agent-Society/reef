@@ -45,7 +45,7 @@ from reef.record2task import NoTasks
 from reef.record2task.generator.client import GeneratorError
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskStorage, TrainingEpisodesResult
+from reef.storage.tasks import TaskRolloutResult, TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import ActiveRollout, TrainingPipeline
 
@@ -1124,7 +1124,7 @@ def test_a_task_whose_result_cannot_be_saved_still_trains_and_the_next_job_saves
     store = p.record2task.task_store
     record_result = store.record_result
 
-    def failing_record_result(*, generation: int, result: TrainingEpisodesResult) -> None:
+    def failing_record_result(*, generation: int, result: TaskRolloutResult) -> None:
         if result.task_name == "harbor-00000-000":
             raise OSError(28, "No space left on device")
         record_result(generation=generation, result=result)
@@ -1158,7 +1158,7 @@ def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedb
     record_result = store.record_result
     calls = {"count": 0}
 
-    def flaky_record_result(*, generation: int, result: TrainingEpisodesResult) -> None:
+    def flaky_record_result(*, generation: int, result: TaskRolloutResult) -> None:
         calls["count"] += 1
         if result.task_name == "harbor-00000-000" and calls["count"] == 1:
             raise OSError(28, "No space left on device")
@@ -1189,7 +1189,7 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_a_lost_result_afte
     store = p.record2task.task_store
     record_result = store.record_result
 
-    def failing_record_result(*, generation: int, result: TrainingEpisodesResult) -> None:
+    def failing_record_result(*, generation: int, result: TaskRolloutResult) -> None:
         if result.task_name == "harbor-00000-000":
             raise OSError(28, "No space left on device")
         record_result(generation=generation, result=result)
@@ -1237,7 +1237,7 @@ def test_a_result_that_the_database_fails_to_save_still_trains_and_is_saved_late
     store = p.record2task.task_store
     record_result = store.record_result
 
-    def locked_record_result(*, generation: int, result: TrainingEpisodesResult) -> None:
+    def locked_record_result(*, generation: int, result: TaskRolloutResult) -> None:
         if result.task_name == "harbor-00000-000":
             raise sqlalchemy.exc.OperationalError("INSERT", {}, Exception("database is locked"))
         record_result(generation=generation, result=result)

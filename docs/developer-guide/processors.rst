@@ -568,7 +568,7 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-training result, the generations whose results the generator received, and the
+rollout result, the generations whose results the generator received, and the
 tasks that trained.
 
 After a restart, the record-to-task stage continues with the next generation number.

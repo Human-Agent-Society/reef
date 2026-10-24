@@ -26,10 +26,10 @@ from reef.storage.tasks import (
     TaskCandidate,
     TaskConflict,
     TaskFileStore,
+    TaskRolloutResult,
     TaskStorage,
     TaskStore,
     TaskStoreError,
-    TrainingEpisodesResult,
 )
 
 
@@ -41,7 +41,7 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
-    ``results`` holds the first training result of each train task that ran,
+    ``results`` holds the first rollout result of each train task that ran,
     ``deliveries`` one row for each generation whose results reached the
     generator, and ``trained`` one row for each task that trained.
     """
@@ -270,7 +270,7 @@ class SQLTaskStore(TaskStore):
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
 
-    def record_result(self, *, generation: int, result: TrainingEpisodesResult) -> None:
+    def record_result(self, *, generation: int, result: TaskRolloutResult) -> None:
         document = result_document(result)
         results = self.tables.results
         with self.records._transaction(write=True) as connection:
@@ -293,7 +293,7 @@ class SQLTaskStore(TaskStore):
             elif existing != document:
                 raise TaskStoreError(f"task {result.task_name!r} of generation {generation} already has a result")
 
-    def results(self, generation: int) -> tuple[TrainingEpisodesResult, ...]:
+    def results(self, generation: int) -> tuple[TaskRolloutResult, ...]:
         results = self.tables.results
         with self.records._transaction(write=False) as connection:
             state = self.read_generation(connection, generation)
@@ -424,8 +424,8 @@ class SQLTaskStore(TaskStore):
         )
 
 
-def result_document(result: TrainingEpisodesResult) -> str:
-    """Encode a training result as canonical JSON text. An identical retry gives the same text."""
+def result_document(result: TaskRolloutResult) -> str:
+    """Encode a rollout result as canonical JSON text. An identical retry gives the same text."""
     return json.dumps(
         {
             "task_name": result.task_name,
@@ -439,10 +439,10 @@ def result_document(result: TrainingEpisodesResult) -> str:
     )
 
 
-def result_from_document(text: str) -> TrainingEpisodesResult:
+def result_from_document(text: str) -> TaskRolloutResult:
     """Decode the text of :func:`result_document`."""
     document = json.loads(text)
-    return TrainingEpisodesResult(
+    return TaskRolloutResult(
         task_name=document["task_name"],
         rollout_rewards=tuple(document["rollout_rewards"]),
         error=document["error"],

@@ -21,7 +21,7 @@ changes nothing. A deployment selects the file store in
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
 A store also keeps what happens to the train tasks of its generations after
-they are published: each task's first training result, the generations whose
+they are published: each task's first rollout result, the generations whose
 results reached the generator, and the tasks that trained.
 
 A task store belongs to a scenario session. Archiving the scenario retires its
@@ -152,8 +152,8 @@ class StoredTask:
 
 
 @dataclass(frozen=True)
-class TrainingEpisodesResult:
-    """What the first training episodes of a generation's train task returned.
+class TaskRolloutResult:
+    """What the first rollout of a generation's train task returned.
 
     Values: ``task_name`` names a train task that the generation published.
     ``rollout_rewards`` are the rewards of the training episodes that ran. A
@@ -255,8 +255,8 @@ class TaskStore(ABC):
         """Return the published tasks in publication order, optionally of one split."""
 
     @abstractmethod
-    def record_result(self, *, generation: int, result: TrainingEpisodesResult) -> None:
-        """Save the first training result of a train task that the generation published.
+    def record_result(self, *, generation: int, result: TaskRolloutResult) -> None:
+        """Save the first rollout result of a train task that the generation published.
 
         An identical retry changes nothing. Raises ``TaskStoreError`` if the
         task already has another result, or if the generation did not publish
@@ -264,8 +264,8 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def results(self, generation: int) -> tuple[TrainingEpisodesResult, ...]:
-        """Return the saved training results of a generation's tasks, in candidate order."""
+    def results(self, generation: int) -> tuple[TaskRolloutResult, ...]:
+        """Return the saved rollout results of a generation's tasks, in candidate order."""
 
     @abstractmethod
     def mark_delivered(self, *, generation: int) -> None:
@@ -464,9 +464,9 @@ __all__ = [
     "TaskCandidate",
     "TaskConflict",
     "TaskFileStore",
+    "TaskRolloutResult",
     "TaskStorage",
     "TaskStore",
     "TaskStoreError",
-    "TrainingEpisodesResult",
     "files_digest",
 ]

@@ -59,9 +59,9 @@ from reef.storage.tasks import (
     SplitName,
     StoredTask,
     TaskConflict,
+    TaskRolloutResult,
     TaskStore,
     TaskStoreError,
-    TrainingEpisodesResult,
 )
 from reef.task2batch import RolloutResult, RolloutTask2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
@@ -739,7 +739,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             else None
         )
         #: Results that an episode run could not save, by generation; the next job saves them before it delivers.
-        self.unsaved_results: queue.SimpleQueue[tuple[int, TrainingEpisodesResult]] = queue.SimpleQueue()
+        self.unsaved_results: queue.SimpleQueue[tuple[int, TaskRolloutResult]] = queue.SimpleQueue()
         #: Rounds that ended without a job, such as a round of sessions that a complete generation already used.
         self.ended_rounds: list[RoundResult] = []
         #: The generation that runs on the worker. One generation runs at a time.
@@ -760,7 +760,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             for state in store.generations():
                 for name in train_task_names(state):
                     if name in trained and not has_result(store, state.generation, name):
-                        lost = TrainingEpisodesResult(
+                        lost = TaskRolloutResult(
                             task_name=name,
                             error="the result was lost before it was saved",
                             infrastructure_failure=True,
@@ -994,7 +994,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         # The generator learns from a task's first run; a rollout after a restart only trains.
         self.save_result(
             identity["round"],
-            TrainingEpisodesResult(
+            TaskRolloutResult(
                 task_name=identity["name"],
                 rollout_rewards=result.rollout_rewards,
                 error=result.error,
@@ -1038,8 +1038,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         reports = tuple(report_id for episode in training for report_id in episode.report_agent_record_ids)
         return GeneratedTaskResult(task, rewards_of(training)), reports
 
-    def save_result(self, generation: int, result: TrainingEpisodesResult) -> None:
-        """Save a task's first training result; a result that the store fails to save waits for the next job."""
+    def save_result(self, generation: int, result: TaskRolloutResult) -> None:
+        """Save a task's first rollout result; a result that the store fails to save waits for the next job."""
         if self.task_store is None:
             raise RuntimeError("a result needs a task store")
         try:
@@ -1056,7 +1056,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
 
     def save_unsaved_results(self) -> None:
         """Save the results that an episode run could not save; one that still fails waits for the next job."""
-        unsaved: list[tuple[int, TrainingEpisodesResult]] = []
+        unsaved: list[tuple[int, TaskRolloutResult]] = []
         while not self.unsaved_results.empty():
             unsaved.append(self.unsaved_results.get_nowait())
         for generation, result in unsaved:
@@ -1190,7 +1190,7 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
                 # A task that has no result yet gets a lost one, so its generation's feedback completes.
                 for task in self.running_tasks:
                     identity = task.metadata["task"]
-                    lost = TrainingEpisodesResult(
+                    lost = TaskRolloutResult(
                         task_name=identity["name"],
                         error="the rollout did not finish; see the service log",
                         infrastructure_failure=True,
