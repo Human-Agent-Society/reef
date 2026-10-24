@@ -50,12 +50,12 @@ Adding a family
 A family lives in its method package beside its objective hooks:
 
     my_method/slime/
-      __init__.py     the spec: a SlimeAlgorithm subclass, no torch
+      __init__.py     the spec: a SlimeAlgorithm subclass, no torch; when the
+                      family's wire row is not the default five columns, its
+                      row shaper and payload builder live here too
       objective.py    the @objective hooks, torch (worker side)
       <concern>.py    further worker-side torch modules, imported only from
                       objective.py's hooks (e.g. a Megatron teacher)
-      utils/          driver-side helpers, never importing torch; only when
-                      the family's wire row is not the default five columns
 
 Register each declared hook with ``@objective`` so the worker resolves and
 validates it at init time::
