@@ -156,6 +156,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         payload={
             "model": "qwen",
             "messages": [{"role": "user", "content": "2+2?"}],
+            "runtime_load_id": "load-3",
             "metadata": {"tags": ["eval", "smoke"]},
             "response": {
                 "id": "chatcmpl-1",
