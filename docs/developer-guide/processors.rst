@@ -535,8 +535,9 @@ the pipeline drives through the stage's own-batch hooks:
    task's result is an infrastructure failure, not a solver failure.
 3. Each episode comes back with its answered calls. The stage assembles one
    sample from the calls of each episode that ran, scored with the episode's
-   verifier reward, and the samples of one task form its group. A group of
-   fewer than two samples has no relative reward and does not train.
+   verifier reward, and the samples of one task form its group. An episode
+   with a call that the engine aborted has no sample. A group of fewer than
+   two samples has no relative reward and does not train.
 4. When the batch's episodes end, the staleness check drops each group whose
    samples a version produced that is more than ``max-staleness`` versions
    behind, and the batch trains on the groups that are left. Their tasks are

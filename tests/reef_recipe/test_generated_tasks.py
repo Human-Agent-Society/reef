@@ -216,6 +216,19 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
     assert [sample.training.get("turn_count", 1) for sample in p.build_batch(BATCH_SIZE).items] == [2, 1]
 
 
+def test_an_episode_with_an_aborted_call_has_no_sample() -> None:
+    p = processor()
+    stage = p.task2batch
+    assert isinstance(stage, GeneratedTaskBatches)
+    task = "harbor-00000-000"
+    answered = rollout_turn(None, 0)
+    aborted = EpisodeTurn(
+        request=answered.request, response={**answered.response, "choices": [{"finish_reason": "abort"}]}
+    )
+    assert stage.episode_sample(episode(task, 0, 1.0, answered), task) is not None
+    assert stage.episode_sample(episode(task, 1, 1.0, answered, aborted), task) is None
+
+
 def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
     p = processor()
     first, second = "harbor-00000-000", "harbor-00000-001"

@@ -64,6 +64,7 @@ from reef.record2task import Record2Task, TaskResult
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.runtime.interfaces import inference_aborted
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
 from reef.task2batch import Task2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
@@ -1301,9 +1302,13 @@ class GeneratedTaskBatches(Task2Batch, BackgroundJobRunner):
         """The sample of one rollout episode in the group ``task_name``, or None when its calls do not assemble.
 
         The calls become in-memory inference values for the assembly; Reef stores none of them. An episode
-        that ran without a reward scores 0.
+        that ran without a reward scores 0. An episode with a call that the engine aborted has no sample, as
+        the record stage drops a record set with an aborted inference.
         """
         if not episode.turns:
+            return None
+        if any(inference_aborted(turn.response) for turn in episode.turns):
+            logger.warning("episode %s of generated-task %s has an aborted call", episode.episode_id, task_name)
             return None
         inferences = tuple(
             AgentRecord.create(
