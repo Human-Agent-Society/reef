@@ -276,7 +276,7 @@ class TestTopkTestObjective:
         assert rows[1][7] == [{"hint": "", "teacher_tokens": [10, 11, 12, 13, 14]}]
 
     def test_missing_topk_rejected(self):
-        from recipes.openclawrl.slime.utils.data_builder import build_openclawrl_rollout_data
+        from recipes.openclawrl.slime import build_openclawrl_rollout_data
         from reef.train.slime_backend.loss_families import resolve_loss_family
 
         spec = resolve_loss_family("openclawrl")
@@ -293,7 +293,7 @@ class TestTopkTestObjective:
             build_openclawrl_rollout_data(payload, payload["samples"], spec)
 
     def test_topk_payload_builder_ships_candidate_sequences(self):
-        from recipes.openclawrl.slime.utils.data_builder import build_openclawrl_rollout_data
+        from recipes.openclawrl.slime import build_openclawrl_rollout_data
         from reef.train.slime_backend.loss_families import resolve_loss_family
 
         spec = resolve_loss_family("openclawrl")

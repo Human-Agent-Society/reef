@@ -28,9 +28,9 @@ Layout
 .. code:: text
 
    recipes/<name>/slime/
-     __init__.py     the spec: a SlimeAlgorithm subclass, no torch
+     __init__.py     the spec: a SlimeAlgorithm subclass, no torch; a custom
+                     wire row's shaper and payload builder live here too
      objective.py    the @objective hooks, torch
-     utils/          driver-side helpers, only when the wire row is custom
 
 A package ``__init__`` registers its family by reference
 (``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
@@ -127,7 +127,7 @@ loss.
 
 ``tests/slime_backend/test_slime_algorithm_contract.py`` enforces the entry point
 names and the layering: family packages never import ``reef_adapters``, the
-adapter layer never names a family, ``utils/`` stays torch-free, family flags
+adapter layer never names a family, the spec module stays torch-free, family flags
 carry the ``--<name>-`` prefix.
 
 Wire declarations
