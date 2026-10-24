@@ -2,7 +2,7 @@
 
 Three built-in tools, built in code and registered only by ``reef-native
 serve --self-tools``; the episode form never sees them, so a candidate cannot
-pass the checks by calling them, and a tree entry cannot take their names. They
+pass the checks by calling them, and a tree file cannot take their names. They
 run in process whatever ``REEF_NATIVE_ENFORCE`` says, since they are reef's
 code and not the tree's. The order a model should use is inspect, then try,
 then propose: a trial that helped is one ``harness_propose`` away from the
@@ -14,62 +14,51 @@ from __future__ import annotations
 import json
 import secrets
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from reef.harness.runners.native import ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
+from reef.harness.runners.native.graph import SEED_GRAPH
 from reef.harness.runners.native.release_client import ReleaseClient
-from reef.harness.runners.native.seed import SEED_GRAPH
-from reef.harness.tree.mutations import Mutation, MutationError
-from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS, NATIVE_RESERVED_TOOL_NAMES, flat_entry_refusal
+from reef.harness.tree import HarnessTree, TreeKind, TreePatch, locate
+from reef.harness.tree.layout import ALWAYS_REVIEWED_KINDS
 
-#: The names reserved for built-in tools; a tree entry that takes one fails to mount.
-RESERVED_NAMES = NATIVE_RESERVED_TOOL_NAMES
 #: How many catalog rows ``harness_inspect("results")`` returns, newest first.
 RESULT_ROWS = 20
 
-_MUTATIONS_SCHEMA: dict[str, Any] = {
-    "type": "array",
+PATCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
     "description": (
-        "The changes, applied in order as one proposal. Each is an object {op, id, options}: op is create, "
-        "update or remove; id is the entry id (for a tool, hook, skill, graph or agent the entry id is its name); "
-        "options is {name: <kind>, config: {...}} for create and update and is left out for remove. Kinds: "
-        "native_tool (config: name, description, parameters as a JSON schema, capabilities from read, write, "
-        "exec, network, and code defining run(args, workdir) -> str), native_hook (name, event, code defining "
-        "listen(payload, next)), native_graph (name, start, max_steps, stages, edges), native_agent (name, "
-        "prompt, graph, tools, skills, max_steps, max_tool_calls, then), skill (name, text), rules (text), "
-        "config (target models, data with context_window)."
+        "The change as one patch: each key is a path in the harness tree, each value the file's new text, or null "
+        "to remove the file. Paths: native/tools/<name>.py (code defining run(args, workdir) -> str, then the "
+        "constants NAME, DESCRIPTION, PARAMETERS as a JSON schema and CAPABILITIES from read, write, exec, "
+        "network), native/hooks/<name>.py (code defining listen(payload, next), then NAME and EVENT), "
+        "native/graphs/<name>.json (name, start, max_steps, stages, edges), native/agents/<name>.json (name, "
+        "prompt, graph, tools, skills, max_steps, max_tool_calls, then), skills/<name>/SKILL.md, rules.md, and "
+        "config/models.json (context_window)."
     ),
-    "items": {
-        "type": "object",
-        "properties": {
-            "op": {"type": "string", "enum": ["create", "update", "remove"]},
-            "id": {"type": "string"},
-            "options": {"type": "object"},
-        },
-        "required": ["op", "id"],
-    },
+    "additionalProperties": {"type": ["string", "null"]},
 }
 
 INSPECT_DESCRIPTION = (
-    "Read the harness you are running in. what=tree lists the live entries (id, kind, config) and the mounted "
+    "Read the harness you are running in. what=tree returns every file of the live tree by path and the mounted "
     "release id; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
-    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the proposals the "
-    "evaluation rejected; what=status shows the mounted release, the follow mode and any pending mount. Read only. "
-    "Call it before you change anything."
+    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the proposals "
+    "the evaluation rejected; what=status shows the mounted release, the follow mode and any pending mount. Read "
+    "only. Call it before you change anything."
 )
 PROPOSE_DESCRIPTION = (
-    "Send a change to your harness to Reef for the evaluation. Reef admits or refuses the mutations at once and "
-    "answers with a proposal id; an admitted proposal is measured on real tasks against the current harness "
-    "before it is served, and nothing changes in this session. Give the reason in one or two sentences. Try the "
-    "change with harness_try first."
+    "Send a change to your harness to Reef for the evaluation. Reef validates the patch at once and answers with "
+    "a proposal id; an admitted proposal is measured on real tasks against the current harness before it is "
+    "served, and nothing changes in this session. Give the reason in one or two sentences. Try the change with "
+    "harness_try first."
 )
 TRY_DESCRIPTION = (
-    "Mount a change on this process for the rest of the current turn only, with the same mutations shape as "
+    "Mount a change on this process for the rest of the current turn only, with the same patch shape as "
     "harness_propose. New tools, hooks, rules, skills, graphs and agents apply from your next step; at the end "
     "of the turn the served harness is mounted back. Nothing is published. Use it to check a change works "
-    "before harness_propose. A native_loop is reviewed code and is refused here: propose it instead."
+    "before harness_propose. A native loop is reviewed code and is refused here: propose it instead."
 )
 
 
@@ -89,13 +78,13 @@ class ServeState(ABC):
     def session_id(self) -> str | None: ...
 
     @abstractmethod
-    def live_entries(self) -> list[dict[str, Any]]: ...
+    def live_tree(self) -> HarnessTree: ...
 
     @abstractmethod
     def status(self) -> dict[str, Any]: ...
 
     @abstractmethod
-    def try_mount(self, mutations: Sequence[Mutation], try_id: str) -> dict[str, Any]: ...
+    def try_patch(self, patch: TreePatch, try_id: str) -> dict[str, Any]: ...
 
 
 class HostTool(ToolModule):
@@ -106,25 +95,15 @@ class HostTool(ToolModule):
         super().__init__(*args, **kwargs)
 
 
-def _mutations(raw: Any) -> list[Mutation]:
-    if not isinstance(raw, list) or not raw:
-        raise ToolFailed("mutations must be a non-empty list of {op, id, options} objects")
-    mutations = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, Mapping):
-            raise ToolFailed(f"mutations[{index}] must be an object with op, id and options")
-        options = item.get("options")
-        if options is not None and not isinstance(options, Mapping):
-            raise ToolFailed(f"mutations[{index}].options must be an object")
-        try:
-            mutations.append(Mutation(str(item.get("op", "")), str(item.get("id", "")), options))
-        except MutationError as exc:
-            raise ToolFailed(f"mutations[{index}]: {exc}") from exc
-    return mutations
-
-
-def _records(mutations: Sequence[Mutation]) -> list[dict[str, Any]]:
-    return [{"op": m.op, "id": m.id, "options": None if m.options is None else dict(m.options)} for m in mutations]
+def patch_argument(value: Any) -> TreePatch:
+    """The ``patch`` argument as a non-empty ``TreePatch``; ToolFailed naming the problem otherwise."""
+    try:
+        patch = TreePatch.from_json(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolFailed(f"patch: {exc}") from exc
+    if not patch.changes:
+        raise ToolFailed("patch must change at least one path")
+    return patch
 
 
 class SelfTools(ToolRunner):
@@ -145,18 +124,15 @@ class SelfTools(ToolRunner):
 
     def inspect(self, args: dict[str, Any], workdir: str) -> Any:
         what = str(args.get("what", ""))
-        entries = self._state.live_entries()
+        tree = self._state.live_tree()
         if what == "tree":
-            return {
-                "release_id": self._state.release_id,
-                "entries": [{"id": e.get("id"), "kind": e.get("name"), "config": e.get("config")} for e in entries],
-            }
+            return {"release_id": self._state.release_id, "files": dict(tree.files)}
         if what == "graph":
-            graphs = {
-                str(e["config"]["name"]): e["config"]
-                for e in entries
-                if e.get("name") == "native_graph" and isinstance(e.get("config"), Mapping)
-            }
+            graphs = {}
+            for path, text in tree.files.items():
+                location = locate(path)
+                if location is not None and location.kind is TreeKind.NATIVE_GRAPH:
+                    graphs[location.name] = json.loads(text)
             return {"main": graphs.get("main", SEED_GRAPH), "graphs": graphs}
         if what == "results":
             return self.results()
@@ -186,12 +162,12 @@ class SelfTools(ToolRunner):
         return {"head": head, "releases": releases, "rejected": rejected}
 
     def propose(self, args: dict[str, Any], workdir: str) -> Any:
-        mutations = _mutations(args.get("mutations"))
+        patch = patch_argument(args.get("patch"))
         body = {
-            "mutations": _records(mutations),
+            "patch": patch.to_json(),
             "reason": str(args.get("reason") or ""),
-            "session": self._state.session_id,
-            "release_id": self._state.release_id,
+            "session": self._state.session_id or "",
+            "release_id": self._state.release_id or "",
         }
         status, payload = self._state.client.propose(body)
         if status == 404:
@@ -199,21 +175,12 @@ class SelfTools(ToolRunner):
         return json.dumps(payload, ensure_ascii=False)
 
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
-        mutations = _mutations(args.get("mutations"))
-        # A remove names no kind, so the live entries say what the id is; the check covers create, update and remove.
-        kinds = {str(entry.get("id")): str(entry.get("name")) for entry in self._state.live_entries()}
-        for mutation in mutations:
-            options = mutation.options or {}
-            refusal = (
-                None if mutation.options is None else flat_entry_refusal(options, partial=mutation.op == "update")
-            )
-            if refusal is not None:
-                raise ToolFailed(f"{mutation.op} {mutation.id!r}: {refusal}")
-            # The kind the options name and the kind the entry has: an update that renames the kind touches both.
-            for kind in (options.get("name"), kinds.get(mutation.id)):
-                if kind in ALWAYS_REVIEWED_KINDS:
-                    raise ToolFailed(f"{kind} is reviewed code: propose it, a person promotes it")
-        return self._state.try_mount(mutations, secrets.token_hex(4))
+        patch = patch_argument(args.get("patch"))
+        for path in patch.changes:
+            location = locate(path)
+            if location is not None and location.kind in ALWAYS_REVIEWED_KINDS:
+                raise ToolFailed(f"{path} is reviewed code: propose it, a person promotes it")
+        return self._state.try_patch(patch, secrets.token_hex(4))
 
 
 def self_tools(state: ServeState) -> list[HostTool]:
@@ -239,7 +206,7 @@ def self_tools(state: ServeState) -> list[HostTool]:
         HostTool(
             "harness_try",
             TRY_DESCRIPTION,
-            {"type": "object", "properties": {"mutations": _MUTATIONS_SCHEMA}, "required": ["mutations"]},
+            {"type": "object", "properties": {"patch": PATCH_SCHEMA}, "required": ["patch"]},
             SelfTools(state, "try"),
             capabilities=("exec",),
         ),
@@ -249,10 +216,10 @@ def self_tools(state: ServeState) -> list[HostTool]:
             {
                 "type": "object",
                 "properties": {
-                    "mutations": _MUTATIONS_SCHEMA,
+                    "patch": PATCH_SCHEMA,
                     "reason": {"type": "string", "description": "Why this change, in one or two sentences."},
                 },
-                "required": ["mutations", "reason"],
+                "required": ["patch", "reason"],
             },
             SelfTools(state, "propose"),
             capabilities=("network",),
@@ -260,4 +227,4 @@ def self_tools(state: ServeState) -> list[HostTool]:
     ]
 
 
-__all__ = ["RESERVED_NAMES", "RESULT_ROWS", "HostTool", "SelfTools", "ServeState", "self_tools"]
+__all__ = ["PATCH_SCHEMA", "RESULT_ROWS", "HostTool", "SelfTools", "ServeState", "patch_argument", "self_tools"]

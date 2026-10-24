@@ -10,8 +10,9 @@ judge) are declared in the recipe config and resolved the same way.
 :class:`ModelBindings` is the set a method receives: ``served`` is the model
 under test - what the HTTP service proxies to and what evaluation episodes
 run against - and the named ones are the method's own. Methods call
-:meth:`ModelBinding.chat`; the evolution backend renders
-:meth:`ModelBinding.compose_nodes` into each evaluation episode. A served
+:meth:`ModelBinding.chat`; ``render_tree`` merges
+:meth:`ModelBinding.config_overlays` into the config files of each evaluation
+episode and install. A served
 binding points at this Reef's own evaluation route for the scenario when the
 service is known, so an episode samples the release the scenario serves;
 such calls are served without being recorded, so none of this traffic
@@ -348,15 +349,17 @@ class ModelBinding:
 
     # -- Episode-side rendering ----------------------------------------------
 
-    def compose_nodes(
+    def config_overlays(
         self, descriptor: AdapterDescriptor, *, models: Sequence[str] = ()
     ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
-        """``config`` nodes that point ``descriptor``'s harness at this binding.
+        """``(config target, data)`` pairs that point ``descriptor``'s harness at this binding, in template order.
 
-        ``models`` are further model names the harness may pick from: every
-        template entry that names ``{model}`` (a mapping key or a list item)
-        is repeated once per model, this binding's first, while a plain
-        ``{model}`` elsewhere, the default, stays this binding's.
+        ``render_tree`` merges each ``data`` into its target after the tree's
+        own config, so the binding wins every key it writes. ``models`` are
+        further model names the harness may pick from: every template entry
+        that names ``{model}`` (a mapping key or a list item) is repeated once
+        per model, this binding's first, while a plain ``{model}`` elsewhere,
+        the default, stays this binding's.
         """
 
         templates = descriptor.model_binding.get(self.api)
@@ -390,7 +393,9 @@ class ModelBinding:
         for name in models:
             if isinstance(name, str) and name and name not in choices:
                 choices.append(name)
-        return tuple(("config", _substitute(node, values, choices)) for node in templates)
+        return tuple(
+            (str(template["target"]), _substitute(template["data"], values, choices)) for template in templates
+        )
 
 
 @dataclass(frozen=True)

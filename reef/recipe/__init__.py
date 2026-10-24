@@ -7,7 +7,8 @@ weights or the harness*. This package holds everything a method binds to:
   ``build``, ``build_surface``) and
   ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (training objective and data processor).
-- ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
+- ``harness`` — ``HarnessEvolutionRecipe``, the recipe contract every harness
+  evolution method extends; it assembles ``reef.train.harness_backend``.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per release component
   and runs their trainers side by side in one scenario.
 - ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement,

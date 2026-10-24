@@ -4,14 +4,13 @@ An ``AdapterDescriptor`` is loaded from a ``descriptor.yaml`` and states
 everything the shared engines need to drive one harness binary:
 
 - ``config_targets``: named JSON config files with their enforced defaults
-  (a ``primary`` target is required; ``config`` nodes merge into targets) and
+  (a ``primary`` target is required; a tree's ``config/<target>.json`` merges into its target) and
   their checks (a key of the merged config and the matcher every value there
   must match; see :mod:`reef.harness.adapters.matchers`).
-- ``node_paths``: root-relative render paths for the other node kinds;
-  named kinds carry a ``{name}`` placeholder. A kind the adapter leaves out
-  is refused at admission and at render, never dropped.
-- ``tree_path`` (optional, ``files.tree``): where the entries list travels
-  beside the rendered files, for a binary that reconciles the tree live.
+- ``kind_paths``: root-relative render paths for the other tree kinds
+  (``reef.harness.tree.layout``); named kinds carry a ``{name}`` placeholder.
+  A kind the adapter leaves out is refused by validation and at render, never
+  dropped.
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
   episode) and the relocation environment (``{root}`` substituted per
   episode) that points the binary's whole composition at the episode root.
@@ -22,17 +21,8 @@ everything the shared engines need to drive one harness binary:
 - ``writable_paths``: root-relative state directories that a hosted sandbox
   makes writable while keeping the rendered files inside them read-only.
 - ``install`` (optional): the vendor's install channel for the binary at a
-  pinned version, consumed by the served install script; reef never hosts
-  or proxies binary bytes.
-- ``client_env`` and ``client_args`` (optional): the variables and the leading
-  arguments a ``reef-<adapter>`` run adds when a person runs the binary, which
-  an episode never gets (``{root}`` in a ``client_env`` value is the install
-  root); ``client_version_args`` names the version flags that get no leading
-  arguments.
-- ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
-  keeps in the installed tree, so a later run finds them; the check of the
-  installed files at a session start skips them, except the keys of a
-  settings file outside its ``preference_keys``.
+  pinned version, which Reef installs on the host that runs the episodes;
+  Reef never hosts or proxies binary bytes.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -130,12 +120,12 @@ class AdapterRenderer:
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:
-        """Check and adjust one file a ``skill`` node renders."""
+        """Check and adjust one rendered ``skill`` file."""
         return text
 
     @staticmethod
     def process_command(path: str, text: str) -> str:
-        """Check and adjust one file an ``agent_command`` node renders."""
+        """Check and adjust one rendered ``agent_command`` file."""
         return text
 
     @staticmethod
@@ -168,8 +158,8 @@ class AdapterRenderer:
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
 
-#: Node kinds rendered to one path per named node; templates need ``{name}``.
-NAMED_NODE_KINDS = (
+#: Tree kinds rendered to one path per named file; templates need ``{name}``.
+NAMED_KINDS = (
     "agent_command",
     "skill",
     "code_extension",
@@ -179,8 +169,8 @@ NAMED_NODE_KINDS = (
     "native_agent",
     "native_loop",
 )
-#: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
-OPTIONAL_NODE_KINDS = (
+#: Named kinds an adapter may leave out; a tree that holds one then fails validation for it.
+OPTIONAL_KINDS = (
     "agent_command",
     "code_extension",
     "native_tool",
@@ -228,11 +218,7 @@ class ConfigTarget:
     checks: tuple[ConfigCheck, ...] = ()
 
 
-#: The ``{api_key}`` an installed binding carries when the client has no Reef token (a Reef without auth): a
-#: harness such as pi refuses an empty key, and the ``reef-<adapter>`` wrapper reads this one back as no token.
-NO_TOKEN_API_KEY = "reef-no-token"
-
-#: Vendor install kinds the install-script generator can render: an npm
+#: Vendor install kinds Reef can install for episodes: an npm
 #: package at a version, or a git checkout at a ref installed editable into
 #: a venv (the channel of a Python agent that publishes no wheel).
 INSTALL_KINDS = ("npm", "git")
@@ -244,38 +230,6 @@ INSTALL_KINDS = ("npm", "git")
 _INSTALL_PACKAGE_PATTERN = re.compile(r"^[@A-Za-z0-9._/-]+$")
 _INSTALL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _INSTALL_REPOSITORY_PATTERN = re.compile(r"^https://[A-Za-z0-9._/-]+$")
-
-
-#: How a ``client_state`` entry is kept. ``directory`` and ``sqlite`` are created in the installed tree
-#: before the run: an empty directory, or an empty SQLite database (a zero-length file is not one, and a
-#: binary may set it aside and start a new one in its place). ``file`` is copied back after the run when
-#: the binary wrote it as a new file, or renamed a new file over the link, so its mode is kept too.
-CLIENT_STATE_KINDS = ("directory", "sqlite", "file")
-
-
-@dataclass(frozen=True)
-class ClientState:
-    """A path below the relocated composition that an interactive run keeps.
-
-    The wrapper runs the binary on a temp copy of links to the installed
-    composition and removes the copy afterwards, so what the binary creates
-    there is lost; a path that already exists in the installed tree is
-    linked, and what the binary writes through the link stays. The wrapper
-    refuses a session when a file the install wrote has changed, and skips
-    these paths, which are the binary's to write; a link at one of them is
-    removed before the run, so the binary's writes stay in the tree. A file
-    with ``preference_keys`` is the exception: its other keys are checked,
-    and a link at it is refused.
-
-    ``preference_keys`` is for a ``file`` the install writes too, a JSON
-    object: the top-level keys the binary saves there itself and that load no
-    code. The install records the value of every other key, and the wrapper
-    refuses a session once one of those differs.
-    """
-
-    path: str
-    kind: str
-    preference_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -307,7 +261,7 @@ class AdapterDescriptor:
     argv: tuple[str, ...]
     env: Mapping[str, str]
     config_targets: Mapping[str, ConfigTarget]
-    node_paths: Mapping[str, str]
+    kind_paths: Mapping[str, str]
     trajectory_format: str
     trajectory_path: str
     cleanup_whitelist: tuple[str, ...] = ()
@@ -321,7 +275,7 @@ class AdapterDescriptor:
     #: True when the ``{prompt}`` argv slot names a task directory (a Harbor task) rather than text the
     #: model reads, so a gate can hand the adapter task directories instead of prompts.
     is_prompt_task_directory: bool = False
-    #: ``config`` node templates that point this harness at a model endpoint,
+    #: Config templates (``target`` and ``data``) that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
     #: the matching set when it runs evaluation episodes, so the served tree
@@ -335,49 +289,9 @@ class AdapterDescriptor:
     #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
     #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
     is_root_bind_mounted: bool = False
-    #: ``files.tree``: where the entries list travels with the rendered files (a JSON
-    #: array of ``{id, name, config}``), so a resident process can reconcile the
-    #: tree entry by entry; None for an adapter whose binary reads files only.
-    tree_path: str | None = None
     #: Optional quirk that validates the executor against the rendered tree,
     #: replacing the blanket self_isolating restriction before launch.
     validate_execution: ExecutionValidator | None = None
-    #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
-    #: binary: what an interactive run needs that an episode's ``env`` (offline,
-    #: hermetic) must not carry, such as silencing the binary's self-updater
-    #: while reef pins its version. ``{root}`` in a value is the install root,
-    #: for a directory of the installed tree outside the relocated composition.
-    client_env: Mapping[str, str] = field(default_factory=dict)
-    #: Arguments the ``reef-<adapter>`` wrapper puts ahead of the person's own when
-    #: it runs the binary: a setting the rendered tree must not be able to undo.
-    client_args: tuple[str, ...] = ()
-    #: First arguments that get no ``client_args``: the binary's version flags, which start no
-    #: session and which a binary may answer early only when nothing else is on the command line.
-    client_version_args: tuple[str, ...] = ()
-    #: Commands the binary expects on PATH at first start and otherwise fetches
-    #: itself, as ``(command, package)``; the install script names the missing ones.
-    client_tools: tuple[tuple[str, str], ...] = ()
-    #: Root-relative sessions and settings below the composition that a ``reef-<adapter>`` run
-    #: keeps in the installed tree, so a later run resumes its sessions and skips its first-run setup.
-    client_state: tuple[ClientState, ...] = ()
-
-    def compose_relocation(self) -> tuple[str, str]:
-        """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
-
-        That entry relocates the binary's whole composition at the episode
-        root, and it is the only env entry a client-side wrapper needs."""
-        primary = PurePosixPath(self.config_targets["primary"].path)
-        for parent in primary.parents:
-            if parent == PurePosixPath("."):
-                break
-            marker = f"{{root}}/{parent}"
-            for key, value in self.env.items():
-                if value == marker:
-                    return key, str(parent)
-        raise DescriptorError(
-            f"adapter {self.name!r} has no env var relocating a directory above {str(primary)!r} "
-            "(expected an entry with a {root}/<dir> value)"
-        )
 
 
 def _require_str(data: Mapping[str, Any], key: str, where: str) -> str:
@@ -416,7 +330,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     if not isinstance(files, Mapping):
         raise DescriptorError(f"{where} requires a 'files' object")
     config_targets = _parse_config_targets(files.get("config"), where)
-    node_paths = _parse_node_paths(files, where)
+    kind_paths = parse_kind_paths(files, where)
     trajectory = data.get("trajectory")
     if not isinstance(trajectory, Mapping):
         raise DescriptorError(f"{where} requires a 'trajectory' object")
@@ -444,24 +358,15 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_root_bind_mounted = data.get("is_root_bind_mounted", False)
     if not isinstance(is_root_bind_mounted, bool):
         raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
-    client_env = data.get("client_env", {})
-    if not isinstance(client_env, Mapping) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
-    ):
-        raise DescriptorError(f"{where} 'client_env' must map strings to strings")
-    client_args = _str_list(data.get("client_args", []), f"{where} 'client_args'")
-    client_version_args = _str_list(data.get("client_version_args", []), f"{where} 'client_version_args'")
-    client_tools = _parse_client_tools(data.get("client_tools"), where)
-    client_state = _parse_client_state(data.get("client_state"), where)
     renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
-    descriptor = AdapterDescriptor(
+    return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
         argv=_str_list(data.get("argv"), f"{where} 'argv'"),
         env=dict(env),
         config_targets=config_targets,
-        node_paths=node_paths,
+        kind_paths=kind_paths,
         trajectory_format=_require_str(trajectory, "format", f"{where} trajectory"),
         trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
         cleanup_whitelist=whitelist + quirk_whitelist,
@@ -473,27 +378,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
         model_binding=model_binding,
-        tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,
-        client_env=dict(client_env),
-        client_args=client_args,
-        client_version_args=client_version_args,
-        client_tools=client_tools,
-        client_state=client_state,
     )
-    if client_state:
-        _, compose_dir = descriptor.compose_relocation()
-        for state in client_state:
-            if PurePosixPath(compose_dir) not in PurePosixPath(state.path).parents:
-                raise DescriptorError(f"{where} 'client_state' path {state.path!r} is not below {compose_dir!r}")
-    return descriptor
-
-
-def _parse_tree_path(files: Mapping[str, Any], where: str) -> str | None:
-    if "tree" not in files:
-        return None
-    (path,) = _relative_paths([files["tree"]], f"{where} files.tree")
-    return path
 
 
 def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
@@ -556,7 +442,7 @@ def _parse_model_binding(
     config_targets: Mapping[str, ConfigTarget],
     where: str,
 ) -> dict[str, tuple[Mapping[str, Any], ...]]:
-    """``model_binding`` is a mapping of API dialect to config node templates;
+    """``model_binding`` is a mapping of API dialect to config templates;
     a bare list is the ``openai`` set."""
     if raw is None:
         return {}
@@ -564,25 +450,25 @@ def _parse_model_binding(
         raw = {"openai": raw}
     if not isinstance(raw, Mapping) or not raw:
         raise DescriptorError(
-            f"{where} 'model_binding' must map an api (openai, responses, anthropic) to config node templates"
+            f"{where} 'model_binding' must map an api (openai, responses, anthropic) to config templates"
         )
     parsed: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for api, templates in raw.items():
         label = f"{where} model_binding.{api}"
         if not isinstance(templates, list) or not templates:
-            raise DescriptorError(f"{label} must be a non-empty list of config node templates")
-        nodes: list[Mapping[str, Any]] = []
-        for index, node in enumerate(templates):
-            if not isinstance(node, Mapping):
+            raise DescriptorError(f"{label} must be a non-empty list of config templates")
+        parsed_templates: list[Mapping[str, Any]] = []
+        for index, template in enumerate(templates):
+            if not isinstance(template, Mapping):
                 raise DescriptorError(f"{label}[{index}] must be an object")
-            target = str(node.get("target", "primary"))
+            target = str(template.get("target", "primary"))
             if target not in config_targets:
                 raise DescriptorError(f"{label}[{index}] names unknown config target {target!r}")
-            data = node.get("data")
+            data = template.get("data")
             if not isinstance(data, Mapping):
                 raise DescriptorError(f"{label}[{index}] requires a 'data' object")
-            nodes.append({"target": target, "data": dict(data)})
-        parsed[str(api)] = tuple(nodes)
+            parsed_templates.append({"target": target, "data": dict(data)})
+        parsed[str(api)] = tuple(parsed_templates)
     return parsed
 
 
@@ -621,52 +507,17 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
     )
 
 
-def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
-    node_paths = {"rules": _require_str(files, "rules", f"{where} files")}
-    for kind in NAMED_NODE_KINDS:
-        if kind in OPTIONAL_NODE_KINDS and kind not in files:
+def parse_kind_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
+    """The descriptor's ``files:`` path templates by tree kind; a required kind left out is a DescriptorError."""
+    kind_paths = {"rules": _require_str(files, "rules", f"{where} files")}
+    for kind in NAMED_KINDS:
+        if kind in OPTIONAL_KINDS and kind not in files:
             continue
         template = _require_str(files, kind, f"{where} files")
         if "{name}" not in template:
             raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
-        node_paths[kind] = template
-    return node_paths
-
-
-def _parse_client_tools(value: Any, where: str) -> tuple[tuple[str, str], ...]:
-    """``client_tools``: a list of ``{command, package}`` the binary wants on PATH."""
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        raise DescriptorError(f"{where} 'client_tools' must be a list")
-    tools: list[tuple[str, str]] = []
-    for entry in value:
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("command"), str) or not entry["command"]:
-            raise DescriptorError(f"{where} 'client_tools' entries need a non-empty 'command'")
-        package = entry.get("package", entry["command"])
-        if not isinstance(package, str) or not package:
-            raise DescriptorError(f"{where} 'client_tools' 'package' must be a non-empty string")
-        tools.append((entry["command"], package))
-    return tuple(tools)
-
-
-def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
-    """``client_state``: a list of ``{path, kind}`` an interactive run keeps in the installed tree, a ``file`` with
-    the ``preference_keys`` the binary may change in it."""
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        raise DescriptorError(f"{where} 'client_state' must be a list")
-    states: list[ClientState] = []
-    for entry in value:
-        if not isinstance(entry, Mapping) or entry.get("kind") not in CLIENT_STATE_KINDS:
-            raise DescriptorError(f"{where} 'client_state' entries need a 'kind' in {CLIENT_STATE_KINDS}")
-        (path,) = _relative_paths([entry.get("path")], f"{where} 'client_state' 'path'")
-        if "preference_keys" in entry and entry["kind"] != "file":
-            raise DescriptorError(f"{where} 'client_state' 'preference_keys' is for a 'file' entry")
-        preference_keys = _str_list(entry.get("preference_keys", []), f"{where} 'client_state' 'preference_keys'")
-        states.append(ClientState(path=path, kind=entry["kind"], preference_keys=preference_keys))
-    return tuple(states)
+        kind_paths[kind] = template
+    return kind_paths
 
 
 def _load_quirks(

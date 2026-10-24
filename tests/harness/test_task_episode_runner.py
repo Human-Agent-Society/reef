@@ -17,7 +17,7 @@ import pytest
 from reef.core.records_types import ROLLOUT_HEADER
 
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.harness.client.tasks import (
+from reef.harness.episodes.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
     TaskEpisode,

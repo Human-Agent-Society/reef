@@ -28,28 +28,6 @@ env:
   DSH_HOME: "{root}/dsh"
   DSH_AGENTS_HOME: "{root}/dsh-agents"
   DSH_TELEMETRY_MODE: "DISABLED"
-# reef-dsh relocates DSH_HOME only, so a person's run reads the tree's
-# commands from the install root; without this dsh reads ~/.agents/skills.
-client_env:
-  DSH_AGENTS_HOME: "{root}/dsh-agents"
-# What a person saves in the web profile, which reef-dsh would otherwise
-# leave in the temp copy it removes: the API keys (.credentials.yaml, owner
-# only), the providers and default model (settings.yaml), both renamed over
-# the link on every save, the agent presets, the session logs both profiles
-# share, and the storage units the web profile keeps its workspaces in.
-# Episodes keep none of them: the cleanup whitelist below reads a run's
-# sessions and storages as episode state.
-client_state:
-  - path: "dsh/.credentials.yaml"
-    kind: file
-  - path: "dsh/settings.yaml"
-    kind: file
-  - path: "dsh/.agent-presets"
-    kind: directory
-  - path: "dsh/sessions"
-    kind: directory
-  - path: "dsh/storages"
-    kind: directory
 files:
   config:
     primary:
@@ -189,7 +167,7 @@ quirks: reef.harness.adapters.dsh.quirks
 # How to point dsh at a model endpoint, per API dialect: a hand declared
 # llm-pi-ai route selected by agent-default-model, its key named by
 # apiKeyEnv and supplied through the .env file. Each profile's patch carries
-# the route, since the wrapper points only a declared binding at its proxy.
+# the route.
 # Reef renders the set matching its model binding's api into evaluation
 # episodes; the served tree never carries a provider or a key.
 model_binding:

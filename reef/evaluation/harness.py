@@ -1,10 +1,10 @@
 """Harness candidate evaluation: run the evaluation tasks as episodes, then decide by the scores.
 
-A :class:`HarnessCandidate` is the candidate a harness backend proposes.
+A :class:`HarnessCandidate` is a candidate tree beside the current tree.
 :class:`HarnessEpisodeEvaluator` implements :class:`CandidateEvaluator` for it.
-It runs each evaluation task on the candidate tree and, for a comparison, on
-the current tree, and returns one :class:`EvaluationResult` with the scores of
-each side. The method's :class:`EpisodeScorer` (``evolution.evaluate``) scores
+It renders each tree with the served model binding, runs each evaluation task
+on the candidate tree and, for a comparison, on the current tree, and returns
+one :class:`EvaluationResult` with the scores of each side. The method's :class:`EpisodeScorer` (``evolution.evaluate``) scores
 each episode. Two selection policies read the result:
 :class:`ScoreComparisonPlugin` selects a candidate with more task wins than
 losses, and :class:`FloorPlugin` runs the candidate alone and selects it when
@@ -55,9 +55,8 @@ from reef.harness.episodes.trajectory import (
     stage_path,
     sum_agents,
 )
-from reef.harness.tree.mutations import Mutation, nodes_from_entries
-from reef.harness.tree.nodes import clip_record_text, redact_secret_shaped
-from reef.harness.tree.render import render_composition, tree_files
+from reef.harness.tree import HarnessTree, TreePatch, render_tree
+from reef.harness.tree.checks import clip_record_text, redact_secret_shaped
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import (
     ExecutorSelection,
@@ -448,21 +447,29 @@ EPISODE_SUMMARY_CHARS = 240
 
 @dataclass(frozen=True, kw_only=True)
 class HarnessCandidate(UpdateCandidate):
-    """One rendered harness mutation compared with the current composition."""
+    """One candidate tree, evaluated against the current tree.
 
-    candidate_files: Mapping[str, str]
-    current_files: Mapping[str, str]
-    candidate_entries: tuple[Mapping[str, Any], ...]
-    current_entries: tuple[Mapping[str, Any], ...]
-    mutations: tuple[Mutation, ...]
-    #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
-    evaluation_tasks: tuple[str, ...] = ()
-    #: The candidate is the rollback target, so selecting it rolls back.
+    Values: ``candidate_tree`` is ``current_tree.apply(patch)`` for a
+    proposal, and the rollback target's tree for a recheck. ``patch`` is the
+    proposal's patch, and ``current_tree.diff(candidate_tree)`` for a recheck.
+    ``evaluation_tasks`` are the tasks both sides run, the seed tasks first.
+    ``recheck`` marks a candidate that is the rollback target, so selecting it
+    rolls back. ``proposal_id`` names the inbox proposal the patch came from,
+    ``None`` for the method's own. ``record_dir`` is the step's record
+    directory, ``None`` with the record off. ``method_state`` is the method
+    state the step commits, which a selection plugin may read.
+    Purpose: ``HarnessBackend.prepare_step`` makes it; the evaluator renders
+    both trees and runs their episodes, and the selection decides on it.
+    """
+
+    candidate_tree: HarnessTree
+    current_tree: HarnessTree
+    patch: TreePatch
+    evaluation_tasks: tuple[str, ...]
     recheck: bool = False
-    #: The inbox proposal these mutations came from, settled with the result; None for the method's own.
     proposal_id: str | None = None
-    #: The step record directory claimed for it at prepare time; ``None`` with the record off.
     record_dir: Path | None = None
+    method_state: Mapping[str, Any] = field(default_factory=dict)
 
 
 def clip_redacted(text: str, limit: int) -> str:
@@ -490,7 +497,6 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
         *,
         descriptor: AdapterDescriptor,
         scorer: EpisodeScorer,
-        tasks: tuple[str, ...],
         models: ModelBindings,
         binary: str | None,
         episode_timeout_s: float,
@@ -504,7 +510,6 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
         self.worker_selection = worker_selection
         self.worker_requirements = worker_requirements
         self._descriptor = descriptor
-        self._tasks = tasks
         self.use_models(models)
         self._worker_pool = EvaluationWorkerPool(
             worker_selection,
@@ -530,17 +535,16 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
     def use_models(self, models: ModelBindings) -> None:
         """Run later episodes with ``models``: the served binding renders into each tree, and scorers receive all."""
         # Resolving the binding here refuses an adapter without a matching model_binding before any episode runs.
-        self._binding_nodes = models.served.compose_nodes(self._descriptor)
+        models.served.config_overlays(self._descriptor)
         self._models = models
 
-    def render(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-        """The tree plus the model binding, and the entries list beside them where the adapter carries one."""
-        files = render_composition((*nodes_from_entries(entries), *self._binding_nodes), self._descriptor)
-        return {**files, **tree_files(self._descriptor, entries)}
+    def render(self, tree: HarnessTree) -> dict[str, str]:
+        """``tree``'s files for one episode, pointed at the served model."""
+        return render_tree(tree, self._descriptor, self._models.served.config_overlays(self._descriptor))
 
     def evaluation_tasks(self, candidate: HarnessCandidate) -> tuple[str, ...]:
-        """The tasks the candidate carries; an older candidate carries none and falls back to the seed set."""
-        return candidate.evaluation_tasks or self._tasks
+        """The tasks the candidate carries."""
+        return candidate.evaluation_tasks
 
     def episode_count(self, candidate: HarnessCandidate, side_count: int) -> int:
         """How many episodes :meth:`evaluate` runs for ``candidate`` on ``side_count`` sides."""
@@ -559,8 +563,8 @@ class HarnessEpisodeEvaluator(CandidateEvaluator):
         sides = tuple(sides)
         if not sides or any(side not in EVALUATION_SIDES for side in sides):
             raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
-        entries = {"candidate": candidate.candidate_entries, "current": candidate.current_entries}
-        files = {side: self.render(entries[side]) for side in sides}
+        trees = {"candidate": candidate.candidate_tree, "current": candidate.current_tree}
+        files = {side: self.render(trees[side]) for side in sides}
         episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
         # Episodes interleave candidate and current inside each pairing, so
         # anything that drifts during the run (upstream load, rate limits)

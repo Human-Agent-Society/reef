@@ -7,7 +7,7 @@ the ``stage/enter`` and ``stage/exit`` events that now name the path. The
 tools, hooks, agents, graphs and prompt come from a ``NativeHost`` read at
 each use, so what a step runs on is what the host holds when the step starts.
 
-A ``native_loop`` node replaces the graph for the root turn with code:
+A native loop file replaces the graph for the root turn with code:
 ``run_turn(ctx)`` over a ``LoopContext`` whose every call is one stage handler
 of the same ``Run``, so the hooks, budgets, enforcer and log stay reef's.
 """
@@ -25,8 +25,21 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.runners.native.seed import SEED_GRAPH
-from reef.harness.tree.nodes import _NAME, NATIVE_END_REASONS, validate_native_graph
+from reef.harness.tree.checks import NAME, NATIVE_END_REASONS, validate_native_graph
+
+#: The built-in loop as a graph: think, act while the model calls tools, end when it answers. The loop runs this
+#: when a tree carries no ``main`` graph; a tree may replace it with its own ``native/graphs/main.json``.
+SEED_GRAPH: dict[str, Any] = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {"think": {"kind": "model"}, "act": {"kind": "tools"}, "done": {"kind": "end", "reason": "completed"}},
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "done"},
+        {"from": "act", "when": "done", "to": "think"},
+    ],
+}
 
 #: Bound regex input and wall time; Python's matcher has no execution-step limit.
 NATIVE_MATCH_WINDOW = 4096
@@ -793,8 +806,8 @@ class LoopContext:
     def log(self, event: str, data: Mapping[str, Any]) -> None:
         """One ``loop/<event>`` in the session; the name is checked and prefixed, so this call cannot write a core event."""
         self._transition()
-        if not isinstance(event, str) or not _NAME.fullmatch(event) or event in LOOP_FRAME_EVENTS:
-            raise ValueError(f"loop event {event!r} must match {_NAME.pattern} and not be one of {LOOP_FRAME_EVENTS}")
+        if not isinstance(event, str) or not NAME.fullmatch(event) or event in LOOP_FRAME_EVENTS:
+            raise ValueError(f"loop event {event!r} must match {NAME.pattern} and not be one of {LOOP_FRAME_EVENTS}")
         if not isinstance(data, Mapping):
             raise ValueError("loop event data must be an object")
         # default= covers values only; a key that is not a JSON key (a tuple, say) is written as its text at every depth.

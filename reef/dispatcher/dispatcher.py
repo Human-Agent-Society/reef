@@ -314,11 +314,6 @@ class Dispatcher(ScenarioLifecycle):
                 moved.append(str(destination))
         return moved
 
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self.recipe.build_surface("").files is not None
-
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).releases()

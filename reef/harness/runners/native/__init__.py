@@ -1,6 +1,6 @@
-"""Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
+"""Reef's native coding agent: a headless single prompt loop whose tools and loop events are files of its tree.
 
-One episode is one process and one turn. The rendered composition root
+One episode is one process and one turn. The rendered native directory
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
 ``graphs/``, ``agents/``, ``loops/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.runners.native.host``), talks to the served model
@@ -21,7 +21,6 @@ import copy
 import importlib.util
 import json
 import os
-import shutil
 import sys
 import threading
 import time
@@ -42,7 +41,7 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.runners.native.graph import TurnLoop
-from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
+from reef.harness.tree.checks import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12
@@ -58,8 +57,6 @@ MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
-#: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
-TREE_FILE = "tree.json"
 #: A tool's declaration as the render writes it after the code: literal constants the loop reads without running it.
 TOOL_FIELDS: tuple[str, ...] = ("NAME", "DESCRIPTION", "PARAMETERS", "CAPABILITIES")
 _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
@@ -445,7 +442,7 @@ def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
 
 def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
     """Every ``*.json`` under ``agents/`` by name, admitted again here so a hand edited file cannot run unchecked."""
-    from reef.harness.tree.nodes import validate_native_agent
+    from reef.harness.tree.checks import validate_native_agent
 
     agents: dict[str, Mapping[str, Any]] = {}
     for path in sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []:
@@ -661,20 +658,13 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         "model": binding.model,
         "base_url": binding.base_url,
         "cwd": str(workdir),
-        # Where the composition came from: the entries list a newer render carries, else the rendered files.
-        "tree": TREE_FILE if (root / TREE_FILE).is_file() else "files",
     }
     try:
         try:
             # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
             enforcer = select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
-            # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
-            # One directory per process, cleared on the way out: the wrapper reuses the sessions directory
-            # across runs and a mount refuses a module file that is already there.
-            mount_dir = session_dir / "mounts" / f"boot-{os.getpid()}"
-            shutil.rmtree(mount_dir, ignore_errors=True)
-            host = NativeHost.from_root(root, mount_dir)
+            host = NativeHost.from_root(root)
             graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None, "loop": None})
@@ -699,12 +689,9 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         session.write("turn/start", {"turn": 1})
         loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
         run = graphs.Run(loop, prompt, binding, host, workdir)
-        try:
-            if module is not None:
-                return graphs.run_loop_module(run, module)
-            return graphs.run_graph(run, graph)
-        finally:
-            host.dispose()
+        if module is not None:
+            return graphs.run_loop_module(run, module)
+        return graphs.run_graph(run, graph)
     finally:
         session.close()
 

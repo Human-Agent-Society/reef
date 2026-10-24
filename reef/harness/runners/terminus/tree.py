@@ -62,7 +62,7 @@ def extension_source(files: Mapping[str, str]) -> tuple[str, str] | None:
 
 
 def load_tree(root: Path | str) -> dict[str, str]:
-    """Read a rendered tree from the episode root, keyed as ``render_composition`` keys it.
+    """Read a rendered tree from the episode root, keyed as ``render_tree`` keys it.
 
     ``root`` is the episode root rather than the ``terminus`` directory,
     because ``terminus-commands`` sits beside it; reading one level down would

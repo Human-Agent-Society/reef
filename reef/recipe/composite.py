@@ -23,7 +23,7 @@ uses the deployment's model:
            config:
              pipeline: {task2batch: {config: {buffer_size: 32}}}
          harness:
-           implementation: reef.recipe.cordis:CordisRecipe
+           implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
              evolution: {adapter: pi, ...}
 """
@@ -48,6 +48,7 @@ from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
@@ -297,6 +298,7 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
@@ -309,6 +311,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
+                releases=None if releases is None else ComponentReleases(releases, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)

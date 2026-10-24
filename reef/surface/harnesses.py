@@ -1,42 +1,56 @@
-"""Serve an agent harness file tree by client pull."""
+"""Serve a harness release to a client: the release's source tree, rendered for the scenario's adapter."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.core.model_metadata import ModelMetadata
-
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.tree import HarnessTree, render_tree
+from reef.surface.base import ComponentSurface, FileTree, HarnessInfo, Surface
 from reef.surface.files import TextFileTree
 
 #: The component name a harness surface binds.
 HARNESS_COMPONENT = "harness"
 
 
+class HarnessFiles(FileTree):
+    """A release's files as the adapter's binary reads them: its source tree rendered without a model binding.
+
+    A release stores the source tree; the client gets the adapter's files,
+    and binds its own model endpoint.
+    """
+
+    def __init__(self, descriptor: AdapterDescriptor) -> None:
+        self.descriptor = descriptor
+        self.source = TextFileTree()
+
+    def read_files(self, artifact: Artifact) -> Mapping[str, str] | None:
+        files = self.source.read_files(artifact)
+        if files is None:
+            return None
+        return render_tree(HarnessTree(files), self.descriptor)
+
+
 def create_harness_surface(
-    seed_entries: tuple[Mapping[str, Any], ...] = (),
+    descriptor: AdapterDescriptor,
+    *,
     served_model: str | None = None,
     client_models: tuple[str, ...] = (),
     served_api: str = "openai",
     model_metadata: Mapping[str, ModelMetadata] | None = None,
     served_metadata: ModelMetadata | None = None,
 ) -> Surface:
-    """Build a surface exposing every text file in a harness tree as the ``harness`` component.
+    """A surface that serves each release of the ``harness`` component as ``descriptor``'s rendered files.
 
-    The tree is adapter-specific: its paths are whatever the adapter
-    descriptor's render engine produced (config files, rules, agent
-    commands, code extensions). The surface does not validate or
-    transform; the client pulls the raw tree and applies it. ``harness``
-    carries the recipe's seed, the composition behind the base release no
-    step published, the model the recipe serves and its API dialect, which the
-    install route binds an installed tree with when a release has no gate of its
-    own, and the further models an installed client may switch to.
+    ``harness`` carries the model the recipe serves, its API dialect, its
+    metadata, and the further models a client may switch to, for the routes
+    that tell a client how to reach Reef.
     """
     return Surface(
-        components={HARNESS_COMPONENT: ComponentSurface(files=TextFileTree())},
+        components={HARNESS_COMPONENT: ComponentSurface(files=HarnessFiles(descriptor))},
         harness=HarnessInfo(
-            seed_entries=tuple(seed_entries),
             served_model=served_model,
             served_api=served_api,
             model_metadata=dict(model_metadata or {}),
@@ -46,4 +60,4 @@ def create_harness_surface(
     )
 
 
-__all__ = ["HARNESS_COMPONENT", "create_harness_surface"]
+__all__ = ["HARNESS_COMPONENT", "HarnessFiles", "create_harness_surface"]
