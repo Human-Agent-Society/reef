@@ -16,16 +16,16 @@ Hidden rules, ground-truth actions, and verifier details never enter SAO feedbac
 | --- | --- |
 | Actor | Dense Qwen3-8B, full-parameter updates |
 | Critic | Qwen3-8B value model; self-attention frozen, other parameters trainable |
-| Update unit | One complete scored serving task, including all model calls |
+| Sample / batch | One complete task trajectory; eight tasks per training batch; micro batch one |
 | Warmup | First 10 training batches: critic only |
 | Critic cadence | Two critic updates per batch, including warmup |
 | Actor cadence | One update per batch after warmup |
 | Learning rates | Actor `1e-6`; critic `5e-6` |
 | Evaluation | Frozen final actor, no test reports or updates |
-| Context / per-call output | 40,960 / 8,192 tokens |
+| Context / per-call output | 131,072 / 16,384 tokens; static YaRN factor four |
 | Episode budgets | Official 100 turns, 50 world-tool calls, 256,000 output tokens |
 
-This is a dense, per-task adaptation of SAO. It is not a reproduction of the paper's MoE, batch-128 experiment.
+This is a dense, batch-eight adaptation of SAO. It is not a reproduction of the paper's MoE, batch-128 experiment.
 Critic warmup is not critic pretraining. No pretrained value checkpoint is assumed.
 The existing two-critic-update timing is preserved; this example does not claim the paper specifies that timing exactly.
 
@@ -70,10 +70,15 @@ bash recipes/sao/examples/servelearnbench/run.sh
 The default is a launch configuration, not a measured minimum GPU requirement.
 Allocate the GPUs before running the script. Do not run the service on a login node.
 
-For a 20-turn experiment with up to 16,384 output tokens per call, append
-`--max-steps 20 --max-tokens 16384` to the command above.
-The output limit includes reasoning and the visible reply; the cumulative context limit remains 40,960 tokens.
-These are experimental budgets, not the benchmark's default budgets or a measured GPU-capacity claim.
+The launcher prepares a separate model view under `CHECKPOINT_DIR/model-128k`.
+It links the original weights and writes a Qwen3 configuration with YaRN factor four and original context 32,768.
+The source checkpoint stays unchanged. SGLang reads this configuration; the example provider installs matching YaRN in both training roles.
+The provider also sets the attention magnitude and disables incompatible fused RoPE.
+All published HF checkpoints must retain this model configuration.
+
+The defaults are 100 model calls and at most 16,384 output tokens per call.
+Thinking and the visible reply share the output budget; the cumulative context limit is 131,072 tokens.
+A 128k limit does not force a task to generate 128k tokens or establish a GPU capacity result.
 
 For baselines, run `METHOD=blind` or `METHOD=oracle` with fresh directories and a separate stack.
 Both baselines use the same stack without reports; their training backend stays idle.
@@ -86,12 +91,20 @@ METHOD=blind bash recipes/sao/examples/servelearnbench/run.sh
 METHOD=oracle bash recipes/sao/examples/servelearnbench/run.sh
 ```
 
-For each SAO serving task, the driver submits one report with every ordered inference receipt.
-It waits for the training release, including weight publication, before starting the next task.
-Keep `save-interval: "1"` for this campaign.
-Reef publishes only saved weights, and the driver waits for publication after every task.
-Recorded weight versions must agree within each task and match the latest committed release afterward.
+Each serving task submits one report containing every ordered inference receipt.
+The driver collects eight tasks before waiting for training and weight publication.
+No task spans a weight update. Test tasks use the final published actor and never submit reports.
+Keep `save-interval: "1"` so each completed batch publishes weights.
 A training timeout or service error aborts the run.
+
+`SAO_BATCH=8` and `SAO_BATCH=1 SAO_WARMUP=10` are independent configuration values.
+Together, they use the first 80 serving tasks for 20 critic updates and no actor updates.
+The actor starts on batch 11. This warmup is an implementation choice, not value pretraining.
+
+The fixed split contains 140 serving tasks. Seventeen complete batches train on 136 tasks.
+The final four tasks are still served and scored but are not reported for training.
+Their `untrained_tail` rows make this remainder policy explicit; no samples are duplicated or borrowed from test.
+The summary records trained task counts and ending reasons, including budget and context endings.
 
 ## Low-cost smoke checks
 
@@ -119,7 +132,7 @@ Use a short allocation, including a preemptable allocation when available:
 ```bash
 export MODEL_DIR=/scratch/your-project/models/Qwen3-0.6B
 export SAO_GPUS=1
-export SAO_WARMUP=1
+export SAO_BATCH=1 SAO_WARMUP=1
 bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64
 ```
 
@@ -127,7 +140,7 @@ This runs two serving tasks and two test tasks.
 Each task has at most 20 model calls, with at most 64 output tokens per call.
 The first serving task warms up the critic; the second also updates the actor.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
-Restore `SAO_WARMUP=10` and the 8B model for the pilot.
+Restore `SAO_BATCH=8 SAO_WARMUP=10` and the 8B model for the pilot.
 
 ## Results and recovery limits
 

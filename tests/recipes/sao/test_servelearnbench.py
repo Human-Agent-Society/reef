@@ -244,8 +244,10 @@ def test_mixed_weight_versions_fail_before_reporting():
     model.reef.report.assert_not_called()
 
 
-@pytest.mark.parametrize("method,expected", [("blind", 0), ("oracle", 0), ("sao", 2)])
-def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, expected):
+@pytest.mark.parametrize("method", ["blind", "oracle", "sao"])
+@pytest.mark.parametrize("batch_size,smoke", [(1, True), (8, True), (8, False)])
+def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, batch_size, smoke):
+    monkeypatch.delenv("SAO_BATCH", raising=False)
     monkeypatch.setitem(sys.modules, "harness.adapter", adapter)
     spec = importlib.util.spec_from_file_location("retail_campaign", EXAMPLE / "run.py")
     campaign = importlib.util.module_from_spec(spec)
@@ -273,6 +275,7 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
         return {"status": "accepted"}
 
     def wait_for_training(client, scenario, count, timeout):
+        assert len(reports) == count * batch_size
         releases.append({"operation": "training", "runtime_load_id": f"v{count}"})
         return releases[-1]
 
@@ -282,17 +285,43 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
     path = tmp_path / "results.jsonl"
     monkeypatch.setattr(
-        sys, "argv", ["run.py", "--method", method, "--smoke", "--max-steps", "20", "--output", str(path)]
+        sys,
+        "argv",
+        [
+            "run.py",
+            "--method",
+            method,
+            "--max-steps",
+            "20",
+            "--batch-size",
+            str(batch_size),
+            "--output",
+            str(path),
+            *(["--smoke"] if smoke else []),
+        ],
     )
     campaign.main()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     episodes = [row for row in rows if row.get("type") == "episode"]
+    serving_count = 2 * batch_size if smoke else 140
+    test_count = 2 if smoke else 64
+    expected = serving_count // batch_size * batch_size if method == "sao" else 0
     assert len(reports) == expected
     assert set(reports).isdisjoint(row["task_id"] for row in episodes if row["phase"] == "test")
-    assert [row["training_releases_before"] for row in episodes] == ([0, 1, 2, 2] if method == "sao" else [0] * 4)
+    expected_versions = (
+        ([i // batch_size for i in range(serving_count)] + [expected // batch_size] * test_count)
+        if method == "sao"
+        else [0] * (serving_count + test_count)
+    )
+    assert [row["training_releases_before"] for row in episodes] == expected_versions
+    tails = [row for row in rows if row.get("type") == "untrained_tail"]
+    assert len(tails) == (serving_count % batch_size if method == "sao" else 0)
+    assert rows[-1]["training_releases"] == expected // batch_size
+    assert rows[-1]["trained_tasks"] == expected
+    assert rows[-1]["ending_counts"] == {"serving": {"finish": serving_count}, "test": {"finish": test_count}}
     assert all(oracle == (method == "oracle") for _, oracle, _ in phases)
     assert rows[-1]["test_score"] == 100
     config, official_rows = read_rows(str(path))
     assert config["method"] == method
     assert config["max_steps"] == 20
-    assert setting_scores(official_rows)["n_test"] == 2
+    assert setting_scores(official_rows)["n_test"] == test_count

@@ -32,14 +32,17 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
-        "--smoke", action="store_true", help="Run two serving and two test tasks; label results as smoke"
+        "--smoke", action="store_true", help="Run two serving batches and two test tasks; label results as smoke"
     )
-    parser.add_argument("--max-tokens", type=int, default=protocol.MAX_TOKENS)
+    parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--max-steps", type=int, default=protocol.MAX_STEPS, help="Maximum model calls per task")
+    parser.add_argument("--batch-size", type=int, default=int(os.environ.get("SAO_BATCH", "8")))
     parser.add_argument("--training-timeout", type=float, default=1800)
     args = parser.parse_args()
-    if args.max_tokens <= 0 or args.max_steps <= 0 or args.training_timeout <= 0:
+    if args.max_tokens <= 0 or args.max_steps <= 0 or args.training_timeout <= 0 or args.batch_size <= 0:
         parser.error("token, turn, and timeout limits must be positive")
+    if "SAO_BATCH" in os.environ and args.batch_size != int(os.environ["SAO_BATCH"]):
+        parser.error("--batch-size must match the trainer SAO_BATCH")
     client = ReefClient(
         os.environ["REEF_SERVICE_URL"],
         token=os.environ.get("REEF_TOKEN"),
@@ -58,14 +61,19 @@ def main() -> None:
     if (len(serving), len(tests)) != (140, 64):
         raise RuntimeError("Retail L1/W1 differs from the pinned 140/64 split")
     if args.smoke:
-        serving, tests = serving[:2], tests[:2]
+        serving, tests = serving[: 2 * args.batch_size], tests[:2]
+    trainable_count = len(serving) // args.batch_size * args.batch_size
+    if args.method == "sao" and not trainable_count:
+        parser.error("The serving split must contain at least one complete training batch")
     oracle = Oracle()
     oracle.setup(bundle)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     expected_releases = 0
     expected_version: str | None = None
     test_rewards: list[float] = []
-    model_name = Path(os.environ.get("MODEL_DIR", "reef")).name
+    pending_tasks: list[str] = []
+    ending_counts: dict[str, dict[str, int]] = {"serving": {}, "test": {}}
+    model_name = os.environ.get("REEF_MODEL_NAME") or Path(os.environ.get("MODEL_DIR", "reef")).name
     config = {
         "type": "config",
         "benchmark_revision": BENCHMARK_REVISION,
@@ -77,6 +85,12 @@ def main() -> None:
         "top_p": 1.0,
         "smoke": args.smoke,
         "max_tokens": args.max_tokens,
+        "global_batch_size": args.batch_size,
+        "micro_batch_size": 1,
+        "critic_only_batches": int(os.environ.get("SAO_WARMUP", "10")),
+        "context_length": 131072,
+        "tail_policy": "score_without_training",
+        "untrained_tail_tasks": len(serving) - trainable_count,
         "max_steps": args.max_steps,
         "max_output_per_task": protocol.MAX_OUTPUT_PER_TASK,
         "tool_budget": protocol.ENGINE_TOOL_BUDGET,
@@ -91,7 +105,7 @@ def main() -> None:
         output.write(json.dumps({"config": config}) + "\n")
         output.flush()
         for phase, tasks in (("serving", serving), ("test", tests)):
-            for task in tasks:
+            for task_index, task in enumerate(tasks):
                 model.begin_episode()
                 releases_before = training_releases(client, args.scenario)
                 if len(releases_before) != expected_releases:
@@ -105,7 +119,10 @@ def main() -> None:
                 if training_releases(client, args.scenario) != releases_before:
                     raise RuntimeError("Model changed during an episode")
                 reason = episode_end_reason(trace)
+                ending_counts[phase][reason] = ending_counts[phase].get(reason, 0) + 1
                 version = episode_runtime_load_id(model) if args.method == "sao" else None
+                if args.method == "sao" and expected_version is None:
+                    expected_version = version
                 if expected_version is not None and version != expected_version:
                     raise RuntimeError("Episode did not use the latest committed training weights")
                 row = {
@@ -137,14 +154,23 @@ def main() -> None:
                 output.write(json.dumps(row, ensure_ascii=False) + "\n")
                 output.flush()
                 if phase == "serving" and args.method == "sao":
-                    report = report_episode(model, args.scenario, task.task_id, reward.reward, reason)
-                    expected_releases += 1
-                    release = wait_for_training(client, args.scenario, expected_releases, args.training_timeout)
-                    expected_version = release["runtime_load_id"]
-                    output.write(
-                        json.dumps({"type": "training", "task_id": task.task_id, "report": report, "release": release})
-                        + "\n"
-                    )
+                    if task_index >= trainable_count:
+                        output.write(json.dumps({"type": "untrained_tail", "task_id": task.task_id}) + "\n")
+                    else:
+                        report = report_episode(model, args.scenario, task.task_id, reward.reward, reason)
+                        pending_tasks.append(task.task_id)
+                        output.write(json.dumps({"type": "report", "task_id": task.task_id, "report": report}) + "\n")
+                        if len(pending_tasks) == args.batch_size:
+                            expected_releases += 1
+                            release = wait_for_training(
+                                client, args.scenario, expected_releases, args.training_timeout
+                            )
+                            expected_version = release["runtime_load_id"]
+                            output.write(
+                                json.dumps({"type": "training", "task_ids": list(pending_tasks), "release": release})
+                                + "\n"
+                            )
+                            pending_tasks.clear()
                     output.flush()
                 if phase == "test":
                     test_rewards.append(reward.reward)
@@ -154,6 +180,9 @@ def main() -> None:
             "test_score": 100 * sum(test_rewards) / len(test_rewards),
             "training_releases": expected_releases,
             "smoke": args.smoke,
+            "ending_counts": ending_counts,
+            "trained_tasks": trainable_count if args.method == "sao" else 0,
+            "untrained_tail_tasks": len(serving) - trainable_count if args.method == "sao" else 0,
         }
         output.write(json.dumps(summary) + "\n")
         print(json.dumps(summary), flush=True)

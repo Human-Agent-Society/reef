@@ -12,6 +12,7 @@ export REEF_PORT=${REEF_PORT:-8900}
 export REEF_SERVICE_URL="http://127.0.0.1:${REEF_PORT}"
 export REEF_SCENARIO=${REEF_SCENARIO:-retail-l1-w1}
 export SAO_GPUS=${SAO_GPUS:-4}
+export SAO_BATCH=${SAO_BATCH:-8}
 export SAO_WARMUP=${SAO_WARMUP:-10}
 method=${METHOD:-sao}
 python=${REEF_PYTHON:-python3}
@@ -37,6 +38,10 @@ export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$XDG_CACHE_HOME/induct
 export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-$XDG_CACHE_HOME/cuda}
 mkdir -p "$MEGATRON_CONFIG_LOCK_DIR"
 export REEF_TOKEN=${REEF_TOKEN:-$("$python" -c 'import secrets; print(secrets.token_hex(24))')}
+source_model="$MODEL_DIR"
+export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$source_model")}
+"$python" "$PWD/long_context.py" "$source_model" "$CHECKPOINT_DIR/model-128k"
+export MODEL_DIR="$CHECKPOINT_DIR/model-128k"
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send
 # no reports, so their training backend remains idle throughout the campaign.
@@ -61,4 +66,4 @@ if [[ "$ready" != 1 ]]; then
     exit 1
 fi
 "$python" run.py --method "$method" --scenario "$REEF_SCENARIO" \
-    --output "$REEF_WORK/results.jsonl" --max-tokens 8192 "$@"
+    --output "$REEF_WORK/results.jsonl" --max-tokens 16384 --max-steps 100 --batch-size "$SAO_BATCH" "$@"
