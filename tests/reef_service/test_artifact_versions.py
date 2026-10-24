@@ -27,7 +27,6 @@ from tests.support.runtime_stubs import runtime_bindings
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
-from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -211,19 +210,6 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         "training",
         "creation",
     ]
-
-
-@pytest.mark.unit
-def test_live_version_is_listed_but_cannot_be_a_rollback_target(tmp_path) -> None:
-    value, _, _ = dispatcher(tmp_path, save_interval=2)
-    train(value, 1)
-    train(value, 2)
-
-    versions = value.list_releases("math")
-    live = next(version for version in versions if not version["checkpoint"])
-    assert not live["restorable"]
-    with pytest.raises(ReleaseNotRestorable, match="no durable checkpoint bytes"):
-        value.rollback("math", live["release_id"])
 
 
 @pytest.mark.unit

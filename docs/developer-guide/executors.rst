@@ -735,8 +735,9 @@ Reef records ``RUNNING`` before calling ``train``, then invokes
 ``save_checkpoint`` and verifies the checkpoint directory. When the backend
 sets ``TrainingCheckpoint.writes_checkpoint`` to false, Reef does not do
 these two steps. Slime does this with ``--save-interval`` above 1.
-Then the marker records a null ``checkpoint_path``, and the committer
-publishes the version of the job as live weights. Training metrics and
+Then the marker records a null ``checkpoint_path``, and the job publishes
+nothing: Reef serves only saved weights. The trainer keeps its weights, and the
+next job that saves publishes them. Training metrics and
 method telemetry are recorded together with ``CHECKPOINT`` in one durable write,
 so a crash cannot leave a replayable checkpoint without its training metrics.
 The coordinator performs colocated inference offload and selects the scenario

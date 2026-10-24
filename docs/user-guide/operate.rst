@@ -30,7 +30,7 @@ Read the release chain
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/releases"
 
-Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Content can be live (``content_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (``content_kind: saved_artifact``, a Git LFS commit).
+Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Every release's content is saved in the repository as a Git LFS commit.
 
 For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
@@ -103,11 +103,11 @@ Rollback republishes the target as a new commit and makes it current; history is
 Set the checkpoint cadence
 --------------------------
 
-Each version whose checkpoint the training backend saves becomes a durable artifact. A Tinker deployment saves each version. A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts.
+Reef serves only weights that the training backend saved and that passed candidate evaluation. Each version whose checkpoint the backend saves becomes an artifact. A Tinker deployment saves each version. A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts.
 
-Set ``1`` to save and publish after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, thus their versions are live weights: their versions are recorded, but their bytes are not. The driver does not start with ``--release-train`` when the value is above 1. A scenario that serves several components cannot publish live weights, so it needs ``1``.
+Set ``1`` to save and publish after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, so they publish nothing: their records, metrics and algorithm state are committed, serving stays on the last saved release, and the trainer keeps training from its own weights. The next saved version carries their updates. The driver does not start with ``--release-train`` when the value is above 1.
 
-A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again. Per-scenario LoRA applies the same rule to each scenario, as if each scenario trained its own full weights. Each scenario counts its own versions, saves after its own ``N``-th version, and loses a maximum of ``N`` - 1 of its own jobs. At the next start, Reef publishes each scenario's last save under a new runtime load ID. The scenario serves that checkpoint until its next training step publishes a new version.
+A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again. Per-scenario LoRA applies the same rule to each scenario, as if each scenario trained its own full weights. Each scenario counts its own versions, saves after its own ``N``-th version, and loses a maximum of ``N`` - 1 of its own jobs. At the next start, Reef publishes each scenario's last save under a new runtime load ID. The scenario serves that checkpoint until its next saved version passes evaluation.
 
 On a training deployment, checkpoint retention runs under ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``) with storage-fraction limits; when storage is blocked the step is deferred rather than failed, and ``/reef/status`` shows ``checkpoint_storage``.
 
@@ -148,8 +148,8 @@ What survives a restart, provided the storage paths are persistent:
      - in the Git LFS repository; the recovered head is what is served
    * - algorithm state and record progress
      - restored from the head record of the commit history
-   * - live weights
-     - not recoverable; the last checkpoint is restored
+   * - the training of the jobs after the last save
+     - not recoverable; training continues from the last saved checkpoint
    * - a training step in flight
      - not recoverable; the batch is replayed after the step is settled
    * - a local cycle's batch (a harness step) when the service stops

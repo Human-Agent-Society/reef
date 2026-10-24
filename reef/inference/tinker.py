@@ -25,7 +25,7 @@ from typing import Any
 
 from reef_client.sse import synthesize_sse_events
 
-from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
+from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
@@ -190,7 +190,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._handler = TinkerInferenceHandler(self, sampler, base_model)
         self._lock = RLock()
         self._incarnation = uuid.uuid4().hex
-        self._loads: dict[str, str | None] = {}
+        self._load_count = 0
         self._versions: dict[str | None, str] = {}
         self._releases: dict[str, tuple[str | None, str]] = {}
         self._active_release: str | None = None
@@ -223,18 +223,13 @@ class TinkerInferenceRuntime(InferenceRuntime):
         return sampler_path, version
 
     def _new_load(self, sampler_path: str | None) -> tuple[str | None, str]:
-        version = f"{self._incarnation}:{len(self._loads)}"
-        self._loads[version] = sampler_path
+        version = f"{self._incarnation}:{self._load_count}"
+        self._load_count += 1
         return sampler_path, version
 
     def snapshot(self, artifact: Artifact) -> tuple[str | None, str]:
         """Resolve exactly the frozen artifact; old in-flight calls keep their sampler."""
         with self._lock:
-            if isinstance(artifact.ref, LiveWeightArtifactRef):
-                version = artifact.ref.runtime_load_id
-                if version in self._loads:
-                    return self._loads[version], version
-                raise ValueError("Tinker live snapshot belongs to an unavailable serving incarnation")
             if artifact.ref.release_id in self._releases:
                 return self._releases[artifact.ref.release_id]
             sampler_path = checkpoint_sampler_path(artifact, self._model)

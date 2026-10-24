@@ -72,8 +72,6 @@ Reports and training
 
 **The training step fails and /reef/status reports an error.** The service log has the traceback. A driver rejecting ``--wandb-key`` or ``--use-wandb`` means tracking must be configured under ``observability.wandb`` instead. A mismatch between the recipe's loss family and the Slime flags is refused at startup by design.
 
-**After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``save-interval`` at 1 unless you can afford to lose live versions.
-
 **After a restart, the training of the last jobs is lost.** With ``--save-interval`` above 1, the jobs between two saves keep no checkpoint. At the next start, the Slime preflight deletes the job marker of such a job and writes it to the log. Training continues from the last saved checkpoint. The batches of the jobs after that checkpoint do not train again. With per-scenario LoRA, each scenario continues from its own last checkpoint. To lose fewer jobs, decrease the interval.
 
 **A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:

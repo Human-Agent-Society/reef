@@ -67,7 +67,7 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The selected content: a model checkpoint, live weights, or a harness tree.
+The selected content: a model checkpoint or a harness tree.
 ``content_id`` identifies those contents independently of when or why Reef
 published them.
 

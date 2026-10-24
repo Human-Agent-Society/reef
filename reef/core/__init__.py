@@ -25,7 +25,7 @@ so identity can be shared without pulling in storage, and
 ``tests/contributing/test_dependency_boundaries.py``.
 """
 
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
+from reef.core.artifact_ref import ArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
@@ -33,7 +33,6 @@ from reef.core.reports import ReportBase, ReportValidationError
 __all__ = [
     "AgentRecord",
     "ArtifactRef",
-    "LiveWeightArtifactRef",
     "ReefError",
     "ReportBase",
     "ReportValidationError",

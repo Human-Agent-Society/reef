@@ -125,18 +125,18 @@ Built-in surfaces
 
 **Weights.** ``WeightLoader`` probes whether an in-memory live runtime load ID
 survived a restart and restores durable checkpoints during rollback.
-``WeightInferenceHooks`` asks the engine to report its serving runtime load ID
-and verifies that metadata before Reef records the exchange. The training
+For a training scenario, Reef records the serving runtime load ID that the
+engine reports for each exchange, and rejects a response that reports none
+(see `HTTP API <../reference/http-api.rst>`__). The training
 runtime activates newly trained weights inside its own durable job
 transaction; the surface does not repeat that step.
 
 **Per-scenario adapters.** When a runtime trains one LoRA adapter per
 scenario, ``create_weight_surface(scenario=..., runtime=...)`` puts that
-scenario's adapter revision on every request. A live release names its frozen
-revision. A durable release names the revision the runtime serves for the
-scenario, as a full-weight durable release takes its version from the
-runtime: a restart publishes each scenario's checkpoint under a new runtime
-load ID. ``reef.surface.adapter`` holds only the
+scenario's adapter revision on every request. A release names the revision the
+runtime serves for the scenario, as a full-weight release takes its version
+from the runtime: a restart publishes each scenario's checkpoint under a new
+runtime load ID. ``reef.surface.adapter`` holds only the
 naming contract (``adapter_name(scenario, runtime_load_id)`` and its inverse), so a
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the training bridge owns one
@@ -214,9 +214,7 @@ committer carries the other forward from the previous checkpoint:
            )
 
 The base artifact of such a scenario keeps one directory per component
-(``weights/``, ``harness/``), and every step must publish a durable
-checkpoint: a live weight release names only an engine load, so it cannot
-carry the other components. ``CompositeRecipe`` (``reef.recipe.composite``)
+(``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
 builds exactly this from existing flat recipes, one per component, and runs
 each one's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.

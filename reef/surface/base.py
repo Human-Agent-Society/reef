@@ -400,8 +400,8 @@ class Surface:
         """
         if self.single:
             return artifact.ref.content_id != previous.ref.content_id
-        current = artifact.materialize().components if not artifact.is_live else None
-        before = previous.materialize().components if not previous.is_live else None
+        current = artifact.materialize().components
+        before = previous.materialize().components
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
         return current.entries[name].content_id != before.entries[name].content_id

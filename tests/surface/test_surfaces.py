@@ -13,7 +13,6 @@ from reef.surface import (
     InferenceHooks,
     LeasingInferenceHooks,
     RequestSkillLayer,
-    RuntimeLoadMismatch,
     SkillLayer,
     Surface,
     WeightInferenceHooks,
@@ -25,6 +24,7 @@ from reef.surface import (
 )
 from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
+from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
 
 
 class _InjectingModule(RequestSkillLayer):
@@ -167,18 +167,10 @@ def _checkpoint_artifact(tmp_path):
     return Artifact.local(d)
 
 
-def _live_artifact(runtime_load_id: str = "wv-1"):
-    from reef.artifact import Artifact, LiveWeightArtifactRef
+def _release_without_files():
+    from reef.artifact import Artifact, ArtifactRef
 
-    return Artifact(
-        LiveWeightArtifactRef(
-            content_id="artifact:live",
-            release_id=f"live:proc:{runtime_load_id}:1",
-            parent_release_id=None,
-            runtime_load_id=runtime_load_id,
-        ),
-        None,
-    )
+    return Artifact(ArtifactRef(content_id="artifact:release", release_id="release:1", parent_release_id=None), None)
 
 
 def _weight_hooks(surface: Surface | None = None):
@@ -193,50 +185,33 @@ def _weight_loader(surface: Surface | None = None):
     return loader
 
 
-def test_weight_surface_asks_live_requests_to_echo_the_serving_version() -> None:
-    artifact = _live_artifact("wv-1")
-    payload = {"model": "m", "messages": []}
-    out = _weight_hooks().prepare_request(artifact, "/v1/chat/completions", payload)
-    assert out == {**payload, "return_meta_info": True}
-    assert "return_meta_info" not in payload
-
-
-def test_weight_surface_skips_injection_for_checkpoints_and_streams(tmp_path) -> None:
-    surface = create_weight_surface()
-    payload = {"model": "m", "messages": []}
-    assert (
-        _weight_hooks(surface).prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload)
-        is payload
-    )
-    streaming = {**payload, "stream": True}
-    assert _weight_hooks(surface).prepare_request(_live_artifact(), "/v1/chat/completions", streaming) is streaming
-
-
 def test_weight_surface_addresses_every_request_to_the_served_adapter(tmp_path) -> None:
     # The engine applies an adapter only when the request names it, so a
     # LoRA deployment must name it on every request — including the
     # checkpoint and streaming paths that skip version echoing.
     surface = create_weight_surface(adapter_name="reef_lora")
     payload = {"model": "m", "messages": []}
-    live = _weight_hooks(surface).prepare_request(_live_artifact("wv-1"), "/v1/chat/completions", payload)
-    assert live == {**payload, "lora_path": "reef_lora", "return_meta_info": True}
     checkpoint = _weight_hooks(surface).prepare_request(
         _checkpoint_artifact(tmp_path), "/v1/chat/completions", payload
     )
     assert checkpoint == {**payload, "lora_path": "reef_lora"}
     streaming = _weight_hooks(surface).prepare_request(
-        _live_artifact(), "/v1/chat/completions", {**payload, "stream": True}
+        _checkpoint_artifact(tmp_path), "/v1/chat/completions", {**payload, "stream": True}
     )
-    assert streaming["lora_path"] == "reef_lora"
+    assert streaming == {**payload, "stream": True, "lora_path": "reef_lora"}
     assert "lora_path" not in payload
 
 
 def test_weight_surface_refuses_a_request_naming_another_adapter() -> None:
     surface = create_weight_surface(adapter_name="reef_lora")
     with pytest.raises(ReefError, match="serves adapter 'reef_lora'"):
-        _weight_hooks(surface).prepare_request(_live_artifact(), "/v1/chat/completions", {"lora_path": "other"})
+        _weight_hooks(surface).prepare_request(
+            _release_without_files(), "/v1/chat/completions", {"lora_path": "other"}
+        )
     # Naming the served adapter explicitly is redundant, not wrong.
-    out = _weight_hooks(surface).prepare_request(_live_artifact(), "/v1/chat/completions", {"lora_path": "reef_lora"})
+    out = _weight_hooks(surface).prepare_request(
+        _release_without_files(), "/v1/chat/completions", {"lora_path": "reef_lora"}
+    )
     assert out["lora_path"] == "reef_lora"
 
 
@@ -245,19 +220,16 @@ def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> No
     assert _weight_hooks().prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload) is payload
 
 
-def test_weight_surface_accepts_a_matching_reported_version() -> None:
-    surface = create_weight_surface()
-    artifact = _live_artifact("wv-7")
-    _weight_hooks(surface).verify_response(artifact, "/v1/chat/completions", {"metadata": {"runtime_load_id": "wv-7"}})
+def test_the_reported_version_is_read_from_every_response_shape() -> None:
+    assert reported_runtime_load_id({"metadata": {"runtime_load_id": "wv-7"}}) == "wv-7"
     # Native /generate shape: top-level meta_info.
-    _weight_hooks(surface).verify_response(artifact, "/generate", {"meta_info": {"runtime_load_id": "wv-7"}})
-    # OpenAI chat shape with return_meta_info: per-choice meta_info.
-    _weight_hooks(surface).verify_response(
-        artifact, "/v1/chat/completions", {"choices": [{"meta_info": {"runtime_load_id": "wv-7"}}]}
-    )
+    assert reported_runtime_load_id({"meta_info": {"runtime_load_id": "wv-7"}}) == "wv-7"
+    # OpenAI chat shape: per-choice meta_info.
+    assert reported_runtime_load_id({"choices": [{"meta_info": {"runtime_load_id": "wv-7"}}]}) == "wv-7"
+    assert reported_runtime_load_id({"choices": [{"message": {"content": "hi"}}]}) is None
 
 
-def test_weight_surface_accepts_exact_mixed_token_versions_from_an_in_place_update() -> None:
+def test_mixed_token_versions_from_an_in_place_update_are_valid_spans() -> None:
     response = {
         "choices": [{"meta_info": {"runtime_load_id": "engine:7"}}],
         "training": {
@@ -270,10 +242,10 @@ def test_weight_surface_accepts_exact_mixed_token_versions_from_an_in_place_upda
         },
     }
 
-    _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
+    assert [span.runtime_load_id for span in reported_runtime_load_spans(response)] == ["engine:6", "engine:7"]
 
 
-def test_weight_surface_reads_anthropic_producing_version_from_private_training_spans() -> None:
+def test_the_reported_version_of_an_anthropic_response_is_its_final_training_span() -> None:
     response = {
         "type": "message",
         "content": [{"type": "text", "text": "done"}],
@@ -287,36 +259,7 @@ def test_weight_surface_reads_anthropic_producing_version_from_private_training_
         },
     }
 
-    _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/messages", response)
-
-
-def test_weight_surface_rejects_inconsistent_mixed_token_versions() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "engine:8"}}],
-        "training": {
-            "response_length": 2,
-            "runtime_load_spans": [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-    with pytest.raises(RuntimeLoadMismatch, match="runtime-load-ID spans end"):
-        _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
-
-
-def test_weight_surface_accepts_when_weight_update_precedes_the_first_decode() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "engine:7"}}],
-        "training": {
-            "response_length": 2,
-            "runtime_load_spans": [
-                {"start": 0, "end": 2, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-
-    _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
+    assert reported_runtime_load_id(response) == "engine:7"
 
 
 @pytest.mark.parametrize(
@@ -327,7 +270,7 @@ def test_weight_surface_accepts_when_weight_update_precedes_the_first_decode() -
         ("engine:6", "replacement:7"),
     ],
 )
-def test_weight_surface_rejects_impossible_runtime_load_histories(runtime_load_ids) -> None:
+def test_impossible_runtime_load_histories_are_rejected(runtime_load_ids) -> None:
     response = {
         "choices": [{"meta_info": {"runtime_load_id": runtime_load_ids[-1]}}],
         "training": {
@@ -340,61 +283,7 @@ def test_weight_surface_rejects_impossible_runtime_load_histories(runtime_load_i
     }
 
     with pytest.raises(ValueError, match=r"advance monotonically|return to an earlier"):
-        _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
-
-
-def test_weight_surface_rejects_token_history_older_than_the_frozen_head() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "engine:5"}}],
-        "training": {
-            "response_length": 1,
-            "runtime_load_spans": [{"start": 0, "end": 1, "runtime_load_id": "engine:5"}],
-        },
-    }
-
-    with pytest.raises(RuntimeLoadMismatch, match="cannot follow frozen"):
-        _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
-
-
-def test_weight_surface_rejects_opaque_history_for_a_canonical_frozen_head() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "opaque-version"}}],
-        "training": {
-            "response_length": 1,
-            "runtime_load_spans": [{"start": 0, "end": 1, "runtime_load_id": "opaque-version"}],
-        },
-    }
-
-    with pytest.raises(RuntimeLoadMismatch, match="incompatible with canonical"):
-        _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
-
-
-def test_weight_surface_skips_validation_for_checkpoints(tmp_path) -> None:
-    _weight_hooks().verify_response(_checkpoint_artifact(tmp_path), "/v1/chat/completions", {"provider": "ok"})
-
-
-def test_weight_surface_rejects_a_mismatched_reported_version() -> None:
-    surface = create_weight_surface()
-    artifact = _live_artifact("wv-7")
-    with pytest.raises(RuntimeLoadMismatch, match=r"wv-7.*wv-8|wv-8.*wv-7"):
-        _weight_hooks(surface).verify_response(
-            artifact, "/v1/chat/completions", {"choices": [{"meta_info": {"runtime_load_id": "wv-8"}}]}
-        )
-    with pytest.raises(RuntimeLoadMismatch):
-        _weight_hooks(surface).verify_response(artifact, "/generate", {"meta_info": {"runtime_load_id": "wv-8"}})
-
-
-def test_weight_surface_rejects_an_engine_that_reports_no_version() -> None:
-    surface = create_weight_surface()
-    artifact = _live_artifact("wv-7")
-    with pytest.raises(RuntimeLoadMismatch, match="reports no runtime_load_id"):
-        _weight_hooks(surface).verify_response(
-            artifact, "/v1/chat/completions", {"choices": [{"message": {"content": "hi"}}]}
-        )
-    with pytest.raises(RuntimeLoadMismatch, match="reports no runtime_load_id"):
-        _weight_hooks(surface).verify_response(
-            artifact, "/generate", {"meta_info": {"finish_reason": {"type": "stop"}}}
-        )
+        reported_runtime_load_spans(response)
 
 
 def test_record_only_surface_has_no_inference_hooks() -> None:
@@ -495,16 +384,6 @@ def _checkpoint_ref(version: str = "checkpoint:step-7"):
     return ArtifactRef(content_id="artifact:ckpt", release_id=version, parent_release_id=None)
 
 
-def test_a_live_release_serves_under_the_version_that_published_it() -> None:
-    # The engine already loaded e:2, but Reef did not commit it yet.
-    runtime = _StubTrainingRuntime("e:2", published="e:2")
-    assert create_weight_surface().served_runtime_load_id(_live_artifact("e:1"), runtime) == "e:1"
-    # A per-scenario adapter is named after the version of the committed release.
-    adapters = _StubAdapterRuntime("e:2", {"math": "e:2"})
-    surface = create_weight_surface(scenario="math", runtime=adapters)
-    assert surface.served_runtime_load_id(_live_artifact("e:3"), adapters) == "e:3"
-
-
 def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
     from reef.artifact import Artifact
 
@@ -523,25 +402,11 @@ def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_p
     assert surface.served_runtime_load_id(restored, _StubAdapterRuntime("e:6", {})) is None
 
 
-def test_recover_keeps_the_live_head_the_engine_still_holds() -> None:
-    assert isinstance(_StubTrainingRuntime("wv-1"), WeightRuntime)
-    live = _live_artifact("wv-1").ref
-    got = _weight_loader().recover(live, _checkpoint_ref(), _StubTrainingRuntime("wv-1"))
-    assert got is live
-
-
-def test_recover_falls_back_when_the_engine_cannot_serve_the_live_head() -> None:
-    # A restarted engine never names the recovered version: issue #138.
-    live = _live_artifact("dead-session:2").ref
+def test_recover_serves_the_checkpoint_when_the_head_is_not_durable() -> None:
+    local = _release_without_files().ref
     checkpoint = _checkpoint_ref()
-    got = _weight_loader().recover(live, checkpoint, _StubTrainingRuntime("live-session:1"))
-    assert got is checkpoint
-
-
-def test_recover_leaves_unprobeable_runtimes_alone() -> None:
-    live = _live_artifact("wv-1").ref
-    assert _weight_loader().recover(live, _checkpoint_ref(), None) is live
-    assert _weight_loader().recover(live, _checkpoint_ref(), _StubTrainingRuntime(None)) is live
+    assert _weight_loader().recover(local, checkpoint, _StubTrainingRuntime("session:1")) is checkpoint
+    assert _weight_loader().recover(local, checkpoint, None) is checkpoint
 
 
 def test_recover_short_circuits_when_already_at_the_head() -> None:
@@ -552,16 +417,17 @@ def test_recover_short_circuits_when_already_at_the_head() -> None:
     assert _weight_loader(surface).recover(same, checkpoint, _StubTrainingRuntime("nope")) is checkpoint
 
 
-def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision() -> None:
+def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision(tmp_path) -> None:
+    from reef.artifact import Artifact
     from reef.surface import adapter_name
 
-    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {}))
-    live = _live_artifact(runtime_load_id="engine:7")
-    served = hooks.prepare_request(live, "/v1/chat/completions", {"messages": []})
-    assert served["lora_path"] == adapter_name("math", "engine:7")
-    assert served["return_meta_info"] is True
+    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {"math": "engine:7"}))
+    published = Artifact.local(tmp_path, metadata={"runtime_load_id": "engine:3"})
+    served = hooks.prepare_request(published, "/v1/chat/completions", {"messages": []})
+    # The release serves under the revision the runtime holds for the scenario.
+    assert served == {"messages": [], "lora_path": adapter_name("math", "engine:7")}
     with pytest.raises(ReefError, match="asked for lora_path"):
-        hooks.prepare_request(live, "/v1/chat/completions", {"lora_path": adapter_name("code", "engine:7")})
+        hooks.prepare_request(published, "/v1/chat/completions", {"lora_path": adapter_name("code", "engine:7")})
 
 
 def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> None:
@@ -577,20 +443,3 @@ def test_weight_hooks_refuse_both_a_shared_and_a_scenario_adapter() -> None:
         WeightInferenceHooks("shared", scenario="math", runtime=_StubAdapterRuntime(None, {}))
     with pytest.raises(ValueError, match="both the scenario and the runtime"):
         WeightInferenceHooks(scenario="math")
-
-
-def test_weight_loader_recovers_against_the_scenarios_own_adapter_version(tmp_path) -> None:
-    class Runtime(_StubTrainingRuntime, AdapterWeightRuntime):
-        def __init__(self):
-            super().__init__("engine:9")  # some other scenario published last
-
-        def serving_adapter_runtime_load_id(self, scenario):
-            return "engine:4" if scenario == "math" else None
-
-    checkpoint = _checkpoint_artifact(tmp_path).ref
-    live = _live_artifact(runtime_load_id="engine:4").ref
-    assert WeightLoader(scenario="math").recover(live, checkpoint, Runtime()) == live
-    # A scenario whose adapter the engine no longer holds falls back.
-    assert WeightLoader(scenario="code").recover(live, checkpoint, Runtime()) == checkpoint
-    # The unscoped loader still compares against the global version.
-    assert WeightLoader().recover(live, checkpoint, Runtime()) == checkpoint

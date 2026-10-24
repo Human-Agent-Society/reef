@@ -20,7 +20,7 @@ from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOBatches, SAOTasks
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import LiveWeightArtifactRef
+from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -102,16 +102,10 @@ def _sao_inference(
     }
     if action_mask is not None:
         payload["action_mask"] = list(action_mask)
-    artifact_ref = (
-        LiveWeightArtifactRef(
-            content_id="math",
-            release_id=runtime_load_id,
-            parent_release_id=None,
-            runtime_load_id=runtime_load_id,
-        )
-        if runtime_load_id
-        else None
-    )
+    # The serve path of a training scenario records the version that answered.
+    if runtime_load_id:
+        payload["runtime_load_id"] = runtime_load_id
+    artifact_ref = ArtifactRef(content_id="math", release_id="release-1", parent_release_id=None)
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
@@ -255,11 +249,9 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
 
 
 @pytest.mark.unit
-def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live() -> None:
-    # Rollouts served before the first training commit carry a plain checkpoint
-    # ArtifactRef (kind="artifact"), not a LiveWeightArtifactRef; their producing
-    # version lives only in payload["runtime_load_id"], set by the durable serve
-    # path. The sample must still record its producing version, or prepare_training_step rejects
+def test_processor_reads_runtime_load_id_from_the_payload_of_a_record_without_a_release() -> None:
+    # The producing version lives in payload["runtime_load_id"], set by the
+    # durable serve path. The sample must still record it, or prepare_training_step rejects
     # the whole batch ("requires one recorded producing runtime load ID") and no
     # SAO step ever runs.
     inference = AgentRecord.create(
@@ -487,7 +479,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         self.jobs.append(dict(payload))
         job_id = f"job-{scenario_step}"
         if self.checkpoint_root is None:
-            # A job that saves no checkpoint publishes live weights.
+            # A job that saves no checkpoint publishes nothing.
             checkpoint_path = None
         else:
             checkpoint = self.checkpoint_root / job_id
@@ -607,12 +599,10 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
 @pytest.mark.integration
 def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     # The paper's async claim: after a step, the version an inference would
-    # freeze IS the freshly-synced one, not the pre-train head. The runtime
-    # saves no checkpoint, so the head stays a LiveWeightArtifactRef whose
-    # runtime_load_id is observable.
+    # freeze IS the freshly-synced one, not the pre-train head.
     initial = tmp_path / "initial"
     initial.mkdir()
-    runtime = _StubTrainingRuntime()
+    runtime = _StubTrainingRuntime(checkpoint_root=tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
         SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
@@ -628,13 +618,12 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
         dispatcher.accept_record(_sao_report("r1", "i1", 0.9))
 
         _wait_for_step(dispatcher, 1)
-        head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
-        # The new head is a live-weight ref carrying the freshly-synced version,
-        # and it actually moved off the pre-train head (guards against a
-        # constant stub).
-        assert isinstance(head, LiveWeightArtifactRef)
-        assert head.runtime_load_id == "slime-v4"
+        scenario = dispatcher.get_or_create_scenario("math")
+        head = scenario.repository.require_current_artifact()
+        # The new head is the saved release of the freshly-synced version, and it
+        # actually moved off the pre-train head (guards against a constant stub).
         assert head.release_id != pre_head.release_id
+        assert dispatcher.current_artifact("math").materialize().metadata["runtime_load_id"] == "slime-v4"
         assert runtime.serving_runtime_load_id() == "slime-v4"
     finally:
         dispatcher.close()

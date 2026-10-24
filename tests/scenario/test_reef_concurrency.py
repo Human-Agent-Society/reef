@@ -9,19 +9,13 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from reef.artifact import (
-    Artifact,
-    ArtifactConflict,
-    ArtifactRef,
-    InMemoryRepositoryBackend,
-    LiveWeightArtifactRef,
-    Repository,
-)
+from reef.artifact import Artifact, ArtifactConflict, ArtifactRef, InMemoryRepositoryBackend, Repository
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
@@ -30,12 +24,13 @@ from reef.train.types import TrainStepResult
 
 
 class CountingRuntime(StubTrainingRuntime):
-    """Training runtime that counts durable jobs across threads."""
+    """Training runtime that counts durable jobs across threads; with ``checkpoint_root`` every job saves its weights."""
 
-    def __init__(self) -> None:
+    def __init__(self, checkpoint_root: Path | None = None) -> None:
         super().__init__(base_url="http://trainer")
         self._lock = threading.Lock()
         self.train_calls = 0
+        self._checkpoint_root = checkpoint_root
 
     @property
     def inference_handler(self):
@@ -57,10 +52,16 @@ class CountingRuntime(StubTrainingRuntime):
             self.train_calls += 1
             version = f"w{self.train_calls}"
         job_id = f"job-{payload['scenario_step']}"
+        checkpoint_path = None
+        if self._checkpoint_root is not None:
+            checkpoint = self._checkpoint_root / job_id
+            checkpoint.mkdir(parents=True)
+            (checkpoint / "model.txt").write_text(version)
+            checkpoint_path = str(checkpoint)
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
-            checkpoint_path=None,
+            checkpoint_path=checkpoint_path,
             current_runtime_load_id=None,
             metadata={"runtime_load_id": version},
         )
@@ -135,12 +136,7 @@ def test_advance_current_requires_the_observed_head(tmp_path) -> None:
     head = repository.require_current_artifact()
 
     stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
-    advanced = LiveWeightArtifactRef(
-        content_id="live:1",
-        release_id="live:proc:w1:1",
-        parent_release_id=head.release_id,
-        runtime_load_id="w1",
-    )
+    advanced = ArtifactRef(content_id="live:1", release_id="live:proc:w1:1", parent_release_id=head.release_id)
     with pytest.raises(ArtifactConflict, match="serving head advanced"):
         repository.advance_current(advanced, expected=stale)
 
@@ -154,7 +150,7 @@ def test_advance_current_requires_the_observed_head(tmp_path) -> None:
 def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    runtime = CountingRuntime()
+    runtime = CountingRuntime(tmp_path / "checkpoints")
     pairs_per_thread = 4
     thread_count = 4
     dispatcher = Dispatcher(
@@ -182,10 +178,8 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     assert runtime.train_calls == total
     assert scenario.trainer.state == {"steps": total}
     assert scenario.scenario_step == total
-    head = scenario.repository.require_current_artifact()
-    assert isinstance(head, LiveWeightArtifactRef)
-    assert head.runtime_load_id == f"w{total}"
-    assert head.release_id.endswith(f":w{total}:{total}")
+    # Each batch published one saved release; the head is the last one.
+    assert dispatcher.current_artifact("math").materialize().metadata["runtime_load_id"] == f"w{total}"
 
 
 @pytest.mark.unit

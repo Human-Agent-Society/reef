@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
 from reef.runtime.interfaces import inference_aborted
 
@@ -50,12 +50,7 @@ def _local_artifact(tmp_path) -> Artifact:
 
 def _live_artifact() -> Artifact:
     return Artifact(
-        LiveWeightArtifactRef(
-            content_id="live-test",
-            release_id="live:engine:6",
-            parent_release_id="checkpoint",
-            runtime_load_id="engine:6",
-        ),
+        ArtifactRef(content_id="live-test", release_id="live:engine:6", parent_release_id="checkpoint"),
         None,
     )
 

@@ -13,7 +13,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.artifact_ref import LiveWeightArtifactRef, RuntimeLoadSpan, parse_runtime_load_spans
+from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.batches import TrajectoryItem
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
@@ -197,11 +197,7 @@ def make_policy_trajectory(
             raise ValueError("response training runtime_load_id disagrees with its token runtime-load-ID spans")
         runtime_load_id = next(iter(span_versions)) if len(span_versions) == 1 else None
     else:
-        artifact_ref = item.artifact_ref
-        served_runtime_load_id = (
-            artifact_ref.runtime_load_id if isinstance(artifact_ref, LiveWeightArtifactRef) else None
-        )
-        runtime_load_id = recorded_runtime_load_id or training_runtime_load_id or served_runtime_load_id
+        runtime_load_id = recorded_runtime_load_id or training_runtime_load_id
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
     return make_trajectory((item,), reward).with_training(

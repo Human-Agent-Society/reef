@@ -13,24 +13,11 @@ from reef.artifact import (
     GitVersionSource,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
-    LiveWeightArtifactRef,
     Repository,
     RepositoryBackend,
     download_huggingface_snapshot,
     parse_artifact_source,
 )
-
-
-@pytest.mark.unit
-def test_live_weight_artifact_ref_specializes_the_generic_identity() -> None:
-    durable = ArtifactRef("artifact-1", "checkpoint-1", None)
-    live = LiveWeightArtifactRef("artifact-2", "live-2", "checkpoint-1", "engine:2")
-
-    assert not hasattr(durable, "runtime_load_id")
-    assert isinstance(live, ArtifactRef)
-    assert live.runtime_load_id == "engine:2"
-    with pytest.raises(ValueError, match="non-empty"):
-        LiveWeightArtifactRef("artifact-3", "live-3", "checkpoint-1", "")
 
 
 @pytest.mark.unit
@@ -73,18 +60,8 @@ def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> 
         checkpoint_artifact=fork,
         local_dir=tmp_path / "local",
     )
-    chain = ArtifactReleaseChain(repository, process_id="worker")
-
-    expected, live = chain.prepare_live(step=1, runtime_load_id="engine-1")
-    _, retry = chain.prepare_live(step=1, runtime_load_id="engine-1")
-    assert expected == fork
+    chain = ArtifactReleaseChain(repository)
     assert chain.current == fork
-    assert retry == live
-    assert live.release_id == "live:worker:engine-1:1"
-    assert live.parent_release_id == fork.release_id
-
-    chain.advance(live, expected=expected)
-    assert chain.current == live
     assert chain.checkpoint == fork
 
     candidate = tmp_path / "candidate"

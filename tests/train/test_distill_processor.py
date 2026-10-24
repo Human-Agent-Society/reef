@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from reef.artifact.artifact import LiveWeightArtifactRef
+from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
@@ -97,9 +97,7 @@ def _inference(agent_record_id: str, *, messages: list[dict[str, Any]] | None = 
         request_type=RequestType.INFERENCE,
         payload=payload,
         agent_record_id=agent_record_id,
-        artifact_ref=LiveWeightArtifactRef(
-            content_id="science", release_id="slime-v3", parent_release_id=None, runtime_load_id="slime-v3"
-        ),
+        artifact_ref=ArtifactRef(content_id="science", release_id="slime-v3", parent_release_id=None),
     )
 
 

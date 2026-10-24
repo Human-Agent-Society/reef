@@ -12,14 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import (
-    Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
-    ArtifactPublicationError,
-    ArtifactRef,
-    LiveWeightArtifactRef,
-)
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
@@ -340,10 +333,9 @@ class ScenarioFactory:
                 local_dir=self._local_artifact_dir,
             )
             repository.synchronize_checkpoint()
-            if not isinstance(current_artifact, LiveWeightArtifactRef):
-                # Traffic must not reach a recovered scenario before its committed
-                # head is servable; a failed activation leaves the scenario unloaded.
-                surface.activate(Artifact(current_artifact, repository), runtime)
+            # Traffic must not reach a recovered scenario before its committed
+            # head is servable; a failed activation leaves the scenario unloaded.
+            surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,

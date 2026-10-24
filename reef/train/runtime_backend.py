@@ -179,6 +179,12 @@ class RuntimeCandidateBackend(CandidateBackend):
             return PreparedStep.dropped(state=state, metrics={**metrics, **stale.metrics})
         if not isinstance(candidate, ModelCandidate):
             raise RuntimeContractError(f"{type(runtime).__name__}.train_candidate must return ModelCandidate")
+        if candidate.checkpoint_path is None:
+            # Reef serves only saved weights that passed evaluation, so a job that saved
+            # nothing publishes nothing. The trainer keeps training from its own weights,
+            # and the next job that saves publishes them.
+            self.reject_candidate(candidate)
+            return PreparedStep.skipped(state=next_state, metrics={**candidate.training_metrics, **metrics})
         return PreparedStep.with_candidate(candidate, state=next_state, metrics=metrics)
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:

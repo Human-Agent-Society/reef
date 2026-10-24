@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import (
     Artifact,
@@ -13,13 +15,12 @@ from reef.artifact import (
     ArtifactError,
     ArtifactPublicationError,
     InMemoryRepositoryBackend,
-    LiveWeightArtifactRef,
     Repository,
 )
 from reef.core import ReefError, RequestType
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.inference.http import HttpInferenceHandler, content_identity_headers
+from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
@@ -38,17 +39,16 @@ class ContractInferenceHandler(InferenceHandler):
 
 
 class WeightRecipe(Recipe):
-    """A recipe whose scenarios commit live weights, so serving-version
-    verification applies (the core ``recipe`` implementation serves a plain
-    evolution surface and never verifies a runtime load ID)."""
+    """A recipe whose scenarios serve weights (the core ``recipe`` implementation serves a plain evolution surface)."""
 
     def build_surface(self, scenario: str) -> Surface:
         return create_weight_surface()
 
 
-def weight_dispatcher(tmp_path, initial):
+def weight_dispatcher(tmp_path, initial, *, training: bool = False):
+    """A dispatcher of weight scenarios; ``training`` gives them a training runtime, so they record serving versions."""
     return Dispatcher(
-        WeightRecipe(),
+        WeightRecipe(training_runtime=StubTrainingRuntime()) if training else WeightRecipe(),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
@@ -82,16 +82,6 @@ def test_provider_native_generation_stays_behind_inference_backend() -> None:
 
     assert {"/v1/chat/completions", "/v1/responses", "/v1/messages"} <= routes
     assert "/generate" not in routes
-
-
-@pytest.mark.unit
-def test_live_artifact_headers_use_version_without_a_checkpoint_path() -> None:
-    ref = LiveWeightArtifactRef("artifact-1", "live:weight-v1", "checkpoint", "weight-v1")
-    artifact = Artifact(ref, None)
-
-    assert content_identity_headers(artifact) == {
-        "x-reef-release-id": "live:weight-v1",
-    }
 
 
 @pytest.mark.unit
@@ -721,48 +711,14 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
     asyncio.run(run())
 
 
-@pytest.mark.unit
-def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
-    async def run() -> None:
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del path, payload
-            assert artifact.local_path is None
-            assert isinstance(artifact.ref, LiveWeightArtifactRef)
-            # Real engines report the serving version in meta_info.
-            return {"meta_info": {"runtime_load_id": artifact.ref.runtime_load_id}}
-
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat")
-        checkpoint = dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
-        runtime = dispatcher.get_or_create_scenario("chat")
-        assert runtime.repository.current_artifact.release_id.startswith("live:")
-        assert runtime.repository.checkpoint_artifact == checkpoint
-        assert runtime.scenario_step == 1
-
-        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
-        await client.start_server()
-        try:
-            response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": []},
-            )
-            assert response.status == 200
-            assert "x-reef-runtime-load-ID" not in response.headers
-            assert await response.json() == {"meta_info": {"runtime_load_id": "sglang-v1"}}
-            listed = await client.get("/reef/scenarios/chat/releases")
-            current = next(row for row in (await listed.json())["releases"] if row["current"])
-            assert current["runtime_load_id"] == "sglang-v1"
-        finally:
-            await client.close()
-
-    import asyncio
-
-    asyncio.run(run())
+def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) -> None:
+    """Commit a training step whose weights the trainer saved, so the scenario serves them as ``version``."""
+    checkpoint = root / f"checkpoint-{version}"
+    checkpoint.mkdir()
+    (checkpoint / "model.txt").write_text(version)
+    dispatcher.registry.get(scenario).commit(
+        TrainStepResult(state=None, runtime_load_id=version, checkpoint_path=str(checkpoint))
+    )
 
 
 @pytest.mark.unit
@@ -784,10 +740,8 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
         dispatcher.get_or_create_scenario("chat")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
         head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
-        assert isinstance(head, LiveWeightArtifactRef)
-        assert head.runtime_load_id == "sglang-v1"
 
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
@@ -809,7 +763,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         assert metrics["serve/request/completed_total"] == 1
         assert metrics["serve/retries_total"] == 1
         assert metrics["serve/version_mismatch_total"] == 0
-        assert [ref.runtime_load_id for ref in calls] == ["sglang-v1", "sglang-v1"]
+        assert calls == [head, head]
         recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert len(recorded) == 1
         assert recorded[0].artifact_ref == calls[-1]
@@ -979,7 +933,7 @@ def test_aborted_training_stream_without_a_runtime_load_id_is_not_a_mismatch(
         dispatcher = weight_dispatcher(tmp_path, initial)
         try:
             dispatcher.get_or_create_scenario("chat")
-            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+            commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
             status, _, body = await post_stream(dispatcher, handler, path)
             assert status == 200
             assert body == b"".join(frames)
@@ -1062,59 +1016,6 @@ def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_b
 
 
 @pytest.mark.unit
-def test_completed_inference_with_mismatched_runtime_load_id_fails_loudly(tmp_path) -> None:
-    """A completed response with unverifiable runtime-load-ID information returns 409 and is never recorded."""
-
-    async def run() -> None:
-        calls = []
-
-        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            del path, payload
-            calls.append(artifact.ref)
-            return {"choices": [{"message": {"content": "hi"}, "meta_info": {"runtime_load_id": "sglang-v2"}}]}
-
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
-
-        client = TestClient(
-            TestServer(
-                create_app(
-                    dispatcher,
-                    inference_handler=ContractInferenceHandler(backend),
-                    inference_retry_policy=InferenceRetryPolicy(initial_s=0.001, max_s=0.002, timeout_s=0.01),
-                )
-            )
-        )
-        await client.start_server()
-        try:
-            response = await client.post(
-                "/v1/chat/completions",
-                headers={"x-reef-scenario": "chat"},
-                json={"messages": []},
-            )
-            assert response.status == 409
-            assert "without token-level runtime-load-ID spans" in await response.text()
-        finally:
-            await client.close()
-
-        metrics = dispatcher.get_or_create_scenario("chat").operations.snapshot()
-        assert metrics["serve/request/failed_total"] == 1
-        assert metrics["serve/version_mismatch_total"] == 1
-        assert metrics["serve/retries_total"] == 0
-        assert metrics["ingest/accepted_total"] == 0
-        assert [ref.runtime_load_id for ref in calls] == ["sglang-v1"]
-        assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
-
-    import asyncio
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
 def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
     async def run() -> None:
         async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
@@ -1155,10 +1056,7 @@ def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
 
 @pytest.mark.unit
 def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> None:
-    """Live artifacts only exist behind engines that report runtime_load_id;
-
-    a response without one means the serving version is unverifiable — 409, no record.
-    """
+    """A training scenario records which weights answered; a response without a runtime_load_id is a 409 and no record."""
 
     async def run() -> None:
         async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
@@ -1168,9 +1066,9 @@ def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> 
         initial = tmp_path / "initial"
         initial.mkdir()
         (initial / "model.txt").write_text("base")
-        dispatcher = weight_dispatcher(tmp_path, initial)
+        dispatcher = weight_dispatcher(tmp_path, initial, training=True)
         dispatcher.get_or_create_scenario("chat")
-        dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
+        commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
 
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
         await client.start_server()
@@ -1190,35 +1088,6 @@ def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> 
     import asyncio
 
     asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-    backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first_dispatcher = Dispatcher(
-        WeightRecipe(),
-        backend,
-        local_artifact_dir=tmp_path / "first-local",
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-    checkpoint = first_dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
-    # Live weights have no checkpoint bytes, so a new dispatcher cannot serve them.
-    first_dispatcher.registry.get("chat").commit(TrainStepResult(state=None, runtime_load_id="sglang-v1"))
-    assert first_dispatcher.get_or_create_scenario("chat").repository.current_artifact != checkpoint
-
-    second_dispatcher = Dispatcher(
-        WeightRecipe(),
-        backend,
-        local_artifact_dir=tmp_path / "second-local",
-        scenario_storage=SQLiteScenarioStorage(),
-    )
-
-    assert second_dispatcher.get_or_create_scenario("chat").repository.current_artifact == checkpoint
-    restored = second_dispatcher.current_artifact("chat").materialize()
-    assert restored.local_path.joinpath("model.txt").read_text() == "base"
 
 
 @pytest.mark.unit
@@ -1449,8 +1318,10 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
 
     async def run() -> tuple[list[str], list[str]]:
         async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-            live = isinstance(artifact.ref, LiveWeightArtifactRef)
-            return {"meta_info": {"runtime_load_id": artifact.ref.runtime_load_id}} if live else {"ok": True}
+            # A training scenario records the version the engine reports.
+            return (
+                {"meta_info": {"runtime_load_id": "sglang-v2"}} if isinstance(recipe, WeightRecipe) else {"ok": True}
+            )
 
         initial = tmp_path / "initial"
         initial.mkdir()
@@ -1464,13 +1335,12 @@ def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_
         releases = [dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id]
         for version in (1, 2):
             if isinstance(recipe, WeightRecipe):
-                result = TrainStepResult(state=None, runtime_load_id=f"sglang-v{version}")
+                commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
             else:
                 candidate = tmp_path / f"candidate-{version}"
                 candidate.mkdir()
                 (candidate / "AGENTS.md").write_text(f"v{version}")
-                result = TrainStepResult(state=None, artifact=Artifact.local(candidate))
-            dispatcher.registry.get("chat").commit(result)
+                dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
             releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
         assert len(set(releases)) == 3
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))

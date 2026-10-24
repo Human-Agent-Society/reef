@@ -8,7 +8,7 @@ from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.opd import OpdObjective, OPDRecipe, OPDSettings, OPDTasks
 from recipes.opd.slime import OpdSettings
-from reef.artifact.artifact import LiveWeightArtifactRef
+from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
@@ -49,9 +49,7 @@ def inference() -> AgentRecord:
         scenario="math",
         request_type=RequestType.INFERENCE,
         agent_record_id="i1",
-        artifact_ref=LiveWeightArtifactRef(
-            content_id="math", release_id="slime-v3", parent_release_id=None, runtime_load_id="slime-v3"
-        ),
+        artifact_ref=ArtifactRef(content_id="math", release_id="slime-v3", parent_release_id=None),
         payload={
             "messages": [{"role": "user", "content": "Compute 1 + 1."}],
             "chat_template_kwargs": {"enable_thinking": False},

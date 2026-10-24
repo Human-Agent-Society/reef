@@ -612,7 +612,7 @@ class RequestService:
             # A flat release's hooks need it too: after a checkpointed commit the head is a
             # durable release whose runtime load ID lives only in its metadata, and a weight
             # hook that cannot read it names no adapter, so the frozen base answers instead.
-            # A live head is returned as is, and a durable one comes from the release cache.
+            # The materialized copy comes from the release cache.
             artifact = artifact.materialize()
         served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
         return PreparedInference(

@@ -40,7 +40,6 @@ class Scenario:
         trainers: tuple[ComponentTrainer, ...],
         model_config: ModelConfig | None = None,
         scenario_step: int = 0,
-        process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
@@ -79,7 +78,7 @@ class Scenario:
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.surface)
-        self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
+        self._artifact_chain = ArtifactReleaseChain(repository)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,

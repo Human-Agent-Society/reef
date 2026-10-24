@@ -21,7 +21,7 @@ from tests.recipes.sao.test_sao_bridge import (
 from tests.support.runtime_stubs import StubTrainingRuntime
 from tests.support.slime_coordinator import build_slime_coordinator
 
-from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef
 from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed
 from reef.runtime.recovery import ScenarioHistory, history_path, marker_path
@@ -417,7 +417,7 @@ def test_a_restart_serves_each_scenario_from_its_own_last_checkpoint(
 
     runtime = Runtime().inference
     saved = Artifact.local(Path(template.format(rollout_id=1)), metadata={"runtime_load_id": "inc:2"})
-    head = LiveWeightArtifactRef("live:a", "live:a:3", saved.ref.release_id, "inc:3")
+    head = ArtifactRef("live:a", "live:a:3", saved.ref.release_id)
     assert WeightLoader("a").recover(head, saved.ref, runtime) == saved.ref
     request = WeightInferenceHooks(scenario="a", runtime=runtime).prepare_request(saved, "/v1/chat/completions", {})
     assert request["lora_path"] == scenario_adapter_name("a", "inc:101")

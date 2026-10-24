@@ -12,7 +12,7 @@ from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _TEST_GROUPED_OBJE
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import ExecutorRuntimeFixture
 
-from reef.artifact import LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef
 from reef.core import RuntimeLoadSpan
 from reef.observability.operations import OperationMetrics
 from reef.runtime.executor import ray as ray_executor
@@ -972,8 +972,19 @@ def test_recovery_republishes_an_uncertain_partial_weight_update_before_commit()
     assert runtime.inference_admission_status == {"open": False, "active": 0}
 
 
+class LocalReleases:
+    """A release repository for request tests: every release materializes to the same local directory."""
+
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self.root = root
+
+    def materialize(self, ref: ArtifactRef) -> Artifact:
+        return Artifact(ref, None, local_path=self.root)
+
+
 @pytest.mark.unit
-def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch) -> None:
+def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch, tmp_path) -> None:
     async def call_inline(function, /, *args, **kwargs):
         return function(*args, **kwargs)
 
@@ -986,19 +997,14 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
     class Scenario:
         operations = OperationMetrics(("serve/request", "serve/admission"))
         recipe = "test"
-        repository = None
+        repository = LocalReleases(tmp_path / "releases")
         surface = create_weight_surface()
         inference_handler = None
 
         def __init__(self) -> None:
             self.runtime = runtime.inference_runtime
             self.training_runtime = runtime.training_runtime
-            self.ref = LiveWeightArtifactRef(
-                content_id="live:old",
-                release_id="live:proc:engine:0:0",
-                parent_release_id=None,
-                runtime_load_id="engine:0",
-            )
+            self.ref = ArtifactRef(content_id="content:old", release_id="release:0", parent_release_id=None)
 
         def current_artifact_ref(self):
             return self.ref
@@ -1018,12 +1024,12 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 
     class RecordingBackend(InferenceHandler):
         def __init__(self) -> None:
-            self.versions: list[str] = []
+            self.releases: list[str] = []
 
         async def inference(self, artifact, path, payload):
             del path, payload
-            self.versions.append(artifact.ref.runtime_load_id)
-            return {"metadata": {"runtime_load_id": artifact.ref.runtime_load_id}}
+            self.releases.append(artifact.ref.release_id)
+            return {"metadata": {"runtime_load_id": "engine:1"}}
 
     scenario = Scenario()
     backend = RecordingBackend()
@@ -1042,15 +1048,12 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
             for rollout in range(8 * 64)
         ]
         await asyncio.sleep(0)
-        assert backend.versions == []
+        assert backend.releases == []
         queued_metrics = scenario.operations.snapshot()
         assert queued_metrics["serve/request/active"] == 8 * 64
         assert queued_metrics["serve/admission/active"] == 8 * 64
-        scenario.ref = LiveWeightArtifactRef(
-            content_id="live:new",
-            release_id="live:proc:engine:1:1",
-            parent_release_id=scenario.ref.release_id,
-            runtime_load_id="engine:1",
+        scenario.ref = ArtifactRef(
+            content_id="content:new", release_id="release:1", parent_release_id=scenario.ref.release_id
         )
         runtime.reconcile_training_job(
             scenario_step=1,
@@ -1060,7 +1063,8 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         assert {response["metadata"]["runtime_load_id"] for response, _ in responses} == {"engine:1"}
 
     asyncio.run(run())
-    assert backend.versions == ["engine:1"] * (8 * 64)
+    # Every queued request froze the head that reopened admission.
+    assert backend.releases == ["release:1"] * (8 * 64)
     metrics = scenario.operations.snapshot()
     assert metrics["serve/request/active"] == 0
     assert metrics["serve/request/completed_total"] == 8 * 64
@@ -1069,21 +1073,16 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 
 
 @pytest.mark.unit
-def test_stream_and_failure_release_their_inference_admission_handles() -> None:
+def test_stream_and_failure_release_their_inference_admission_handles(tmp_path) -> None:
     runtime = ExecutorRuntimeFixture(
         train_group_handle=DeferredWeightUpdateTrainGroupHandle(), inference_url="http://router"
     )
-    ref = LiveWeightArtifactRef(
-        content_id="live:current",
-        release_id="live:proc:engine:0:0",
-        parent_release_id=None,
-        runtime_load_id="engine:0",
-    )
+    ref = ArtifactRef(content_id="content:current", release_id="release:0", parent_release_id=None)
 
     class Scenario:
         operations = OperationMetrics(("serve/request", "serve/admission"))
         recipe = "test"
-        repository = None
+        repository = LocalReleases(tmp_path / "releases")
         surface = create_weight_surface()
         inference_handler = None
 
@@ -1197,25 +1196,6 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         assert item.payload["runtime_load_id"] == "engine:0"
         assert Scenario.operations.snapshot()["serve/request/completed_total"] == 2
         assert runtime.inference_admission_status == {"open": True, "active": 0}
-
-        mismatched, mismatched_pending = await service.start_stream(
-            {"x-reef-scenario": "math"},
-            {"stream": True},
-            "/v1/chat/completions",
-            DeferredStreamingBackend(),
-        )
-        body = b"".join([chunk async for chunk in mismatched.chunks])
-        mismatched.record_response = {
-            "metadata": {"runtime_load_id": "engine:1"},
-            "training": {"runtime_load_id": "engine:1"},
-        }
-        with pytest.raises(RuntimeLoadMismatch):
-            service.record_stream(mismatched_pending, stream_record(mismatched, body, complete=True))
-        await mismatched.close()
-        metrics = Scenario.operations.snapshot()
-        assert metrics["serve/version_mismatch_total"] == 1
-        assert metrics["serve/request/failed_total"] == 1
-        assert metrics["serve/request/active"] == 0
 
         with pytest.raises(RuntimeLoadMismatch, match="atomic record_response"):
             await service.start_stream(

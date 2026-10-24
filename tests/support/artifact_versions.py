@@ -46,7 +46,7 @@ class RollbackRuntime(StubTrainingRuntime):
         self.trained += 1
         version = f"w{self.trained}"
         if (payload["scenario_step"] + 1) % self.save_interval:
-            # A job between two saves publishes live weights.
+            # A job between two saves publishes nothing.
             checkpoint_path = None
         else:
             checkpoint = self.checkpoint_dir / str(payload["scenario_step"])

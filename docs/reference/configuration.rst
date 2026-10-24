@@ -362,12 +362,11 @@ A training step in this mode works as follows:
 
 - The trainer stays on its GPUs between steps. Reef does not offload or
   reload it, because no other model shares the GPUs.
-- Each step commits a scenario version with its records, metrics and runtime
-  load ID, as with an engine. No weights leave the trainer: the version names
-  the weights that the trainer holds.
-- The step after each ``save-interval`` versions saves the Megatron
-  checkpoint and the HF export, and Reef publishes that version as an
-  artifact. See `Set the checkpoint cadence
+- Each step commits its records, metrics and algorithm state. No weights leave
+  the trainer between saves.
+- Each ``save-interval``-th step saves the Megatron checkpoint and the HF
+  export, and Reef publishes that version as an artifact. See `Set the
+  checkpoint cadence
   <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 - A restart continues from the last saved checkpoint, as with an engine.
 
@@ -462,9 +461,10 @@ The connector moves no KV and composes with another connector under vLLM's
 ``MultiConnector``. To combine it with vLLM's native CPU offloading, list
 ``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
 in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
-configured connector, so it cannot be combined with this one. A local release
-without the connector serves under its release id; a live release without it
-is rejected.
+configured connector, so it cannot be combined with this one. Without the
+connector the engine reports no runtime load ID: a scenario that trains rejects
+the response, and a scenario that does not train serves it under its release
+id.
 
 ``rollout_log_probs`` must mean the same thing on every engine as in the
 trainer. Sampling runs through::

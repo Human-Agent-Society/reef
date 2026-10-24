@@ -331,7 +331,8 @@ class ModelCandidate(UpdateCandidate):
     """A trained model update that has not changed serving weights.
 
     ``checkpoint_path`` is None if the backend saved no checkpoint for this
-    job. That occurs with a checkpoint interval larger than 1.
+    job, which occurs with a checkpoint interval larger than 1. Such a
+    candidate publishes nothing: Reef serves only saved weights.
     """
 
     training_job_id: str
@@ -380,7 +381,7 @@ class TrainingJobResult:
     training_job_id: str | None = None
 
     def __post_init__(self) -> None:
-        # None: the backend saved no checkpoint for this job. The committer publishes its version as live weights.
+        # None: the backend saved no checkpoint for this job, so the job publishes nothing.
         if self.checkpoint_path is not None:
             _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if not self.runtime_load_id:

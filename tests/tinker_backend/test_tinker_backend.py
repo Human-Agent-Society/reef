@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from recipes.tttd.tinker import TttdTinkerLoss
-from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
+from reef.artifact.artifact import Artifact
 from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
@@ -247,25 +247,6 @@ def test_reload_before_and_after_commit_restores_authoritative_artifact(runtime,
         assert client.initializations == 1
     finally:
         restored.shutdown()
-
-
-def test_live_versions_and_rollback_bind_exact_snapshots(runtime, objective, tmp_path):
-    value, _ = runtime
-    candidate = value.training.train_candidate(prepared(value, objective).payload)
-    activated = value.inference.activate_candidate(candidate)
-    value.backend(objective).acknowledge_commit(1, candidate.training_job_id)
-    live = Artifact(LiveWeightArtifactRef("live", "release", "parent", activated.runtime_load_id), None)
-    assert value.inference.snapshot(live)[0] == "tinker://update-1/sampler"
-    assert value.training.incumbent.state_path == "tinker://update-1/state"
-    base = empty_artifact(tmp_path)
-    value.training.restore_checkpoint(base)
-    WeightLoader().load(base, value.inference)
-    WeightLoader().activate(base, value.inference, source=base)
-    assert value.training.incumbent.state_path == "tinker://base/state"
-    assert value.inference.snapshot(live)[1] == activated.runtime_load_id
-    assert value.inference.current_runtime_load_id() != activated.runtime_load_id
-    with pytest.raises(ValueError, match="incarnation"):
-        value.inference.snapshot(Artifact(LiveWeightArtifactRef("live", "x", None, "old:0"), None))
 
 
 def test_exclusive_state_dir_and_model_validation(runtime, tmp_path):

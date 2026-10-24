@@ -17,14 +17,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.artifact.artifact import (
-    Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
-    ArtifactPublicationError,
-    ArtifactRef,
-    LiveWeightArtifactRef,
-)
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
@@ -43,7 +36,6 @@ from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import (
     DurableWeightsPublication,
-    LiveWeightPublication,
     NoArtifactPublication,
     PreparedCommit,
     SavedArtifactPublication,
@@ -328,7 +320,7 @@ class ScenarioCommitter:
             if target is None:
                 raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
             target_ref, target_checkpoint = target
-            if not target_checkpoint or isinstance(target_ref, LiveWeightArtifactRef):
+            if not target_checkpoint:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
@@ -484,8 +476,6 @@ class ScenarioCommitter:
         """
         with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
-            if isinstance(current_ref, LiveWeightArtifactRef):
-                return None
             if self._store.durable:
                 self._synchronize_checkpoint()
             surface = self._binding.surface
@@ -551,7 +541,7 @@ class ScenarioCommitter:
 
                 surface = self._binding.surface
                 if isinstance(publication, DurableWeightsPublication):
-                    # Saved weights always become an artifact version; only a job that saved nothing is live.
+                    # Saved weights become an artifact version; weights a job did not save are never published.
                     publication = SavedArtifactPublication(
                         Artifact.local(
                             Path(publication.checkpoint_path),
@@ -559,19 +549,7 @@ class ScenarioCommitter:
                         ),
                         surface.loader_component,
                     )
-                if isinstance(publication, LiveWeightPublication):
-                    if not surface.single:
-                        raise ReefError(
-                            f"scenario {self._name!r} serves components {list(surface.names)}: "
-                            "live weights cannot be published without a checkpoint"
-                        )
-                    if result.pending:
-                        raise ReefError(
-                            "a pending release requires a durable checkpoint; this step publishes live weights only"
-                        )
-                    self.commit_live_weights(publication, prepared, trainer)
-                else:
-                    self.commit_saved_artifact(result, publication, prepared, trainer, component)
+                self.commit_saved_artifact(result, publication, prepared, trainer, component)
                 return result.state
 
     def prepare_experiment(
@@ -609,25 +587,6 @@ class ScenarioCommitter:
             except RuntimeError:
                 logger.exception("experiment correlation could not annotate the pending result")
         return result
-
-    def commit_live_weights(
-        self,
-        publication: LiveWeightPublication,
-        prepared: PreparedCommit,
-        trainer: Trainer,
-    ) -> None:
-        artifacts = self._artifacts
-        next_step = self._step + 1
-        head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
-        if not self._store.durable:
-            artifacts.advance(live_ref, expected=head)
-        record = self._append_commit_record(
-            step=next_step,
-            artifact_ref=live_ref,
-            checkpoint=False,
-            prepared=prepared,
-        )
-        self.finish_committed_step(prepared, record, trainer, expected=head, expected_checkpoint=artifacts.checkpoint)
 
     def commit_without_artifact(self, prepared: PreparedCommit, trainer: Trainer, component: str | None) -> None:
         # No pending check: a pending step carries durable bytes by construction, so it never lands here.

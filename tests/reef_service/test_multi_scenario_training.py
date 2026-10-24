@@ -74,6 +74,7 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime = AdapterRuntime()
+    runtime._checkpoint_dir = tmp_path / "exported"
     dispatcher = build_training_dispatcher(
         runtime, tmp_path, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     )
@@ -91,8 +92,8 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
         assert math.scenario_step == 1 and code.scenario_step == 2
-        assert math.current_artifact_ref().runtime_load_id == "w1"
-        assert code.current_artifact_ref().runtime_load_id == "w3"
+        assert dispatcher.current_artifact("math").materialize().metadata["runtime_load_id"] == "w1"
+        assert dispatcher.current_artifact("code").materialize().metadata["runtime_load_id"] == "w3"
 
         status = dispatcher.build_training_status()
         assert set(status["scenarios"]) == {"math", "code"}
@@ -104,14 +105,9 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         math_hooks = math.surface.inference
         code_hooks = code.surface.inference
         assert math_hooks is not None and code_hooks is not None
-        from reef.artifact import Artifact
-
-        served_math = math_hooks.prepare_request(
-            Artifact(math.current_artifact_ref(), math.repository), "/v1", payload
-        )
-        served_code = code_hooks.prepare_request(
-            Artifact(code.current_artifact_ref(), code.repository), "/v1", payload
-        )
+        # The request service materializes the release before the hooks read its metadata.
+        served_math = math_hooks.prepare_request(dispatcher.current_artifact("math").materialize(), "/v1", payload)
+        served_code = code_hooks.prepare_request(dispatcher.current_artifact("code").materialize(), "/v1", payload)
         assert served_math["lora_path"] == adapter_name("math", "w1")
         assert served_code["lora_path"] == adapter_name("code", "w3")
     finally:

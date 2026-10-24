@@ -32,7 +32,7 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
 from opentelemetry.trace import Link, NonRecordingSpan, SpanContext, SpanKind, TraceFlags, set_span_in_context
 from opentelemetry.util.types import AttributeValue
 
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef
+from reef.core.artifact_ref import ArtifactRef
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
@@ -290,10 +290,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
 
 
 def _artifact_attributes(ref: ArtifactRef) -> dict[str, AttributeValue]:
-    attributes: dict[str, AttributeValue] = {"reef.release_id": ref.release_id, "reef.content_id": ref.content_id}
-    if isinstance(ref, LiveWeightArtifactRef):
-        attributes["reef.runtime_load_id"] = ref.runtime_load_id
-    return attributes
+    return {"reef.release_id": ref.release_id, "reef.content_id": ref.content_id}
 
 
 def _tags(payload: Mapping[str, Any]) -> list[str]:

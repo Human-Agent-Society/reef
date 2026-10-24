@@ -9,7 +9,6 @@ the crash windows around the commit point and assert each is recoverable.
 from __future__ import annotations
 
 import hashlib
-import logging
 import sqlite3
 import time
 from contextlib import closing
@@ -23,7 +22,7 @@ from tests.support._strategies import resolve_episode_scorer, resolve_proposer
 from tests.support._threshold_processor import ThresholdBatches, ThresholdTasks, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingRuntime, candidate_backend, runtime_bindings
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
@@ -58,11 +57,8 @@ def sample_record(
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=LiveWeightArtifactRef(
-            content_id=f"live:{step}",
-            release_id=f"live:proc:{runtime_load_id}:{step}",
-            parent_release_id="base",
-            runtime_load_id=runtime_load_id,
+        artifact_ref=ArtifactRef(
+            content_id=f"content:{step}", release_id=f"release:{runtime_load_id}:{step}", parent_release_id="base"
         ),
         checkpoint=checkpoint,
         algorithm_state={"steps": step},
@@ -99,8 +95,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert [record.step for record in records] == [1, 2]
     first = records[0]
     assert first.scenario == "math"
-    assert isinstance(first.artifact_ref, LiveWeightArtifactRef)
-    assert first.artifact_ref.runtime_load_id == "w1"
+    assert first.artifact_ref == ArtifactRef("content:1", "release:w1:1", "base")
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
@@ -205,16 +200,7 @@ def test_commit_history_reads_the_appends_of_another_writer(open_history) -> Non
 
 
 @pytest.mark.unit
-def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
-    weight_value = sample_record().to_dict()["artifact_ref"]
-    assert weight_value == {
-        "kind": "live_weights",
-        "content_id": "live:1",
-        "release_id": "live:proc:w1:1",
-        "parent_release_id": "base",
-        "runtime_load_id": "w1",
-    }
-
+def test_commit_record_serializes_its_artifact_ref() -> None:
     durable = CommitRecord(
         scenario="math",
         step=1,
@@ -323,10 +309,10 @@ class RecordingRuntime(StubTrainingRuntime):
         self.trained_batches.append(payload["sources"])
         runtime_load_id = f"w{len(self.trained_batches)}"
         if self._checkpoint_dir is None:
-            # Without a checkpoint directory, the runtime saves nothing and publishes live weights.
+            # Without a checkpoint directory, the runtime saves nothing, so its jobs publish nothing.
             checkpoint_path = None
         else:
-            checkpoint = self._checkpoint_dir / str(payload["scenario_step"])
+            checkpoint = self._checkpoint_dir / runtime_load_id
             checkpoint.mkdir(parents=True)
             (checkpoint / "model.txt").write_text(runtime_load_id)
             checkpoint_path = str(checkpoint)
@@ -479,6 +465,7 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     runtime = RecordingRuntime()
+    runtime._checkpoint_dir = tmp_path / "exported"
     dispatcher = build_training_dispatcher(
         runtime,
         tmp_path,
@@ -496,14 +483,10 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     records = committed_records(agent_record_dir)
     assert [record.step for record in records] == [1, 2]
     first, second = records
-    assert isinstance(first.artifact_ref, LiveWeightArtifactRef)
-    assert isinstance(second.artifact_ref, LiveWeightArtifactRef)
-    assert first.artifact_ref.runtime_load_id == "w1"
-    assert first.checkpoint is False
+    assert first.checkpoint is True and second.checkpoint is True
     assert first.algorithm_state == {"steps": 1}
     assert first.consumed_ids == frozenset({"i1", "r1"})
     assert first.high_water_sequence == 2
-    assert second.artifact_ref.runtime_load_id == "w2"
     assert second.high_water_sequence == 4
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
@@ -517,6 +500,7 @@ def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     runtime = RecordingRuntime()
+    runtime._checkpoint_dir = tmp_path / "exported"
     dispatcher = build_training_dispatcher(
         runtime,
         tmp_path,
@@ -534,12 +518,14 @@ def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -> None:
+def test_recovery_restores_the_head_step_and_state_from_the_log(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    runtime = RecordingRuntime()
+    runtime._checkpoint_dir = tmp_path / "exported"
+    first = build_training_dispatcher(runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
@@ -547,8 +533,6 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     first.accept_record(sft_report("r2", "i2"))
     wait_for_step(first, 2)
     committed_head = first.get_or_create_scenario("math").repository.require_current_artifact()
-    assert isinstance(committed_head, LiveWeightArtifactRef)
-    assert committed_head.runtime_load_id == "w2"
 
     # A fresh dispatcher over the same dirs is a process restart: nothing is
     # durable except the release chain, the record store, and the commit history.
@@ -557,8 +541,6 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     )
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 2
-    # The live head survives the restart: it is the head record of the commit history, even
-    # though the release chain only knows the bootstrap checkpoint.
     assert recovered.repository.require_current_artifact() == committed_head
     assert recovered.trainer.state == {"steps": 2}
 
@@ -825,32 +807,6 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_recovery_warns_when_the_engine_disagrees_with_the_live_head(tmp_path, caplog) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    agent_record_dir = tmp_path / "agent-record"
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(sft_inference("i1"))
-    first.accept_record(sft_report("r1", "i1"))
-    wait_for_step(first, 1)
-
-    disagreeing = RecordingRuntime(served_version="w999")
-    second = build_training_dispatcher(disagreeing, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    with caplog.at_level(logging.WARNING, logger="reef.surface.weights"):
-        recovered = second.get_or_create_scenario("math")
-    assert recovered.scenario_step == 1
-    assert any("w1" in record.message and "w999" in record.message for record in caplog.records)
-
-    agreeing = RecordingRuntime(served_version="w1")
-    third = build_training_dispatcher(agreeing, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="reef.surface.weights"):
-        third.get_or_create_scenario("math")
-    assert not caplog.records
-
-
-@pytest.mark.unit
 def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     """In-memory deployments keep pre-log semantics: version-chain-only recovery."""
     initial = tmp_path / "initial"
@@ -866,17 +822,17 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     assert [record.step for record in store.history()] == [1]
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
-    assert committed["metrics"]["selected"] is True
+    # The runtime saved nothing, so the step trained but published no release.
+    assert committed["metrics"]["training_method"]["objective"] == "sft"
     assert not list(tmp_path.rglob("*.sqlite3"))
 
-    # Recovery still works from the release chain: the live head is forgotten, as
-    # before the commit history existed, and the step reverts to the checkpointed 0.
+    # Recovery still works from the release chain, as before the commit history
+    # existed: the step reverts to the checkpointed 0.
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
     assert recovered.store.history() == ()
     assert second.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
-    assert not isinstance(recovered.repository.require_current_artifact(), LiveWeightArtifactRef)
 
 
 @pytest.mark.unit
@@ -1232,8 +1188,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["advance", "commit_step"])
-def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch, failure_point) -> None:
+def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     agent_record_dir = tmp_path / "records"
@@ -1255,28 +1210,21 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
     pending = scenario.trainer.pending_batch
     assert pending is not None
 
-    if failure_point == "advance":
-        target = scenario._committer._artifacts
-        method_name = "advance"
-    else:
-        # The step is stored, but the caller sees an error.
-        target = scenario.store
-        method_name = "commit_step"
-    original = getattr(target, method_name)
+    # The step is stored, but the caller sees an error.
+    original = scenario.store.commit_step
     should_fail = True
 
     def fail_once(*args, **kwargs):
         nonlocal should_fail
         if should_fail:
             should_fail = False
-            if failure_point == "commit_step":
-                original(*args, **kwargs)
-            raise RuntimeError(f"injected {failure_point} failure")
+            original(*args, **kwargs)
+            raise RuntimeError("injected commit_step failure")
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(target, method_name, fail_once)
+    monkeypatch.setattr(scenario.store, "commit_step", fail_once)
 
-    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+    with pytest.raises(RuntimeError, match="injected commit_step failure"):
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
@@ -1409,7 +1357,6 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     wait_for_step(dispatcher, 1, scenario="skills")
     assert scenario.scenario_step == 1
     head = scenario.repository.require_current_artifact()
-    assert not isinstance(head, LiveWeightArtifactRef)  # harness surface is pull-based
 
     records = committed_records(agent_record_dir, scenario="skills")
     assert len(records) == 1

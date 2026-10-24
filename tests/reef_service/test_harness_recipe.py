@@ -2545,10 +2545,11 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
 
 def test_pending_requires_durable_bytes() -> None:
     """Only a step with bytes to promote later can ask to be held back, so a
-    live-weights or no-artifact step is refused where it is built."""
+    no-artifact step is refused where it is built."""
     assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
     assert TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path="/ckpt", pending=True).pending is True
-    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
+    # A version names saved weights, so a version without bytes is refused before the pending check.
+    with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
         TrainStepResult({}, {}, runtime_load_id="w1", pending=True)
     with pytest.raises(ValueError, match="pending step must carry durable bytes"):
         TrainStepResult({}, {}, pending=True)

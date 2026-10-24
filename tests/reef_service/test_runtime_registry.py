@@ -5,7 +5,7 @@ import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.null import NULL_INFERENCE_URL
@@ -257,7 +257,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(LiveWeightArtifactRef("id", "version-1", None, "weight-1"), None),
+                Artifact(ArtifactRef("id", "version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -270,7 +270,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(LiveWeightArtifactRef("id", "version-1", None, "weight-1"), None),
+                Artifact(ArtifactRef("id", "version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -312,7 +312,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(LiveWeightArtifactRef("id", "rev", None, "weight-1"), None),
+                Artifact(ArtifactRef("id", "rev", None), None),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )

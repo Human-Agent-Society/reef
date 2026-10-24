@@ -406,8 +406,9 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         }
         with pytest.raises(ReefError, match="serves no component"):
             scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
-        with pytest.raises(ReefError, match="live weights"):
-            scenario.commit(TrainStepResult(state={}, runtime_load_id="inc:2"))
+        # A version without saved weights is refused where the result is built.
+        with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
+            TrainStepResult(state={}, runtime_load_id="inc:2")
 
         # Rolling back to the harness-only step restores the base weights and evolved harness together.
         scenario.rollback(after_harness.ref.release_id)
