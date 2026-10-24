@@ -25,8 +25,8 @@ Implementations:
   the teacher's request with the served model's chat template.
 * ``GeneratedTaskTasks`` (in the built-in recipe ``reef.recipe.generated_tasks``):
   new Harbor tasks from a description and, optionally, from recorded sessions.
-  Each round generates tasks, checks them, and plays them; the training plays
-  come back as reports and become tasks.
+  Each round generates and checks tasks. Their rollout episodes are not
+  records: ``GeneratedTaskBatches`` turns them into samples.
 
 Shared parts of ``make_sample``:
 
@@ -36,7 +36,7 @@ Shared parts of ``make_sample``:
 
 The subpackage ``generator``, which this module does not import, is the
 generator service. It runs the slow steps that need containers (the designer
-prompt, the authoring rules, the oracle check, and the task plays) in a
+prompt, the authoring rules, the oracle check, and the task episodes) in a
 process beside the HTTP service.
 
 The modules in this directory depend only on ``reef.core``,

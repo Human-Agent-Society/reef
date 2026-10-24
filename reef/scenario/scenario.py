@@ -45,7 +45,15 @@ class Scenario:
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
+            (
+                "serve/request",
+                "serve/admission",
+                "evaluate/request",
+                "evaluate/admission",
+                "rollout/request",
+                "rollout/admission",
+                "ingest/write",
+            ),
             counters=(
                 "serve/retries_total",
                 "serve/version_mismatch_total",
@@ -53,6 +61,9 @@ class Scenario:
                 "evaluate/retries_total",
                 "evaluate/version_mismatch_total",
                 "evaluate/timeouts_total",
+                "rollout/retries_total",
+                "rollout/version_mismatch_total",
+                "rollout/timeouts_total",
                 "ingest/accepted_total",
                 "ingest/duplicates_total",
                 "ingest/rejected_report_total",

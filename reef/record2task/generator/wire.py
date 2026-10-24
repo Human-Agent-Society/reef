@@ -1,4 +1,4 @@
-"""The JSON forms the generator service and its client exchange: tasks, oracle results and played episodes."""
+"""The JSON forms the generator service and its client exchange: tasks, oracle results and episodes."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.harness.client.tasks import TaskPlay
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
 from reef.record2task.generator.designer import DesignerRequest
 from reef.record2task.generator.harbor import OracleResult
 from reef.record2task.generator.inputs import record_document
@@ -170,45 +170,55 @@ def checked_reward_map(value: Mapping[object, object], label: str) -> dict[str, 
     return result
 
 
-def play_document(play: TaskPlay) -> dict[str, object]:
-    """One played episode as JSON: what the verifier said and what reached Reef."""
+def episode_document(episode: TaskEpisode) -> dict[str, object]:
+    """One episode as JSON: what the verifier said and what reached Reef."""
     return {
-        "task_path": str(play.task_path),
-        "name": play.name,
-        "episode_id": play.episode_id,
-        "reward": play.reward,
-        "rewards": dict(play.rewards),
-        "error": play.error,
-        "receipts": list(play.receipts),
-        "failed_calls": play.failed_calls,
-        "report_agent_record_ids": list(play.report_agent_record_ids),
-        "trial_uri": play.trial_uri,
+        "task_path": str(episode.task_path),
+        "name": episode.name,
+        "episode_id": episode.episode_id,
+        "reward": episode.reward,
+        "rewards": dict(episode.rewards),
+        "error": episode.error,
+        "receipts": list(episode.receipts),
+        "failed_calls": episode.failed_calls,
+        "report_agent_record_ids": list(episode.report_agent_record_ids),
+        "trial_uri": episode.trial_uri,
+        "turns": [{"request": dict(turn.request), "response": dict(turn.response)} for turn in episode.turns],
     }
 
 
-def play_from_document(document: object) -> TaskPlay:
-    fields = checked_object(document, "a played episode")
+def episode_from_document(document: object) -> TaskEpisode:
+    fields = checked_object(document, "an episode")
     rewards = fields.get("rewards", {})
     if not isinstance(rewards, Mapping):
-        raise WireError("a played episode's rewards must be an object")
-    receipts = checked_string_list(fields, "receipts", label="a played episode")
-    reports = checked_string_list(fields, "report_agent_record_ids", label="a played episode")
+        raise WireError("an episode's rewards must be an object")
+    receipts = checked_string_list(fields, "receipts", label="an episode")
+    reports = checked_string_list(fields, "report_agent_record_ids", label="an episode")
     failed_calls = fields.get("failed_calls", 0)
     if isinstance(failed_calls, bool) or not isinstance(failed_calls, int):
-        raise WireError("a played episode's failed_calls must be an integer")
+        raise WireError("an episode's failed_calls must be an integer")
     trial_uri = fields.get("trial_uri")
     error = fields.get("error", "")
     if (trial_uri is not None and not isinstance(trial_uri, str)) or not isinstance(error, str):
-        raise WireError("a played episode's trial_uri and error must be text")
-    return TaskPlay(
-        task_path=Path(checked_string(fields, "task_path", label="a played episode")),
-        name=checked_string(fields, "name", label="a played episode"),
-        episode_id=checked_string(fields, "episode_id", label="a played episode"),
+        raise WireError("an episode's trial_uri and error must be text")
+    turns = fields.get("turns", [])
+    if not isinstance(turns, list) or any(
+        not isinstance(turn, Mapping)
+        or not isinstance(turn.get("request"), Mapping)
+        or not isinstance(turn.get("response"), Mapping)
+        for turn in turns
+    ):
+        raise WireError("an episode's turns must be objects with a request and a response")
+    return TaskEpisode(
+        task_path=Path(checked_string(fields, "task_path", label="an episode")),
+        name=checked_string(fields, "name", label="an episode"),
+        episode_id=checked_string(fields, "episode_id", label="an episode"),
         reward=checked_optional_number(fields.get("reward"), "reward"),
-        rewards=checked_reward_map(rewards, "a played episode's rewards"),
+        rewards=checked_reward_map(rewards, "an episode's rewards"),
         error=error,
         receipts=tuple(receipts),
         failed_calls=failed_calls,
         report_agent_record_ids=tuple(reports),
         trial_uri=trial_uri,
+        turns=tuple(EpisodeTurn(turn["request"], turn["response"]) for turn in turns),
     )

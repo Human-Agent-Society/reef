@@ -7,6 +7,7 @@ from typing import Any
 
 from aiohttp import web
 
+from reef.core.records_types import ROLLOUT_HEADER
 from reef.runtime.interfaces import INFERENCE_ABORT_ERROR, MULTIMODAL_ROUTES, InferenceHandler, inference_aborted
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
@@ -222,7 +223,23 @@ def register_inference_routes(
         return web.json_response(response_payload, headers=response_headers)
 
     async def inference(request: web.Request) -> web.StreamResponse:
+        if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
+            return await rollout(request)
         return await serve(request, request.headers, request.path, record=True)
+
+    async def rollout(request: web.Request) -> web.StreamResponse:
+        """A call of a rollout episode that Reef runs itself (``ROLLOUT_HEADER``): the served release, kept by nobody.
+
+        The response keeps its training block, so the episode's caller assembles its samples. The call does
+        not stream: the training block is complete only with the whole response.
+        """
+        payload = await read_object(request)
+        if payload.get("stream") is True:
+            raise web.HTTPBadRequest(text="a rollout call does not stream; send the request without stream")
+        response_payload, _ = await request_service.infer_with_data(
+            request.headers, payload, request.path, inference_handler, record=False, rollout=True
+        )
+        return web.json_response(response_payload)
 
     async def evaluation(request: web.Request) -> web.StreamResponse:
         """An evaluation episode's call: the scenario's release, served like any other and kept by nobody.

@@ -44,8 +44,10 @@ from reef.train.trainer import Trainer
 logger = logging.getLogger(__name__)
 
 
-def request_family(record: bool) -> str:
-    """The operation metrics family of a call: served traffic keeps a record, an evaluation call does not."""
+def request_family(record: bool, *, rollout: bool = False) -> str:
+    """The operation metrics family of a call: served traffic keeps a record; an evaluation or rollout call does not."""
+    if rollout:
+        return "rollout"
     return "serve" if record else "evaluate"
 
 
@@ -235,12 +237,21 @@ class RequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        rollout: bool = False,
     ) -> tuple[dict[str, Any], AgentRecord | None]:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
-        ``evaluated`` component (see ``Surface.inference_for_evaluation``)."""
+        ``evaluated`` component (see ``Surface.inference_for_evaluation``).
+
+        ``rollout`` True serves a call of a rollout episode that Reef runs itself: the served release with its
+        hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
+        with the runtime load ID that answered, so the caller assembles the episode's samples.
+        """
+        if rollout and record:
+            raise ValueError("a rollout call keeps no record")
+        family = request_family(record, rollout=rollout)
         operations = await self.inference_operations(headers, record=record)
-        # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
-        measurement = operations.start(f"{request_family(record)}/request")
+        # Evaluation and rollout traffic is measured apart, so Reef's own episodes do not read as served requests.
+        measurement = operations.start(f"{family}/request")
         succeeded = False
         try:
             original_payload = dict(payload)
@@ -252,9 +263,9 @@ class RequestService:
             while True:
                 attempt += 1
                 if attempt > 1:
-                    operations.increment(f"{request_family(record)}/retries_total")
+                    operations.increment(f"{family}/retries_total")
                 prepared, payload = await self._prepare_request(
-                    headers, original_payload, path, handler, record=record, evaluated=evaluated
+                    headers, original_payload, path, handler, record=record, evaluated=evaluated, rollout=rollout
                 )
                 try:
                     if prepared.durable:
@@ -293,6 +304,8 @@ class RequestService:
                                 artifact_ref=prepared.record_ref,
                             )
                         succeeded = True
+                        if rollout:
+                            return rollout_inference_response(response, payload), None
                         return client_inference_response(response), item
                     # A handler ``abort`` finish reason makes the attempt unusable.
                     # Restart the request against the latest artifact and never record it.
@@ -313,10 +326,10 @@ class RequestService:
                 remaining_budget -= sleep_for
                 retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
         except RuntimeLoadMismatch:
-            operations.increment(f"{request_family(record)}/version_mismatch_total")
+            operations.increment(f"{family}/version_mismatch_total")
             raise
         except InferenceRetryTimeout:
-            operations.increment(f"{request_family(record)}/timeouts_total")
+            operations.increment(f"{family}/timeouts_total")
             raise
         finally:
             measurement.finish(succeeded=succeeded)
@@ -496,6 +509,7 @@ class RequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        rollout: bool = False,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
@@ -507,7 +521,7 @@ class RequestService:
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
-            with initial.operations.measure(f"{request_family(record)}/admission"):
+            with initial.operations.measure(f"{request_family(record, rollout=rollout)}/admission"):
                 admission = await initial.runtime.acquire_inference()
         else:
             admission = None
@@ -516,7 +530,13 @@ class RequestService:
             # committed by the weight update that released it, never the head it
             # observed before waiting.
             prepared = await asyncio.to_thread(
-                self._prepare_inference, parsed, handler, admission, record=record, evaluated=evaluated
+                self._prepare_inference,
+                parsed,
+                handler,
+                admission,
+                record=record,
+                evaluated=evaluated,
+                rollout=rollout,
             )
             hooks = prepared.hooks
             transformed = (
@@ -572,6 +592,7 @@ class RequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        rollout: bool = False,
     ) -> PreparedInference:
         scenario = self.inference_scenario(parsed, record=record)
         selected_handler = handler if handler is not None else scenario.inference_handler
@@ -580,7 +601,8 @@ class RequestService:
         ref = scenario.current_artifact_ref()
         artifact = Artifact(ref, scenario.repository)
         surface = scenario.surface
-        hooks = surface.inference if record else surface.inference_for_evaluation(evaluated)
+        # A rollout call samples the served policy, so it runs the served hooks as a recorded call does.
+        hooks = surface.inference if record or rollout else surface.inference_for_evaluation(evaluated)
         # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
         # loaded component, never a composed release whose root holds only component directories.
         loaded_component = surface.loader_component
@@ -1216,6 +1238,19 @@ def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[st
     return {**payload, "metadata": metadata}
 
 
+def rollout_inference_response(response: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The response of a rollout call: the training block stays, with the runtime load ID that answered.
+
+    ``payload`` is the request after ``_stamp_durable_runtime_load_id``; its stamp goes into the training block
+    when the block names no version of its own.
+    """
+    training = response.get("training")
+    if not isinstance(training, Mapping):
+        return dict(response)
+    stamped = {key: payload[key] for key in ("runtime_load_id", "runtime_load_spans") if key in payload}
+    return {**response, "training": {**stamped, **training}}
+
+
 def client_inference_response(response: Mapping[str, Any]) -> dict[str, Any]:
     """Remove Reef-private training tensors from a buffered client response.
 
@@ -1238,4 +1273,5 @@ __all__ = [
     "client_inference_response",
     "normalize_request_payload",
     "page_headers",
+    "rollout_inference_response",
 ]

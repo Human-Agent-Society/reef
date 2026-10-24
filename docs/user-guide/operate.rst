@@ -352,7 +352,7 @@ not change. A scenario does not open, and the error says why, when:
 To change an imported task, give it a new name.
 
 A harness evolution recipe evaluates on the imported eval tasks with
-``evolution.eval_task_store: imported-tasks`` and an adapter that plays a task
+``evolution.eval_task_store: imported-tasks`` and an adapter that runs a task
 directory, such as ``terminus``. Each step reads the eval split again, so a
 task that you import later joins the next step. See `Harness evolution keys
 <../reference/configuration.rst#harness-evolution-keys>`__.

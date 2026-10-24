@@ -4,7 +4,7 @@ The author is a coding agent: it writes a Harbor task in a workspace from one re
 session and the repository the session changed, runs the task's oracle and nop check itself through a
 tool, and revises until the check passes. The generator service's one-reply prompt Designer is the
 baseline author on the same sessions. A pass-rate band marks the tasks the solver can reach. The built-in
-generated-task recipe plays the tasks and trains on them.
+generated-task recipe runs the tasks and trains on them.
 
 - ``sources``: the sources file (session records and their repositories) and the session renderer.
 - ``author``: the author contract and its two implementations: the agent, pi in an E2B sandbox behind a

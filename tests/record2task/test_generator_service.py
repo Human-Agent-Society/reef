@@ -1,4 +1,4 @@
-"""The generator service and its client: proposals, written tasks, checks and plays over HTTP."""
+"""The generator service and its client: proposals, written tasks, checks and episodes over HTTP."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.client.tasks import TaskPlay, TaskPlayer
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
 from reef.recipe.generated_tasks.processor import GeneratedTaskRecord2Record, RoundSettings, TaskGroupSettings
@@ -41,10 +41,10 @@ from reef.record2task.generator import (
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
-    ReefTaskPlays,
+    ReefTaskEpisodes,
     TaskChecks,
+    TaskEpisodes,
     TaskNameConflict,
-    TaskPlays,
     readiness_probes,
 )
 from reef.record2task.generator.inputs import TaskGenerationRequest
@@ -52,8 +52,8 @@ from reef.record2task.generator.service import CLOSE_GRACE_S, DockerProbe, Harbo
 from reef.record2task.generator.wire import (
     WireError,
     designer_request_document,
-    play_document,
-    play_from_document,
+    episode_document,
+    episode_from_document,
     source_records_from_document,
     task_document,
     task_from_document,
@@ -120,26 +120,25 @@ class StandInChecks(TaskChecks):
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
 
 
-class StandInPlays(TaskPlays):
+class StandInEpisodes(TaskEpisodes):
     def __init__(self, reward: float = 0.5) -> None:
         self.reward = reward
         self.calls: list[dict[str, object]] = []
 
-    async def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
+    async def run_episodes(self, task_path, *, scenario, model, arm, count, extra_instruction_paths, tags):
         self.calls.append(
             {
                 "task": task_path.name,
                 "scenario": scenario,
                 "model": model,
                 "arm": arm,
-                "plays": plays,
-                "is_reporting": is_reporting,
+                "count": count,
                 "extra": [Path(path) for path in extra_instruction_paths],
                 "tags": dict(tags),
             }
         )
         return tuple(
-            TaskPlay(
+            TaskEpisode(
                 task_path,
                 task_path.name,
                 f"e{n}",
@@ -151,22 +150,22 @@ class StandInPlays(TaskPlays):
                 ("rep",),
                 None,
             )
-            for n in range(plays)
+            for n in range(count)
         )
 
 
-class GatedPlays(StandInPlays):
-    """Plays that wait for ``gate``, so a test sees what runs beside the plays in flight."""
+class GatedEpisodes(StandInEpisodes):
+    """Episodes that wait for ``gate``, so a test sees what runs beside the episodes in flight."""
 
     def __init__(self, gate: threading.Event) -> None:
         super().__init__()
         self.gate = gate
         self.waiting = 0
 
-    async def play(self, task_path, **arguments):
+    async def run_episodes(self, task_path, **arguments):
         self.waiting += 1
         await asyncio.to_thread(self.gate.wait)
-        return await super().play(task_path, **arguments)
+        return await super().run_episodes(task_path, **arguments)
 
 
 class StandInProbe(ReadinessProbe):
@@ -180,21 +179,23 @@ class StandInProbe(ReadinessProbe):
         return self.reason
 
 
-def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInPlays]:
+def service(
+    tmp_path: Path, **parts: object
+) -> tuple[GeneratorService, StandInDesigner, StandInChecks, StandInEpisodes]:
     designer = parts.get("designer") or StandInDesigner()
     checks = parts.get("checks") or StandInChecks()
-    plays = parts.get("plays") or StandInPlays()
+    episodes = parts.get("episodes") or StandInEpisodes()
     built = GeneratorService(
         tasks_root=tmp_path / "tasks",
         designer=designer,  # type: ignore[arg-type]
         checks=checks,  # type: ignore[arg-type]
-        plays=plays,  # type: ignore[arg-type]
+        episodes=episodes,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
         jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
-    return built, designer, checks, plays  # type: ignore[return-value]
+    return built, designer, checks, episodes  # type: ignore[return-value]
 
 
 def run_with(built: GeneratorService, body: Callable[[HttpGenerator], Awaitable[object]]) -> object:
@@ -254,19 +255,18 @@ def test_a_proposal_without_a_model_uses_the_services_default_and_none_is_refuse
 
 
 def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_body_says(tmp_path: Path) -> None:
-    built, designer, _, plays = service(tmp_path, designer_model="strong")
+    built, designer, _, episodes = service(tmp_path, designer_model="strong")
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={}, model="m")
         await generator.propose(request(), scenario="spade", generation=1, index=1, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        await generator.play(
+        await generator.run_episodes(
             written.path,
             scenario="spade",
             arm="bare",
-            plays=1,
-            is_reporting=False,
+            count=1,
             extra_instruction_files=(),
             tags={},
         )
@@ -274,7 +274,9 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
 
     run_with(built, body)
     assert [call["model"] for call in designer.calls] == ["strong", "strong"]
-    assert plays.calls[0]["model"] == "served", "the designer model is the Designer's alone; plays keep the served one"
+    assert (
+        episodes.calls[0]["model"] == "served"
+    ), "the designer model is the Designer's alone; episodes keep the served one"
     built, designer, _, _ = service(tmp_path / "without")
 
     async def body_without(generator: HttpGenerator) -> object:
@@ -436,109 +438,111 @@ def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: P
     assert len(checks.calls) == 1
 
 
-def test_a_check_and_a_second_play_run_while_a_play_waits(tmp_path: Path) -> None:
+def test_a_check_and_a_second_episode_job_run_while_an_episode_job_waits(tmp_path: Path) -> None:
     gate = threading.Event()
-    plays = GatedPlays(gate)
-    built, _, _, _ = service(tmp_path, plays=plays)
+    episodes = GatedEpisodes(gate)
+    built, _, _, _ = service(tmp_path, episodes=episodes)
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        arguments = {"scenario": "spade", "arm": "plain", "plays": 1, "is_reporting": False}
-        playing = [
-            asyncio.ensure_future(generator.play(written.path, extra_instruction_files=(), tags={}, **arguments))
+        arguments = {"scenario": "spade", "arm": "plain", "count": 1}
+        running = [
+            asyncio.ensure_future(
+                generator.run_episodes(written.path, extra_instruction_files=(), tags={}, **arguments)
+            )
             for _ in range(2)
         ]
         try:
-            assert (await generator.check(written.path)).is_solvable, "the check does not wait behind the plays"
+            assert (await generator.check(written.path)).is_solvable, "the check does not wait behind the episodes"
             deadline = time.monotonic() + 10.0
-            while plays.waiting < 2 and time.monotonic() < deadline:
+            while episodes.waiting < 2 and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
-            assert plays.waiting == 2, "the second play does not wait behind the first"
+            assert episodes.waiting == 2, "the second episode job does not wait behind the first"
         finally:
             gate.set()
-        return await asyncio.gather(*playing)
+        return await asyncio.gather(*running)
 
     first, second = run_with(built, body)  # type: ignore[misc]
     assert len(first) == len(second) == 1
 
 
-def test_the_task_plays_keep_at_most_concurrency_episodes_of_all_plays_in_flight(
+def test_the_task_episodes_keep_at_most_concurrency_episodes_of_all_requests_in_flight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     in_flight = 0
     most_in_flight = 0
 
-    async def episode(self: TaskPlayer, task_path: Path) -> TaskPlay:
+    async def episode(self: TaskEpisodeRunner, task_path: Path) -> TaskEpisode:
         nonlocal in_flight, most_in_flight
         in_flight += 1
         most_in_flight = max(most_in_flight, in_flight)
         await asyncio.sleep(0.02)
         in_flight -= 1
-        return TaskPlay(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+        return TaskEpisode(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
 
-    monkeypatch.setattr(TaskPlayer, "play_async", episode)
-    task_plays = ReefTaskPlays(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
+    monkeypatch.setattr(TaskEpisodeRunner, "run_async", episode)
+    task_episodes = ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, concurrency=2)
 
-    async def two_plays() -> list[tuple[TaskPlay, ...]]:
-        arguments = {"scenario": "s", "model": "m", "arm": "plain", "plays": 3, "is_reporting": False}
+    async def two_runs() -> list[tuple[TaskEpisode, ...]]:
+        arguments = {"scenario": "s", "model": "m", "arm": "plain", "count": 3}
         return await asyncio.gather(
-            *(task_plays.play(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments) for _ in range(2))
+            *(
+                task_episodes.run_episodes(tmp_path / "t", extra_instruction_paths=(), tags={}, **arguments)
+                for _ in range(2)
+            )
         )
 
-    assert [len(played) for played in asyncio.run(two_plays())] == [3, 3]
+    assert [len(ran) for ran in asyncio.run(two_runs())] == [3, 3]
     assert most_in_flight == 2
 
 
-def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
-    built, _, _, plays = service(tmp_path)
+def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
+    built, _, _, episodes = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
         proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
         assert proposed.task is not None
         written = await generator.write_task(proposed.task)
-        played = await generator.play(
+        ran = await generator.run_episodes(
             written.path,
             scenario="spade",
             arm="hint",
-            plays=2,
-            is_reporting=True,
+            count=2,
             extra_instruction_files=("solution/hint.txt",),
             tags={"generation": "1"},
         )
-        assert [play.reward for play in played] == [0.5, 0.5] and played[0].report_agent_record_ids == ("rep",)
+        assert [episode.reward for episode in ran] == [0.5, 0.5] and ran[0].report_agent_record_ids == ("rep",)
         with pytest.raises(GeneratorError, match="extra instruction files do not exist"):
-            await generator.play(
+            await generator.run_episodes(
                 written.path,
                 scenario="spade",
                 arm="hint",
-                plays=1,
-                is_reporting=False,
+                count=1,
                 extra_instruction_files=("solution/missing.txt",),
                 tags={},
             )
         for tags, message in (
             ({"arm": "plain"}, "may not name 'arm'"),
-            ({"task": "other"}, "player's own tag"),
+            ({"task": "other"}, "episode runner's own tag"),
             ({"batch": ""}, "non-empty printable ASCII value"),
         ):
             with pytest.raises(GeneratorError, match=rf"refused \(400\).*{message}"):
-                await generator.play(
+                await generator.run_episodes(
                     written.path,
                     scenario="spade",
                     arm="plain",
-                    plays=1,
-                    is_reporting=True,
+                    count=1,
                     extra_instruction_files=(),
                     tags=tags,
                 )
         return None
 
     run_with(built, body)
-    assert len(plays.calls) == 1, "a play with labels that cannot ride as tags never runs"
-    call = plays.calls[0]
-    assert call["task"] == "harbor-00001-000-inspection" and call["arm"] == "hint" and call["plays"] == 2
+    assert len(episodes.calls) == 1, "an episode request with labels that cannot ride as tags never runs"
+    call = episodes.calls[0]
+    assert call["task"] == "harbor-00001-000-inspection" and call["arm"] == "hint" and call["count"] == 2
     assert call["model"] == "served" and call["scenario"] == "spade" and call["tags"] == {"generation": "1"}
     assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
 
@@ -674,14 +678,19 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
         task_from_document({**task_document(task), "tests": {}})
     with pytest.raises(ValueError, match="must be a JSON object"):
         task_from_document("task")
-    play = TaskPlay(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
-    assert play_from_document(play_document(play)) == play
+    episode = TaskEpisode(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
+    assert episode_from_document(episode_document(episode)) == episode
     with pytest.raises(ValueError, match="failed_calls"):
-        play_from_document({**play_document(play), "failed_calls": "2"})
+        episode_from_document({**episode_document(episode), "failed_calls": "2"})
     with pytest.raises(WireError, match="rewards must map names to numbers"):
-        play_from_document({**play_document(play), "rewards": {"score": "high"}})
+        episode_from_document({**episode_document(episode), "rewards": {"score": "high"}})
     with pytest.raises(WireError, match="rewards must map names to numbers"):
-        play_from_document({**play_document(play), "rewards": {"score": True}})
+        episode_from_document({**episode_document(episode), "rewards": {"score": True}})
+    turn = EpisodeTurn(request={"messages": []}, response={"training": {"tokens": [1, 2]}})
+    rollout = TaskEpisode(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", (), 0, (), None, turns=(turn,))
+    assert episode_from_document(episode_document(rollout)) == rollout, "a rollout episode carries its calls"
+    with pytest.raises(WireError, match="turns must be objects"):
+        episode_from_document({**episode_document(rollout), "turns": [{"request": {}}]})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
@@ -731,7 +740,7 @@ def spade(generator: HttpGenerator, tmp_path: Path) -> SpadeTaskGenerator:
 
 
 def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(tmp_path: Path) -> None:
-    built, designer, checks, plays = service(tmp_path)
+    built, designer, checks, episodes = service(tmp_path)
     material = tmp_path / "selected-snapshot"
     (material / "state").mkdir(parents=True)
     (material / "state" / "app.port").write_text("8472\n")
@@ -746,12 +755,12 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         assert task.name.startswith("harbor-history-")
         assert (await task_generator.validate(task)).is_valid
         context = PipelineContext("spade")
-        round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(plays_per_task=2))
-        generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, task_player=generator)
-        result, _ = await generation.played(task, 0)
-        assert result.is_played and len(result.training_rewards) == 2
+        round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
+        generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, generator_service=generator)
+        result, _ = await generation.run_training_episodes(task, 0, count=2)
+        assert not result.error and len(result.rollout_rewards) == 2
         assert read_harbor_task(tmp_path / "tasks" / task.name).source_agent_record_ids == task.source_agent_record_ids
-        await task_generator.record_results((result,))
+        await task_generator.record_results((result.generated(task),), generation=0)
 
     run_with(built, body)
     prompt = designer.calls[0]["messages"][1]["content"]
@@ -760,7 +769,7 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
     assert "asset-0/state/app.port" in prompt and "8472" in prompt
     assert str(material) not in prompt
     assert "before the task was solved" in prompt
-    assert len(checks.calls) == 1 and len(plays.calls) == 2
+    assert len(checks.calls) == 1 and len(episodes.calls) == 2
     assert [report["record_id"] for report in designer.reports] == ["designer-1"]
 
 
@@ -834,7 +843,7 @@ def test_source_based_refusal_reports_the_designer_receipt(tmp_path: Path) -> No
     async def body(generator: HttpGenerator) -> None:
         task_generator = spade(generator, tmp_path)
         assert await task_generator.generate(TaskGenerationRequest(source_records(), "rebuild")) == ()
-        await task_generator.record_results(())
+        await task_generator.record_results((), generation=0)
 
     run_with(built, body)
     assert designer.reports[0]["record_id"] == "designer-1"

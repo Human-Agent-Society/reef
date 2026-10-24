@@ -30,7 +30,7 @@ from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling.author import REVIEW_TEXT
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
-from reef.recipe.generated_tasks.generator import TaskPlayResult
+from reef.recipe.generated_tasks.generator import RejectedTask, RolledOutTask
 
 
 @pytest.fixture(autouse=True)
@@ -69,14 +69,14 @@ def validated(generator: AutoEnvScalingGenerator) -> tuple[HarborTask, tuple[str
 
 
 def closed_with(generator: AutoEnvScalingGenerator, task: HarborTask, errors: tuple[str, ...]) -> dict[str, Any]:
-    """Close the generation as the recipe would after its plays, and read its report."""
+    """Close the generation as the recipe would after its episodes, and read its report."""
     if errors:
-        played = TaskPlayResult(task, error="; ".join(errors))
+        result = RejectedTask(task, "; ".join(errors))
     else:
-        # The recipe writes a valid task again to play it.
+        # The recipe writes a valid task again to run it.
         asyncio.run(generator.service.write_task(task))
-        played = TaskPlayResult(task, (0.0, 1.0))
-    asyncio.run(generator.record_results((played,)))
+        result = RolledOutTask(task, (0.0, 1.0))
+    asyncio.run(generator.record_results((result,), generation=0))
     return json.loads((generator.state_dir / f"generation-{generator.generation:05d}.json").read_text())
 
 

@@ -1,7 +1,7 @@
 """A generated task: the designer's reply as a Harbor task, and the checks that Harbor can solve it.
 
 The designer writes a Harbor task directly: the instruction the agent reads, the files of the container
-image, the verifier under ``tests/`` and a reference solution under ``solution/``. Any Harbor agent plays
+image, the verifier under ``tests/`` and a reference solution under ``solution/``. Any Harbor agent runs
 it; Harbor scores it. The checks follow the terminal task designer of Terminal-Bench's team (spare,
 ``scripts/terminal-rsi``): a structural gate refuses an untouched scaffold, the Dockerfile is read the way
 the classic Docker parser reads it (a heredoc body is a parse error there), tasks are deduplicated by a

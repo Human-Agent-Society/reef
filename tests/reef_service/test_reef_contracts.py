@@ -17,6 +17,7 @@ from reef.artifact import (
     Repository,
 )
 from reef.core import ReefError, RequestType
+from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import HttpInferenceHandler, content_identity_headers
 from reef.recipe import Recipe
@@ -335,6 +336,38 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
             assert records[0].payload["response"]["choices"][0]["message"]["content"] == "hi"
             assert records[0].artifact_ref == used_artifact.ref
             assert "artifact" not in records[0].payload
+        finally:
+            await client.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_rollout_call_keeps_no_record_and_returns_its_training_block() -> None:
+    async def run() -> None:
+        training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
+
+        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+            return {"choices": [{"message": {"content": "hi"}}], "training": training}
+
+        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+        assert dispatcher.get_or_create_scenario("chat") is not None
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
+        await client.start_server()
+        try:
+            rollout = {"x-reef-scenario": "chat", ROLLOUT_HEADER: "1"}
+            body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
+            response = await client.post("/v1/chat/completions", headers=rollout, json=body)
+            assert response.status == 200 and "x-reef-agent-record-id" not in response.headers
+            assert (await response.json())["training"] == training
+            streamed = await client.post("/v1/chat/completions", headers=rollout, json={**body, "stream": True})
+            assert streamed.status == 400
+            served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
+            assert "training" not in await served.json(), "a served call never shows its training block"
+            records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            assert len(records) == 1, "only the served call is a record"
         finally:
             await client.close()
 

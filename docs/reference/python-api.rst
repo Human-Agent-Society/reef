@@ -614,7 +614,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        record ids returns the checkpoint.
    * - ``save_candidates(generation=..., directories=...)``
      - Save a copy of each candidate task directory once, before validation or
-       play. The name of a candidate is the name of its directory.
+       episodes. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
@@ -634,8 +634,17 @@ images, and then records its publication. A ``StoredTask`` holds the task
        return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskPlayer.play``. Do not
+       for example for ``read_harbor_task`` or ``TaskEpisodeRunner.run``. Do not
        change it.
+   * - ``mark_trained(task_names=...)``, ``trained_task_names()``
+     - Mark published train tasks as trained, or return the trained ones. The
+       rollout of a task pool marks a task once the commit of its training step
+       is durable, so a restart rolls out only the others.
+   * - ``write_document(key=..., document=...)``, ``documents()``
+     - Save a text document under a non-empty key, or return every document by
+       key. Each key holds one document; another document under a used key
+       raises ``TaskStoreError``. The store does not read a document: the stage
+       that writes the store keeps its own state about its tasks here.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -1105,7 +1114,7 @@ Task generation
 .. code:: python
 
    from reef.core.tasks import HarborTask
-   from reef.recipe.generated_tasks import TaskGenerator, TaskPlayResult, TaskValidationResult
+   from reef.recipe.generated_tasks import TaskGenerator, GeneratedTaskResult, TaskValidationResult
    from reef.record2task.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
@@ -1116,14 +1125,17 @@ Task generation
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
-``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
+``async record_results(results: tuple[GeneratedTaskResult, ...], *, generation: int)``
+is optional. It receives the results of one earlier ``generate`` call, named by
+``TaskGenerationRequest.generation``, possibly after later calls and after a
+restart. A second call for the same generation must have no effect. The
 default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
 
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
-carries source records and non-empty requirements text.
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={}, generation=0)``
+carries source records, non-empty requirements text, and the number of the generation.
 Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
 Use an empty record tuple for description-only generation.
 For local materials, pass a tuple of ``Path`` values in ``assets``.
@@ -1136,9 +1148,12 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``TaskPlayResult(task, training_rewards=(), error="", split="train")`` holds
-the rewards of the training plays, only of the episodes that ran. ``is_played`` is true when
-``error`` is empty. A task that was not played has no rewards.
+``GeneratedTaskResult`` is ``RejectedTask(task, reason)``, ``HeldOutTask(task)``,
+``RolledOutTask(task, rollout_rewards)`` or ``FailedTask(task, error,
+infrastructure_failure)``. ``rollout_rewards`` is a non-empty tuple of finite
+numbers; ``reason`` and ``error`` are non-empty. See `the task generation
+contract <../developer-guide/processors.rst#task-generation-contract>`__ for
+when the recipe sends each case.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
@@ -1151,7 +1166,7 @@ its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
 - Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
-Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
+Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe runs the tasks and trains, so the processor half of the method is
 not needed.
 
 Batch

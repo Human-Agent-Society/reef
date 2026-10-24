@@ -217,7 +217,7 @@ def test_a_serving_version_of_another_incarnation_restarts_the_served_versions()
     stage = InferenceRecord2Record()
     for version in ("e:1", "e:2", "e:2", "f:0"):
         stage.observe_serving_runtime_load_id(version)
-    assert stage.served_runtime_load_ids == ["f:0"]
+    assert stage.served_versions.versions == ["f:0"]
 
 
 @pytest.mark.unit

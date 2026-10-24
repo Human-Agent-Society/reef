@@ -23,6 +23,12 @@ class RequestType(str, Enum):
     TRAIN = "train"
 
 
+#: The request header that marks an inference call of a rollout episode that Reef runs itself. The service
+#: serves the call from the scenario's release as it serves any other, keeps no record of it, and returns the
+#: response with its training block. Such an episode is not user data, so it never becomes a record.
+ROLLOUT_HEADER = "x-reef-rollout"
+
+
 def parse_references(payload: Mapping[str, Any]) -> tuple[str, ...]:
     value = payload.get("references", ())
     if not isinstance(value, (list, tuple)) or any(not isinstance(reference, str) for reference in value):

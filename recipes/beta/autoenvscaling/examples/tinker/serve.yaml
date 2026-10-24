@@ -1,5 +1,5 @@
 # AutoEnvScaling on Tinker: a coding agent rebuilds recorded sessions as Harbor tasks, and the served model trains on them.
-# The built-in generated-task recipe plays and trains; AutoEnvScaling is the task generator.
+# The built-in generated-task recipe runs the tasks and trains; AutoEnvScaling is the task generator.
 # Supply TINKER_API_KEY, E2B_API_KEY and REEF_AUTOENVSCALING_DESIGNER_TOKEN through the shell, never here.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SOURCES_PATH lists the
 # recorded sessions; REEF_AUTOENVSCALING_DESIGNER_URL is the Reef that serves the agent's model and holds the sessions.
@@ -15,7 +15,7 @@ inference:
   model-path: Qwen/Qwen3-8B
   # An agent's episode is many turns.
   timeout-s: 1800
-# The generator service: writes, checks and plays the agent's tasks, on the host that has Docker and harbor.
+# The generator service: writes and checks the agent's tasks and runs their episodes, on the host that has Docker and harbor.
 generator:
   tasks-root: ${REEF_AUTOENVSCALING_STATE_DIR}/tasks
   # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
@@ -34,21 +34,17 @@ recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
 # The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The training plays of each task form one group; the next round is due after batches_per_round batches trained.
+  # The next round is due after batches_per_round batches trained.
   record2record:
     config:
-      plays_per_task: 4
       batches_per_round: 2
-  # The rounds: one generation of tasks each, played through the generator service.
+  # The rounds: one generation of tasks each, run through the generator service.
   record2task:
     config:
       generator_url: ${endpoints.generator}
       rounds: 20
       # The stage requires a description; the generator takes what the tasks are from its sources file.
       description: coding tasks rebuilt from recorded coding-agent sessions
-      state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/rounds
-      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
-      scaffold_tolerance: 8
       # The task generator: count sessions rebuilt for each round, a pass-rate band to mark the tasks in reach.
       generator:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
@@ -57,7 +53,7 @@ pipeline:
           state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
           sources_path: ${REEF_AUTOENVSCALING_SOURCES_PATH}
           count: 8
-          # A played task is in the band when the Reasoning Agent passes a quarter to three quarters of its episodes.
+          # A task that ran is in the band when the Reasoning Agent passes a quarter to three quarters of its episodes.
           band_low: 0.25
           band_high: 0.75
           # The Designer: pi on a strong model, its calls recorded on the Designer's Reef.
@@ -69,13 +65,21 @@ pipeline:
           # A model call on the same Reef reviews each task's tests; a task they grade on what the instruction does
           # not state is refused.
           review: refuse
+  # A rollout batch is tasks_per_step saved tasks; it trains on the fresh groups of their episodes.
+  task2batch:
+    config:
+      tasks_per_step: 2
+      # The training episodes of each task form one group.
+      episodes_per_task: 4
+      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+      scaffold_tolerance: 8
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 1800
   options:
     state-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/tinker
-    # Episodes in one batch and one optimizer step: two complete task groups of plays_per_task plays.
+    # Episodes in one batch and one optimizer step: two complete task groups of episodes_per_task episodes.
     batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004
@@ -84,3 +88,4 @@ storage:
   artifact-work-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/artifact-work
   artifact-cache-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/artifact-cache
   agent-record-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/agent-record
+  task-file-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/task-files

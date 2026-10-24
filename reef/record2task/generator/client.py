@@ -13,7 +13,7 @@ from pathlib import Path
 import aiohttp
 
 from reef.core.tasks import HarborTask
-from reef.harness.client.tasks import TaskPlay
+from reef.harness.client.tasks import TaskEpisode
 from reef.record2task.generator.designer import DesignerRequest
 from reef.record2task.generator.harbor import OracleResult
 from reef.record2task.generator.inputs import read_asset_files
@@ -22,15 +22,15 @@ from reef.record2task.generator.wire import (
     checked_object,
     checked_string,
     designer_request_document,
+    episode_from_document,
     oracle_from_document,
-    play_from_document,
     task_document,
     task_from_document,
 )
 
 DEFAULT_POLL_S = 2.0
 DEFAULT_TIMEOUT_S = 60.0
-# The longest a play or check may take: several episodes of a large model on one task run for hours, not minutes.
+# The longest an episode job or a check may take: several episodes of a large model on one task run for hours, not minutes.
 DEFAULT_JOB_TIMEOUT_S = 4 * 3600.0
 
 
@@ -88,8 +88,8 @@ class Generator(ABC):
     async def write_task(self, task: HarborTask) -> WrittenTask:
         """Stage the task under the tasks root and return where it is.
 
-        Writing the same task again returns the staged copy with ``created`` False, so a play that a stop
-        interrupted can stage and play again. Raises ``TaskNameConflict`` when a different task holds the name,
+        Writing the same task again returns the staged copy with ``created`` False, so episodes that a stop
+        interrupted can stage the task and run again. Raises ``TaskNameConflict`` when a different task holds the name,
         and ``DuplicateTask`` when the same content is staged under another name.
         """
 
@@ -100,24 +100,23 @@ class Generator(ABC):
     async def check(self, task_path: Path) -> OracleResult: ...
 
     @abstractmethod
-    async def play(
+    async def run_episodes(
         self,
         task_path: Path,
         *,
         scenario: str,
         arm: str,
-        plays: int,
-        is_reporting: bool,
+        count: int,
         extra_instruction_files: Sequence[str],
         tags: Mapping[str, str],
         model: str | None = None,
-    ) -> tuple[TaskPlay, ...]: ...
+    ) -> tuple[TaskEpisode, ...]: ...
 
 
 class HttpGenerator(Generator):
     """The generator service over HTTP; a job is polled every ``poll_s`` seconds until it is done or failed.
 
-    ``timeout_s`` bounds one HTTP exchange; ``job_timeout_s`` bounds a whole job, the longest a play or check
+    ``timeout_s`` bounds one HTTP exchange; ``job_timeout_s`` bounds a whole job, the longest an episode job or a check
     may take, after which the job is given up and reported as an error.
     """
 
@@ -252,34 +251,32 @@ class HttpGenerator(Generator):
         except WireError as exc:
             raise GeneratorError(f"the check's result cannot be read: {exc}") from exc
 
-    async def play(
+    async def run_episodes(
         self,
         task_path: Path,
         *,
         scenario: str,
         arm: str,
-        plays: int,
-        is_reporting: bool,
+        count: int,
         extra_instruction_files: Sequence[str],
         tags: Mapping[str, str],
         model: str | None = None,
-    ) -> tuple[TaskPlay, ...]:
+    ) -> tuple[TaskEpisode, ...]:
         body: dict[str, object] = {
             "scenario": scenario,
             "path": str(task_path),
             "arm": arm,
-            "plays": plays,
-            "is_reporting": is_reporting,
+            "count": count,
             "extra_instruction_files": list(extra_instruction_files),
             "tags": dict(tags),
         }
         if model is not None:
             body["model"] = model
-        result = await self.job_result(await self.call("POST", "/plays", body=body))
-        rows = result.get("plays")
+        result = await self.job_result(await self.call("POST", "/episodes", body=body))
+        rows = result.get("episodes")
         if not isinstance(rows, list):
-            raise GeneratorError("the play's result holds no episodes")
+            raise GeneratorError("the episode job's result holds no episodes")
         try:
-            return tuple(play_from_document(row) for row in rows)
+            return tuple(episode_from_document(row) for row in rows)
         except WireError as exc:
-            raise GeneratorError(f"the play's episodes cannot be read: {exc}") from exc
+            raise GeneratorError(f"the episode job's episodes cannot be read: {exc}") from exc
