@@ -16,7 +16,13 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskTasks
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult
+from reef.recipe.generated_tasks.generator import (
+    FailedTask,
+    GeneratedTaskResult,
+    HeldOutTask,
+    RejectedTask,
+    RolledOutTask,
+)
 from reef.recipe.generated_tasks.processor import (
     GeneratedTaskRecord2Record,
     GenerationJob,
@@ -52,10 +58,10 @@ def run_tasks(generator: SpadeTaskGenerator, *, plain: float = 0.25) -> tuple[Ge
     for task in asyncio.run(generator.generate(REQUEST)):
         validation = asyncio.run(generator.validate(task))
         if not validation.is_valid:
-            results.append(GeneratedTaskResult(task, error="; ".join(validation.errors)))
+            results.append(RejectedTask(task, "; ".join(validation.errors)))
             continue
         asyncio.run(generator.service.write_task(task))
-        results.append(GeneratedTaskResult(task, (plain, plain)))
+        results.append(RolledOutTask(task, (plain, plain)))
     return tuple(results)
 
 
@@ -165,9 +171,7 @@ def test_a_task_that_ran_no_episodes_scores_zero_with_its_error(tmp_path: Path) 
     service = StandInGenerator(tmp_path / "tasks")
     generator = spade(tmp_path, service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    asyncio.run(
-        generator.record_results((GeneratedTaskResult(item, error="the agent could not run the task"),), generation=0)
-    )
+    asyncio.run(generator.record_results((FailedTask(item, "the agent could not run the task", False),), generation=0))
     assert service.reports[0]["score"] == 0.0
     assert service.reports[0]["metadata"]["refusal"] == "the agent could not run the task"
     assert report(tmp_path, 0)["tasks"] == []
@@ -179,7 +183,7 @@ def test_eval_tasks_receive_no_designer_reward_or_training_experience(tmp_path: 
     generator = spade(tmp_path, service, count=1)
     (generated,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(generated)).is_valid
-    asyncio.run(generator.record_results((GeneratedTaskResult(task=generated, split="eval"),), generation=0))
+    asyncio.run(generator.record_results((HeldOutTask(generated),), generation=0))
     assert service.reports == [] and service.episode_requests == []
     assert generator.experience == ()
     document = report(tmp_path, 0)
@@ -316,14 +320,14 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
     generator = spade(tmp_path, service, count=1)
     (first,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=0)))
     (second,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=1)))
-    asyncio.run(generator.record_results((GeneratedTaskResult(second, (0.25,)),), generation=1))
+    asyncio.run(generator.record_results((RolledOutTask(second, (0.25,)),), generation=1))
     assert report(tmp_path, 1)["tasks"][0]["name"] == second.name
     restarted = spade(tmp_path, service, count=1)
     assert restarted.generation == 2, "numbering continues after the open generation"
-    asyncio.run(restarted.record_results((GeneratedTaskResult(first, (0.25,)),), generation=0))
+    asyncio.run(restarted.record_results((RolledOutTask(first, (0.25,)),), generation=0))
     assert report(tmp_path, 0)["tasks"][0]["name"] == first.name
     reports = len(service.reports)
-    asyncio.run(restarted.record_results((GeneratedTaskResult(first, (0.25,)),), generation=0))
+    asyncio.run(restarted.record_results((RolledOutTask(first, (0.25,)),), generation=0))
     assert len(service.reports) == reports, "a second delivery of a closed generation does nothing"
 
 
@@ -331,7 +335,7 @@ def test_a_task_that_could_not_run_gets_no_designer_reward(tmp_path: Path) -> No
     service = StandInGenerator(tmp_path / "tasks")
     generator = spade(tmp_path, service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    failure = GeneratedTaskResult(item, error="the sandbox provider is down", infrastructure_failure=True)
+    failure = FailedTask(item, "the sandbox provider is down", True)
     asyncio.run(generator.record_results((failure,), generation=0))
     assert service.reports == [] and report(tmp_path, 0)["proposals"][0]["infrastructure_failure"]
 

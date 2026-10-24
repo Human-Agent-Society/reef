@@ -25,7 +25,15 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
+from reef.recipe.generated_tasks.generator import (
+    FailedTask,
+    GeneratedTaskResult,
+    HeldOutTask,
+    RejectedTask,
+    RolledOutTask,
+    TaskGenerator,
+    TaskValidationResult,
+)
 from reef.recipe.generated_tasks.processor import (
     DeliveryJob,
     GeneratedTaskRecord2Record,
@@ -40,12 +48,13 @@ from reef.recipe.generated_tasks.processor import (
     rewards_of,
     train_task_names,
 )
+from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
 from reef.record2record import InferenceRecord2Record
 from reef.record2task import NoTasks
 from reef.record2task.generator.client import GeneratorError
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskRolloutResult, TaskStorage
+from reef.storage.tasks import TaskStorage
 from reef.train.algos.registry import resolve_objective
 from reef.train.pipeline import ActiveRollout, TrainingPipeline
 
@@ -233,17 +242,32 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
 @pytest.mark.parametrize(
     ("build", "message"),
     [
-        (lambda: GeneratedTaskResult(task_for("t-a", "r", 1), (1.0,), error="refused"), "no rewards"),
-        (lambda: GeneratedTaskResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
-        (lambda: GeneratedTaskResult(task_for("t-a", "r", 1), infrastructure_failure=True), "needs the error"),
+        (lambda: RolledOutTask(task_for("t-a", "r", 1), ()), "non-empty tuple"),
+        (lambda: RolledOutTask(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
+        (lambda: FailedTask(task_for("t-a", "r", 1), "", True), "needs the error"),
+        (lambda: RejectedTask(task_for("t-a", "r", 1), ""), "needs its reason"),
+        (lambda: TaskRolloutResult("t-a", (1.0,), error="refused"), "no rewards"),
+        (lambda: TaskRolloutResult("t-a"), "non-empty tuple"),
+        (lambda: TaskRolloutResult("t-a", (1.0,), infrastructure_failure=True), "needs the error"),
         (lambda: TaskGenerationRequest((), "tasks", generation=-1), "non-negative"),
-        (lambda: GeneratedTaskResult(task=task_for("t-a", "r", 1), rollout_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
 )
 def test_the_contract_values_refuse_what_the_recipe_cannot_run(build: Any, message: str) -> None:
     with pytest.raises((TypeError, ValueError), match=message):
         build()
+
+
+def test_a_rollout_result_reads_back_from_its_document_as_the_generators_result() -> None:
+    task = task_for("t-a", "r", 1)
+    ran = TaskRolloutResult("t-a", (1.0, 0.0))
+    failed = TaskRolloutResult("t-a", error="the sandbox is gone", infrastructure_failure=True)
+    assert TaskRolloutResult.from_document(ran.document()) == ran and ran.generated(task) == RolledOutTask(
+        task, (1.0, 0.0)
+    )
+    assert failed.generated(task) == FailedTask(task, "the sandbox is gone", True)
+    with pytest.raises(ValueError, match="is not the result of"):
+        ran.generated(task_for("t-b", "r", 1))
 
 
 class ScriptedGenerator(TaskGenerator):
@@ -466,10 +490,11 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     (results,) = task_generator.results
     assert task_generator.result_generations == [0]
     assert [result.task.name for result in results] == names
-    assert all(result.rollout_rewards == (0.25, 0.25) and result.has_episodes for result in results)
+    assert all(isinstance(result, RolledOutTask) and result.rollout_rewards == (0.25, 0.25) for result in results)
     store = p.record2task.task_store
-    assert store.is_delivered(0) and [result.task_name for result in store.results(0)] == names
-    assert store.results(0)[0].rollout_rewards == (0.25, 0.25)
+    saved = rollout_results(store)
+    assert 0 in delivered_generations(store) and sorted(saved) == sorted(names)
+    assert saved[names[0]].rollout_rewards == (0.25, 0.25)
 
 
 @pytest.mark.unit
@@ -478,9 +503,7 @@ def test_eval_tasks_are_saved_without_episodes(tmp_path: Path) -> None:
     pipeline, service = rounds(tmp_path, task_generator, eval_fraction=1.0)
     assert not looked(pipeline)
     assert service.episode_requests == [] and service.writes == []
-    assert all(
-        result.split == "eval" and not result.has_episodes and not result.error for result in task_generator.results[0]
-    )
+    assert all(isinstance(result, HeldOutTask) for result in task_generator.results[0])
     assert pipeline.status()["task_store"] == {
         "train": 0,
         "eval": 2,
@@ -489,7 +512,7 @@ def test_eval_tasks_are_saved_without_episodes(tmp_path: Path) -> None:
         "rejected": 0,
         "pending": 0,
     }
-    assert pipeline.record2task.task_store.is_delivered(0), "no train task waits to run"
+    assert 0 in delivered_generations(pipeline.record2task.task_store), "no train task waits to run"
     assert pipeline.record2task.task_store.generation(0).is_complete
     pipeline.close()
 
@@ -553,9 +576,10 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     assert not looked(pipeline)
 
     results = {result.task.name: result for result in task_generator.results[0]}
-    assert results["follower"].split == "eval" and not results["follower"].error
-    assert "split conflict" in results["bridge"].error
-    assert "other files" in results["train-task"].error
+    assert isinstance(results["follower"], HeldOutTask)
+    bridge, train_task = results["bridge"], results["train-task"]
+    assert isinstance(bridge, RejectedTask) and "split conflict" in bridge.reason
+    assert isinstance(train_task, RejectedTask) and "other files" in train_task.reason
     assert service.writes == []
     assert {task.name: task.split for task in store.tasks()} == {
         "train-task": "train",
@@ -582,8 +606,8 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert not looked(p)
     assert service.writes == ["harbor-00000-001"]
     (results,) = task_generator.results
-    assert results[0].error == "oracle check refused: the oracle scored 0" and results[0].rollout_rewards == ()
-    assert results[1].has_episodes
+    assert results[0] == RejectedTask(results[0].task, "oracle check refused: the oracle scored 0")
+    assert isinstance(results[1], RolledOutTask)
     assert p.status()["task_store"]["available"] == 1
 
 
@@ -592,7 +616,9 @@ def test_a_refused_write_or_a_task_the_agent_cannot_run_comes_back_without_episo
     task_generator = ScriptedGenerator([generated(0, 0)])
     p, _ = rounds(tmp_path, task_generator, taken)
     assert not looked(p)
-    assert task_generator.results[0][0].error.startswith("refused: a different task holds the name harbor-00000-000")
+    (refused,) = task_generator.results[0]
+    assert isinstance(refused, FailedTask) and not refused.infrastructure_failure
+    assert refused.error.startswith("refused: a different task holds the name harbor-00000-000")
     assert taken.episode_requests == []
 
     cannot_run = StandInGenerator(tmp_path / "second" / "tasks", episode_error="Failed to start tmux session.")
@@ -601,7 +627,8 @@ def test_a_refused_write_or_a_task_the_agent_cannot_run_comes_back_without_episo
     assert not looked(p)
     assert [call["arm"] for call in cannot_run.episode_requests] == ["plain"]
     assert cannot_run.deleted == [], "the staged copy stays for the next run"
-    assert task_generator.results[0][0].error == "the agent could not run the task: Failed to start tmux session."
+    (failed,) = task_generator.results[0]
+    assert failed == FailedTask(failed.task, "the agent could not run the task: Failed to start tmux session.", True)
 
 
 class PartlyReported(StandInGenerator):
@@ -648,11 +675,11 @@ def test_results_that_the_generator_did_not_take_are_sent_again_by_a_later_job(t
     assert service.writes == ["harbor-00000-000", "harbor-00000-001"]
     p.ready(BATCH_SIZE)
     assert p.status()["task_generation"]["last_error"] == "the generator lost its state directory"
-    assert not p.record2task.task_store.is_delivered(0)
+    assert 0 not in delivered_generations(p.record2task.task_store)
     task_generator.failing_results = False
     assert asyncio.run(p.record2task.deliver_results()) == ""
     assert task_generator.result_generations == [0, 0], "the second delivery reached it"
-    assert p.record2task.task_store.is_delivered(0)
+    assert 0 in delivered_generations(p.record2task.task_store)
     assert asyncio.run(p.record2task.deliver_results()) == "" and len(task_generator.results) == 2
 
 
@@ -685,8 +712,7 @@ def test_a_task_that_cannot_run_is_an_infrastructure_failure(tmp_path: Path) -> 
     p, _ = rounds(tmp_path, task_generator, BrokenRunner(tmp_path / "tasks"), rounds=1)
     looked(p)
     ((result,),) = task_generator.results
-    assert result.infrastructure_failure and result.error == "the sandbox provider is down"
-    assert not result.has_episodes
+    assert result == FailedTask(result.task, "the sandbox provider is down", True)
 
 
 class BrokenRunner(StandInGenerator):
@@ -729,7 +755,7 @@ def test_a_restart_sends_results_that_the_generator_did_not_receive(tmp_path: Pa
     worker.finish()
     restarted.ready(BATCH_SIZE)
     assert task_generator.result_generations == [0]
-    assert restarted.record2task.task_store.is_delivered(0)
+    assert 0 in delivered_generations(restarted.record2task.task_store)
 
 
 def test_a_generation_whose_results_fail_does_not_hold_back_later_ones(tmp_path: Path) -> None:
@@ -739,7 +765,7 @@ def test_a_generation_whose_results_fail_does_not_hold_back_later_ones(tmp_path:
     train_rollout(p)
     looked(p)
     store = p.record2task.task_store
-    assert not store.is_delivered(0) and store.is_delivered(1)
+    assert 0 not in delivered_generations(store) and 1 in delivered_generations(store)
 
 
 def test_a_task_whose_episodes_a_stop_interrupted_is_staged_again_and_runs(tmp_path: Path) -> None:
@@ -757,7 +783,9 @@ def test_a_task_whose_episodes_a_stop_interrupted_is_staged_again_and_runs(tmp_p
     restarted, _ = rounds(tmp_path, task_generator, service, rounds=1)
     looked(restarted)
     ((result,),) = task_generator.results
-    assert result.has_episodes and service.deleted == [], "staging the same task again reuses the staged copy"
+    assert (
+        isinstance(result, RolledOutTask) and service.deleted == []
+    ), "staging the same task again reuses the staged copy"
 
 
 class FailingGenerator(ScriptedGenerator):
@@ -1122,21 +1150,21 @@ def test_a_rollout_that_trains_nothing_lets_the_next_round_start(tmp_path: Path)
 def test_a_task_whose_result_cannot_be_saved_still_trains_and_the_next_job_saves_it(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]))
     store = p.record2task.task_store
-    record_result = store.record_result
+    write_document = store.write_document
 
-    def failing_record_result(*, generation: int, result: TaskRolloutResult) -> None:
-        if result.task_name == "harbor-00000-000":
+    def failing_write_document(*, key: str, document: str) -> None:
+        if key == "rollout/harbor-00000-000":
             raise OSError(28, "No space left on device")
-        record_result(generation=generation, result=result)
+        write_document(key=key, document=document)
 
-    store.record_result = failing_record_result
+    store.write_document = failing_write_document
     looked(p)
-    assert {result.task_name for result in store.results(0)} == {"harbor-00000-001"}
+    assert set(rollout_results(store)) == {"harbor-00000-001"}
     train_rollout(p)
     assert p.status()["task_store"]["trained"] == 2, "the task's episodes reached Reef, so its group trained"
-    store.record_result = record_result
+    store.write_document = write_document
     assert asyncio.run(p.record2task.run(DeliveryJob(receipt="delivery"))).error == ""
-    assert store.is_delivered(0), "the next job saved the result, so the feedback went out"
+    assert 0 in delivered_generations(store), "the next job saved the result, so the feedback went out"
 
 
 def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_path: Path) -> None:
@@ -1155,16 +1183,16 @@ def test_a_generation_whose_task_result_failed_to_save_once_still_gets_its_feedb
     task_generator = ScriptedGenerator([generated(0, 0, 1)])
     p, _ = rounds(tmp_path, task_generator, rounds=1)
     store = p.record2task.task_store
-    record_result = store.record_result
+    write_document = store.write_document
     calls = {"count": 0}
 
-    def flaky_record_result(*, generation: int, result: TaskRolloutResult) -> None:
+    def flaky_write_document(*, key: str, document: str) -> None:
         calls["count"] += 1
-        if result.task_name == "harbor-00000-000" and calls["count"] == 1:
+        if key == "rollout/harbor-00000-000" and calls["count"] == 1:
             raise OSError(28, "No space left on device")
-        record_result(generation=generation, result=result)
+        write_document(key=key, document=document)
 
-    store.record_result = flaky_record_result
+    store.write_document = flaky_write_document
     looked(p)
     assert task_generator.result_generations == [0], "the delivery job saved the result again, then delivered"
 
@@ -1187,21 +1215,21 @@ def test_a_skipped_generation_is_finished_by_the_next_round(tmp_path: Path) -> N
 def test_a_task_that_trained_before_its_result_was_saved_gets_a_lost_result_after_a_restart(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
     store = p.record2task.task_store
-    record_result = store.record_result
+    write_document = store.write_document
 
-    def failing_record_result(*, generation: int, result: TaskRolloutResult) -> None:
-        if result.task_name == "harbor-00000-000":
+    def failing_write_document(*, key: str, document: str) -> None:
+        if key == "rollout/harbor-00000-000":
             raise OSError(28, "No space left on device")
-        record_result(generation=generation, result=result)
+        write_document(key=key, document=document)
 
     # The first task's result is never saved, but both tasks train before the stop.
-    store.record_result = failing_record_result
+    store.write_document = failing_write_document
     looked(p)
     store.mark_trained(task_names=("harbor-00000-000", "harbor-00000-001"))
     p.close()
     task_generator = ScriptedGenerator()
     again, _ = rounds(tmp_path, task_generator, rounds=1)
-    (lost,) = [result for result in again.record2task.task_store.results(0) if result.error]
+    (lost,) = [result for result in rollout_results(again.record2task.task_store).values() if result.error]
     assert lost.task_name == "harbor-00000-000" and lost.infrastructure_failure
     assert len(again.record2record.task_pool) == 0, "a trained task does not run again"
     assert asyncio.run(again.record2task.deliver_results()) == "" and task_generator.result_generations == [0]
@@ -1227,7 +1255,7 @@ def test_a_rollout_job_that_fails_gives_its_tasks_lost_results_so_the_feedback_g
     p.task2batch.run = failing_run
     for _ in range(4):
         p.ready(BATCH_SIZE)
-    results = p.record2task.task_store.results(0)
+    results = rollout_results(p.record2task.task_store).values()
     assert [result.infrastructure_failure for result in results] == [True, True]
     assert task_generator.result_generations == [0]
 
@@ -1235,20 +1263,20 @@ def test_a_rollout_job_that_fails_gives_its_tasks_lost_results_so_the_feedback_g
 def test_a_result_that_the_database_fails_to_save_still_trains_and_is_saved_later(tmp_path: Path) -> None:
     p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
     store = p.record2task.task_store
-    record_result = store.record_result
+    write_document = store.write_document
 
-    def locked_record_result(*, generation: int, result: TaskRolloutResult) -> None:
-        if result.task_name == "harbor-00000-000":
+    def locked_write_document(*, key: str, document: str) -> None:
+        if key == "rollout/harbor-00000-000":
             raise sqlalchemy.exc.OperationalError("INSERT", {}, Exception("database is locked"))
-        record_result(generation=generation, result=result)
+        write_document(key=key, document=document)
 
-    store.record_result = locked_record_result
+    store.write_document = locked_write_document
     looked(p)
     train_rollout(p)
     assert p.status()["task_store"]["trained"] == 2, "both groups trained"
-    store.record_result = record_result
+    store.write_document = write_document
     assert asyncio.run(p.record2task.run(DeliveryJob(receipt="delivery"))).error == ""
-    assert store.is_delivered(0)
+    assert 0 in delivered_generations(store)
 
 
 def test_a_round_that_ran_out_of_attempts_is_retried_with_the_same_sessions(tmp_path: Path) -> None:

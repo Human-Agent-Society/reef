@@ -47,7 +47,14 @@ from recipes.beta.spade.generation import (
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
+from reef.recipe.generated_tasks.generator import (
+    FailedTask,
+    GeneratedTaskResult,
+    HeldOutTask,
+    RejectedTask,
+    TaskGenerator,
+    TaskValidationResult,
+)
 from reef.recipe.generated_tasks.processor import rewards_of
 from reef.record2task.generator.client import (
     DuplicateTask,
@@ -322,12 +329,16 @@ class SpadeTaskGenerator(TaskGenerator):
             pending = pending_proposals.pop(result.task.name, None)
             if pending is None:
                 continue
-            proposal = ProposalRecord(pending.index, pending.skill, pending.designer_record_id, None, result.error)
-            if result.split == "eval":
+            proposal = ProposalRecord(pending.index, pending.skill, pending.designer_record_id, None, "")
+            if isinstance(result, HeldOutTask):
                 proposals.append((replace(proposal, task_name=result.task.name, split="eval"), None))
                 continue
-            if not result.has_episodes:
-                proposals.append((replace(proposal, infrastructure_failure=result.infrastructure_failure), None))
+            if isinstance(result, RejectedTask):
+                proposals.append((replace(proposal, refusal=result.reason), None))
+                continue
+            if isinstance(result, FailedTask):
+                failed = replace(proposal, refusal=result.error, infrastructure_failure=result.infrastructure_failure)
+                proposals.append((failed, None))
                 continue
             plain = result.rollout_rewards
             hint: tuple[float, ...] = ()

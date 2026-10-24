@@ -20,9 +20,9 @@ changes nothing. A deployment selects the file store in
 ``storage.task_file_backend``: ``local`` selects :class:`LocalTaskFileStore`,
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
-A store also keeps what happens to the train tasks of its generations after
-they are published: each task's first rollout result, the generations whose
-results reached the generator, and the tasks that trained.
+A store also keeps the train tasks that trained, and documents that the
+stage writing the store saves under keys of its own. The store keeps each
+document as text and does not read it.
 
 A task store belongs to a scenario session. Archiving the scenario retires its
 task stores and task files with its records and commits. Record retention
@@ -151,36 +151,24 @@ class StoredTask:
             raise ValueError("a stored task needs a name, the split 'train' or 'eval', and a files digest")
 
 
-@dataclass(frozen=True)
-class TaskRolloutResult:
-    """What the first rollout of a generation's train task returned.
-
-    Values: ``task_name`` names a train task that the generation published.
-    ``rollout_rewards`` are the rewards of the training episodes that ran. A
-    non-empty ``error`` means that the task ran no episodes;
-    ``infrastructure_failure`` says that it could not run at all.
-    Purpose: the record-to-task stage saves it when the task's episodes first end, and
-    sends the results of a generation to its generator once each train task of
-    the generation has one, also after a restart.
-    """
-
-    task_name: str
-    rollout_rewards: tuple[float, ...] = ()
-    error: str = ""
-    infrastructure_failure: bool = False
-
-
 class TaskStore(ABC):
     """The generations and published tasks of one named store of a scenario.
 
-    Values: the state of a store is a finite sequence of generations in
-    increasing ``generation``, and a finite sequence of published tasks in
-    publication order. No two published tasks have the
-    same name. A published task does not change.
+    Values: the state of a store is a tuple ``(G, P, T, D)``. ``G`` is a finite
+    sequence of generations in increasing ``generation``. ``P`` is a finite
+    sequence of published tasks in publication order; no two have the same
+    name, and a published task does not change. ``T`` is a set of task names
+    with ``T ⊆ {name(p) : p ∈ P, split(p) = train}``: the train tasks that
+    trained. ``D : K ⇀ Str`` maps non-empty keys to documents, each key written
+    once. Nothing is removed from ``G``, ``P``, ``T`` or ``D``.
 
     Purpose: a record-to-task stage writes its generations and publishes their
     candidates. A caller adds task directories (``add_task``). Readers take the
     published tasks of a split (``tasks``) and their directories (``path``).
+    The rollout of a task pool marks the tasks that trained (``mark_trained``),
+    so a restart rolls out only the others. The stage that writes the store
+    keeps its own durable state about its tasks in ``D``; the store does not
+    interpret a document.
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
@@ -255,25 +243,16 @@ class TaskStore(ABC):
         """Return the published tasks in publication order, optionally of one split."""
 
     @abstractmethod
-    def record_result(self, *, generation: int, result: TaskRolloutResult) -> None:
-        """Save the first rollout result of a train task that the generation published.
+    def write_document(self, *, key: str, document: str) -> None:
+        """Save ``document`` under ``key``: after the call, ``D(key) = document``.
 
-        An identical retry changes nothing. Raises ``TaskStoreError`` if the
-        task already has another result, or if the generation did not publish
-        it to the train split.
+        An identical retry changes nothing. Raises ``TaskStoreError`` if ``key``
+        is empty, or if ``D(key)`` is already another document.
         """
 
     @abstractmethod
-    def results(self, generation: int) -> tuple[TaskRolloutResult, ...]:
-        """Return the saved rollout results of a generation's tasks, in candidate order."""
-
-    @abstractmethod
-    def mark_delivered(self, *, generation: int) -> None:
-        """Save that the generator received the results of the generation. A repeated call changes nothing."""
-
-    @abstractmethod
-    def is_delivered(self, generation: int) -> bool:
-        """Return whether the generator received the results of the generation."""
+    def documents(self) -> Mapping[str, str]:
+        """Return ``D``: every saved document by its key."""
 
     @abstractmethod
     def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
@@ -464,7 +443,6 @@ __all__ = [
     "TaskCandidate",
     "TaskConflict",
     "TaskFileStore",
-    "TaskRolloutResult",
     "TaskStorage",
     "TaskStore",
     "TaskStoreError",

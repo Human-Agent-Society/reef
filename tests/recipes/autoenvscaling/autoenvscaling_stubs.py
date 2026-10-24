@@ -35,7 +35,7 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
 from reef.core.tasks import HarborTask
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult
+from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2task.generator import GeneratorError, WrittenTask
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.sandbox.e2b import E2BExecutor, E2BSession
@@ -319,10 +319,10 @@ def run_tasks(generator: AutoEnvScalingGenerator, *training: tuple[float, ...]) 
     for item in asyncio.run(generator.generate(REQUEST)):
         validation = asyncio.run(generator.validate(item))
         if not validation.is_valid:
-            results.append(GeneratedTaskResult(item, error="; ".join(validation.errors)))
+            results.append(RejectedTask(item, "; ".join(validation.errors)))
             continue
         asyncio.run(generator.service.write_task(item))
-        results.append(GeneratedTaskResult(item, rewards[len(results) % len(rewards)]))
+        results.append(RolledOutTask(item, rewards[len(results) % len(rewards)]))
     return tuple(results)
 
 

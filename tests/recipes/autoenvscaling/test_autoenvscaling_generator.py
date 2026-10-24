@@ -55,8 +55,9 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult
+from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
+from reef.recipe.generated_tasks.results import rollout_results
 from reef.record2task.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2task.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2task.generator.inputs import TaskGenerationRequest
@@ -274,7 +275,7 @@ def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) 
     with pytest.raises(GeneratorError, match="the harbor command line is not installed"):
         asyncio.run(generator.validate(second))
     assert not (tmp_path / "tasks" / NAMES[1]).exists(), "no copy is left"
-    asyncio.run(generator.record_results((GeneratedTaskResult(first, (0.0, 1.0)),), generation=0))
+    asyncio.run(generator.record_results((RolledOutTask(first, (0.0, 1.0)),), generation=0))
     document = report(tmp_path)
     assert document["error"].startswith(f"the check of {NAMES[1]} could not run")
     assert [entry["stage"] for entry in document["proposals"]] == ["", "unreached"]
@@ -321,7 +322,7 @@ def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path:
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
     (generated,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(generated)).is_valid
-    asyncio.run(generator.record_results((GeneratedTaskResult(task=generated, split="eval"),), generation=0))
+    asyncio.run(generator.record_results((HeldOutTask(generated),), generation=0))
     document = report(tmp_path)
     assert document["tasks"] == []
     assert document["proposals"][0]["stage"] == "held_out"
@@ -339,9 +340,9 @@ def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> Non
     service.is_solvable = False
     errors = asyncio.run(generator.validate(second)).errors
     results = (
-        GeneratedTaskResult(first, (0.0, 1.0)),
-        GeneratedTaskResult(second, error="; ".join(errors)),
-        GeneratedTaskResult(third, error="the agent could not run the task: no sandbox"),
+        RolledOutTask(first, (0.0, 1.0)),
+        RejectedTask(second, "; ".join(errors)),
+        FailedTask(third, "the agent could not run the task: no sandbox", False),
     )
     asyncio.run(generator.record_results(results, generation=0))
 
@@ -593,7 +594,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     for task in generated.tasks:
         asyncio.run(generation.run_and_record(task, labels={}))
     delivery_error = asyncio.run(generation.deliver_results())
-    results = generation.task_store.results(0)
+    results = list(rollout_results(generation.task_store).values())
     generation.close()
     assert len(generated.tasks) == 2 and delivery_error == ""
     assert [result.rollout_rewards for result in results] == [(0.5, 0.5)] * 2
@@ -638,10 +639,10 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
     (first,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=0)))
     assert asyncio.run(generator.validate(first)).is_valid
     (second,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=1)))
-    asyncio.run(generator.record_results((GeneratedTaskResult(second, (0.5, 0.5)),), generation=1))
+    asyncio.run(generator.record_results((RolledOutTask(second, (0.5, 0.5)),), generation=1))
     assert report(tmp_path, 1)["tasks"][0]["name"] == second.name
     restarted = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
-    asyncio.run(restarted.record_results((GeneratedTaskResult(first, (0.5, 0.5)),), generation=0))
+    asyncio.run(restarted.record_results((RolledOutTask(first, (0.5, 0.5)),), generation=0))
     document = report(tmp_path, 0)
     assert [task["band"] for task in document["tasks"]] == ["inside"]
     assert document["tasks"][0]["checks"], "the check results saved before the restart are in the report"
@@ -652,6 +653,6 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
 def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInAuthor(), StandInGenerator(tmp_path / "tasks"), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
-    failure = GeneratedTaskResult(item, error="the sandbox provider is down", infrastructure_failure=True)
+    failure = FailedTask(item, "the sandbox provider is down", True)
     asyncio.run(generator.record_results((failure,), generation=0))
     assert [entry["stage"] for entry in report(tmp_path)["proposals"]] == ["outage"]

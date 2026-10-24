@@ -444,17 +444,21 @@ generator gets what it needs from its ``config`` and from these calls only:
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
 
-A ``GeneratedTaskResult`` holds the task, ``rollout_rewards``, a ``split``
-(``train`` by default), an ``error``, and ``infrastructure_failure``. The
-rewards include only episodes that ran. An episode that ran
-without a reward counts as 0. A non-empty ``error`` means that the task ran no
-episodes: it failed validation, the generator service refused it, or the agent
-could not start on it. ``infrastructure_failure`` marks an error where the task
-could not run at all; it is not a failure of the solver.
+Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
-An eval result has ``split="eval"``, no rewards, and no error. The task ran
-no episodes. A generator must not use an eval result as training feedback or as
-experience for later generations.
+- ``RejectedTask(task, reason)``: the candidate failed validation or
+  conflicted with the task store, so it was never published.
+- ``HeldOutTask(task)``: the task is in the eval split. It runs no episodes. A
+  generator must not use it as training feedback or as experience for later
+  generations.
+- ``RolledOutTask(task, rollout_rewards)``: the first rollout of the train task
+  ran. ``rollout_rewards`` holds one verifier reward for each training episode
+  that ran, as the rollout's policy scored it before it trained on it. An
+  episode that ran without a reward counts as 0.
+- ``FailedTask(task, error, infrastructure_failure)``: the first rollout ran no
+  episode. ``infrastructure_failure`` is true when the task could not run at
+  all, for example because the sandbox failed; it is not a failure of the
+  solver. It is false when the generator service refused the task.
 
 The generator service scores an episode whose verifier ran past its timeout
 as 0, and reports it, so a training episode of that kind trains. The task's

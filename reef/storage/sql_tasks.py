@@ -26,7 +26,6 @@ from reef.storage.tasks import (
     TaskCandidate,
     TaskConflict,
     TaskFileStore,
-    TaskRolloutResult,
     TaskStorage,
     TaskStore,
     TaskStoreError,
@@ -41,17 +40,15 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
-    ``results`` holds the first rollout result of each train task that ran,
-    ``deliveries`` one row for each generation whose results reached the
-    generator, and ``trained`` one row for each task that trained.
+    ``trained`` holds one row for each task that trained, and ``documents``
+    one row for each document key with its document text.
     """
 
     generations: Table
     candidates: Table
     published: Table
-    results: Table
-    deliveries: Table
     trained: Table
+    documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -99,25 +96,18 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("files_digest", String(64), nullable=False),
             Column("split", Text, nullable=False),
         ),
-        results=Table(
-            "task_result",
-            metadata,
-            *key_columns(),
-            Column("task_name", Text, primary_key=True),
-            Column("generation", BigInteger, nullable=False),
-            Column("result_json", Text, nullable=False),
-        ),
-        deliveries=Table(
-            "task_delivery",
-            metadata,
-            *key_columns(),
-            Column("generation", BigInteger, primary_key=True),
-        ),
         trained=Table(
             "task_trained",
             metadata,
             *key_columns(),
             Column("task_name", Text, primary_key=True),
+        ),
+        documents=Table(
+            "task_document",
+            metadata,
+            *key_columns(),
+            Column("document_key", Text, primary_key=True),
+            Column("document", Text, nullable=False),
         ),
     )
 
@@ -270,51 +260,26 @@ class SQLTaskStore(TaskStore):
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
 
-    def record_result(self, *, generation: int, result: TaskRolloutResult) -> None:
-        document = result_document(result)
-        results = self.tables.results
+    def write_document(self, *, key: str, document: str) -> None:
+        if not key:
+            raise TaskStoreError("a document needs a non-empty key")
+        documents = self.tables.documents
         with self.records._transaction(write=True) as connection:
-            state = self.read_generation(connection, generation)
-            published = state is not None and any(
-                candidate.name == result.task_name and candidate.split == "train"
-                for candidate in state.candidates or ()
-            )
-            if not published:
-                raise TaskStoreError(f"generation {generation} did not publish train task {result.task_name!r}")
             existing = connection.execute(
-                select(results.c.result_json).where(self.matching(results, task_name=result.task_name))
+                select(documents.c.document).where(self.matching(documents, document_key=key))
             ).scalar()
             if existing is None:
-                connection.execute(
-                    results.insert().values(
-                        **self.key, task_name=result.task_name, generation=generation, result_json=document
-                    )
-                )
+                connection.execute(documents.insert().values(**self.key, document_key=key, document=document))
             elif existing != document:
-                raise TaskStoreError(f"task {result.task_name!r} of generation {generation} already has a result")
+                raise TaskStoreError(f"document {key!r} is already saved with other text")
 
-    def results(self, generation: int) -> tuple[TaskRolloutResult, ...]:
-        results = self.tables.results
+    def documents(self) -> Mapping[str, str]:
+        documents = self.tables.documents
         with self.records._transaction(write=False) as connection:
-            state = self.read_generation(connection, generation)
             rows = connection.execute(
-                select(results.c.result_json).where(self.matching(results, generation=generation))
-            ).scalars()
-            saved = {result.task_name: result for result in map(result_from_document, rows.all())}
-        candidates = () if state is None else state.candidates or ()
-        names = dict.fromkeys(candidate.name for candidate in candidates)
-        return tuple(saved[name] for name in names if name in saved)
-
-    def mark_delivered(self, *, generation: int) -> None:
-        with self.records._transaction(write=True) as connection:
-            self.require_generation(connection, generation)
-            self.records._insert_if_absent(connection, self.tables.deliveries, {**self.key, "generation": generation})
-
-    def is_delivered(self, generation: int) -> bool:
-        deliveries = self.tables.deliveries
-        with self.records._transaction(write=False) as connection:
-            row = connection.execute(select(deliveries).where(self.matching(deliveries, generation=generation)))
-            return row.first() is not None
+                select(documents.c.document_key, documents.c.document).where(self.matching(documents))
+            )
+            return {row.document_key: row.document for row in rows}
 
     def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
         with self.records._transaction(write=True) as connection:
@@ -422,32 +387,6 @@ class SQLTaskStore(TaskStore):
             .where(self.matching(candidates, generation=generation, candidate_index=index))
             .values(**outcome)
         )
-
-
-def result_document(result: TaskRolloutResult) -> str:
-    """Encode a rollout result as canonical JSON text. An identical retry gives the same text."""
-    return json.dumps(
-        {
-            "task_name": result.task_name,
-            "rollout_rewards": list(result.rollout_rewards),
-            "error": result.error,
-            "infrastructure_failure": result.infrastructure_failure,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def result_from_document(text: str) -> TaskRolloutResult:
-    """Decode the text of :func:`result_document`."""
-    document = json.loads(text)
-    return TaskRolloutResult(
-        task_name=document["task_name"],
-        rollout_rewards=tuple(document["rollout_rewards"]),
-        error=document["error"],
-        infrastructure_failure=document["infrastructure_failure"],
-    )
 
 
 def generation_state(row: RowMapping, candidate_rows: Sequence[RowMapping]) -> GenerationState:

@@ -636,6 +636,15 @@ images, and then records its publication. A ``StoredTask`` holds the task
      - Return the local task directory of a candidate or a published task,
        for example for ``read_harbor_task`` or ``TaskEpisodeRunner.run``. Do not
        change it.
+   * - ``mark_trained(task_names=...)``, ``trained_task_names()``
+     - Mark published train tasks as trained, or return the trained ones. The
+       rollout of a task pool marks a task once the commit of its training step
+       is durable, so a restart rolls out only the others.
+   * - ``write_document(key=..., document=...)``, ``documents()``
+     - Save a text document under a non-empty key, or return every document by
+       key. Each key holds one document; another document under a used key
+       raises ``TaskStoreError``. The store does not read a document: the stage
+       that writes the store keeps its own state about its tasks here.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -1139,9 +1148,12 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``GeneratedTaskResult(task, rollout_rewards=(), error="", split="train")`` holds
-the rewards of the training episodes, only of the episodes that ran. ``has_episodes`` is true for a train
-task with an empty ``error``. A task that ran no episodes has no rewards.
+``GeneratedTaskResult`` is ``RejectedTask(task, reason)``, ``HeldOutTask(task)``,
+``RolledOutTask(task, rollout_rewards)`` or ``FailedTask(task, error,
+infrastructure_failure)``. ``rollout_rewards`` is a non-empty tuple of finite
+numbers; ``reason`` and ``error`` are non-empty. See `the task generation
+contract <../developer-guide/processors.rst#task-generation-contract>`__ for
+when the recipe sends each case.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise

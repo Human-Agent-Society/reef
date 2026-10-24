@@ -42,7 +42,14 @@ from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewC
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator, TaskValidationResult
+from reef.recipe.generated_tasks.generator import (
+    FailedTask,
+    GeneratedTaskResult,
+    HeldOutTask,
+    RejectedTask,
+    TaskGenerator,
+    TaskValidationResult,
+)
 from reef.record2task.generator.client import DuplicateTask, Generator, GeneratorError, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.designer import parse_harbor_reply
 from reef.record2task.generator.harbor import GeneratedHarborTask, OracleResult, dockerfile_logical_lines, harbor_task
@@ -721,17 +728,21 @@ class AutoEnvScalingGenerator(TaskGenerator):
         outcomes: dict[str, TaskOutcome] = {}
         for result in results:
             proposal = pending.pop(result.task.name)
-            if result.split == "eval":
+            if isinstance(result, HeldOutTask):
                 proposals.append(replace(proposal, stage=STAGE_HELD_OUT))
                 continue
-            if not result.has_episodes:
+            if isinstance(result, RejectedTask):
+                stage = state.stages.get(result.task.name) or STAGE_RUN
+                proposals.append(replace(proposal, stage=stage, refusal=result.reason))
+                continue
+            if isinstance(result, FailedTask):
                 if result.infrastructure_failure:
                     stage = STAGE_OUTAGE
                 else:
                     stage = state.stages.get(result.task.name) or STAGE_RUN
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
                 continue
-            pass_rate = statistics.fmean(result.rollout_rewards) if result.rollout_rewards else 0.0
+            pass_rate = statistics.fmean(result.rollout_rewards)
             # Where the pass rate falls against the band; a null bound is no bound.
             if self.band_low is not None and pass_rate < self.band_low:
                 band = BAND_BELOW

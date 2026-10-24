@@ -9,9 +9,9 @@ generation job:
 3. Publishes each valid task with its train/eval split. Eval tasks run no episodes.
 
 The round's train tasks wait in the record stage's task pool. The pipeline takes up to ``tasks_per_step`` of
-them as one rollout batch, and ``GeneratedTaskBatches`` runs them on its own worker: ``episodes_per_task`` episodes of each task's
-training arm, through the generator service, which limits the episodes in flight. Each episode
-carries the batch and its task use. The training episodes of one task use form one group, and the batch
+them as one rollout batch, and ``GeneratedTaskBatches`` runs them on its own worker: ``episodes_per_task``
+episodes of each task's training arm, through the generator service, which limits the episodes in flight.
+Each episode carries the batch and its task use. The training episodes of one task use form one group, and the batch
 trains on its groups once they settled. A task's first episodes save its result; when every train task of a
 generation has a result, the next job sends the generation's results to the generator.
 
@@ -47,22 +47,21 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
 from reef.harness.client.tasks import TaskEpisode
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, TaskGenerator
+from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
+from reef.recipe.generated_tasks.results import (
+    TaskRolloutResult,
+    delivered_generations,
+    mark_delivered,
+    rollout_results,
+    save_rollout_result,
+)
 from reef.record2record import Record2Record, RecordSetUnit, ReportContext
 from reef.record2record.rollout import BATCH_LABEL, TASK_USE_LABEL, RolloutGrouping, RolloutReportRecord2Record
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.generator.client import DuplicateTask, Generator, HttpGenerator, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.storage.tasks import (
-    GenerationState,
-    SplitName,
-    StoredTask,
-    TaskConflict,
-    TaskRolloutResult,
-    TaskStore,
-    TaskStoreError,
-)
+from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
 from reef.task2batch import RolloutResult, RolloutTask2Batch
 from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
@@ -193,41 +192,35 @@ def available_tasks(store: TaskStore) -> tuple[tuple[int, StoredTask], ...]:
     )
 
 
-def has_result(store: TaskStore, generation: int, task_name: str) -> bool:
-    return any(result.task_name == task_name for result in store.results(generation))
-
-
 def deliverable_generations(store: TaskStore) -> tuple[GenerationState, ...]:
-    """The complete generations whose train tasks all have results and that the generator did not receive."""
+    """The deliverable generations, oldest first: ``complete(g)``, ``train(g) ⊆ dom rollout`` and ``g ∉ Δ``."""
+    saved = rollout_results(store)
+    delivered = delivered_generations(store)
     return tuple(
         state
         for state in store.generations()
         if state.is_complete
-        and not store.is_delivered(state.generation)
-        and {result.task_name for result in store.results(state.generation)} == set(train_task_names(state))
+        and state.generation not in delivered
+        and all(name in saved for name in train_task_names(state))
     )
 
 
 def task_results(store: TaskStore, state: GenerationState) -> tuple[GeneratedTaskResult, ...]:
-    """The result of each candidate with an outcome, in candidate order, as the generator receives them."""
-    saved = {result.task_name: result for result in store.results(state.generation)}
+    """The result of each candidate of a complete generation, in candidate order, as the generator receives them.
+
+    A rejected candidate is a ``RejectedTask``, an eval task a ``HeldOutTask``, and a train task the result of
+    its first rollout, ``rollout(n)``.
+    """
+    saved = rollout_results(store)
     results: list[GeneratedTaskResult] = []
     for candidate in state.candidates or ():
         task = read_harbor_task(store.path(candidate.files_digest))
         if candidate.error:
-            results.append(GeneratedTaskResult(task, error=candidate.error))
+            results.append(RejectedTask(task, candidate.error))
         elif candidate.split == "eval":
-            results.append(GeneratedTaskResult(task, split="eval"))
-        elif candidate.split == "train":
-            result = saved[candidate.name]
-            results.append(
-                GeneratedTaskResult(
-                    task,
-                    result.rollout_rewards,
-                    error=result.error,
-                    infrastructure_failure=result.infrastructure_failure,
-                )
-            )
+            results.append(HeldOutTask(task))
+        else:
+            results.append(saved[candidate.name].generated(task))
     return tuple(results)
 
 
@@ -535,8 +528,8 @@ class GeneratedTaskRecord2Record(RolloutReportRecord2Record):
     the next round number, the complete generations of the task store, and the round limit. The limit counts
     the rounds that finished a generation and the rounds whose generation ran out of attempts; a round of
     sessions that a complete generation already used does not count. A restart counts complete generations
-    only, so a generation that ran out of attempts gets new attempts after a restart. A round is due when no round is running, the
-    limit is not reached, the task pool holds fewer than ``refill_tasks`` tasks, and one of these is true:
+    only, so a generation that ran out of attempts gets new attempts after a restart. A round is due when no
+    round is running, the limit is not reached, the task pool holds fewer than ``refill_tasks`` tasks, and one of these is true:
 
     * it is the first round after a start;
     * the last round made no train task, or the last rollout trained nothing, so no batch comes;
@@ -685,7 +678,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
     ``generation_deadline_seconds``. ``finished_rounds`` hands back each round with its saved train tasks.
 
     ``GeneratedTaskBatches`` runs saved tasks through ``run_and_record``, which saves a task's first
-    result. When every train task of a generation has a result, the next job sends the generation's results
+    rollout result, ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results`. When every train task of a
+    generation has a result, the next job sends the generation's results
     to the generator. A restart puts the train tasks that did not train back in the record stage's task pool
     and sends the results that the generator did not receive.
     """
@@ -738,8 +732,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             if context.task_storage is not None and self.rounds > 0
             else None
         )
-        #: Results that an episode run could not save, by generation; the next job saves them before it delivers.
-        self.unsaved_results: queue.SimpleQueue[tuple[int, TaskRolloutResult]] = queue.SimpleQueue()
+        #: Rollout results that the store could not save; the next job saves them before it delivers.
+        self.unsaved_results: queue.SimpleQueue[TaskRolloutResult] = queue.SimpleQueue()
         #: Rounds that ended without a job, such as a round of sessions that a complete generation already used.
         self.ended_rounds: list[RoundResult] = []
         #: The generation that runs on the worker. One generation runs at a time.
@@ -757,15 +751,16 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 round_stage.task_pool.add(stored.name, task_item(store, generation, stored), group_key=generation)
             # A task that trained before its result was saved does not run again; the generator learns it was lost.
             trained = store.trained_task_names()
+            saved = rollout_results(store)
             for state in store.generations():
                 for name in train_task_names(state):
-                    if name in trained and not has_result(store, state.generation, name):
+                    if name in trained and name not in saved:
                         lost = TaskRolloutResult(
                             task_name=name,
                             error="the result was lost before it was saved",
                             infrastructure_failure=True,
                         )
-                        store.record_result(generation=state.generation, result=lost)
+                        save_rollout_result(store, lost)
             # Results that a stop kept from the generator go out now, even when no other job is due.
             if self.worker is not None and deliverable_generations(store):
                 self.worker.submit(DeliveryJob(receipt=DELIVERY_RECEIPT))
@@ -976,8 +971,8 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         task: TaskItem,
         *,
         labels: Mapping[str, str],
-    ) -> tuple[GeneratedTaskResult, tuple[str, ...]]:
-        """Run one pooled task's training episodes with ``labels``; save its result in the task store at its first run.
+    ) -> tuple[TaskRolloutResult, tuple[str, ...]]:
+        """Run one pooled task's training episodes with ``labels``; save its result as ``rollout(n)`` at its first run.
 
         Returns the result and the reports of its training episodes.
         """
@@ -990,17 +985,9 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         except Exception as exc:
             logger.exception("generated-task %s could not run on scenario %r", identity["name"], self.scenario)
             error = str(exc) or type(exc).__name__
-            result, reports = GeneratedTaskResult(harbor_task, error=error, infrastructure_failure=True), ()
+            result, reports = TaskRolloutResult(harbor_task.name, error=error, infrastructure_failure=True), ()
         # The generator learns from a task's first run; a rollout after a restart only trains.
-        self.save_result(
-            identity["round"],
-            TaskRolloutResult(
-                task_name=identity["name"],
-                rollout_rewards=result.rollout_rewards,
-                error=result.error,
-                infrastructure_failure=result.infrastructure_failure,
-            ),
-        )
+        self.save_result(result)
         return result, reports
 
     async def run_training_episodes(
@@ -1009,19 +996,20 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
         generation: int,
         *,
         labels: Mapping[str, str],
-    ) -> tuple[GeneratedTaskResult, tuple[str, ...]]:
+    ) -> tuple[TaskRolloutResult, tuple[str, ...]]:
         """Stage one saved task in the generator service and run its training arm's episodes there.
 
-        Returns the task's result and the reports of its training episodes, none for a task that ran no
-        episodes. A task whose training episodes all could not run comes back with the first episode's error
-        as an infrastructure failure. The generator service limits the episodes in flight.
+        Returns the task's rollout result and the reports of its training episodes, none for a task that ran
+        no episode. A task that the service refuses fails without an infrastructure failure. A task whose
+        training episodes all could not run, or that ran none, fails as an infrastructure failure with the
+        first episode's error. The generator service limits the episodes in flight.
         """
         if self.generator_service is None:
             raise RuntimeError("running episodes needs the generator service")
         try:
             task_path = (await self.generator_service.write_task(task)).path
         except (DuplicateTask, TaskNameConflict) as exc:
-            return GeneratedTaskResult(task, error=f"refused: {exc}"), ()
+            return TaskRolloutResult(task.name, error=f"refused: {exc}"), ()
         training = await self.generator_service.run_episodes(
             task_path,
             scenario=self.scenario,
@@ -1032,19 +1020,29 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             tags={"round": str(generation), **labels},
             model=self.served_model,
         )
-        if training and all(episode.is_infrastructure_failure for episode in training):
+        if not training:
+            return (
+                TaskRolloutResult(
+                    task.name, error="the generator service ran no episode", infrastructure_failure=True
+                ),
+                (),
+            )
+        if all(episode.is_infrastructure_failure for episode in training):
             error = f"the agent could not run the task: {training[0].error[:ERROR_EXCERPT_CHARS]}"
-            return GeneratedTaskResult(task, error=error, infrastructure_failure=True), ()
+            return TaskRolloutResult(task.name, error=error, infrastructure_failure=True), ()
         reports = tuple(report_id for episode in training for report_id in episode.report_agent_record_ids)
-        return GeneratedTaskResult(task, rewards_of(training)), reports
+        return TaskRolloutResult(task.name, rewards_of(training)), reports
 
-    def save_result(self, generation: int, result: TaskRolloutResult) -> None:
-        """Save a task's first rollout result; a result that the store fails to save waits for the next job."""
+    def save_result(self, result: TaskRolloutResult) -> None:
+        """Save ``rollout(n)`` unless the task has a result.
+
+        A result that the store fails to save waits for the next job.
+        """
         if self.task_store is None:
             raise RuntimeError("a result needs a task store")
         try:
-            if not has_result(self.task_store, generation, result.task_name):
-                self.task_store.record_result(generation=generation, result=result)
+            if result.task_name not in rollout_results(self.task_store):
+                save_rollout_result(self.task_store, result)
         except TaskStoreError:
             logger.exception("the result of generated-task %s conflicts with the task store", result.task_name)
         except Exception:
@@ -1052,15 +1050,15 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             logger.exception(
                 "the result of generated-task %s was not saved on scenario %r", result.task_name, self.scenario
             )
-            self.unsaved_results.put((generation, result))
+            self.unsaved_results.put(result)
 
     def save_unsaved_results(self) -> None:
         """Save the results that an episode run could not save; one that still fails waits for the next job."""
-        unsaved: list[tuple[int, TaskRolloutResult]] = []
+        unsaved: list[TaskRolloutResult] = []
         while not self.unsaved_results.empty():
             unsaved.append(self.unsaved_results.get_nowait())
-        for generation, result in unsaved:
-            self.save_result(generation, result)
+        for result in unsaved:
+            self.save_result(result)
 
     def deliver_later(self) -> None:
         """Send the generator the results that it has not received, on the worker, after the jobs before it."""
@@ -1085,7 +1083,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
                 logger.exception("the task generator did not take the results of generation %d", state.generation)
                 error = str(exc) or type(exc).__name__
                 continue
-            self.task_store.mark_delivered(generation=state.generation)
+            mark_delivered(self.task_store, state.generation)
         return error
 
 
@@ -1155,7 +1153,8 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
         worker: BackgroundJobWorker | None = None,
     ) -> None:
         super().__init__(context, None)
-        # A rollout batch bounds its own samples, at most tasks_per_step x episodes_per_task, so no buffer releases them.
+        # A rollout batch bounds its own samples, at most tasks_per_step x episodes_per_task, so no buffer
+        # releases them.
         self.buffer_size = None
         self.record2record = record2record
         self.record2task = record2task
@@ -1195,7 +1194,7 @@ class GeneratedTaskBatches(RolloutTask2Batch, BackgroundJobRunner):
                         error="the rollout did not finish; see the service log",
                         infrastructure_failure=True,
                     )
-                    self.record2task.save_result(identity["round"], lost)
+                    self.record2task.save_result(lost)
             self.running_tasks = ()
             self.record2task.deliver_later()
         return tuple(finished)
