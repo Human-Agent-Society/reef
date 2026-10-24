@@ -654,7 +654,7 @@ recipe composes from the recorded request and the report's
 served model's chat template. A method's own stages live in
 ``recipes/<name>/processor.py`` (the record-to-task and task-to-batch classes)
 and ``recipes/<name>/recipe.py`` (the record stage); harness evolution's live
-in ``reef/train/cordis_backend/processor.py``. Recipe-specific correlation and
+in ``reef/record2task/traces.py`` and ``reef/task2batch/traces.py``. Recipe-specific correlation and
 model clients belong beside the method's stages.
 
 Compatibility

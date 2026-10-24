@@ -136,7 +136,8 @@ test process (never commit them), then run::
 
 The tests exercise pi and Codex through the ordinary executor factory, model
 traffic through a localhost tunnel, trajectory and residue read-back, immutable
-inputs, timeout cleanup, and Cordis/GEPA scoring. The selected model must support
+inputs, timeout cleanup, and harness evaluation and GEPA scoring of remote
+episodes. The selected model must support
 both Chat Completions and Responses through OpenRouter and be available to the
 account in its region. Provider credentials remain in a local test HTTP server;
 only a synthetic prompt and an episode token enter the sandbox. Default CI skips

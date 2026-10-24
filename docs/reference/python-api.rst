@@ -135,7 +135,7 @@ Recipe
 .. code:: python
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
-   from reef.recipe.cordis import CordisRecipe
+   from reef.recipe.harness import HarnessEvolutionRecipe
    from reef.recipe.reefine import ReefineRecipe
    from reef.recipe.sft import SFTRecipe
 
@@ -151,7 +151,10 @@ for every scenario in a deployment.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── CordisRecipe             harness tree + episodes  reef.recipe.cordis
+   └── HarnessEvolutionRecipe   harness tree + episodes  reef.recipe.harness
+       ├── ReefineRecipe                                  reef.recipe.reefine
+       ├── GEPARecipe                                     recipes.gepa.recipe
+       ├── MetaHarnessRecipe                              recipes.meta_harness.recipe
        └── SkillClawRecipe                                recipes.skillclaw.recipe
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
@@ -165,8 +168,9 @@ recipe to remain record-only.
 +---------------------------------+------------------------------------------------------+
 | train and publish weights       | subclass ``WeightTrainingRecipe``                    |
 +---------------------------------+------------------------------------------------------+
-| use Reef's harness loop         | configure ``CordisRecipe``; subclass it only         |
-|                                 | for a named preset or extra validation               |
+| use Reef's harness loop         | configure ``HarnessEvolutionRecipe``; subclass it    |
+|                                 | for a method's defaults (``evolution_spec()``) or    |
+|                                 | extra validation                                     |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
 |                                 | ``build_surface()``                                  |
@@ -194,12 +198,14 @@ Common members
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
-| ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
-|                                                   |                             | ``Trainer.build``              |
+| ``task_storage=..., releases=...)``               |                             | and give ``task_storage`` to   |
+|                                                   |                             | ``Trainer.build``;             |
+|                                                   |                             | ``releases`` reads the         |
+|                                                   |                             | component's committed releases |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
 | ``surface=..., algorithm_states=...,``            | ...]``                      | component; defaults to the     |
-| ``task_storage=...)``                             |                             |                                |
+| ``task_storage=..., releases=...)``               |                             |                                |
 |                                                   |                             | single trainer ``build``       |
 |                                                   |                             | returns, bound to the          |
 |                                                   |                             | surface's one component        |
@@ -226,8 +232,9 @@ Common members
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
-adapter a client installs its harness tree with (``None``, the default, for a
-recipe with no harness tree; ``CordisRecipe`` names ``evolution.adapter``).
+adapter ``GET /reef/harness`` renders the recipe's harness releases for
+(``None``, the default, for a recipe with no harness tree;
+``HarnessEvolutionRecipe`` names ``evolution.adapter``).
 The scenario list names it for every scenario. Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add ``training_spec()``,
@@ -579,7 +586,8 @@ uses its own ``name``.
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
 The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
 which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
-give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
+give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
+keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store, except ``imported-tasks``
 (``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
@@ -1368,19 +1376,21 @@ reject the jobs in flight before you upgrade.
 Harness method
 --------------
 
-A harness-evolution method fills three slots with plugin classes. Reef runs
-the loop around them: snapshot, apply, run the paired episodes, record,
-publish or revert.
+A harness evolution method fills up to four slots with plugin classes. Reef
+runs the loop around them: it reads the head tree from the scenario's git
+history, asks the proposer for a patch, validates the patched tree, runs the
+evaluation, and publishes the candidate or keeps the head. `Write a harness
+method <../developer-guide/write-a-harness-method.rst>`__ is the guide; this
+section is the reference.
 
 .. code:: python
 
    from reef.evaluation import SelectionPlugin
    from reef.evaluation.harness import EpisodeScorer
-   from reef.train.cordis_backend import Proposer
+   from reef.train.harness_backend import ProposalContext, Proposer, TreeProposal
 
    class MyProposer(Proposer):
-       def propose(self, nodes, samples, models, *, manifest=None, rejected=(), sources=(),
-                   requests=(), entries=(), agent_host=None) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
+       def propose(self, context: ProposalContext) -> TreeProposal | None: ...
 
    class MyScorer(EpisodeScorer):
        def score(self, task, result) -> float: ...
@@ -1396,66 +1406,99 @@ with ``module`` and ``config``. Reef builds it with the class method
 ``from_config``. ``Proposer``, ``EpisodeScorer`` and ``Promoter`` inherit
 ``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
 builds the class with no arguments and refuses a non-empty ``config``.
+``Proposer``, ``Promoter``, ``ProposalContext`` and ``TreeProposal`` come from
+``reef.train.harness_backend``; ``HarnessTree`` and ``TreePatch`` come from
+``reef.harness.tree``.
 
-+------------------------+----------------------------------------------------------+
-| Member                 | Contract                                                 |
-+========================+==========================================================+
-| ``nodes``              | the tree as ``(kind, config)`` pairs                     |
-+------------------------+----------------------------------------------------------+
-| ``samples``            | the batch of ATIF ``TrajectoryItem`` values              |
-+------------------------+----------------------------------------------------------+
-| ``models``             | the method's only path to a model: ``models.served`` is  |
-|                        | the model under test, ``models["teacher"]`` comes from   |
-|                        | ``evolution.models``                                     |
-+------------------------+----------------------------------------------------------+
-| ``manifest``           | keyword-only: the previous step's ``FailureManifest``,   |
-|                        | the per-task record of which episodes failed and how;    |
-|                        | ``None`` before the first settled step                   |
-+------------------------+----------------------------------------------------------+
-| ``reads_requests``     | property, ``False`` by default: ``True`` when the        |
-|                        | proposer answers the ``requests`` of a manual step       |
-+------------------------+----------------------------------------------------------+
-| ``runs_agent``         | property, ``False`` by default: ``True`` when the        |
-|                        | proposer uses ``agent_host`` to run a coding agent       |
-+------------------------+----------------------------------------------------------+
-| ``entries``            | keyword-only: the tree as entry options,                 |
-|                        | ``{"id", "name", "config"}`` mappings in tree order, so  |
-|                        | an ``update`` or ``remove`` can name its entry           |
-+------------------------+----------------------------------------------------------+
-| ``Mutation``           | ``create``, ``update``, or ``remove`` on one root-level  |
-|                        | entry; a sequence applies as one composite proposal      |
-+------------------------+----------------------------------------------------------+
-| ``StepProposal``       | the mutations plus ``notes``, a JSON mapping the step    |
-|                        | records under ``proposal_notes`` and never reads; empty  |
-|                        | mutations skip the step                                  |
-+------------------------+----------------------------------------------------------+
-| ``result``             | one finished episode: exit code, stdout, stderr, and the |
-|                        | parsed ``trajectory``                                    |
-+------------------------+----------------------------------------------------------+
-| ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
-|                        | per-task score lists in task order, ``None`` for an      |
-|                        | episode that could not run; ``current_scores`` is empty  |
-|                        | under ``selection: floor``, which runs the candidate     |
-|                        | alone                                                    |
-+------------------------+----------------------------------------------------------+
++--------------------------------+----------------------------------------------------------+
+| Member                         | Contract                                                 |
++================================+==========================================================+
+| ``context.step``               | this step's number, at least 1                           |
++--------------------------------+----------------------------------------------------------+
+| ``context.tree``               | the head ``HarnessTree``: source path to text, the       |
+|                                | files the patch applies to                               |
++--------------------------------+----------------------------------------------------------+
+| ``context.descriptor``         | the adapter the tree renders for; it says which kinds    |
+|                                | and config targets a tree may hold                       |
++--------------------------------+----------------------------------------------------------+
+| ``context.samples``            | the batch of ATIF ``TrajectoryItem`` values, with one    |
+|                                | ``SampleSource`` per sample in ``context.sources``       |
++--------------------------------+----------------------------------------------------------+
+| ``context.request``            | the ``TrainingRequest`` this step answers, ``None``      |
+|                                | for an automatic step                                    |
++--------------------------------+----------------------------------------------------------+
+| ``context.evaluation_tasks``   | the tasks this step's evaluation runs, the seed          |
+|                                | tasks first                                              |
++--------------------------------+----------------------------------------------------------+
+| ``context.models``             | the method's only path to a model: ``models.served``     |
+|                                | is the model under test, ``models["teacher"]`` comes     |
+|                                | from ``evolution.models``; every call counts against     |
+|                                | ``evolution.max_model_calls_per_step``                   |
++--------------------------------+----------------------------------------------------------+
+| ``context.manifest``           | the previous step's ``FailureManifest``, the per-task    |
+|                                | record of which episodes failed and how; ``None``        |
+|                                | before the first settled step                            |
++--------------------------------+----------------------------------------------------------+
+| ``context.rejected``           | the latest rejected proposals, oldest first, each        |
+|                                | with its step, patch and reason                          |
++--------------------------------+----------------------------------------------------------+
+| ``context.problems``           | empty on a step's first proposal; on the retry, the      |
+|                                | validation problems of the first                         |
++--------------------------------+----------------------------------------------------------+
+| ``context.method_state``       | the JSON state the method committed with the             |
+|                                | latest step, empty before its first                      |
++--------------------------------+----------------------------------------------------------+
+| ``context.last_outcome``       | the latest evaluated step's ``StepOutcome``: its         |
+|                                | step, patch, whether it was selected, the reason,        |
+|                                | and both score vectors; ``None`` before the first        |
++--------------------------------+----------------------------------------------------------+
+| ``context.trials``             | a ``TrialRunner`` whose ``run(tree, tasks)`` scores      |
+|                                | trial episodes on the evaluation's workers; ``None``     |
+|                                | when the deployment allows none                          |
++--------------------------------+----------------------------------------------------------+
+| ``context.agent_host``         | set when ``runs_agent`` is true and the deployment       |
+|                                | configured ``evolution.proposer_agent``                  |
++--------------------------------+----------------------------------------------------------+
+| ``reads_requests``             | property, ``False`` by default: ``True`` when the        |
+|                                | proposer answers training requests (``manual`` and       |
+|                                | ``hybrid``)                                              |
++--------------------------------+----------------------------------------------------------+
+| ``runs_agent``                 | property, ``False`` by default: ``True`` when the        |
+|                                | proposer runs a coding agent on ``context.agent_host``   |
++--------------------------------+----------------------------------------------------------+
+| ``TreeProposal``               | ``patch`` (a ``TreePatch``: path to new text, or to      |
+|                                | ``None`` for a removal), ``requires`` (what the          |
+|                                | change needs where the harness runs), ``notes`` (a       |
+|                                | JSON mapping the commit records under                    |
+|                                | ``proposal_notes``) and ``method_state`` (replaces       |
+|                                | the committed state; ``None`` keeps it)                  |
++--------------------------------+----------------------------------------------------------+
+| ``result``                     | one finished episode: exit code, stdout, stderr, and     |
+|                                | the parsed ``trajectory``                                |
++--------------------------------+----------------------------------------------------------+
+| ``evaluation.metrics``         | guarantees ``candidate_scores`` and                      |
+|                                | ``current_scores``: per-task score lists in task         |
+|                                | order, ``None`` for an episode that could not run;       |
+|                                | ``current_scores`` is empty under                        |
+|                                | ``selection: floor``, which runs the candidate alone     |
++--------------------------------+----------------------------------------------------------+
 
-Returning ``None`` from ``propose`` skips the step. Reef passes every keyword
-on every call.
+Returning ``None`` from ``propose`` skips the step: its row's ``skipped``
+reads ``no proposal``, and the method's state stays as it was. A
+``TreeProposal`` with the empty patch skips the step too, but the step
+commits its ``method_state`` and records its ``notes``. A patch whose tree fails
+validation gets one retry with the problems in ``context.problems``; a second
+failure skips the step. A model-based judge overrides
+``EpisodeScorer.score_with_models(task, result, models)`` instead of
+``score``.
 
-Migration:
-
-- Wrap a plain ``propose`` or ``evaluate`` function in a ``Proposer`` or
-  ``EpisodeScorer`` subclass. Its ``propose`` or ``score`` method calls the
-  function. Name the class in the deployment file.
-- Rename ``__call__`` on a ``Proposer``, ``EpisodeScorer`` or ``Promoter``
-  subclass to ``propose``, ``score`` or ``promote``.
-- A proposer that named the ``requests`` or ``agent_host`` keyword overrides
-  ``reads_requests`` or ``runs_agent``.
-- Move the body of a ``CandidatePluginFactory`` or
-  ``CandidateEvaluationPluginFactory`` to the class method ``from_config`` on
-  the plugin. The plugin then inherits ``SelectionPlugin`` or
-  ``ConfiguredEvaluationPlugin``. The worked examples are in
-`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
+Migration: the keyword form ``propose(nodes, samples, models, ...)`` became
+``propose(context)``. Read the tree from ``context.tree.files``, and return
+``TreeProposal(TreePatch({path: text}))`` instead of mutations. State that
+a method kept in a backend subclass moves to ``TreeProposal.method_state``,
+which the next step reads as ``context.method_state``. The worked examples
+are in `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__.
 
 Candidate evaluation
 --------------------
@@ -1508,15 +1551,16 @@ Surface
 
 .. code:: python
 
+   from reef.harness.delivery import create_harness_surface
    from reef.surface import (
-       ComponentSurface, Surface, create_config_surface, create_harness_surface,
-       create_skill_surface, create_weight_surface,
+       ComponentSurface, Surface, create_config_surface, create_skill_surface,
+       create_weight_surface,
    )
 
 A surface binds one frozen release to its consumers.
 ``WeightTrainingRecipe.build_surface()`` already calls
-``create_weight_surface()``, and ``CordisRecipe`` calls
-``create_harness_surface()``, so most methods never touch this.
+``create_weight_surface()``, and ``HarnessEvolutionRecipe`` calls
+``create_harness_surface(descriptor)``, so most methods never touch this.
 
 ``Surface`` is a frozen dataclass mapping each named release component to a
 ``ComponentSurface``, whose capabilities are fields, not subclass identity.

@@ -222,45 +222,36 @@ starting it to require that token) and keeps its state under
 [the deployment configuration](reef/service/profiles/reefine.yaml) and pass
 your copy with `-c`.
 
-In another terminal with the same Python environment activated (the install
-bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
-harness, and ask for a change:
+In another terminal, create a scenario and ask for a change:
 
 ```bash
 curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "x-reef-scenario: my-harness" \
-  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
-
-reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
+curl -fsS -H "x-reef-scenario: my-harness" -H "Content-Type: application/json" \
+  -d '{"text": "when I ask you to fix a bug, reproduce it with a failing test first", "session": "me", "release_id": ""}' \
+  http://127.0.0.1:8901/reef/train
 ```
 
-The script installs into `~/reef-harness/<scenario>` (here
-`~/reef-harness/my-harness`); `bash -s -- <dir>` names another install root.
-Keep any install root outside the project the agent works in: a session can
-write files in its project, so with the install root there it could change
-what the next session runs. The same holds for the Python environment the
-install bakes into `reef-pi` and the Reef checkout it imports: code there runs
-as you when `reef-pi` starts. For codex and dsh, keep them out of `/tmp` and
-`$TMPDIR` too: their sandboxes let a command write there as well. The check
-`reef-pi` runs before a session holds only against a session that can write
-just its project, `/tmp` and `$TMPDIR`; pi runs commands with no sandbox (see
-[Recover a changed installation](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#recover-a-changed-installation)).
+The answer carries `page_path`, the request's page: open
+`http://127.0.0.1:8901` followed by that path in a browser. The page follows
+the step while it runs, then shows the result, the files the change wrote,
+the review, and the next action. The served model writes the change as a
+skill, a rules file, an agent command, or a pi extension. Where the host can
+isolate it (Linux with `bwrap` and `pasta`, as a non-root user), or with
+`REEF_PROPOSER_SANDBOX=none` on a machine you trust, it works as a coding
+agent that runs the changed harness before handing the change back. A change
+to an extension waits as a pending release until you promote it with
+`POST /reef/scenarios/my-harness/promote`.
 
-Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
-model writes the change as a skill, a rules entry, an agent command, or a pi
-extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
-non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
-works as a coding agent that runs the changed harness before handing the change
-back. The next session's update notice offers the install; a step that
-settles while you are between turns offers its install right away. Review the
-versions with `/versions`, which opens a step's page, and install one with
-`/versions <version> install`. To change the model, restart
-`reef serve` with another `--inference.upstream-model` and rerun the install
-command: installation writes the model ID into the local harness configuration.
-See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and
-research demos and the [Reefine guide](docs/user-guide/recipes/reefine.rst) for
-configuration.
+`GET /reef/harness` serves the published tree, rendered for pi. The files
+carry no endpoint, key, or model: a client writes them where pi reads them
+and binds pi's model to this Reef (see
+[Use a published tree](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#use-a-published-tree)).
+Write the tree outside the project the agent works in: a session can write
+files in its project, so a tree there could change what the next session
+runs. See the [Reefine tutorial](tutorials/reefine/README.md) for scripted
+bug-fix and research demos and the
+[Reefine guide](docs/user-guide/recipes/reefine.rst) for configuration.
 
 ## 📚 Recipes and examples
 

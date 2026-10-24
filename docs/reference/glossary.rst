@@ -107,8 +107,8 @@ Candidate selection
 The decision whether a produced update should replace the current served
 release. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
-``CandidateEvaluationPlugin`` implements both. The docs also call this the
-gate. Every recipe carries the plugin as ``candidate_evaluation``. It is
+``CandidateEvaluationPlugin`` implements both. Every recipe carries the
+plugin as ``candidate_evaluation``. It is
 independent of checkpoint saves and retention.
 
 Surface
@@ -160,22 +160,26 @@ Harness tree
 
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
-adapter, the loop's own tools, hook listeners, and control flow graph. Reef
-serves it over
-``GET /reef/harness``. An adapter combines the rendered tree with a harness
-executable; that harness and its configured model form the running agent.
+adapter, the loop's own tools, hook listeners, control flow graphs, delegate
+agents and loop code. A tree is one directory of text files at fixed paths
+(the layout), and each release stores one as its source tree. Reef serves it
+over ``GET /reef/harness``, rendered for the adapter or as source. An adapter
+combines the rendered tree with a harness executable; that harness and its
+configured model form the running agent.
 
 Render
 ------
 
-Turning a harness tree into the files one agent uses: harness tree entries in,
-paths and their text out. This process does not touch disk or start an agent.
+Turning a source tree, and optionally a model binding, into the files one
+agent reads: source paths and their text in, the adapter's paths and their
+text out. Rendering writes nothing to disk and starts no agent.
 
-Reef's shared engine and the adapter own it together. The engine goes first,
-merging and writing by rules that are the same for every agent and rejecting a
-tree that breaks them. The adapter gets the last word: its paths decide where
-each file goes, and its quirks module may rewrite, drop, or refuse what the
-engine produced before an agent ever reads it.
+Reef's shared rules and the adapter own it together. Each config file merges
+the adapter's enforced defaults, the tree's config, and the model binding, in
+that order, and the shared checks refuse a tree that breaks them. The adapter
+gets the last word: its paths decide where each file goes, and its renderer
+may rewrite, drop, or refuse what the shared step produced before an agent
+ever reads it.
 
 Skill
 -----
@@ -250,7 +254,9 @@ Method
 ------
 
 The learning algorithm itself. A recipe is the object that binds one method to a
-scenario; ``harness_evolve`` is one mechanism running many possible methods.
+scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
+methods, each a ``Proposer`` with, where it needs its own, a scorer and a
+selection policy.
 
 Adapter
 -------
@@ -265,14 +271,14 @@ Episode
 
 One headless run of the agent under test against one task, in a throwaway root
 holding nothing but the rendered tree. Harness evolution scores every task twice
-per step, once per side.
+per step, once per side; the ``floor`` selection runs the candidate side only.
 
-Mutation
---------
+Patch
+-----
 
-One proposed edit to a harness tree: ``create``, ``update``, or ``remove`` on a
-single root-level entry. A sequence applies as one composite proposal under one
-verdict.
+One proposed change to a harness tree: each changed source path mapped to the
+file's new text, or to ``null`` to remove the file. A step applies one patch
+to the head tree and evaluates the result as one candidate.
 
 Preset
 ------

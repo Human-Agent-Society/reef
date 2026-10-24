@@ -32,7 +32,7 @@ Read the release chain
 
 Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Every release's content is saved in the repository as a Git LFS commit.
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
+For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's evaluation metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
 Read the proposal inbox
 -----------------------
@@ -42,7 +42,7 @@ Read the proposal inbox
    ls -R .reef/proposals/code-repair
    cat .reef/proposals/code-repair/settled/*.json
 
-A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``evolution.proposals_dir`` (default ``.reef/proposals``), one directory per scenario. Each file holds the body the agent sent (``mutations``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
+A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``evolution.proposals_dir`` (default ``.reef/proposals``), one directory per scenario. Each file holds the body the agent sent (``patch``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
 
 .. list-table::
    :header-rows: 1
@@ -55,29 +55,18 @@ A harness scenario keeps the proposals its agents sent through ``POST /reef/harn
    * - ``claimed/``
      - taken by the step now running; a step that failed before it settled leaves the file here, and no later step takes it again
    * - ``refused/``
-     - the step's own admission refused it, because the head had moved; ``refused`` holds the rule
+     - the step's own validation refused it, because the head had moved; ``refused`` holds the problems
    * - ``settled/``
-     - the gate settled it; ``verdict`` holds the step, whether it was selected, and the selector's reason
+     - the evaluation settled it; ``result`` holds the step, whether it was selected, and the selection's reason
 
-The commit that settled a proposal carries ``proposal: {id, session, release_id}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. A step takes the oldest pending proposal before it asks the method's own ``propose``; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
+The commit that settled a proposal carries ``proposal: {id, session, reason}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. A step takes the oldest pending proposal before it asks the method's own ``propose``; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
 
 Read what a release requires
 ----------------------------
 
-A request sent to ``POST /reef/train`` may name what its change needs from the person's machine, and the commit that answered it carries ``training_request.requires`` (``{name, kind, check}`` items; ``kind`` is ``permission``, ``env`` or ``service``; the method may have added items of its own), so ``GET /reef/harness/releases`` and ``GET /reef/harness`` say what a release needs before anyone installs it. A releases row carries its own step's list; the manifest's ``requires`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. On the person's machine the ``.reef-harness-release`` release metadata file the install script writes beside the tree carries two keys for it:
+A request sent to ``POST /reef/train`` may name what its change needs where the harness runs, and the method may add items of its own. The commit that answered the request carries the merged list as ``training_request.requires``: ``{name, kind, check, prompt}`` items, where ``kind`` is ``permission``, ``env``, ``service`` or ``binary``. A releases row in ``GET /reef/harness/releases`` carries its own step's list. The ``requires`` of ``GET /reef/harness`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. Each step's page shows both under Setup.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 20 80
-
-   * - Key
-     - Meaning
-   * - ``requires``
-     - what the installed release needs over its whole chain, as its manifest carried it
-   * - ``setup``
-     - the check offs ``reef-<adapter> setup`` recorded, ``{name, checked_at, check}`` each, carried over from the previous release metadata file by name, so a check off survives every later install through the script (the stdlib client's pull writes its own release metadata file, without them); an item whose check is not the recorded one counts as unmet, and ``setup`` runs it again
-
-The install script refuses a release with an item ``setup`` does not meet: it prints the setup list and the newest release in the chain that requires nothing, the one that installs on a machine with nothing set up (``?release_id=<id>``; install it, run ``reef-<adapter> setup`` for the head's list, then install the head), and exits 1 before it installs the binary or makes a directory. ``reef-<adapter> setup`` is the only thing that runs a check, after the person read it and confirmed; ``reef-<adapter> setup --mark <name>`` records a check off by hand, and ``reef-<adapter> setup --release <id>`` checks off a pending release's items before its promote and install. A release metadata file the stdlib client pull or an older install wrote carries neither key, which reads as nothing required and nothing checked off.
+Reef runs no check. A client checks each item where the harness runs before it runs the release: an ``env`` item's variable is set, a ``binary`` item's program is on the PATH, and any other ``check`` command exits 0. A person should read a check before the client runs it. ``tutorials/reefine/run.py`` shows one such client: it refuses to install a release with an unmet item and prints each item's ``prompt``.
 
 Choose a starting release
 -------------------------
@@ -86,7 +75,7 @@ Inference always answers from the scenario's current release. No request header 
 
 A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
 
-To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier release again, see the next section, Roll back. It also says which releases can be restored.
+To pull a specific harness release, add ``?release_id=<id>`` to the harness manifest route. To serve an earlier release again, see the next section, Roll back. It also says which releases can be restored.
 
 Roll back
 ---------

@@ -1,10 +1,12 @@
 Reefine
 ========
 
-Reefine is the built-in recipe for refining a pi coding harness from plain
+Reefine is the built-in recipe for refining a coding harness from plain
 language instructions. Its implementation is
 ``reef.recipe.reefine:ReefineRecipe``, and its proposer and evaluator ship in
 the Reef wheel, so the service needs no tutorial checkout or training GPUs.
+The bundled profile refines a pi harness; `Adapters other than pi`_ covers
+the others.
 
 Start the bundled profile with an OpenAI-compatible endpoint:
 
@@ -27,38 +29,44 @@ The profile listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN
 state under ``.reef/reefine/``. For custom deployments, copy
 ``reef/service/profiles/reefine.yaml`` and pass it with ``-c``. The
 `Reefine tutorial <https://github.com/Human-Agent-Society/reef/tree/main/tutorials/reefine>`__
-includes installation, bug-fix and research demos, and recorded measurements.
+runs a bug-fix demo, a research demo and a measurement of which requests
+passed the checks.
 
 How it works
 ------------
 
-1. Ask. In a ``reef-pi`` session, ``/reefine <what it should do>`` has
-   the model think the change through in the background before anything is
-   filed, while the chat shows one line (``ctrl+o`` expands the whole
-   clarification) and the session keeps its input and context: when it
-   triggers, what state the harness must know and how it learns it, what
-   you must provide. It asks only about an open point that changes what
-   gets built and that a reasonable default cannot settle, so a clear
-   request files without a question; each question offers concrete options,
-   the one it recommends first and marked, and it then files your original
-   words with the answers as clarifications (``--direct`` as the first word
-   files at once). From the shell, ``reef-pi evolve
-   "<text>"`` posts the same instruction to ``POST /reef/train``; add
-   ``--wait`` to stay until the step settles. Either ask prints the
-   request's page link (``GET /reef/harness/requests/<id>/page``), which
-   reloads every five seconds, naming the step's state, until the result
+1. Ask. ``POST /reef/train`` files a plain-language instruction for one
+   scenario. Create the scenario, then send the instruction:
+
+   .. code:: bash
+
+      curl -sS -H "Content-Type: application/json" \
+        -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
+      curl -sS -H "x-reef-scenario: my-harness" -H "Content-Type: application/json" \
+        -d '{"text": "when I ask you to fix a bug, reproduce it with a failing test first", "session": "me", "release_id": ""}' \
+        http://127.0.0.1:8901/reef/train
+
+   ``session`` and ``release_id`` say where the request came from: the
+   client's session and the release it runs, empty when it runs none yet.
+   The answer carries the training record id and ``page_path``, the
+   request's page (``GET /reef/harness/requests/<id>/page``). The page
+   reloads every five seconds and names the step's state until the result
    is on it, ending with the design and how to use the change.
+   ``GET /reef/harness/requests/<id>/progress`` gives the same state as
+   JSON. The `manual training API
+   <../../reference/http-api.rst#manual-training>`__ lists the fields a
+   request carries.
 2. Step. In ``training-mode: manual`` the service runs one evolve step for
    each accepted instruction. Where the host can isolate it, a coding agent
-   answers the instruction (see `The agent proposer`_): it edits the tree,
-   runs the changed harness for real and hands the entries back, and a
-   review call reads them against the request. Otherwise the served model
-   answers it in a few calls: it writes a design first (the
+   answers the instruction (see `The agent proposer`_): it edits a copy of
+   the head tree, runs the changed harness for real and hands the files
+   back, and a review call reads them against the request. Otherwise the
+   served model answers it in a few calls: it writes a design first (the
    request in one sentence, what triggers the behavior, what state the
    harness must know and where it comes from, what only you can provide as
-   ``requires`` items with a ``prompt`` each), then the entries, and a
+   ``requires`` items with a ``prompt`` each), then the files, and a
    second call reviews them against the request. The review also says
-   whether the entries deliver the requested behavior or only put a
+   whether the files deliver the requested behavior or only put a
    substitute in its place, such as a rule describing it. When the review
    is partial or finds a substitute, the model writes the answer again with
    the review's findings, up to three answers in all. The step keeps the
@@ -78,35 +86,41 @@ How it works
    both its reasoning and its reply; when it still gives none, the step
    records why and both pages say the review did not run, rather than
    reading like a step that had no review to give.
-3. Result. The session that asked reports it in the chat when the step
-   settles, and ``reef-pi evolve ... --wait`` prints the same line:
-   published as a release, ready but waiting for your review because it
-   changes an extension, rejected by the evaluation, or skipped with the reason,
-   followed by the points the review left uncovered.
-4. Read. A release that touches a ``code_extension`` is held back from the
-   served head, so it reaches no session on its own. ``/versions
-   <step>`` opens its page (``reef-pi page <version>`` from the shell), which
-   carries the design, how to use the change, the review and the numbers.
-5. Install and set up. A step that settles while you are between turns offers
-   its install there; otherwise run ``/versions <version> install``
-   (``reef-pi update`` from the shell). A release held back from the head is
-   served as part of installing it, so installing is the one decision. After
-   confirmation, the session collects what the change needs: for each unmet ``requires`` item it shows the item's
-   ``prompt`` and asks for the value of an ``env`` item, kept in
-   ``.reef-harness-env`` beside the install, or for a confirmation before a
-   ``permission`` or ``service`` check runs (``reef-pi setup`` asks the
-   same from the shell). A release with an unmet item is never installed.
-6. Reload. Type ``/reload`` in the session, or restart ``reef-pi``, and the
-   new release is the harness you are talking to.
+3. Result. The request page and the step's page
+   (``GET /reef/harness/releases/<step>/page``) give the result: published
+   as a release, pending because it changes an extension, rejected by the
+   evaluation, or skipped with the reason, followed by the points the review
+   left uncovered. The request page also gives the next action: the promote
+   route for a pending release, ``GET /reef/harness`` for a published one.
+4. Promote. A release that touches a ``code_extension`` is held back from the
+   served head, so Reef serves it to no client. Read its step page, which
+   carries the design, how to use the change, the review and the numbers,
+   then promote it:
+
+   .. code:: bash
+
+      curl -sS -X POST -H "Content-Type: application/json" \
+        -d '{"release_id": "<the pending release id>"}' \
+        http://127.0.0.1:8901/reef/scenarios/my-harness/promote
+
+5. Use. ``GET /reef/harness`` serves the head rendered for the deployment's
+   adapter, and ``GET /reef/harness?form=source`` serves its source tree.
+   The served files carry no endpoint and no credential: a client binds its
+   agent's model to this Reef itself, as `Use a published tree
+   <../evolve-your-harness.rst#use-a-published-tree>`__ describes. The
+   manifest's ``requires`` lists what the release needs over its whole
+   chain, and the client checks each item before it runs the release. The
+   tutorial's ``run.py`` is a worked client for pi.
 
 Behavior and configuration
 --------------------------
 
 * ``training-mode: manual`` runs one step for each accepted instruction on
   ``POST /reef/train``. Use ``hybrid`` to also learn from failing reports.
-* The agent proposer, or the served model where the host cannot isolate the
-  agent, proposes skills, rules, agent commands, or pi extensions.
-  Requests and update notices are enabled in the seed by default.
+* The first tree of a new scenario is the recipe's seed,
+  ``reef/recipe/reefine/seed``: one starter skill. The agent proposer, or the
+  served model where the host cannot isolate the agent, proposes skills,
+  rules, agent commands, or pi extensions.
 * The proposer is instructed to integrate new slash commands into pi's native
   ``/`` autocomplete dropdown alongside built-in commands, with descriptions,
   using prompt templates or extension command registration. The review checks
@@ -114,15 +128,15 @@ Behavior and configuration
   state and an off command for modes. Headless trials cannot verify the dropdown;
   the agent records any unverified interactive checks in its design.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
-  human promotion. Client requirements must pass setup before installation.
+  human promotion.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
   alone and publishes it when every task scores at least
   ``evolution.floor_score`` (``1.0``). The current release is not run, and an
   episode that could not run misses the floor.
 * What only you can provide (a phone number, a credential, a permission, an
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
-  ``prompt`` is one sentence of at most 200 characters that setup shows when
-  it asks for the item; the Setup table of the step's page has a prompt
+  ``prompt`` is one sentence of at most 200 characters that a client shows
+  when it asks for the item; the Setup table of the step's page has a prompt
   column. A proposal may require at most eight distinct items, including
   those added by the proposer. Exceeding this limit skips the proposal with
   an explanation and publishes no change; split the request into smaller
@@ -131,115 +145,94 @@ Behavior and configuration
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or
   stores itself as uncovered. On another adapter the value reaches the
-  harness's environment at run time, and the same holds for its entries.
+  harness's environment at run time, and the same rules hold for the files
+  the proposer writes there.
 
 Adapters other than pi
 ----------------------
 
-``evolution.adapter`` runs the profile on any bundled adapter. The update
-notice is a pi extension, so on another adapter the profile leaves it out
-and says so in the log; ``reef-<adapter> update`` installs a new release.
-The ``/reefine`` command is one command file there (the reserved entry
-``reef-requests``): the session's model files the request with
-``reef-<adapter> evolve``, gives you the request's page link, waits for the
-step with ``reef-<adapter> wait`` in pieces its shell tool allows, tells you
-the result and, on your yes, runs ``reef-<adapter> update``. Start the new
-version by starting ``reef-<adapter>`` again.
+``evolution.adapter`` runs the profile on any bundled adapter. A request comes
+through ``POST /reef/train`` on every adapter, the pages are the same, and
+``GET /reef/harness`` serves the release rendered for that adapter. Serve the
+upstream in the dialect the adapter's model binding speaks:
 
 .. list-table::
    :header-rows: 1
 
    * - Adapter
-     - Start a session
-     - Type
      - Serve with
    * - ``claude``
-     - ``reef-claude``
-     - ``/reefine <request>``
      - ``--inference.upstream-api anthropic``
    * - ``codex``
-     - ``reef-codex``
-     - ``$reefine <request>`` (Codex has no custom slash commands)
      - ``--inference.upstream-api responses``
-   * - ``opencode``
-     - ``reef-opencode``
-     - ``/reefine <request>``
-     - no flag (the default openai dialect)
-   * - ``hermes``
-     - ``reef-hermes``
-     - ``/reefine <request>``
-     - no flag (the default openai dialect)
-   * - ``dsh``
-     - ``reef-dsh web``
-     - ``/reefine <request>``
+   * - ``opencode``, ``hermes``, ``dsh``
      - no flag (the default openai dialect)
 
-``terminus`` has no session to type in and no install: a request comes
-through ``POST /reef/train``, and ``GET /reef/harness`` serves a published
-tree. The agent proposer runs on pi
-alone, so another adapter builds no agent and needs no proposer sandbox; on another adapter the served model answers a request with rules,
-skills and commands, and with a config entry where the harness's config
-enforces a behavior (an opencode agent with a permission map, Claude Code
-permissions that pre-approve only ``WebSearch`` and ``WebFetch``, Codex's
-``web_search``). It writes no ``code_extension``,
-since it knows pi's extension API and no other. The prompt tells it that
-harness's own facts from its adapter's ``harness_facts.yaml``: how you
-type a command there, which file holds the rules, which tools the harness
-has (web search among them, with what it needs: ``DEEPSEEK_API_KEY`` on
-dsh) and how the harness offers a mode. The review judges new commands by
-the same facts. Its design says when the request needs behavior these
-kinds cannot give. On ``claude``, ``codex``, ``hermes`` and ``dsh`` a
-command cannot take a tool away, so a mode there is guidance the model
-follows while every tool stays offered: the design and the command's reply
-say so, the mode's state lives in the conversation (the command's reply and
-the header on each reply) and never in a file a tool writes or reads, the
-model declines a skill the person's message loads while the mode is on and
-names the mode's off command rather than a way around it (Claude Code's
-``!`` line, say), and the review lists a request for a hard restriction
-under limits. On
-``opencode`` an agent with a permission map is the mode, and the model gets
-only the tools it allows: an answer whose agent has no permission map is
-written again, since that agent is offered every tool. A command's
+The agent proposer runs on pi alone, so another adapter builds no agent and
+needs no proposer sandbox. On another adapter the served model answers a
+request with rules, skills and commands, and with a ``config/primary.json``
+file where the harness's config enforces a behavior (an opencode agent with
+a permission map, Claude Code permissions that pre-approve only
+``WebSearch`` and ``WebFetch``, Codex's ``web_search``). It writes no
+``code_extension``, since it knows pi's extension API and no other. The
+prompt tells it that harness's own facts from its adapter's
+``harness_facts.yaml``: how you type a command there, which file holds the
+rules, which tools the harness has (web search among them, with what it
+needs: ``DEEPSEEK_API_KEY`` on dsh) and how the harness offers a mode. The
+review judges new commands by the same facts. Its design says when the
+request needs behavior these kinds cannot give.
+
+On ``claude``, ``codex``, ``hermes`` and ``dsh`` a command cannot take a tool
+away, so a mode there is guidance the model follows while every tool stays
+offered: the design and the command's reply say so, the mode's state lives
+in the conversation (the command's reply and the header on each reply) and
+never in a file a tool writes or reads, the model declines a skill the
+person's message loads while the mode is on and names the mode's off
+command rather than a way around it (Claude Code's ``!`` line, say), and the
+review lists a request for a hard restriction under limits.
+
+On ``opencode`` an agent with a permission map is the mode, and the model
+gets only the tools it allows: an answer whose agent has no permission map
+is written again, since that agent is offered every tool. A command's
 ``agent:`` runs only that command's turn, so the person enters the mode with
 ``/agents`` (or with its command as a new session's first message) and
 leaves it with ``/agents``, choosing build, together with a leave command
 whose text says every tool is back: opencode tells the model nothing when
 the agent changes. The permission map limits the model's own tool calls
 only; a skill the person types, a file attached with ``@`` and a ``!``
-command still run, and the review lists them under limits. On ``codex`` a
-``web_search`` config entry turns the hosted search on in every session of
-the release, which How to use says. A ``terminus`` run has no reply a
-person reads, so its design names the files the task leaves, the
-verifier's reward and the trajectory as the visible result, and its pages
-name no wrapper command: ``GET /reef/harness`` serves the published tree,
-and what the release requires must hold in the Harbor task a run uses.
+command still run, and the review lists them under limits.
+
+On ``codex`` the ``web_search`` key turns the hosted search on in every
+session of the release, which How to use says. A ``terminus`` run has no
+reply a person reads, so its design names the files the task leaves, the
+verifier's reward and the trajectory as the visible result, and what the
+release requires must hold in the Harbor task a run uses.
 
 An answer whose form slipped is written again while attempts remain: JSON
 that does not parse (a list or an object that decodes inside a broken outer
-array is a fragment of it, not the answer), entries every one of which was
-dropped, or entries the harness's own admission refuses (the admission the
-step meets next runs on each answer). When admission refused the entries,
-the retry shows that answer's design and entries, so what it got right
-stays. Each dropped answer's reason is recorded
-(``proposal_notes.dropped_attempts``), shows in the request page's Activity
-while the step runs, and shows under Review on the request and step pages.
-A review reply whose JSON a stray quote broke is asked once more. The review
-reads the whole design; the step records it cut to 4000 characters with its
-last paragraph, the How to use, kept whole.
+array is a fragment of it, not the answer), files every one of which was
+dropped, or files the harness's validation refuses (each answer meets the
+validation the step runs next). When validation refused the files, the retry
+shows that answer's design and files, so what it got right stays. Each
+dropped answer's reason is recorded (``proposal_notes.dropped_attempts``),
+shows in the request page's Activity while the step runs, and shows under
+Review on the request and step pages. A review reply whose JSON a stray
+quote broke is asked once more. The review reads the whole design; the step
+records it cut to 4000 characters with its last paragraph, the How to use,
+kept whole.
 
-Off pi, a design that says no entry this harness takes can deliver the
+Off pi, a design that says no file this harness takes can deliver the
 request is an answer, not a failure: the review runs on it, the step
 records it under ``proposal_notes.declined`` with the design and what is
-out of reach, and the pages and the result line say it was answered with
-no change. When that review finds a point an entry could still deliver,
-the request is written again. On pi such a reply stays a proposal with
-nothing to apply, its reason under ``failure``.
+out of reach, and the pages say it was answered with no change. When that
+review finds a point a file could still deliver, the request is written
+again. On pi such a reply stays a proposal with nothing to apply, its
+reason under ``failure``.
 
-The result line after a published step carries the release's own How to
-use (``how to use: ...``, its first paragraph), and ``reef-<adapter>
-update`` prints it after the install, so the session tells the person the
-form the release takes (``$chat`` on codex) rather than one taken from the
-request. What the harness puts out of reach prints one point per line.
+After a published step, both pages show the release's own How to use, so a
+person learns the form the release takes (``$chat`` on codex) rather than
+one taken from the request. They list what the harness puts out of reach
+one point per line.
 
 The agent proposer
 ------------------
@@ -247,22 +240,23 @@ The agent proposer
 The text proposer writes an extension it never runs, so a model name it
 guessed or a parameter a provider refuses only shows once you use the
 change. The agent proposer runs the served model as a pi coding agent
-instead. Its working directory holds the tree as one file per entry
-(``harness/skills``, ``rules``, ``commands`` and ``extensions``, plus
-``requires.json`` and ``design.md``), with Reef's own entries, the
-extension API reference among them, read-only beside it. The agent starts
-with this deployment's corrected reference, even when the base release
-contains an older copy; the release itself stays unchanged. When the
+instead. Its working directory holds an editable copy of the head tree in
+``harness/``, where it may change ``skills/<name>/SKILL.md``, ``rules.md``,
+``commands/<name>.md`` and ``extensions/<name>.ts``. Beside it are
+``requires.json``, ``design.md``, ``progress.md`` and the read-only
+``reference/pi-extension-api.md``, this deployment's summary of the
+extension API. A file the agent writes outside the layout, or of a kind a
+request may not change, is not read back, and the check says so. When the
 reference omits an interface or leaves behavior unclear,
 the agent may read the installed pi package's documentation, type definitions
 and relevant source files. It checks the installed version first; if source
 is missing locally, it may consult that exact upstream version. The package
-is read-only, and delivered entries must use supported public interfaces.
+is read-only, and delivered files must use supported public interfaces.
 A behavior that requires changes to pi itself is recorded as a limitation
 in the design. The agent may also read provider documentation on the network
 and has three tools of its own:
 
-* ``harness_check`` runs the working directory through Reef's admission, as
+* ``harness_check`` runs the working directory through Reef's validation, as
   the step will.
 * ``harness_trial`` runs the changed harness for real, online, on a task the
   agent writes, and returns the session's final text, the tools it called,
@@ -284,12 +278,13 @@ and has three tools of its own:
 
 While it runs, the request page's Activity lists each tool the agent calls,
 each check and trial with its result, and each image or speech call with the
-provider's status, so a long run shows what it is doing; opening the
-``/reefine`` spinner in pi lists the latest few.
+provider's status, so a long run shows what it is doing.
 
-When the agent stops, its files are read back into the step's mutations,
-``requires`` items and design, and the review runs as for the text
-proposer. The agent's session log lands in the step record as
+When the agent stops, its ``harness/`` copy is read back as a patch against
+the head tree, beside its ``requires`` items and design, and the review runs
+as for the text proposer. A run that changed no file, ran past its limit or
+ended on a failed model response hands back no change, its reason under
+``failure``. The agent's session log lands in the step record as
 ``agent-session.jsonl``.
 Check and trial observations also land in ``agent-checks.jsonl``, identified
 by the candidate's SHA-256 checksum. Candidate files, design and progress
@@ -428,17 +423,9 @@ set ``TMPDIR`` for the service if Docker's VM does not share it. To run the
 task containers on E2B instead, see `Docker or E2B
 <../../developer-guide/harness-adapters.rst#docker-or-e2b>`__.
 
-Terminus runs one Harbor task at a time through ``reef-terminus --task``.
-Submit evolution requests over HTTP and inspect their result pages. The
-interactive install and reload steps in `How it works`_ do not apply:
-
-* There is no install script. ``GET /reef/harness/install?adapter=terminus``
-  answers HTTP 400.
-* There is no ``reef-terminus`` client wrapper, so ``reef-terminus evolve``
-  and ``reef-terminus update`` do not exist.
-* There is no session, so there is no ``/reefine`` to type. The ``/reefine``
-  command and the update notice are pi entries, so start the profile with
-  both turned off:
+Terminus runs one Harbor task at a time through ``reef-terminus --task``, so
+there is no session to type in. Submit requests over HTTP and read their
+pages:
 
 .. code:: bash
 
@@ -446,9 +433,7 @@ interactive install and reload steps in `How it works`_ do not apply:
    reef serve --recipe reefine \
      --inference.upstream-url https://openrouter.ai/api \
      --inference.upstream-model openai/gpt-4o-mini \
-     --recipe.config.evolution.adapter terminus \
-     --recipe.config.evolution.requests false \
-     --recipe.config.evolution.version_check false
+     --recipe.config.evolution.adapter terminus
 
 In another terminal, create a scenario, read its ``release_id`` from
 ``GET /reef/harness``, and send a request to ``POST /reef/train``. Replace
@@ -491,17 +476,15 @@ What the step records
 Every step's catalog row carries the request under
 ``metrics.training_request`` and the proposer's notes under
 ``metrics.proposal_notes``; the step page
-(``GET /reef/harness/releases/<step>/page``, ``reef-pi page <version>``) renders
-them:
+(``GET /reef/harness/releases/<step>/page``) renders them:
 
 * ``design``: the proposer's plan for the request, a few sentences, as the
   page's Design section.
 * ``review``: the second call's result, ``complete`` or ``partial``, with
-  the points of the request the entries cover and the ones they leave
+  the points of the request the files cover and the ones they leave
   uncovered, and the ``limits`` the harness puts out of reach, as the
-  Review section; the result line in the session and from ``--wait`` names
-  the uncovered points and the limits. Absent when the review call
-  failed, which never blocks the step.
+  Review section; the result on the pages names the uncovered points and the
+  limits. Absent when the review call failed, which never blocks the step.
 * ``refused_requires``: the ``requires`` items the proposer wrote that could
   not be honored, each with the reason, under "refused by the step" in the
   Setup section. An ``env`` item whose check is a shell test is brought to
@@ -514,12 +497,13 @@ them:
   failed (how long it took, the reply budget and the endpoint's error; a
   reply without text adds that a thinking model may have spent the budget
   on its reasoning and names ``REEF_PROPOSER_MAX_TOKENS``) or the reply
-  held no usable entry. The result line in the session and from ``--wait``
-  quotes it, and the page shows it as ``proposer failure`` in the Result
-  section.
+  held no usable file. The request page quotes it, and the step page shows
+  it as ``proposer failure`` in the Result section.
 
-All ``CordisRecipe`` evolution settings remain available, including custom
-proposers, seeds, execution settings, and publication policies.
+Every ``HarnessEvolutionRecipe`` evolution setting remains available,
+including custom proposers, seeds, execution settings, and publication
+policies; see `Recipe configuration
+<../../reference/configuration.rst#recipe-configuration>`__.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
 call budgets. Defaults are 600 seconds and 65536 reply tokens for the call that
@@ -530,12 +514,3 @@ seconds and 8192 tokens for failure-driven proposals; the reply budgets are
 sized for a thinking model, which spends part of the budget on its reasoning
 before the JSON (a review budget of 8192 came back empty on one). The
 tutorial's ``run.sh`` sets 900 seconds and 16384 tokens for its local model.
-
-Migration
----------
-
-The former ``tutorials/harness-requests/`` directory is now
-``tutorials/reefine/``. Existing runs can retain their state by moving their
-``work/`` directory and keeping the old scenario name in the driver. The
-``evolve-your-harness`` tutorial's proposer and evaluator entrypoints delegate
-to Reefine, so its existing configurations continue to work.

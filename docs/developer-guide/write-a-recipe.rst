@@ -13,7 +13,7 @@ the next version are Reef's job, not the method's.
 
 This page covers a **weight** recipe. For a harness-evolution method with a
 proposer, an episode scorer, and a selection policy against a fixed model, see
-`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
+`Write a harness method <write-a-harness-method.rst>`__.
 
 .. code:: mermaid
 

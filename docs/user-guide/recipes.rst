@@ -81,7 +81,7 @@ the update.
      - `GEPA <recipes/gepa.rst>`__
      - `GEPA on AIME 2025 <../../recipes/gepa/examples/aime/README.md>`__
    * - Meta-Harness
-     - harness: complete compositions
+     - harness: complete trees
      - ``recipes/meta_harness/``
      - `Meta-Harness <../../recipes/meta_harness/README.md>`__
      - Meta-Harness on Terminal-Bench:
@@ -116,7 +116,7 @@ recipe reads it out of the traffic it already serves.
      - harness: skills, rules, agent commands, and pi extensions
      - ``reef/recipe/reefine/``
      - `Reefine <recipes/reefine.rst>`__
-     - `Reefine on reef-pi <../../tutorials/reefine/README.md>`__
+     - `Reefine on pi <../../tutorials/reefine/README.md>`__
 
 How a recipe is selected
 ------------------------

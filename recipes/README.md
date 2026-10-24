@@ -55,7 +55,7 @@ the update.
 | SDPO | model weights | [`recipes/sdpo/`](sdpo/) | [SDPO](../docs/user-guide/recipes/sdpo.rst) | [SDPO on SciKnowEval Chemistry](sdpo/examples/sciknoweval/README.md) |
 | OPD | model weights | [`recipes/opd/`](opd/) | [OPD](../docs/user-guide/recipes/opd.rst) | [OPD on mathematical reasoning](opd/examples/math/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
-| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
+| Meta-Harness | harness: complete trees | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 
 [SAO](sao/examples/imo_answerbench/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
@@ -76,7 +76,7 @@ per-period reward for one long episode.
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
 sample a parent from the method's own archive, reflect on one component with a
-stronger model over the served composition's failing traffic, and accept the
+stronger model over the served tree's recorded traffic, and accept the
 child only if it beats its parent on the minibatch - and `selection` publishes
 only on a strict mean improvement over the full validation set. Nothing in it
 imports the upstream package. Its AIME example is the validation: the driver
@@ -86,7 +86,7 @@ official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
 run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
 
-[Meta-Harness](meta_harness/README.md) searches complete harness compositions
+[Meta-Harness](meta_harness/README.md) searches complete harness trees
 using all retained candidates and scores. It selects strict mean-score
 improvements and commits the population with Reef's serving state. See the
 [Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
@@ -101,7 +101,7 @@ recipe reads it out of the traffic it already serves.
 |---|---|---|---|---|
 | OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
 | SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on pi](../tutorials/reefine/README.md) |
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings
@@ -114,8 +114,8 @@ contains only the harness side.
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
 sealed night (one decision per skill group plus the no-skill bucket) mapped
-to one composite mutation sequence, `selection: always` publishes every
-non skip night as the paper's ungated regime does, and the method ships its
+to one patch of the skill pool, `selection: always` publishes every non-skip
+night as the paper does and leaves the measurement to the next day, and the method ships its
 own delivery - a recipe surface that injects the served pool's catalog into
 every proxied request. The campaign driver embeds the Reef service, runs
 the frozen 60-task WildClawBench day in docker, pulls the published pool
@@ -127,10 +127,11 @@ one-episode reef-eval smoke over it.
 
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
 turns a plain-language request into a harness update. The served model
-proposes the change and the gate scores it, and code extensions wait for a
-promote before they run. `reef serve --recipe reefine` starts its profile
-without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
-records a bug-fix flow, a research loop, and which requests won the gate.
+proposes the change, the evaluation checks that the changed harness still
+works, and code extensions wait for a promote before they are served.
+`reef serve --recipe reefine` starts its profile without a checkout, and the
+[Reefine tutorial](../tutorials/reefine/README.md) records a bug-fix flow, a
+research loop, and which requests passed the checks.
 
 ## Basic
 

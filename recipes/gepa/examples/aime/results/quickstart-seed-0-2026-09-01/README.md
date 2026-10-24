@@ -27,7 +27,7 @@ benchmark score.
   calls. Official validation improved from 7/45 (15.56%) to 20/45 (44.44%);
   the replication arm's validation improved from 11/45 (24.44%) to 18/45
   (40.00%).
-- Before search, the 450-rollout baseline gate measured 22.00% for the direct
+- Before search, the 450-rollout baseline check measured 22.00% for the direct
   official path and 20.67% through Reef. The predeclared non-inferiority check
   passed with no failed Reef episodes.
 - The official arm took 15,371.5 seconds and cost an estimated $5.458627. The
@@ -35,13 +35,13 @@ benchmark score.
 
 The frozen scores differ by 0.67 percentage points and the selected scores by
 1.33 points. Reef therefore reproduced the official quickstart's improvement
-pattern closely for seed 0. Seeds 1 and 2 and the multi-node extension were not
-run, so this result does not estimate across-seed variance or complete the
+pattern closely for seed 0. Seeds 1 and 2 and the multi-component extension were
+not run, so this result does not estimate across-seed variance or complete the
 four-cell study.
 
 ## Baseline source
 
-The baseline gate was paid under one Reef commit of the replication branch and
+The baseline check was paid under one Reef commit of the replication branch and
 run identity `0ffbc8e3`, then imported into the seed-0 optimization run at a
 later commit of that same branch. The intervening change added a
 worker-concurrency override without changing the model, dataset, prompt,

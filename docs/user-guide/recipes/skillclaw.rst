@@ -42,22 +42,25 @@ How Reef implements it
 ----------------------
 
 skillclaw is a method package on the harness evolution engine
-(``reef/train/cordis_backend/``); `Evolve your harness
+(``reef/train/harness_backend/``); `Evolve your harness
 <../evolve-your-harness.rst>`__ describes the mechanism it runs on. The method
-supplies a ``Proposer`` and an ``EpisodeScorer`` (``harness/plugins.py``); the engine renders the harness, runs
-evaluation tasks, records changes, and rolls back rejected changes.
-``propose`` runs the night flow and maps its decisions to one composite
-mutation sequence, so a whole night applies under one snapshot
-and settles under one verdict.
+supplies a ``Proposer`` (``NightProposer``) and an ``EpisodeScorer``
+(``ProbeScorer``) in ``harness/plugins.py``; the engine validates the
+candidate tree, runs the evaluation tasks, records each step, and publishes
+the selected tree. The proposer runs the night flow and maps the night's pool
+changes to one patch, one ``skills/<name>/SKILL.md`` file per added or
+rewritten skill, so a whole night is evaluated and published as one
+candidate tree.
 
 Two choices distinguish it from the tutorial method. ``selection: always``
 publishes every night that produces a proposal, because the next day is the
-gate. And the skill catalog must reach the model on every live request, so the
-recipe overrides ``build_surface``, the hook controlling how a published
-artifact reaches the request path (`recipe.py
-<../../../recipes/skillclaw/recipe.py>`__). That override is
-the one extension point beyond the method's own plugin classes; with it the recipe
-names no ``harness_adapter``, since no harness tree is installed.
+measurement. And the skill catalog must reach the model on every live
+request, so the recipe overrides ``build_surface``, the hook controlling how
+a published release reaches the request path (`recipe.py
+<../../../recipes/skillclaw/recipe.py>`__). That override is the one
+extension point beyond the method's own plugin classes. The recipe also names
+no ``harness_adapter``: the pool reaches the model through that catalog, not
+only through files a client pulls for one agent.
 
 Configuration
 -------------
@@ -94,4 +97,4 @@ the numbers from the stored run data.
 See also
 --------
 
-- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling, pinning, and installing a published tree.
+- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling and pinning a published tree.
