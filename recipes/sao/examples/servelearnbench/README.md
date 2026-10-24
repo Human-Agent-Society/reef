@@ -88,6 +88,8 @@ METHOD=oracle bash recipes/sao/examples/servelearnbench/run.sh
 
 For each SAO serving task, the driver submits one report with every ordered inference receipt.
 It waits for the training release, including weight publication, before starting the next task.
+Keep `save-interval: "1"` for this campaign.
+Reef publishes only saved weights, and the driver waits for publication after every task.
 Recorded weight versions must agree within each task and match the latest committed release afterward.
 A training timeout or service error aborts the run.
 
@@ -118,10 +120,11 @@ Use a short allocation, including a preemptable allocation when available:
 export MODEL_DIR=/scratch/your-project/models/Qwen3-0.6B
 export SAO_GPUS=1
 export SAO_WARMUP=1
-bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-tokens 512
+bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64
 ```
 
 This runs two serving tasks and two test tasks.
+Each task has at most 20 model calls, with at most 64 output tokens per call.
 The first serving task warms up the critic; the second also updates the actor.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
 Restore `SAO_WARMUP=10` and the 8B model for the pilot.
