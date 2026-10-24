@@ -31,7 +31,9 @@ The existing two-critic-update timing is preserved; this example does not claim 
 
 All methods use the same generation settings and task split.
 The context and per-call output limits above differ from the benchmark's default per-call limit of 65,536 tokens.
-The official episode-level budgets remain unchanged.
+The default episode-level budgets remain unchanged.
+Use `--max-steps` to set a different model-turn limit for every serving and test task.
+The results record that limit. Apply the same limit to every compared method.
 A length-limited model turn can continue through the official agent loop.
 Task-level budget exhaustion and context overflow retain the official reward and ending reason.
 The driver neither drops these trajectories by length nor adds value bootstrapping.
@@ -67,6 +69,11 @@ bash recipes/sao/examples/servelearnbench/run.sh
 `SAO_GPUS` sets tensor parallelism for the colocated actor, critic, and inference engine.
 The default is a launch configuration, not a measured minimum GPU requirement.
 Allocate the GPUs before running the script. Do not run the service on a login node.
+
+For a 20-turn experiment with up to 16,384 output tokens per call, append
+`--max-steps 20 --max-tokens 16384` to the command above.
+The output limit includes reasoning and the visible reply; the cumulative context limit remains 40,960 tokens.
+These are experimental budgets, not the benchmark's default budgets or a measured GPU-capacity claim.
 
 For baselines, run `METHOD=blind` or `METHOD=oracle` with fresh directories and a separate stack.
 Both baselines use the same stack without reports; their training backend stays idle.

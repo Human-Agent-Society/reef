@@ -96,6 +96,27 @@ def test_split_is_fixed_ordered_and_disjoint(bundle):
 
 
 @pytest.mark.parametrize("correct", [True, False])
+def test_configurable_episode_preserves_official_execution_and_scoring(bundle, correct):
+    task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
+    responses = ground_truth_responses(task) if correct else [completion("finish", {}, 0)]
+    official = agent.run_episode(model_with_responses(copy.deepcopy(responses)), bundle, task)
+    configured = adapter.run_episode(model_with_responses(responses), bundle, task, max_steps=20)
+    assert configured == official
+
+
+def test_configured_turn_cap_keeps_official_reward_and_all_receipts(bundle):
+    task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
+    model = model_with_responses([completion("finish", {}, i, finish_reason="length") for i in range(20)])
+    reward, trace, usage, _ = adapter.run_episode(model, bundle, task, max_steps=20)
+    assert reward.reward == 0
+    assert usage["calls"] == len(model.receipts) == 20
+    assert adapter.episode_end_reason(trace) == "step_cap"
+    adapter.report_episode(model, "capped-run", task.task_id, reward.reward, "step_cap")
+    assert model.reef.report.call_args.args[1]["references"] == model.receipts
+    assert protocol.MAX_STEPS == 100
+
+
+@pytest.mark.parametrize("correct", [True, False])
 def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, correct):
     task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
     responses = ground_truth_responses(task)
@@ -236,7 +257,8 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     monkeypatch.setattr(campaign, "training_releases", lambda *args: copy.deepcopy(releases))
     monkeypatch.setattr(campaign, "episode_runtime_load_id", lambda model: f"v{len(releases)}")
 
-    def run_episode(model, bundle, task, extra_system):
+    def run_episode(model, bundle, task, extra_system, max_steps):
+        assert max_steps == 20
         phases.append((task.task_id, bool(extra_system), len(releases)))
         model.receipts.append(f"receipt-{task.task_id}")
         return (
@@ -254,12 +276,14 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
         releases.append({"operation": "training", "runtime_load_id": f"v{count}"})
         return releases[-1]
 
-    monkeypatch.setattr(campaign.agent, "run_episode", run_episode)
+    monkeypatch.setattr(campaign, "run_episode", run_episode)
     monkeypatch.setattr(campaign, "report_episode", report_episode)
     monkeypatch.setattr(campaign, "wait_for_training", wait_for_training)
     monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
     path = tmp_path / "results.jsonl"
-    monkeypatch.setattr(sys, "argv", ["run.py", "--method", method, "--smoke", "--output", str(path)])
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--method", method, "--smoke", "--max-steps", "20", "--output", str(path)]
+    )
     campaign.main()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     episodes = [row for row in rows if row.get("type") == "episode"]
@@ -270,4 +294,5 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     assert rows[-1]["test_score"] == 100
     config, official_rows = read_rows(str(path))
     assert config["method"] == method
+    assert config["max_steps"] == 20
     assert setting_scores(official_rows)["n_test"] == 2

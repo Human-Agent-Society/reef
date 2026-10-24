@@ -10,7 +10,42 @@ import httpx
 from openai import APIStatusError
 from openai.types import CompletionUsage
 from reef_client import ReefClient, ReefClientError
-from servelearnbench import llm, protocol
+from servelearnbench import agent, llm, protocol
+from servelearnbench.engine.types import FINISH_ACTION_NAME, Action, RewardResult, Task
+
+
+def run_episode(
+    model: llm.LLM, bundle: dict, task: Task, *, max_steps: int, extra_system: str = ""
+) -> tuple[RewardResult, list[dict], dict, dict]:
+    """Run the official environment and agent loop with an explicit turn limit.
+
+    The pinned benchmark's run_episode does not expose run_turns' max_steps.
+    This entry point preserves its setup and scoring while passing that limit.
+    """
+    if max_steps <= 0:
+        raise ValueError("max_steps must be positive")
+    llm.usage_reset()
+    meta = bundle["meta"]
+    system = meta["system_prompt"] + ("\n\n" + extra_system if extra_system else "")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": task.instruction}]
+    env = agent.new_env(bundle)
+    env.reset(task)
+    specs = agent.tool_specs(env.tools_info, meta["domain"])
+
+    def _execute(name: str, arguments: dict) -> str:
+        if name not in env.tools_map:
+            raise agent.UnknownTool(agent.MSG_UNKNOWN.format(name=name))
+        return env.step(Action(name=name, kwargs=arguments)).observation
+
+    trace = agent.run_turns(
+        model,
+        messages,
+        specs,
+        _execute,
+        on_finish=lambda arguments: env.step(Action(name=FINISH_ACTION_NAME, kwargs=arguments)),
+        max_steps=max_steps,
+    )
+    return env.compute_reward(), trace, llm.agent_usage(), llm.judge_usage()
 
 
 class ReefLLM(llm.LLM):

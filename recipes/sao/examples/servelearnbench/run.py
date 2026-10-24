@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from reef_client import ReefClient
-from servelearnbench import agent, llm, protocol
+from servelearnbench import llm, protocol
 from servelearnbench.methods.baselines import Oracle
 from servelearnbench.scenarios import get_bundle
 from servelearnbench.scoring import category
@@ -17,6 +17,7 @@ from harness.adapter import (
     episode_end_reason,
     episode_runtime_load_id,
     report_episode,
+    run_episode,
     training_releases,
     wait_for_training,
 )
@@ -34,10 +35,11 @@ def main() -> None:
         "--smoke", action="store_true", help="Run two serving and two test tasks; label results as smoke"
     )
     parser.add_argument("--max-tokens", type=int, default=protocol.MAX_TOKENS)
+    parser.add_argument("--max-steps", type=int, default=protocol.MAX_STEPS, help="Maximum model calls per task")
     parser.add_argument("--training-timeout", type=float, default=1800)
     args = parser.parse_args()
-    if args.max_tokens <= 0 or args.training_timeout <= 0:
-        parser.error("token and timeout limits must be positive")
+    if args.max_tokens <= 0 or args.max_steps <= 0 or args.training_timeout <= 0:
+        parser.error("token, turn, and timeout limits must be positive")
     client = ReefClient(
         os.environ["REEF_SERVICE_URL"],
         token=os.environ.get("REEF_TOKEN"),
@@ -75,7 +77,7 @@ def main() -> None:
         "top_p": 1.0,
         "smoke": args.smoke,
         "max_tokens": args.max_tokens,
-        "max_steps": protocol.MAX_STEPS,
+        "max_steps": args.max_steps,
         "max_output_per_task": protocol.MAX_OUTPUT_PER_TASK,
         "tool_budget": protocol.ENGINE_TOOL_BUDGET,
         "serving_count": len(serving),
@@ -97,7 +99,9 @@ def main() -> None:
                 extra = oracle.context(task, phase, 1) if args.method == "oracle" else ""
                 started = time.monotonic()
                 # Infrastructure errors abort the run. They are never reward=0.
-                reward, trace, usage, judge_usage = agent.run_episode(model, bundle, task, extra_system=extra)
+                reward, trace, usage, judge_usage = run_episode(
+                    model, bundle, task, max_steps=args.max_steps, extra_system=extra
+                )
                 if training_releases(client, args.scenario) != releases_before:
                     raise RuntimeError("Model changed during an episode")
                 reason = episode_end_reason(trace)
