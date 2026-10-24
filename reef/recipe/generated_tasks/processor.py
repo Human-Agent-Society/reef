@@ -223,7 +223,7 @@ def task_results(store: TaskStore, state: GenerationState) -> tuple[GeneratedTas
             results.append(
                 GeneratedTaskResult(
                     task,
-                    result.training_rewards,
+                    result.rollout_rewards,
                     error=result.error,
                     infrastructure_failure=result.infrastructure_failure,
                 )
@@ -996,7 +996,7 @@ class GeneratedTaskTasks(ReportTasks, BackgroundJobRunner):
             identity["round"],
             TrainingEpisodesResult(
                 task_name=identity["name"],
-                training_rewards=result.training_rewards,
+                rollout_rewards=result.rollout_rewards,
                 error=result.error,
                 infrastructure_failure=result.infrastructure_failure,
             ),

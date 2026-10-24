@@ -88,7 +88,7 @@ Three kinds of failure end differently:
 
 ### The report and the task store
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, training rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its episodes run. Related source sessions keep the same split. The band does not filter the store.
+`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its episodes run. Related source sessions keep the same split. The band does not filter the store.
 
 The generator's `config` keys:
 

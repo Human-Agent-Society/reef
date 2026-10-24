@@ -224,7 +224,7 @@ def test_episodes_results_deliveries_and_trained_marks_are_kept_per_task(session
     store.publish_task(generation=0, index=0, split="train")
     store.publish_task(generation=0, index=1, split="train")
     store.publish_task(generation=0, index=2, split="eval")
-    beta = TrainingEpisodesResult("beta", training_rewards=(1.0, 0.0))
+    beta = TrainingEpisodesResult("beta", rollout_rewards=(1.0, 0.0))
     alpha = TrainingEpisodesResult("alpha", error="the sandbox is gone", infrastructure_failure=True)
 
     store.record_result(generation=0, result=beta)
@@ -289,7 +289,7 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
         store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
         added = store.add_task(directory=binary_task(sources, "image-task"), split="eval")
-        store.record_result(generation=0, result=TrainingEpisodesResult("alpha", training_rewards=(1.0,)))
+        store.record_result(generation=0, result=TrainingEpisodesResult("alpha", rollout_rewards=(1.0,)))
         store.mark_delivered(generation=0)
         store.mark_trained(task_names=("alpha",))
 
@@ -303,7 +303,7 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
             assert restored == added
             assert (store.path(restored.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
-            assert store.results(0) == (TrainingEpisodesResult("alpha", training_rewards=(1.0,)),)
+            assert store.results(0) == (TrainingEpisodesResult("alpha", rollout_rewards=(1.0,)),)
             assert store.is_delivered(0) and store.trained_task_names() == {"alpha"}
         storage.archive("math")
         with closing(storage.open("math")) as session:

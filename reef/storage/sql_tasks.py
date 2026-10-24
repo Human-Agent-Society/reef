@@ -429,7 +429,7 @@ def result_document(result: TrainingEpisodesResult) -> str:
     return json.dumps(
         {
             "task_name": result.task_name,
-            "training_rewards": list(result.training_rewards),
+            "rollout_rewards": list(result.rollout_rewards),
             "error": result.error,
             "infrastructure_failure": result.infrastructure_failure,
         },
@@ -444,7 +444,7 @@ def result_from_document(text: str) -> TrainingEpisodesResult:
     document = json.loads(text)
     return TrainingEpisodesResult(
         task_name=document["task_name"],
-        training_rewards=tuple(document["training_rewards"]),
+        rollout_rewards=tuple(document["rollout_rewards"]),
         error=document["error"],
         infrastructure_failure=document["infrastructure_failure"],
     )

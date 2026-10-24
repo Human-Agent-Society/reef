@@ -302,7 +302,7 @@ def test_the_band_keeps_a_task_that_ran_only_when_its_pass_rate_is_inside_it(
     assert (task["name"], task["pass_rate"], task["band"]) == (NAMES[0], pass_rate, position)
     # Inside the band or not, the task stays under the tasks root, and the report names where.
     assert task["path"] == str(tmp_path / "tasks" / NAMES[0]) and (tmp_path / "tasks" / NAMES[0]).is_dir()
-    assert task["training_rewards"] == list(training) and task["source_record_id"] == "session-1"
+    assert task["rollout_rewards"] == list(training) and task["source_record_id"] == "session-1"
     [proposal] = document["proposals"]
     if position == "inside":
         assert proposal["stage"] == ""
@@ -596,7 +596,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     results = generation.task_store.results(0)
     generation.close()
     assert len(generated.tasks) == 2 and delivery_error == ""
-    assert [result.training_rewards for result in results] == [(0.5, 0.5)] * 2
+    assert [result.rollout_rewards for result in results] == [(0.5, 0.5)] * 2
     assert [(call["task"], call["arm"], call["count"]) for call in service.episode_requests] == [
         (NAMES[0], "plain", 2),
         (NAMES[1], "plain", 2),

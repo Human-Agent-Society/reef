@@ -329,7 +329,7 @@ class SpadeTaskGenerator(TaskGenerator):
             if not result.has_episodes:
                 proposals.append((replace(proposal, infrastructure_failure=result.infrastructure_failure), None))
                 continue
-            plain = result.training_rewards
+            plain = result.rollout_rewards
             hint: tuple[float, ...] = ()
             if self.hint_plays and HINT_NAME in result.task.solution:
                 try:

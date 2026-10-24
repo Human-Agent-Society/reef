@@ -444,7 +444,7 @@ generator gets what it needs from its ``config`` and from these calls only:
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
 
-A ``GeneratedTaskResult`` holds the task, ``training_rewards``, a ``split``
+A ``GeneratedTaskResult`` holds the task, ``rollout_rewards``, a ``split``
 (``train`` by default), an ``error``, and ``infrastructure_failure``. The
 rewards include only episodes that ran. An episode that ran
 without a reward counts as 0. A non-empty ``error`` means that the task ran no

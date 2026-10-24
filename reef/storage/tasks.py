@@ -156,7 +156,7 @@ class TrainingEpisodesResult:
     """What the first training episodes of a generation's train task returned.
 
     Values: ``task_name`` names a train task that the generation published.
-    ``training_rewards`` are the rewards of the training episodes that ran. A
+    ``rollout_rewards`` are the rewards of the training episodes that ran. A
     non-empty ``error`` means that the task ran no episodes;
     ``infrastructure_failure`` says that it could not run at all.
     Purpose: the record-to-task stage saves it when the task's episodes first end, and
@@ -165,7 +165,7 @@ class TrainingEpisodesResult:
     """
 
     task_name: str
-    training_rewards: tuple[float, ...] = ()
+    rollout_rewards: tuple[float, ...] = ()
     error: str = ""
     infrastructure_failure: bool = False
 

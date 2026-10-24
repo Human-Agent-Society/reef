@@ -237,7 +237,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
         (lambda: GeneratedTaskResult(task_for("t-a", "r", 1), (float("nan"),)), "finite"),
         (lambda: GeneratedTaskResult(task_for("t-a", "r", 1), infrastructure_failure=True), "needs the error"),
         (lambda: TaskGenerationRequest((), "tasks", generation=-1), "non-negative"),
-        (lambda: GeneratedTaskResult(task=task_for("t-a", "r", 1), training_rewards=(1.0,), split="eval"), "eval"),
+        (lambda: GeneratedTaskResult(task=task_for("t-a", "r", 1), rollout_rewards=(1.0,), split="eval"), "eval"),
         (lambda: TaskValidationResult(("",)), "non-empty"),
     ],
 )
@@ -466,10 +466,10 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     (results,) = task_generator.results
     assert task_generator.result_generations == [0]
     assert [result.task.name for result in results] == names
-    assert all(result.training_rewards == (0.25, 0.25) and result.has_episodes for result in results)
+    assert all(result.rollout_rewards == (0.25, 0.25) and result.has_episodes for result in results)
     store = p.record2task.task_store
     assert store.is_delivered(0) and [result.task_name for result in store.results(0)] == names
-    assert store.results(0)[0].training_rewards == (0.25, 0.25)
+    assert store.results(0)[0].rollout_rewards == (0.25, 0.25)
 
 
 @pytest.mark.unit
@@ -582,7 +582,7 @@ def test_an_invalid_task_comes_back_with_its_errors_and_is_never_written(tmp_pat
     assert not looked(p)
     assert service.writes == ["harbor-00000-001"]
     (results,) = task_generator.results
-    assert results[0].error == "oracle check refused: the oracle scored 0" and results[0].training_rewards == ()
+    assert results[0].error == "oracle check refused: the oracle scored 0" and results[0].rollout_rewards == ()
     assert results[1].has_episodes
     assert p.status()["task_store"]["available"] == 1
 

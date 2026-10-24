@@ -760,7 +760,7 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings(episodes_per_task=2))
         generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, generator_service=generator)
         result, _ = await generation.run_training_episodes(task, 0, labels={})
-        assert result.has_episodes and len(result.training_rewards) == 2
+        assert result.has_episodes and len(result.rollout_rewards) == 2
         assert read_harbor_task(tmp_path / "tasks" / task.name).source_agent_record_ids == task.source_agent_record_ids
         await task_generator.record_results((result,), generation=0)
 

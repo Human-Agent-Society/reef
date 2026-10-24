@@ -49,9 +49,9 @@ class TaskValidationResult:
 class GeneratedTaskResult:
     """What became of one generated task in a round.
 
-    ``training_rewards`` holds the rewards of the episodes the recipe trains on,
-    only of the episodes that ran. An episode that ran and returned no reward
-    counts as 0. ``error`` is not
+    ``rollout_rewards`` holds the verifier rewards of the training episodes
+    that ran, as the policy of the rollout scored them, before it trained on
+    them. An episode that ran and returned no reward counts as 0. ``error`` is not
     empty when the task ran no episodes: it failed validation, the generator service
     refused it, or the agent could not start on it. ``infrastructure_failure``
     marks an error where the task could not run at all, for example because
@@ -60,7 +60,7 @@ class GeneratedTaskResult:
     """
 
     task: HarborTask
-    training_rewards: tuple[float, ...] = ()
+    rollout_rewards: tuple[float, ...] = ()
     error: str = ""
     split: Literal["train", "eval"] = "train"
     infrastructure_failure: bool = False
@@ -68,20 +68,20 @@ class GeneratedTaskResult:
     def __post_init__(self) -> None:
         if not isinstance(self.task, HarborTask):
             raise TypeError("task must be a HarborTask")
-        if not isinstance(self.training_rewards, tuple):
-            raise TypeError("training_rewards must be a tuple of numbers")
+        if not isinstance(self.rollout_rewards, tuple):
+            raise TypeError("rollout_rewards must be a tuple of numbers")
         if any(
             isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward)
-            for reward in self.training_rewards
+            for reward in self.rollout_rewards
         ):
             raise ValueError("rewards must be finite numbers")
         if not isinstance(self.error, str):
             raise TypeError("error must be text")
-        if self.error and self.training_rewards:
+        if self.error and self.rollout_rewards:
             raise ValueError("a task that ran no episodes has no rewards")
         if self.split not in ("train", "eval"):
             raise ValueError("task result split must be train or eval")
-        if self.split == "eval" and self.training_rewards:
+        if self.split == "eval" and self.rollout_rewards:
             raise ValueError("an eval task result cannot contain rollout rewards")
         if self.infrastructure_failure and not self.error:
             raise ValueError("an infrastructure failure needs the error that stopped the task")

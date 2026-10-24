@@ -358,7 +358,7 @@ class TaskOutcome:
     digest: str
     path: str
     source_record_id: str
-    training_rewards: tuple[float, ...]
+    rollout_rewards: tuple[float, ...]
     pass_rate: float
     band: str
 
@@ -731,7 +731,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     stage = state.stages.get(result.task.name) or STAGE_RUN
                 proposals.append(replace(proposal, stage=stage, refusal=result.error))
                 continue
-            pass_rate = statistics.fmean(result.training_rewards) if result.training_rewards else 0.0
+            pass_rate = statistics.fmean(result.rollout_rewards) if result.rollout_rewards else 0.0
             # Where the pass rate falls against the band; a null bound is no bound.
             if self.band_low is not None and pass_rate < self.band_low:
                 band = BAND_BELOW
@@ -744,7 +744,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 digest=result.task.digest,
                 path=state.paths.get(result.task.name, ""),
                 source_record_id=proposal.source_record_id,
-                training_rewards=result.training_rewards,
+                rollout_rewards=result.rollout_rewards,
                 pass_rate=pass_rate,
                 band=band,
             )

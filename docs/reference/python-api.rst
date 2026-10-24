@@ -1139,7 +1139,7 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``GeneratedTaskResult(task, training_rewards=(), error="", split="train")`` holds
+``GeneratedTaskResult(task, rollout_rewards=(), error="", split="train")`` holds
 the rewards of the training episodes, only of the episodes that ran. ``has_episodes`` is true for a train
 task with an empty ``error``. A task that ran no episodes has no rewards.
 
