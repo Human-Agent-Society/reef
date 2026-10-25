@@ -1,35 +1,27 @@
-"""Deployment plans, resource ownership, connection configuration, and runtime selection.
+"""Inference components, resource ownership, and runtime selection.
 
-- Component contracts: what a deployment's resources, inference service and
-  training service each own, and how their health is observed.
-- :class:`ModelDeployment`: starts those components in dependency order,
-  attaches the weight-transfer session, and runs Reef's coordinator.
+- Component contracts: what an inference service and the resources it borrows
+  each own, and how their health is observed.
 - Runtime factories: the ``type`` table that turns a config section into
   runtimes, with bundled kinds resolved lazily so importing contracts loads
   no integration.
-- Connection settings shared by the executor- and Ray-backed factories.
 """
 
 from __future__ import annotations
 
 import importlib
 import logging
-import math
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
-from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
+from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import ReefError
-from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
-from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.runtime.executor.failure import ExecutorFailedError
-from reef.runtime.interfaces import InferenceBackend, InferenceRuntime, TrainingBackend, TrainingRuntime
-from reef.runtime.scheduler import TrainingCoordinator
+from reef.runtime.executor import Executor
+from reef.runtime.interfaces import InferenceBackend, InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 
 _logger = logging.getLogger(__name__)
 
@@ -38,15 +30,6 @@ _logger = logging.getLogger(__name__)
 
 class DeploymentResources(ABC):
     """A coordinated allocation and its runtime connection, owned by Reef."""
-
-    @property
-    def training_node_id(self) -> str | None:
-        """Cluster node hosting the trainer's rank 0, or None when the allocation names none.
-
-        Components that must see the trainer's node-local files, such as the
-        coordinator verifying the checkpoints it writes, are placed there.
-        """
-        return None
 
     @abstractmethod
     def start(self) -> None:
@@ -74,83 +57,18 @@ class DeploymentHealth(ABC):
         """Raise on failure; an outstanding probe is not a failed component."""
 
 
-class ComponentHealth(DeploymentHealth):
-    """Observe selected components without importing their implementations."""
-
-    def __init__(self, *components: DeploymentHealth) -> None:
-        self.components = components
-
-    def poll(self) -> None:
-        for component in self.components:
-            component.poll()
-
-
-class ModelPlanSource(ABC):
-    """Rebuild components and rerun durable recovery preflight for each attempt."""
-
-    @abstractmethod
-    def create(self) -> ModelDeploymentPlan:
-        """Return a fresh, unallocated plan from the original configuration."""
-
-
 @dataclass(frozen=True)
 class InferenceConnection:
     """What a started ``InferenceService`` returns: its control protocol and, when it has one, its control executor.
 
     ``protocol`` is the service's non-empty ``connection_protocol``; it names
-    the control vocabulary, including direct weight-update attachment.
-    ``control`` is the borrowed executor that a native weight transfer hands to
-    the sender, or None for a receiver that its ``InferenceBackend`` reaches by
-    other means, such as HTTP. A service whose connection has no executor does
-    not list ``connection_protocol`` in ``supported_transfer_protocols``.
-    Reusing a connection for replacement training workers requires the owning
-    deployment to retire the prior trainer and perform the attachment handshake.
+    the control vocabulary. ``control`` is the borrowed executor that the
+    service's ``InferenceBackend`` calls, or None for a receiver that the
+    backend reaches by other means, such as HTTP.
     """
 
     protocol: str
     control: Executor | None
-
-
-@dataclass(frozen=True)
-class WeightTransferSession:
-    """One deployment's attachment of a trainer to its receiver.
-
-    A value holds the transfer ``protocol`` that the deployment selected and the
-    ``session_id`` that Reef generates whenever it builds a receiver; both are
-    non-empty. ``ModelDeployment`` makes it and the training service reads it in
-    ``attach_weight_transport``. Training workers must not reuse a previous
-    deployment's session. A session that is not a
-    :class:`NativeWeightTransferSession` gives the trainer no receiver handle:
-    the trainer writes weight files and Reef's coordinator delivers them.
-    """
-
-    protocol: str
-    session_id: str
-
-    def __post_init__(self) -> None:
-        if not self.protocol or not self.session_id:
-            raise ValueError("weight transfer sessions require a protocol and identity")
-
-
-@dataclass(frozen=True)
-class NativeWeightTransferSession(WeightTransferSession):
-    """A session over the receiver's own control protocol.
-
-    It adds the receiver's borrowed control ``Executor``; the sender drives the
-    engines through it (for example NCCL or a shared-disk update). This is the
-    existing adapter control protocol, not a universal tensor format.
-    """
-
-    receiver: Executor
-
-
-#: The transfer a trainer declares when it delivers weights as files (full or adapter) that Reef asks the receiver to load.
-WEIGHT_FILES_PROTOCOL = "reef-weight-files-v1"
-#: The transfer in which no weights leave the trainer: each version names the weights the trainer holds.
-#: Its session is native. The receiver's rank 0 records one runtime load ID: the trainer calls
-#: ``set_runtime_load_id(runtime_load_id)`` on it in place of a send, and the receiver's backend reports
-#: the recorded ID. Only a receiver that runs no engine, such as ``inference.backend: none``, accepts it.
-NO_WEIGHT_TRANSFER_PROTOCOL = "reef-no-weight-transfer-v1"
 
 
 class InferenceService(DeploymentHealth):
@@ -161,22 +79,9 @@ class InferenceService(DeploymentHealth):
     def connection_protocol(self) -> str:
         """Control protocol provided by the selected engine integration."""
 
-    @property
-    def supported_transfer_protocols(self) -> tuple[str, ...]:
-        """Weight transfers this receiver accepts: its native one, plus Reef-owned file delivery if it loads files.
-
-        Only ``connection_protocol`` attaches the sender to this receiver's
-        control connection; any other protocol here is delivered by Reef.
-        """
-        return (self.connection_protocol,)
-
     @abstractmethod
     def start(self, resources: DeploymentResources) -> InferenceConnection:
         """Start engines in supplied resources and return a borrowed connection."""
-
-    @abstractmethod
-    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
-        """Fence the receiver and release shared resources before trainer startup."""
 
     @abstractmethod
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
@@ -195,251 +100,13 @@ class InferenceService(DeploymentHealth):
         """Release owned engines, including partial starts, idempotently."""
 
 
-class TrainingService(DeploymentHealth):
-    """Training workers allocated independently of the inference component."""
-
-    @property
-    @abstractmethod
-    def weight_transfer_protocols(self) -> tuple[str, ...]:
-        """Weight transfers this trainer can send, most preferred first.
-
-        The tuple is empty exactly when the trainer has no separately attached
-        sender, which is the combined lifecycle without an inference component.
-        """
-
-    @abstractmethod
-    def start(self, resources: DeploymentResources) -> None:
-        """Start training workers using only their supplied reservations."""
-
-    @abstractmethod
-    def attach_weight_transport(self, session: WeightTransferSession) -> None:
-        """Configure a sender after allocation without taking receiver ownership."""
-
-    @abstractmethod
-    def backend(self) -> TrainingBackend:
-        """Return the training backend for Reef-owned coordination."""
-
-    @abstractmethod
-    def check_health(self) -> None:
-        """Raise when the component is not ready."""
-
-    @abstractmethod
-    def poll(self) -> None:
-        """Observe component failures without blocking behind active work."""
-
-    @abstractmethod
-    def close(self) -> None:
-        """Release owned training objects, including partial starts, idempotently."""
-
-
 # -- Deployment lifecycle -----------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CoordinatorConfig:
-    """Executor selection for Reef's coordinator, independent of backend code."""
-
-    backend: str | type[Executor] = "ray"
-    options: Mapping[str, Any] = field(default_factory=dict)
-    launch_timeout_s: float | None = None
-
-
-@dataclass(frozen=True)
-class ModelDeploymentPlan:
-    """Configured components; constructing a plan must not allocate resources.
-
-    A missing inference component explicitly selects a combined compatibility
-    lifecycle. It is never a fallback after a separate component fails to start.
-    """
-
-    resources: DeploymentResources
-    inference: InferenceService | None
-    training: TrainingService
-    health: DeploymentHealth | None = None
-    coordinator: CoordinatorConfig | None = None
-
-    def validate(self) -> None:
-        if self.coordinator is not None and self.inference is None:
-            raise ValueError("a Reef coordinator requires separate training and inference components")
-        if self.inference is None:
-            sent = self.training.weight_transfer_protocols
-            if sent:
-                raise ValueError(f"training sends {sent!r} but no inference component is configured")
-            return
-        self.weight_transfer_protocol(self.inference)
-
-    def weight_transfer_protocol(self, inference: InferenceService) -> str:
-        """The first protocol in the trainer's preference order that ``inference`` accepts."""
-        sent = self.training.weight_transfer_protocols
-        accepted = inference.supported_transfer_protocols
-        if inference.connection_protocol:
-            for protocol in sent:
-                if protocol in accepted:
-                    return protocol
-        raise ValueError(
-            f"incompatible inference control protocol: training sends {sent!r}, receiver accepts {accepted!r}"
-        )
-
-
-class ModelDeployment:
-    """Own allocation, backend attachment and the generic coordinator process.
-
-    Start order is resources, inference, training, coordinator; close order
-    is the reverse, and close runs for every component that was started even
-    when a later one failed.
-    """
-
-    def __init__(self, plan: ModelDeploymentPlan) -> None:
-        self.plan = plan
-        self._started = False
-        self._closed = False
-        self._resources_started = False
-        self._inference_started = False
-        self._training_started = False
-        self.weight_transfer_session: WeightTransferSession | None = None
-        self._coordinator: Executor | None = None
-        self._coordinator_probe: ExecutorFuture | None = None
-
-    def start(self) -> None:
-        if self._started or self._closed:
-            raise RuntimeError("model deployment can only be started once")
-        self.plan.validate()
-        self._started = True
-        try:
-            self._resources_started = True
-            self.plan.resources.start()
-            connection = self._start_inference()
-            self._start_training()
-            if connection is not None:
-                self._start_coordinator(connection)
-                self.plan.inference.check_health()  # type: ignore[union-attr]
-        except BaseException:
-            try:
-                self.close()
-            except Exception:
-                _logger.exception("Failed to clean up model deployment after startup failure")
-            raise
-
-    def _start_inference(self) -> InferenceConnection | None:
-        """Start the receiver and fence it for the trainer; ``None`` without a separate component."""
-        inference = self.plan.inference
-        if inference is None:
-            return None
-        self._inference_started = True
-        connection = inference.start(self.plan.resources)
-        if connection.protocol != inference.connection_protocol:
-            raise ValueError("inference returned a connection with an incompatible protocol")
-        inference.check_health()
-        # Colocated trainers cannot initialize until inference has
-        # acknowledged releasing its initial device allocations.
-        inference.prepare_weight_transfer(connection)
-        protocol = self.plan.weight_transfer_protocol(inference)
-        if protocol == connection.protocol:
-            if connection.control is None:
-                raise ValueError("a native weight transfer requires the receiver's control executor")
-            self.weight_transfer_session = NativeWeightTransferSession(protocol, uuid4().hex, connection.control)
-        else:
-            self.weight_transfer_session = WeightTransferSession(protocol, uuid4().hex)
-        return connection
-
-    def _start_training(self) -> None:
-        self._training_started = True
-        self.plan.training.start(self.plan.resources)
-        if self.weight_transfer_session is not None:
-            self.plan.training.attach_weight_transport(self.weight_transfer_session)
-        self.plan.training.check_health()
-
-    def _start_coordinator(self, connection: InferenceConnection) -> None:
-        config = self.plan.coordinator
-        inference = self.plan.inference
-        if config is None or inference is None:
-            return
-        # The coordinator verifies the checkpoints the trainer writes, so on a
-        # multi-node cluster it runs on the trainer's node; node-local
-        # checkpoint storage is invisible from anywhere else.
-        self._coordinator = Executor.create(
-            ExecutorConfig(
-                backend=config.backend,
-                workers=(
-                    WorkerSpec(
-                        TrainingCoordinator,
-                        args=(self.plan.training.backend(), inference.backend(connection)),
-                        kwargs={"owns_training": True},
-                    ),
-                ),
-                options=config.options,
-                node_id=self.plan.resources.training_node_id,
-                launch_timeout_s=config.launch_timeout_s,
-            )
-        )
-        # Constructor recovery can take as long as checkpoint loading. The
-        # launcher's ready timeout bounds startup; a short RPC timeout must
-        # not interrupt a healthy recovery and leave its result ambiguous.
-        self._validate_health(self._coordinator.rpc(0, "health"))
-
-    def poll(self) -> None:
-        """Observe components without queuing repeated health work behind training."""
-        if self.plan.health is not None:
-            self.plan.health.poll()
-        coordinator = self._coordinator
-        if coordinator is None:
-            return
-        if coordinator.failure is not None:
-            raise ExecutorFailedError(coordinator.failure)
-        if self._coordinator_probe is None:
-            self._coordinator_probe = coordinator.rpc(0, "health", non_block=True)
-        try:
-            result = self._coordinator_probe.result(timeout=0)
-        except TimeoutError:
-            return
-        self._coordinator_probe = None
-        self._validate_health(result, allow_recovery=True)
-
-    @staticmethod
-    def _validate_health(result: Any, *, allow_recovery: bool = False) -> None:
-        if isinstance(result, Mapping) and (
-            result.get("ok") is True or (allow_recovery and result.get("recoverable") is True)
-        ):
-            return
-        raise RuntimeError(f"training coordinator failed its health check: {result!r}")
-
-    def _close_coordinator(self) -> None:
-        coordinator = self._coordinator
-        if coordinator is not None:
-            try:
-                coordinator.rpc(0, "shutdown", timeout=90)
-            finally:
-                coordinator.shutdown()
-                self._coordinator = None
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        errors = []
-        try:
-            self._close_coordinator()
-        except Exception as exc:
-            errors.append(exc)
-            _logger.exception("Failed to close runtime coordinator")
-        for started, component in (
-            (self._training_started, self.plan.training),
-            (self._inference_started, self.plan.inference),
-            (self._resources_started, self.plan.resources),
-        ):
-            if started and component is not None:
-                try:
-                    component.close()
-                except Exception as exc:
-                    errors.append(exc)
-                    _logger.exception("Failed to close deployment component %s", type(component).__name__)
-        if errors:
-            raise errors[0]
 
 
 # -- Runtime factories --------------------------------------------------------
 
-RuntimeBuild = InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]
+#: What a runtime factory builds: a serving runtime, or a training component, which never serves.
+RuntimeBuild = InferenceRuntime | TrainingComponent
 
 
 class RuntimeConfigError(ReefError):
@@ -454,7 +121,7 @@ class RuntimeFactory(ABC):
 
     Implement:
         ``__call__`` — receive ``(config, model_path, recipe_config, environ)``
-        and return an :class:`InferenceRuntime` or a ``(TrainingRuntime, InferenceRuntime)`` pair.
+        and return an :class:`InferenceRuntime` or a :class:`TrainingComponent`.
     """
 
     kind: str
@@ -492,7 +159,7 @@ class RuntimeFactory(ABC):
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
     ) -> RuntimeBuild:
-        """Build inference alone or separate training and inference components."""
+        """Build the serving runtime or the training component that ``config`` describes."""
 
 
 class _CallableRuntimeFactory(RuntimeFactory):
@@ -520,17 +187,10 @@ class _CallableRuntimeFactory(RuntimeFactory):
 
 #: Bundled kinds, resolved on first use so importing contracts loads no integration.
 _BUILTIN_FACTORIES = {
-    "coordinator_training": "reef.service.runtime:CoordinatorRuntimeFactory",
-    "executor_training": "reef.service.runtime:ExecutorTrainingRuntimeFactory",
     "inference_proxy": "reef.inference.http:InferenceProxyRuntimeFactory",
     "none": "reef.inference.null:NullRuntimeFactory",
-    "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
-    "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
-    "remote_adapters": "reef.inference.remote.runtime:RemoteAdapterRuntimeFactory",
-    "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
-    "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
+    "remote_serving": "reef.inference.remote.runtime:RemoteServingRuntimeFactory",
     "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",
-    "vllm": "reef.inference.vllm.runtime:VLLMRuntimeFactory",
 }
 
 #: Explicitly registered extensions, plus cached instances of resolved builtins.
@@ -619,23 +279,29 @@ class RuntimeRegistry:
         return factory(config, model_path, recipe_config or {}, values)
 
 
-def runtime_pair(value: Any) -> tuple[TrainingRuntime, InferenceRuntime] | None:
-    """Return ``value`` as a ``(training, inference)`` pair, or ``None`` after shutting down what it held.
+def close_runtimes(
+    training_component: TrainingComponent | None, runtime: InferenceRuntime | None
+) -> list[BaseException]:
+    """Close a recipe's training component and inference runtime, and return their close errors in that order.
 
-    Factories and connectors are user-supplied; anything other than the pair
-    is a configuration error, and any runtime they did build must not leak.
+    Admission closes first, so that no new request starts. Then the training
+    component closes, and then the runtime shuts down. A failed close does not
+    stop the next one. ``None`` stands for an absent component or runtime.
     """
-    if (
-        isinstance(value, tuple)
-        and len(value) == 2
-        and isinstance(value[0], TrainingRuntime)
-        and isinstance(value[1], InferenceRuntime)
-    ):
-        return value
-    for component in value if isinstance(value, tuple) else (value,):
-        with suppress(Exception):
-            component.shutdown()
-    return None
+    if runtime is not None:
+        runtime.pause_admission()
+    errors: list[BaseException] = []
+    if training_component is not None:
+        try:
+            training_component.close()
+        except BaseException as exc:
+            errors.append(exc)
+    if runtime is not None:
+        try:
+            runtime.shutdown()
+        except BaseException as exc:
+            errors.append(exc)
+    return errors
 
 
 # -- Config section helpers ---------------------------------------------------
@@ -661,48 +327,6 @@ def config_secret(
     if config.get(env_name) is None:
         return None
     return environ.get(config_string(config, env_name))
-
-
-@dataclass(frozen=True)
-class RuntimeConnectionConfig:
-    """Connection and request options; model-worker topology stays with the backend."""
-
-    inference_url: str | None = config_option(None, help="Inference worker URL; omitted uses the coordinator.")
-    inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
-    train_timeout_s: float | None = config_option(None, help="Training request timeout; omitted follows inference.")
-    batch_size: int = config_option(
-        1, help="Samples in one training step; Reef's Slime and Tinker deployments set it from the training options."
-    )
-    inference_handler_config: Mapping[str, Any] = field(
-        default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
-    )
-
-    def __post_init__(self) -> None:
-        for name, value in (
-            ("inference_timeout_s", self.inference_timeout_s),
-            ("train_timeout_s", self.train_timeout_s),
-        ):
-            if value is not None and (isinstance(value, bool) or not math.isfinite(value) or value <= 0):
-                raise ValueError(f"runtime.{name} must be a positive finite number")
-        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size <= 0:
-            raise ValueError("runtime.batch_size must be a positive integer")
-
-
-@dataclass(frozen=True)
-class ExecutorRuntimeConfig(RuntimeConnectionConfig):
-    coordinator_rank: int = config_option(0, help="Rank of the training coordinator worker.")
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.coordinator_rank < 0:
-            raise ValueError("runtime.coordinator_rank must be non-negative")
-
-
-@dataclass(frozen=True)
-class RayRuntimeConfig(RuntimeConnectionConfig):
-    actor_name: str = config_option(DEFAULT_ACTOR_NAME, help="Training coordinator actor name.")
-    namespace: str = config_option(DEFAULT_NAMESPACE, help="Ray namespace containing the coordinator.")
-    ray_address: str | None = config_option(None, help="Ray cluster address.")
 
 
 def http_readiness_command(python: str, endpoint: str) -> list[str]:

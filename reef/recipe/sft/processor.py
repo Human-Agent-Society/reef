@@ -2,8 +2,8 @@
 
 ``SFTRecord2Record`` makes each report its own record set. ``SFTTasks``
 renders the request and the target with the served model's chat template.
-The loss mask selects the target tokens. The shared ``DistillBatches``
-stage puts the tasks into batches.
+The loss mask selects the target tokens. The shared ``DistillJobData``
+stage puts the tasks into job data.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Self, cast
 
-from reef.core.batches import TrajectoryItem
 from reef.core.config import config_option
-from reef.core.plugins import PluginSettings
+from reef.core.job_data import TrajectoryItem
+from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import make_trajectory
 from reef.inference.chat import template_kwargs_of
@@ -36,10 +36,15 @@ class SFTRecord2Record(ExclusiveReportRecord2Record):
 
     The staleness check drops tokens that an older model version sampled. An
     SFT target is fixed text, not sampled tokens. Thus the stage keeps each
-    held unit until a batch uses it.
+    held unit until job data uses it, and it refuses ``max_staleness``.
     """
 
-    def drop_stale_units(self, max_staleness: int) -> None:
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context)
+
+    def drop_stale_units(self) -> None:
         return
 
 
@@ -95,7 +100,7 @@ class SFTTasks(ReportTasks):
         self.target = settings.target
         self.max_tokens = settings.max_tokens
         self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer_path, trust_remote_code=True)
-        #: The chat template arguments of every render; a task-to-batch stage that renders reuses them.
+        #: The chat template arguments of every render; a task-to-job stage that renders reuses them.
         self.chat_template_kwargs = template_kwargs_of(settings.chat_template_kwargs, "chat_template_kwargs")
         self.overflow_count = 0
 

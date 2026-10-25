@@ -617,6 +617,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
         "REEF_AUTOENVSCALING_DESIGNER_URL": "http://127.0.0.1:8901",
         "REEF_AUTOENVSCALING_DESIGNER_TOKEN": "designer-token",
         "E2B_API_KEY": "e2b-test",
+        "TINKER_API_KEY": "tinker-test",
     }.items():
         monkeypatch.setenv(name, value)
     example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tinker/serve.yaml"

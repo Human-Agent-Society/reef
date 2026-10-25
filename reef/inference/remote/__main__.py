@@ -43,7 +43,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=DEFAULT_INFERENCE_TOKEN_ENV,
         help=f"environment variable with the inference token (default: {DEFAULT_INFERENCE_TOKEN_ENV})",
     )
-    parser.add_argument("--ray-address", default=None, help="join this Ray cluster instead of starting one")
+    parser.add_argument(
+        "--ray-address",
+        default=os.environ.get("RAY_ADDRESS") or None,
+        help="join this Ray cluster instead of starting one (default: RAY_ADDRESS, when set)",
+    )
     parser.add_argument(
         "--ray-num-gpus", type=int, default=None, help="GPUs the started Ray session declares (default: detected)"
     )

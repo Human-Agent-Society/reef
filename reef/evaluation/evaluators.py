@@ -152,11 +152,11 @@ class BackendEvaluateMixin(CandidateEvaluationPlugin):
 
 
 class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, SelectionPlugin):
-    """The default plugin: evaluate via the candidate backend, publish every candidate.
+    """The default plugin of a harness trainer: evaluate via the candidate backend, publish every candidate.
 
-    What a weight-training deployment gets when it configures no evaluation — the
-    same behaviour reef had before candidate evaluation existed — and the
-    ``always`` selection of a harness recipe.
+    A harness trainer that configures no evaluation gets it, and a harness
+    recipe's ``always`` selection names it. A weight trainer's default is
+    ``reef.train.jobs.TrainingMetricsSelectPlugin``.
     """
 
     def __init__(self, candidate_backend: Any) -> None:

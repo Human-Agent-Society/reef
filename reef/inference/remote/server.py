@@ -49,7 +49,7 @@ class LocalEngineResources(InferenceResources):
         return None if self.reservation is None else self.reservation.inference
 
     def start(self) -> None:
-        self.reservation = reserve_model_gpus(ModelGpuLayout(0, self.num_gpus))
+        self.reservation = reserve_model_gpus(ModelGpuLayout(training_gpus=0, inference_gpus=self.num_gpus))
 
     def close(self) -> None:
         reservation, self.reservation = self.reservation, None
@@ -74,8 +74,10 @@ class RemoteInferenceServer:
     ``PUT engines`` starts ``engine`` with the input that the control plane
     sends, replacing running engines, and refuses any other backend name. The
     other control routes call the engines' ``InferenceBackend``, one at a time.
-    ``GET health`` never waits behind such a call: it observes failures through
-    ``InferenceService.poll``. Full weight files are removed after the load, and
+    ``instance_id`` names this process: ``PUT engines`` and ``GET health``
+    report it, so the control plane sees a restarted component, which runs no
+    engines. ``GET health`` reports whether engines run and never waits behind
+    a control call: it observes their failures through ``InferenceService.poll``. Full weight files are removed after the load, and
     an adapter's files when it is unloaded or replaced.
     """
 
@@ -95,6 +97,7 @@ class RemoteInferenceServer:
         self.backend: InferenceBackend | None = None
         self.inference_url: str | None = None
         self.adapters: dict[str, Path] = {}
+        self.instance_id = uuid4().hex
 
     def application(self) -> web.Application:
         app = web.Application(client_max_size=MAX_REQUEST_BYTES, middlewares=[self.report_errors])
@@ -136,9 +139,9 @@ class RemoteInferenceServer:
             service = inference_service_for(backend_name, config)
             connection = service.start(resources)
             service.check_health()
-            # The engines start fenced; Reef's coordinator decides when they serve.
-            service.prepare_weight_transfer(connection)
             backend = service.backend(connection)
+            # The engines start paused; the control plane decides when they serve.
+            backend.pause()
             inference_url = backend.inference_url().rstrip("/")
         except BaseException:
             if service is not None:
@@ -201,7 +204,7 @@ class RemoteInferenceServer:
             raise web.HTTPBadRequest(text="the engine request needs a positive num_gpus")
         async with self.lock:
             await asyncio.to_thread(self.start_stack, backend_name, config, num_gpus)
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "instance": self.instance_id})
 
     async def stop_engines(self, request: web.Request) -> web.StreamResponse:
         self.authorize(request, self.control_token)
@@ -210,13 +213,12 @@ class RemoteInferenceServer:
         return web.json_response({"ok": True})
 
     async def health(self, request: web.Request) -> web.StreamResponse:
-        """Report failed engines; busy engines, such as ones loading weights, are healthy."""
+        """Report this process and whether engines run; raise for failed engines, not for busy ones."""
         self.authorize(request, self.control_token)
-        self.running_backend()
         service = self.service
         if service is not None:
             await asyncio.to_thread(service.poll)
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "instance": self.instance_id, "engines": self.backend is not None})
 
     async def runtime_load_ids(self, request: web.Request) -> web.StreamResponse:
         self.authorize(request, self.control_token)
@@ -246,8 +248,11 @@ class RemoteInferenceServer:
             "recover": backend.recover,
             "abort": backend.abort,
         }
+        operation = request.match_info["operation"]
         async with self.lock:
-            await asyncio.to_thread(operations[request.match_info["operation"]])
+            result = await asyncio.to_thread(operations[operation])
+        if operation == "recover":
+            return web.json_response({"ok": True, "replaced": result})
         return web.json_response({"ok": True})
 
     async def load_weights(self, request: web.Request) -> web.StreamResponse:

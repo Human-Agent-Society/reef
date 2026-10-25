@@ -1,4 +1,4 @@
-"""SAO's record-to-task and task-to-batch stages: one scored rollout, one training unit."""
+"""SAO's record-to-task and task-to-job stages: one scored rollout, one training unit."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from reef.record2record import Record2Record, ReportContext
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.samples import make_policy_trajectory, recorded_training
-from reef.task2batch import BufferSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.task2job import Task2Job, Task2JobSettings
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem
 
 
 class SAOSampleAssembly(SampleAssembly):
@@ -63,21 +63,21 @@ class SAOTasks(ReportTasks):
         return sample
 
 
-class SAOBatches(Task2Batch):
-    """Batch scored rollouts as independently scheduled SAO samples.
+class SAOJobData(Task2Job):
+    """Put scored rollouts into job data as independently scheduled SAO samples.
 
     Single-Rollout Asynchronous Optimization ships each completed rollout on
     its own — no comparison group, no slowest-sample barrier. The pipeline
-    collects the backend's batch size (Slime ``--global-batch-size``) of
-    accepted rollouts, from as many prompts, into one optimizer step; the
-    paper uses 128 (arXiv:2607.07508, §4.1), and 1 trains once per accepted
-    rollout for smoke runs.
+    collects ``job_samples`` accepted rollouts, from as many prompts, into
+    one job. With ``job_samples`` equal to Slime's ``--global-batch-size``,
+    the job is one optimizer step; the paper uses 128 (arXiv:2607.07508,
+    §4.1), and 1 trains once per accepted rollout for smoke runs.
 
-    SAO reuses ``TrajectoryItem`` / ``TrainingBatch`` and fills ``action_mask``
+    SAO reuses ``TrajectoryItem`` / ``JobData`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
     tensors; malformed training input fails explicitly.
 
-    Config: ``buffer_size`` (``BufferSettings``).
+    Config: ``buffer_size`` and ``job_samples`` (``Task2JobSettings``).
     """
 
     @classmethod
@@ -90,7 +90,8 @@ class SAOBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
+        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, items)
+    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, items)

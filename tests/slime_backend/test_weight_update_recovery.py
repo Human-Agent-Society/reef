@@ -267,47 +267,6 @@ def _load_reef_train_actor_adapter(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.unit
-def test_reef_actor_adapter_passes_generation_policy_without_widening_slime_actor_rpc(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_reef_train_actor_adapter(monkeypatch)
-    calls = []
-
-    class Updater:
-        def update_weights(self, *, manage_generation=True, force_full=False):
-            calls.append((manage_generation, force_full))
-            return "updated"
-
-    actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.weight_updater = Updater()
-    actor.args = object()
-
-    assert actor.update_weights(manage_generation=False, force_full=True) == "updated"
-    assert calls == [(False, True)]
-    assert "update_weights" not in vars(actor.weight_updater)
-
-
-@pytest.mark.unit
-def test_reef_actor_adapter_remains_compatible_with_unextended_updater(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_reef_train_actor_adapter(monkeypatch)
-    calls = []
-
-    class Updater:
-        def update_weights(self):
-            calls.append("updated")
-
-    actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.weight_updater = Updater()
-    actor.args = object()
-
-    actor.update_weights(manage_generation=False, force_full=True)
-
-    assert calls == ["updated"]
-
-
-@pytest.mark.unit
 def test_full_weight_save_delegates_without_reopening_slimes_timer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -327,38 +286,10 @@ def test_full_weight_save_delegates_without_reopening_slimes_timer(
     actor = object.__new__(module.ReefMegatronTrainRayActor)
     actor.args = object()
 
-    actor.save_model(7, force_sync=True, scenario_step=7)
+    actor.save_model(7, force_sync=True)
 
     assert saved == [(7, True)]
     assert _StubTimer.started == ["save_model"]
-
-
-@pytest.mark.unit
-def test_resident_train_step_returns_cached_blocks_to_the_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Slime empties the caching allocator only when it offloads a model after
-    # its step. A resident model shares its GPUs with the colocated other one,
-    # so the adapter releases what the step reserved before returning; the
-    # offload path already does, so it is left to Slime.
-    module = _load_reef_train_actor_adapter(monkeypatch)
-    events: list[str] = []
-    base = module.ReefMegatronTrainRayActor.__mro__[1]
-
-    def base_train(self, rollout_id, rollout_data_ref, external_data=None):
-        events.append(f"train:{rollout_id}")
-        return "values"
-
-    monkeypatch.setattr(base, "train", base_train, raising=False)
-    monkeypatch.setattr(module, "clear_memory", lambda: events.append("clear_memory"))
-    actor = object.__new__(module.ReefMegatronTrainRayActor)
-
-    actor.args = types.SimpleNamespace(offload_train=False)
-    assert actor.train(3, "ref") == "values"
-    assert events == ["train:3", "clear_memory"]
-
-    events.clear()
-    actor.args = types.SimpleNamespace(offload_train=True)
-    assert actor.train(4, "ref") == "values"
-    assert events == ["train:4"]
 
 
 @pytest.mark.unit
@@ -380,11 +311,11 @@ def test_lora_save_times_the_branch_that_does_not_delegate(monkeypatch: pytest.M
     monkeypatch.setattr(
         actor,
         "_save_lora_model",
-        lambda rollout_id, force_sync=False, *, scenario_step: saved.append((rollout_id, force_sync)),
+        lambda rollout_id, force_sync=False: saved.append((rollout_id, force_sync)),
         raising=False,
     )
 
-    actor.save_model(3, scenario_step=3)
+    actor.save_model(3)
 
     assert saved == [(3, False)]
     assert _StubTimer.started == ["save_model"]
@@ -616,37 +547,36 @@ def test_native_trainer_attaches_to_inference_without_pushing_batch_config(monke
     assert layout is not worker.train_parallel_config
 
 
-@pytest.mark.parametrize("lora", [True, False])
-def test_actor_exports_the_active_adapter_or_the_full_weights_as_files(monkeypatch, tmp_path, lora):
+@pytest.mark.parametrize("offload_train", [False, True])
+def test_lora_save_writes_the_rollouts_megatron_checkpoint_and_adapter(monkeypatch, tmp_path, offload_train):
     module = _load_reef_train_actor_adapter(monkeypatch)
-    written = []
+    events = []
+    model = types.ModuleType("slime.backends.megatron_utils.model")
+    model.save = lambda rollout_id, *_state: events.append(("megatron", rollout_id))  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.model", model)
 
-    def save_adapter(args, path, tensors, *, scenario, scenario_step):
-        written.append(("adapter", path, tensors, scenario, scenario_step))
+    def save_adapter(args, path, tensors, *, rollout_id):
+        events.append(("adapter", path, tensors, rollout_id))
 
-    def save_full(args, path, model, **options):
-        written.append(("full", path, model, options["model_name"]))
-
-    monkeypatch.setattr(module, "megatron_lora_enabled", lambda args: lora)
     monkeypatch.setattr(module, "save_lora_adapter_to_path", save_adapter)
-    monkeypatch.setattr(module, "save_hf_model_to_path", save_full)
-    monkeypatch.setattr(module, "get_gloo_group", lambda: None)
-    monkeypatch.setattr(module.dist, "barrier", lambda group: None)
     actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.args = types.SimpleNamespace(offload_train=False)
-    actor.model = "model"
-    actor.adapter_slots = types.SimpleNamespace(active="math") if lora else None
-    actor.weight_updater = types.SimpleNamespace(
-        model_name="qwen3", quantization_config=None, export_lora_adapter_tensors=lambda: ["lora_A"]
+    actor.args = types.SimpleNamespace(
+        debug_rollout_only=False,
+        offload_train=offload_train,
+        async_save=False,
+        save_hf=str(tmp_path / "hf" / "checkpoint-{rollout_id}"),
     )
-    actor.export_weight_files(str(tmp_path / "inc-1"))
-    if lora:
-        assert written == [("adapter", tmp_path / "inc-1", ["lora_A"], "math", None)]
-        actor.adapter_slots.active = None
-        with pytest.raises(RuntimeError, match="activated scenario"):
-            actor.export_weight_files(str(tmp_path / "inc-2"))
-    else:
-        assert written == [("full", tmp_path / "inc-1", "model", "qwen3")]
+    actor.role = "actor"
+    actor.model = actor.optimizer = actor.opt_param_scheduler = None
+    actor.weight_updater = types.SimpleNamespace(export_lora_adapter_tensors=lambda: ["lora_A"])
+    actor.wake_up = lambda: events.append(("wake_up",))
+    actor.sleep = lambda: events.append(("sleep",))
+
+    actor._save_lora_model(5, force_sync=True)
+
+    saved = [("megatron", 5), ("adapter", tmp_path / "hf" / "checkpoint-5", ["lora_A"], 5)]
+    # An offloaded model is on the GPU only while it saves.
+    assert events == ([("wake_up",), *saved, ("sleep",)] if offload_train else saved)
 
 
 @pytest.mark.parametrize(
@@ -677,49 +607,6 @@ def test_live_sender_rejects_invalid_reef_transfer_sequence(monkeypatch, target)
     with pytest.raises((ValueError, RuntimeError)):
         updater.prepare_exact_runtime_load_id(target)
     assert str(updater.runtime_load_id) == "engine:2"
-
-
-@pytest.mark.parametrize("fails", [False, True])
-def test_reef_sender_disables_native_receiver_recovery_and_restores_flags(monkeypatch, fails):
-    module = _load_reef_train_actor_adapter(monkeypatch)
-    observed = []
-    base = module.ReefMegatronTrainRayActor.__mro__[1]
-
-    def native_update(actor):
-        observed.append(actor.args.use_fault_tolerance)
-        if actor.args.use_fault_tolerance:
-            pytest.fail("native trainer tried to recover an inference service")
-        if fails:
-            raise RuntimeError("sender failed")
-        return actor.weight_updater.update_weights()
-
-    monkeypatch.setattr(base, "update_weights", native_update)
-    actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.args = types.SimpleNamespace(use_fault_tolerance=True)
-    actor.weight_updater = types.SimpleNamespace(update_weights=lambda: "sent")
-    if fails:
-        with pytest.raises(RuntimeError, match="sender failed"):
-            actor.update_weights(manage_generation=False)
-    else:
-        assert actor.update_weights(manage_generation=False) == "sent"
-    assert observed == [False]
-    assert actor.args.use_fault_tolerance is True
-
-
-def test_lora_sender_does_not_recover_receiver_with_native_fault_tolerance_enabled(monkeypatch):
-    module = _load_reef_train_actor_adapter(monkeypatch)
-    actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.args = types.SimpleNamespace(
-        debug_train_only=False,
-        debug_rollout_only=False,
-        use_fault_tolerance=True,
-        offload_train=False,
-    )
-    actor.rollout_manager = types.SimpleNamespace(
-        recover_updatable_engines=types.SimpleNamespace(remote=lambda: pytest.fail("receiver recovery")),
-        get_updatable_engines_and_lock=types.SimpleNamespace(remote=lambda: ([], None, 0, [], [], [])),
-    )
-    actor._with_lora_engines(lambda: pytest.fail("no receiver is available"))
 
 
 @pytest.mark.unit

@@ -49,46 +49,6 @@ def validate_megatron_lora_args(args: Namespace) -> None:
             "Megatron Bridge LoRA owns actor parameter freezing; do not combine it with "
             "--only-train-params-name-list or --freeze-params-name-list"
         )
-    if getattr(args, "colocate", False) and getattr(args, "rollout_num_gpus_per_engine", 1) != 1:
-        raise ValueError(
-            "colocated Megatron LoRA sync currently requires --rollout-num-gpus-per-engine=1 "
-            "so every adapter checksum is verified against its matching SGLang engine"
-        )
-    slots = getattr(args, "max_loaded_loras", None)
-    if slots is not None and int(slots) < 1:
-        raise ValueError("--max-loaded-loras must be at least 1")
-
-
-def lora_engine_slots(args: Namespace) -> int:
-    """Adapter slots the SGLang engine holds; the bridge's residency capacity.
-
-    Every scenario keeps its current revision resident, and publishing a new
-    revision needs one more slot while both exist, so size it to the number
-    of scenarios plus one. With fewer slots the residency manager evicts the
-    publishing scenario's own current revision first (generation is paused,
-    so no request observes the gap); with exactly one slot that is the only
-    option, which is fine for one scenario.
-
-    Sizing below the scenario count does NOT degrade gracefully: a peer's
-    current revision is never evicted, so the second scenario's publication is
-    refused with ``AdapterCapacityExhausted`` naming the slot count to set
-    here. That refusal is deliberate — evicting a serving peer would route its
-    next request to an adapter the engine no longer holds, and nothing reloads
-    it on demand.
-
-    Do not size this against ``max_staleness``. AReaL ties
-    ``lora_keep_versions`` to its staleness bound because its off-policy
-    correction scores samples through the producing adapter, which must
-    therefore stay loaded. Reef records ``rollout_log_probs`` and the
-    producing runtime load ID on the sample itself, so admission is sequence
-    arithmetic over recorded data: a sample stays admissible for exactly as
-    long as the bound says, whether or not the adapter that produced it is
-    still resident. The scenario count sizes this; the staleness bound does
-    not.
-    """
-
-    value = getattr(args, "max_loaded_loras", None)
-    return 1 if value is None else max(1, int(value))
 
 
 def scenario_adapter_name(scenario: str, runtime_load_id: str) -> str:

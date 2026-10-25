@@ -26,7 +26,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import CordisBackend, Mutation, StepProgress, StepProposal
 from reef.train.cordis_backend.manifest import advance
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
+from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication
 
 MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 PLAIN = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
@@ -295,7 +295,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     b = backend(tmp_path, extending)
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        result = run_backend_step(b, TrainingBatch("demo:instruction:ask-1", (), request=request), b.initial_state())
+        result = run_backend_step(b, JobData("demo:instruction:ask-1", (), request=request), b.initial_state())
     recorded = result.metrics["training_request"]
     assert recorded["id"] == "ask-1" and result.metrics["published"] is True
     # A prompt rides with its item, and meets the screens a check meets.
@@ -315,7 +315,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
 # -- step progress, for the request page -----------------------------------------------------------
 
 
-def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TrainingBatch:
+def _instruction(text: str = "add a rule", request_id: str = "req-1") -> JobData:
     return replace(batch(), request=TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id))
 
 

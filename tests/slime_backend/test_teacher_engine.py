@@ -13,7 +13,7 @@ from reef.core.errors import DeployConfigError
 from reef.service.deploy.service_config import ServiceConfig
 from reef.train.slime_backend.distill.algorithm import DistillAlgorithm, DistillSettings, settings_from_args
 from reef.train.slime_backend.distill.teacher_engine import TeacherEngine, parse_teacher_scores, teacher_vocab_size
-from reef.train.slime_backend.launch import driver_arguments, teacher_service
+from reef.train.slime_backend.launch import TEACHER_URL_ENV, SlimeDeployment, slime_arguments, teacher_service
 
 
 def settings(**kwargs):
@@ -175,9 +175,9 @@ def test_managed_teacher_has_separate_gpu_allocation_and_scoring_endpoint():
     assert service["resources"]["num_gpus"] == 2
     assert "CUDA_VISIBLE_DEVICES" not in service.get("env", {})
     assert service["command"][-2:] == ["--tp", "2"]
-    arguments = driver_arguments(
-        {"reef": config, "endpoints": {"distill-teacher": "http://worker:30001"}}, loss_family="opd"
-    )
+    # The HTTP service, where Slime trains, receives the teacher's endpoint in its environment.
+    assert SlimeDeployment().http_environment(config) == {TEACHER_URL_ENV: "${endpoints.distill-teacher}"}
+    arguments = slime_arguments(config, loss_family="opd", environ={TEACHER_URL_ENV: "http://worker:30001"})
     assert "--opd-teacher-url=http://worker:30001" in arguments
     assert "--opd-teacher-model-path=/models/teacher" in arguments
 
@@ -217,7 +217,9 @@ def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
         tmp_path / "serve.yaml",
     )
     services = {service["name"]: service for service in config["services"]}
-    assert services["slime-driver"]["depends_on"] == ["distill-teacher"]
+    # Slime trains in the HTTP service, which waits for the teacher and reads its endpoint.
+    assert "distill-teacher" in services["reef"]["depends_on"]
+    assert services["reef"]["env"][TEACHER_URL_ENV] == "${endpoints.distill-teacher}"
     assert services["distill-teacher"]["resources"]["num_gpus"] == 2
     assert services["distill-teacher"]["endpoint"] == "http://{host}:30123"
     assert config["reef"]["teacher_model_path"] == "/teacher"
@@ -232,6 +234,7 @@ def test_unsupported_training_backend_rejects_teacher():
                 "reef": {
                     "recipe": "recipe",
                     "training_backend": "tinker",
+                    "training_backend_options": {"state-dir": "tinker-state"},
                     "model_path": "student",
                     "teacher_model_path": "teacher",
                 }

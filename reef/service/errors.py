@@ -17,7 +17,6 @@ from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import (
     InferenceUnavailable,
     ReefError,
-    ScenarioBusy,
     ScenarioCapacityFull,
     ScenarioLimitReached,
     UnknownScenario,
@@ -34,7 +33,6 @@ logger = logging.getLogger(__name__)
 ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
-    (ScenarioBusy, web.HTTPConflict),
     (ScenarioLimitReached, web.HTTPConflict),
     (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),

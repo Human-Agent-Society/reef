@@ -11,9 +11,6 @@ from argparse import Namespace
 class SlimeArguments(Namespace):
     """Slime's namespace with explicit Reef adapter inputs and derived hooks."""
 
-    seed: int
-    fp16: bool
-    use_rollout_routing_replay: bool
     num_rollout: int
     global_batch_size: int
     save_hf: str
@@ -21,13 +18,10 @@ class SlimeArguments(Namespace):
     compute_advantages_and_returns: bool
     debug_train_only: bool
     debug_rollout_only: bool
-    rollout_num_gpus: int
     rollout_external: bool
     colocate: bool
     offload_train: bool
     offload_rollout: bool
-    keep_lora_base_resident: bool
-    disjoint_prefix_sharing: bool
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
     megatron_lora_target_modules: list[str] | None
@@ -41,6 +35,10 @@ class SlimeArguments(Namespace):
     lr: float
     hf_checkpoint: str
     load: str | None
+    ref_load: str | None
+    megatron_to_hf_mode: str
+    use_wandb: bool
+    wandb_key: str | None
     start_rollout_id: int | None
     custom_megatron_init_path: str | None
     custom_critic_args_hook_path: str | None = None
@@ -58,6 +56,7 @@ class SlimeArguments(Namespace):
     finetune: bool
     ckpt_step: int | None
     reef_executor_backend: str
+    reef_train_executor_options: dict[str, object]
     advantage_estimator: str
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]

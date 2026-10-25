@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
@@ -52,7 +52,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 return existing
             if current.training_mode == "auto":
                 raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-            if all(component_trainer.trainer.candidate_backend is None for component_trainer in current.trainers):
+            if not any(component_trainer.trainer.trains for component_trainer in current.trainers):
                 raise ValueError("explicit training requests require a training backend")
             request = normalize_training_request_payload(item.payload)
             if item.references:

@@ -72,17 +72,16 @@ class JudgedSet(RecordSet):
 
 
 class JudgingRecord2Record(Record2Record):
-    """Judge records on a background worker, and hold the judged sets until a batch uses them.
+    """Judge records on a background worker, and hold the judged sets until job data uses them.
 
     Every record is in exactly one state: tracked, in flight, held in the
-    pool, or terminal. Terminal records are released from memory and never
-    batch. Judged sets wait in the order that their judgments arrived.
+    pool, or terminal. Terminal records are released from memory and never train. Judged sets wait in the order that their judgments arrived.
 
     Without a worker, records track and expire, and nothing is ever judged.
     """
 
-    def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None) -> None:
-        super().__init__(ArrivalOrder())
+    def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None, *, max_staleness: int = 0) -> None:
+        super().__init__(ArrivalOrder(), max_staleness=max_staleness)
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
@@ -140,7 +139,7 @@ class JudgingRecord2Record(Record2Record):
             self.retire(job.receipt)
 
     def retire(self, receipt: str) -> None:
-        """This receipt is terminal: released from memory, never batched."""
+        """This receipt is terminal: released from memory, never trained."""
         self.terminal.add(receipt)
 
     def abandon(self, receipt: str) -> None:

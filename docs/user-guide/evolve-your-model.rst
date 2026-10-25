@@ -1,18 +1,21 @@
 Train model weights from agent feedback
 =======================================
 
-Weight training coordinates the driver, model workers and HTTP service. Reef
-hot-swaps each accepted update into the serving engine, so inference keeps
-answering across the update.
+With Slime, weight training runs in two processes on one Ray cluster. Reef submits each
+job's ready data to its training component as one training job. Each checkpoint
+that a job saves is a candidate. Reef publishes a selected candidate, and the
+serving engines load its weights from files.
 
 +--------------------------+-----------------------------------------------+
 | Process                  | Owns                                          |
 +==========================+===============================================+
-| Ray and the Slime driver | GPUs, the optimizer, checkpoints              |
+| Reef HTTP service        | requests, records, the release chain, and the |
+|                          | Slime training component: the training        |
+|                          | workers, their GPUs, the optimizer and the    |
+|                          | checkpoints                                   |
 +--------------------------+-----------------------------------------------+
-| Reef                     | requests, records, the release chain          |
-+--------------------------+-----------------------------------------------+
-| Engine                   | SGLang, serving the current weights           |
+| Inference component      | SGLang or vLLM engines on their own GPUs,     |
+| (service ``inference``)  | serving the published weights                 |
 +--------------------------+-----------------------------------------------+
 
 For hosted LoRA training from a CPU machine, see `Train with Tinker <tinker.rst>`__.
@@ -28,7 +31,7 @@ harness or another text artifact, see `Evolve your harness
 Before you start
 ----------------
 
-The Slime backend needs the supported GPU environment: Ray, a Slime driver, and
+The Slime backend needs the supported GPU environment: Ray, Slime, and
 CUDA-specific builds of torch, SGLang, and Megatron. ``pip install -e .`` from
 the quickstart brings none of them; build the image as described in
 `Installation <../getting-started/installation.rst#gpu-image-for-weight-training>`__, then get
@@ -43,31 +46,34 @@ directory Reef keeps its state in:
      -v "$PWD":/workspace/Reef \
      reef bash
 
-``--network host`` lets the Slime driver, SGLang, and Reef reach each other on
-localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
+``--network host`` lets the HTTP service, the inference component, and Ray
+reach each other on localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
 shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
 invocation non-interactively.
 
 The cookbook ``recipes/sao/examples/imo_answerbench/serve.yaml`` requests one actor GPU
-and one rollout GPU through Slime flags. Reef manages the shared Ray runtime,
-and Slime schedules its model workers there. Its ``run.sh`` defaults the local
+and one serving GPU. Reef manages the shared Ray runtime and reserves the
+training GPUs and the engine GPUs separately there. Its ``run.sh`` defaults the local
 Ray pool to two visible devices; an external cluster controls its own pool.
 The model at ``inference.model-path`` must be present or downloadable.
 
 Start from a config
 -------------------
 
-Each weight-training example ships a complete ``serve.yaml`` that starts the
-processes in the required order and manages the shared Ray runtime. Reef
-assembles the Slime driver and HTTP process, discovers the inference connection
-through the bridge, and stops the stack on exit. Method-specific dependencies
+Each weight-training example ships a complete ``serve.yaml``. ``reef serve``
+manages the shared Ray runtime and starts the inference component before the
+HTTP service. The component listens on a free loopback port; an
+``inference.remote`` section names a component elsewhere instead. The HTTP
+service starts Slime's training workers and the serving engines before it
+answers, and ``reef serve`` stops the stack on exit. Method-specific dependencies
 are implemented by the Recipe. Copy the closest example and edit it.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
   ``recipes/sao/examples/imo_answerbench/serve.yaml``, the smallest: two GPUs, one actor
-  with the critic colocated on it, one rollout engine.
+  that shares its GPU with the critic, and one serving engine.
 - `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
-  ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
+  ``recipes/tttd/examples/tttd/serve.yaml``, four GPUs with LoRA training: two
+  for the actor and two for the serving engines.
 - `OpenClaw-RL conversation learning <recipes/openclawrl.rst>`__ uses
   ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
   stack with a PRM engine and a student model.
@@ -84,21 +90,24 @@ What to review
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
    reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   training.config.global_batch_size | samples in one optimizer step; also when a batch forms
+   pipeline.task2job.config.job_samples | the fewest samples of one job; required for a weight recipe
+   training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
-   training.colocate | share the inference GPUs with training instead of reserving separate ones
    training.options | GPU layout, optimizer, sequence length, loss settings
 
 Three things to get right:
 
-1. **Set the batch size in one place.** ``training.config.global_batch_size``
-   is Slime's ``--global-batch-size``. Reef makes a batch when it holds this
-   many samples, and Slime trains it in optimizer steps of this size. The
-   ``pipeline`` section has no batch size; a ``batch_size`` key there fails
-   as an unknown key when a scenario builds its pipeline.
-2. **The recipe and the loss flags must describe the same objective.** The driver
-   checks this at startup. Each recipe page names its loss family, and
-   `Loss families <../developer-guide/loss-families.rst#family-to-driver-flags>`__
+1. **Set the job size and the batch size.** ``training.config.global_batch_size``
+   is Slime's ``--global-batch-size``, the samples of one optimizer step.
+   ``pipeline.task2job.config.job_samples`` is the samples of one job: Reef
+   submits a job when it holds this many samples, and Slime cuts the job's
+   data into optimizer steps of the batch size. Set ``job_samples:
+   ${training.config.global_batch_size}``, so that one job is one optimizer
+   step. A weight recipe without ``job_samples`` fails its build. A
+   ``batch_size`` key in the ``pipeline`` section fails as an unknown key.
+2. **The recipe and the loss flags must describe the same objective.** The Slime
+   component checks this at startup. Each recipe page names its loss family, and
+   `Loss families <../developer-guide/loss-families.rst#family-to-slime-flags>`__
    maps each one to its flags.
 3. **The serving backend must capture training tensors.** Weight training needs
    the exact token ids, loss mask, and rollout log probabilities produced during
@@ -119,7 +128,7 @@ Run the example
      --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
 Any config value can be overridden on the command line. Startup takes several
-minutes; wait for the driver and HTTP service to report ready.
+minutes; wait for the inference component and the HTTP service to report ready.
 
 .. code:: bash
 
@@ -128,15 +137,16 @@ minutes; wait for the driver and HTTP service to report ready.
 
 ``/healthz`` says the HTTP service is up. Read ``/reef/status`` when something
 is wrong: it reports asynchronous training and preload failures, current weight
-versions, inference admission, processor state, and checkpoint storage.
+versions, inference admission, processor state, and the running training job.
 
 Watch it learn
 --------------
 
 Send inference through Reef and report feedback per response, exactly as in
 `Quickstart <../getting-started/quickstart.rst>`__. When the recipe has enough eligible records
-it builds a batch, asks Slime to train on it, checkpoints the result,
-publishes it to the engine, and records a new version.
+it builds one job's data and submits it to Slime as one training job. The job
+trains the data and saves one checkpoint. Reef evaluates the checkpoint,
+publishes it, loads it into the engines, and records a new version.
 
 .. code:: bash
 
@@ -148,41 +158,48 @@ publishes it to the engine, and records a new version.
 
 You are training when a new ``training`` entry appears, which happens once
 ``global_batch_size`` eligible samples have arrived. Later requests use the current
-version without a restart. Each saved checkpoint becomes a durable version.
-With a ``save-interval`` above 1, the versions between two saves live only in
-engine memory, and a restart falls back to the last checkpoint.
+version without a restart. Slime saves one checkpoint per job, whatever
+``save-interval`` says, so each published version is a durable checkpoint.
+Megatron requires ``save-interval`` whenever ``save`` is set, so the examples
+keep it.
 
-A full-weight deployment handles one training scenario for its lifetime. To
-train another, run another stack on different ports.
+Training is linear: each job continues from the workers' latest checkpoint,
+whether or not Reef selected it. The workers cannot load a published release,
+so Reef refuses a rollback of a Slime scenario.
 
-Gate a candidate
-----------------
+A Slime stack trains one scenario for its lifetime: its workers hold one set
+of weights. To train another scenario, run another stack on different ports.
 
-By default a successful training step is published. To measure the exported
+Evaluate a candidate
+--------------------
+
+By default Reef publishes every saved checkpoint. To measure the exported
 checkpoint first, add an ``evaluation`` section. The fields are in
 `Configuration <../reference/configuration.rst#the-evaluation-section>`__, the plugin
 interface and a worked example in `Write a recipe
-<../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
+<../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__.
 
-Several scenarios on one base model
------------------------------------
+Train a LoRA adapter
+--------------------
 
-One stack can serve and train one LoRA adapter per scenario against a single
-frozen base model. Nothing changes per request: send ``x-reef-scenario`` and
-Reef routes to that scenario's own adapter revision.
+Slime can train a LoRA adapter on a frozen base model instead of the full
+weights. Add these native flags to ``training.options`` (without leading
+``--``):
 
 .. code:: text
 
    --megatron-lora-rank=32 --megatron-lora-alpha=32
    --megatron-lora-target-modules linear_qkv linear_proj linear_fc1 linear_fc2
-   --max-loaded-loras=3
 
-Add these native flags to ``training.options`` (without leading ``--``),
-and size the engine's adapter table for the scenarios you will train, plus
-one slot for the revision being published. The training thread takes turns
-between scenarios; each keeps its own adapter and optimizer state, and a restart
-recovers each scenario from its own last checkpoint. ``/reef/status`` lists each
-scenario with its ``adapter_runtime_load_id``.
+Each release then holds the PEFT adapter alone, and the engines load it under
+a new adapter name. The engines start with the adapter's rank and target
+modules. ``inference.max-loaded-adapters`` (default 1) sizes their adapter
+table: the adapters they keep resident. With 1, the engines unload the
+served adapter before they load the new one, while generation is paused; with
+2, the new adapter loads beside it. ``/reef/status`` reports the scenario's
+``adapter_runtime_load_id``. LoRA needs ``inference.backend: sglang``; vLLM
+serves full weights only. To train one adapter per scenario on one base
+model, use `Tinker with inference engines <tinker.rst#serve-on-inference-engines>`__.
 
 An adapter the scenario did not train, such as one from an offline SFT run,
 is admitted the same way. It enters the release chain only if
@@ -193,8 +210,8 @@ engine holds.
 What a published adapter contains
 ---------------------------------
 
-Every accepted update publishes a directory holding the adapter alone, never a
-merged or full-model checkpoint. This is what makes saving every update
+Every published LoRA release holds the adapter alone in its ``adapter/``
+directory, never a merged or full-model checkpoint. This is what makes saving every update
 affordable: a rank-32 adapter is a few megabytes where the base model is
 gigabytes. Thus the release chain can keep every revision.
 
@@ -214,7 +231,7 @@ revision loads outside Reef with nothing but ``transformers`` and ``peft``:
    from transformers import AutoModelForCausalLM
 
    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
-   model = PeftModel.from_pretrained(base, "/path/to/checkpoint-4")
+   model = PeftModel.from_pretrained(base, "/path/to/release/adapter")
 
 ``reef-adapter.json`` is what lets you check a revision, not just load it. It
 records:
@@ -222,7 +239,7 @@ records:
 - the base model, plus a checksum of its tokenizer and chat-template files;
 - the PEFT settings the export wrote;
 - the dtype of the tensors it wrote;
-- the scenario and step that produced it;
+- the rollout that produced it;
 - a SHA-256 for each of the two PEFT files.
 
 PEFT loaders ignore files they do not recognize, so this one does not affect

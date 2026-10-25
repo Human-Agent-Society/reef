@@ -398,17 +398,13 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
             after_harness.ref.release_id,
         ]
 
-        # A publication naming no component replaces the committing trainer's own; unknown names are refused,
-        # and live weights cannot carry the harness.
+        # A publication naming no component replaces the committing trainer's own; unknown names are refused.
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
         assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
             "AGENTS.md": "x"
         }
         with pytest.raises(ReefError, match="serves no component"):
             scenario.commit(TrainStepResult(state={}, artifact=evolved, component="config"))
-        # A version without saved weights is refused where the result is built.
-        with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
-            TrainStepResult(state={}, runtime_load_id="inc:2")
 
         # Rolling back to the harness-only step restores the base weights and evolved harness together.
         scenario.rollback(after_harness.ref.release_id)

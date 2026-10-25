@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.dispatcher import Dispatcher
 from reef.service.wire import RELEASE_ID_HEADER, SCENARIO_HEADER, HeaderError
 

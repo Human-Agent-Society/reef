@@ -14,15 +14,15 @@ import importlib
 import os
 import re
 from collections.abc import Mapping
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 from reef.recipe.base import Recipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.deployment import RuntimeRegistry
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.deployment import RuntimeRegistry, close_runtimes
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RecipeType = type[Recipe]
@@ -58,12 +58,14 @@ def build_recipe(
     environ: Mapping[str, str] | None = None,
     config: Mapping[str, Any] | None = None,
     runtime: InferenceRuntime | None = None,
-    training_runtime: TrainingRuntime | None = None,
+    training_component: TrainingComponent | None = None,
 ) -> Recipe:
     recipe_class = recipe_class_for(implementation)
     if recipe_class is None:
         raise ValueError(f"unknown recipe reference {implementation!r}")
-    return recipe_class.from_environment(environ, config=config, runtime=runtime, training_runtime=training_runtime)
+    return recipe_class.from_environment(
+        environ, config=config, runtime=runtime, training_component=training_component
+    )
 
 
 def build_named_recipe(
@@ -119,17 +121,13 @@ def build_named_recipe(
         if runtime_config
         else default_runtime
     )
-    training_runtime = None
-    if isinstance(runtime, tuple):
-        training_runtime, runtime = runtime
+    if isinstance(runtime, TrainingComponent):
+        runtime.close()
+        raise TypeError("a recipe's runtime must be an inference runtime; training.backend selects training")
     try:
-        return build_recipe(
-            settings["implementation"], values, config=settings, runtime=runtime, training_runtime=training_runtime
-        )
+        return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
     except BaseException:
         if runtime_config:
-            for component in (training_runtime, runtime):
-                if component is not None:
-                    with suppress(Exception):
-                        component.shutdown()
+            # The build error stays the one raised.
+            close_runtimes(None, runtime)
         raise

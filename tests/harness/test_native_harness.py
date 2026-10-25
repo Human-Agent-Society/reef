@@ -49,7 +49,7 @@ from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition, tree_files
 from reef.sandbox.process import SandboxExecutor
 from reef.train.cordis_backend import CordisBackend, Mutation
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 TOOL = (
     "native_tool",
@@ -660,7 +660,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
         binary=_launcher(tmp_path),
         seed=SEED_NODES,
     )
-    batch = TrainingBatch("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+    batch = JobData("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_files
@@ -1010,7 +1010,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
             binary=_launcher(tmp_path),
             seed=SEED_NODES,
         )
-        batch = TrainingBatch("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+        batch = JobData("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         prepared = backend.prepare_step(batch, backend.initial_state(), 0)
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
@@ -2123,7 +2123,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     episode = backend._episode_evaluator.render(SEED_NODES)
     assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
     assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
-    batch = TrainingBatch("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+    batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
     evaluator = BackendAlwaysSelectPlugin(backend)

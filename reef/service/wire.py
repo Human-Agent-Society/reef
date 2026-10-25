@@ -72,7 +72,7 @@ class ReportPayload:
     wants richer content. Reef's core only validates that it is a string or a JSON
     object — never a specific internal shape. Interpretation is left to whichever
     recipe's processor reads ``report.payload["feedback"]``, the same way ``metadata``,
-    ``SlimeStepSignal.metrics`` are opaque payloads
+    ``TrainingSignal.metrics`` are opaque payloads
     interpreted by consumers rather than validated centrally.
     """
 

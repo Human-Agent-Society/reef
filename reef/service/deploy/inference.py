@@ -174,8 +174,11 @@ def local_inference_component(config: dict[str, Any], settings: ServiceConfig) -
     The component (``python -m reef.inference.remote``) listens on a free
     loopback port and may start only ``inference.backend`` engines. Its two
     tokens are generated into this process's environment, unless set, so the
-    component and the HTTP service inherit them. It joins the Ray cluster at
-    ``training.ray-address`` when one is set; otherwise it starts its own.
+    component and the HTTP service inherit them. It joins the Ray cluster of
+    the deployment (``RAY_ADDRESS``, which ``reef serve`` sets when the
+    training backend runs on Ray, or ``training.ray-address``), so its
+    engines and the training workers reserve separate GPUs; otherwise it
+    starts its own.
     """
     python = os.environ.get("REEF_PYTHON", sys.executable)
     port = free_loopback_port(settings.port)
@@ -236,7 +239,6 @@ _CONFIGURED_FIELDS = {
     "inference_handler_config",
     "ray_address",
     "ray_namespace",
-    "ray_actor_name",
     "train_timeout_s",
     "training_backend",
     "training_ready_timeout",

@@ -104,7 +104,7 @@ def tttd_advantages(args, rollout_data) -> None:
     """Apply the frozen-base, centered token KL from the reference algorithm.
 
     Reef has already supplied one adaptive-entropic advantage per trajectory,
-    expanded over response tokens by the bridge. Slime computes frozen-base
+    expanded over response tokens by Reef's Slime adapter. Slime computes frozen-base
     log-probabilities immediately before this callback. The update below is
     the direct distributed equivalent of
     ``test-time-training/discover@6c40e82``'s ``incorporate_kl_penalty``.

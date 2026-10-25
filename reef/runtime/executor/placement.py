@@ -1,11 +1,9 @@
-"""Reef-owned GPU reservations for one model deployment on Ray.
+"""Reef-owned GPU reservations on Ray.
 
-A deployment reserves every model GPU in one placement group so training and
-inference cannot be scheduled apart, then hands each component the ordered
-bundles it may use. Bundles are ordered by node address and device id, so a
-tensor-parallel engine or a Megatron group always lands on contiguous devices
-of one node. Colocated deployments give both components the same bundles;
-the runtime's memory handoffs make that safe.
+A component reserves its GPUs in one placement group and schedules its
+workers on the ordered bundles. Bundles are ordered by node address and
+device id, so a tensor-parallel engine or a Megatron group always lands on
+contiguous devices of one node. Training and serving never share a bundle.
 
 Ray is imported lazily so the base installation stays CPU-only.
 """
@@ -41,57 +39,44 @@ class GpuBundles(NamedTuple):
 
 @dataclass(frozen=True)
 class ModelGpuLayout:
-    """How many GPUs one deployment reserves and where inference's share starts."""
+    """The GPUs one reservation holds: ``training_gpus`` training bundles, then ``inference_gpus`` inference bundles.
+
+    Both are non-negative ints and at least one is positive. The training
+    bundles come first, so inference's share starts at ``training_gpus``.
+    Its one purpose is the input of ``reserve_model_gpus``: the Slime training
+    component makes it with ``inference_gpus`` 0, and an inference
+    component's server with ``training_gpus`` 0.
+    """
 
     training_gpus: int
     inference_gpus: int
-    colocate: bool = False
-    external_inference: bool = False
 
     def __post_init__(self) -> None:
-        # Zero training GPUs is a hosted trainer: the reservation then holds inference alone.
-        if isinstance(self.training_gpus, bool) or not isinstance(self.training_gpus, int) or self.training_gpus < 0:
-            raise ValueError("a model deployment needs a non-negative number of training GPUs")
-        if self.training_gpus == 0 and (self.colocate or self.external_inference):
-            raise ValueError("a hosted trainer has no training GPUs to colocate or to pair with external engines")
-        if (
-            isinstance(self.inference_gpus, bool)
-            or not isinstance(self.inference_gpus, int)
-            or self.inference_gpus < 0
-            or (self.inference_gpus == 0 and not self.external_inference)
-        ):
-            raise ValueError(
-                "a model deployment needs a positive number of inference GPUs unless engines are external"
-            )
+        for name, value in (("training_gpus", self.training_gpus), ("inference_gpus", self.inference_gpus)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative int")
+        if self.total == 0:
+            raise ValueError("a GPU reservation needs at least one GPU")
 
     @property
     def total(self) -> int:
-        """GPUs in the shared placement group."""
-        if self.external_inference:
-            return self.training_gpus
-        if self.colocate:
-            return max(self.training_gpus, self.inference_gpus)
+        """GPUs in the placement group."""
         return self.training_gpus + self.inference_gpus
 
     @property
     def inference_offset(self) -> int:
         """First bundle inference may use; equal to ``total`` when it gets none."""
-        if self.external_inference:
-            return self.training_gpus
-        return 0 if self.colocate else self.training_gpus
+        return self.training_gpus
 
 
 class ModelGpuReservation:
-    """One deployment's placement group, sliced for its training and inference components."""
+    """One placement group, sliced into its training and inference bundles."""
 
-    def __init__(self, bundles: GpuBundles, layout: ModelGpuLayout, *, training_node_id: str | None = None) -> None:
+    def __init__(self, bundles: GpuBundles, layout: ModelGpuLayout) -> None:
         if len(bundles.bundle_indices) != layout.total:
             raise ValueError("reserved bundles do not match the model GPU layout")
         self._bundles = bundles
         self.layout = layout
-        #: Ray node of the first training bundle, where the trainer's rank 0
-        #: runs and writes its checkpoints; None for a hosted trainer.
-        self.training_node_id = training_node_id
         self._released = False
 
     @property
@@ -141,11 +126,7 @@ def reserve_model_gpus(
             identity.gpu_id,
         )
     bundles = GpuBundles(group, order, [identities[index].gpu_id for index in order])
-    # The trainer's rank 0 takes the first training bundle. Components that
-    # must see its node-local files, such as the coordinator verifying the
-    # checkpoints it writes, are placed on that node.
-    training_node_id = identities[order[0]].node_id if layout.training_gpus > 0 else None
-    return ModelGpuReservation(bundles, layout, training_node_id=training_node_id)
+    return ModelGpuReservation(bundles, layout)
 
 
 def _wait_until_placed(ray: Any, group: Any, count: int, log_interval_s: float) -> None:
@@ -162,11 +143,10 @@ def _wait_until_placed(ray: Any, group: Any, count: int, log_interval_s: float) 
 
 
 class BundleIdentity(NamedTuple):
-    """Where one placement bundle landed: the node's address and Ray id, and the device."""
+    """Where one placement bundle landed: the node's address and the device."""
 
     node_address: str
     gpu_id: int
-    node_id: str
 
 
 class _BundleProbe:
@@ -175,9 +155,7 @@ class _BundleProbe:
     def identity(self) -> BundleIdentity:
         import ray
 
-        return BundleIdentity(
-            ray.util.get_node_ip_address(), int(ray.get_gpu_ids()[0]), ray.get_runtime_context().get_node_id()
-        )
+        return BundleIdentity(ray.util.get_node_ip_address(), int(ray.get_gpu_ids()[0]))
 
 
 def _bundle_identities(ray: Any, group: Any, count: int) -> list[BundleIdentity]:

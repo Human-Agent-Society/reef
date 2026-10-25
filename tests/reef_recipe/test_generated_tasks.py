@@ -10,12 +10,12 @@ from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
-from tests.support.runtime_stubs import StubTrainingRuntime
+from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import StandInGenerator, rollout_turn, task_for
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.batches import TaskItem
+from reef.core.job_data import TaskItem
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
@@ -24,7 +24,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.generated_tasks import GeneratedTaskBatches, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe, TaskGroupObjective
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -42,8 +42,8 @@ from reef.recipe.generated_tasks.processor import (
     GenerationOutcome,
     RolloutJob,
     RoundSettings,
-    TaskBatchSettings,
     TaskGroupSettings,
+    TaskJobSettings,
     episode_assembly,
     rewards_of,
     train_task_names,
@@ -103,18 +103,18 @@ def report(
     )
 
 
-def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, RoundSettings, TaskBatchSettings]:
+def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, RoundSettings, TaskJobSettings]:
     """Split one flat config, as a test writes it, into the settings of the three stages."""
     group_names = {field.name for field in dataclasses.fields(TaskGroupSettings)}
     round_names = {field.name for field in dataclasses.fields(RoundSettings)}
-    batch_names = {field.name for field in dataclasses.fields(TaskBatchSettings)}
+    batch_names = {field.name for field in dataclasses.fields(TaskJobSettings)}
     unknown = sorted(set(config) - group_names - round_names - batch_names)
     if unknown:
         raise ValueError(f"unknown stage settings: {', '.join(unknown)}")
     return (
         TaskGroupSettings(**{key: value for key, value in config.items() if key in group_names}),
         RoundSettings(**{key: value for key, value in config.items() if key in round_names}),
-        TaskBatchSettings(**{key: value for key, value in config.items() if key in batch_names}),
+        TaskJobSettings(**{key: value for key, value in config.items() if key in batch_names}),
     )
 
 
@@ -133,7 +133,7 @@ def processor(**config: object) -> TrainingPipeline:
         context,
         record2record=stage,
         record2task=generation,
-        task2batch=GeneratedTaskBatches(
+        task2job=GeneratedTaskJobData(
             context, batch_settings, record2record=stage, record2task=generation, worker=InlineWorker()
         ),
     )
@@ -158,16 +158,16 @@ def episode(task: str, index: int, reward: float | None, *turns: EpisodeTurn) ->
 
 def rollout_of(p: TrainingPipeline) -> ActiveRollout | None:
     """The rollout batch of the pipeline's generated-task stage."""
-    stage = p.task2batch
-    assert isinstance(stage, GeneratedTaskBatches)
+    stage = p.task2job
+    assert isinstance(stage, GeneratedTaskJobData)
     return stage.rollout
 
 
 def ended_rollout(p: TrainingPipeline, episodes: Mapping[str, tuple[TaskEpisode, ...]]) -> None:
     """A rollout batch of these tasks whose episodes ended: each task's samples are its group."""
     batch = "tasks:rollout:test"
-    stage = p.task2batch
-    assert isinstance(stage, GeneratedTaskBatches)
+    stage = p.task2job
+    assert isinstance(stage, GeneratedTaskJobData)
     samples = {
         f"{batch}/{task}": tuple(sample for sample in (stage.episode_sample(run, task) for run in runs) if sample)
         for task, runs in episodes.items()
@@ -213,13 +213,13 @@ def test_an_episode_whose_response_was_cut_at_max_tokens_still_trains() -> None:
     )
     ended_rollout(p, {task: (cut, episode(task, 1, 0.0, turn([1, 2, 3], 1)))})
     assert p.ready(BATCH_SIZE)
-    assert [sample.training.get("turn_count", 1) for sample in p.build_batch(BATCH_SIZE).items] == [2, 1]
+    assert [sample.training.get("turn_count", 1) for sample in p.build_job_data(BATCH_SIZE).items] == [2, 1]
 
 
 def test_an_episode_with_an_aborted_call_has_no_sample() -> None:
     p = processor()
-    stage = p.task2batch
-    assert isinstance(stage, GeneratedTaskBatches)
+    stage = p.task2job
+    assert isinstance(stage, GeneratedTaskJobData)
     task = "harbor-00000-000"
     answered = rollout_turn(None, 0)
     aborted = EpisodeTurn(
@@ -241,7 +241,7 @@ def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> No
     )
     objective = resolve_objective("task_group")
     assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
-    signal = objective.prepare(p.build_batch(BATCH_SIZE), {})
+    signal = objective.prepare(p.build_job_data(BATCH_SIZE), {})
     assert signal.action == "train"
     assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
     assert signal.metrics["constant_groups"] == 1
@@ -252,7 +252,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
     ended_rollout(
         p, {task: (episode(task, 0, 1.0), episode(task, 1, 1.0)) for task in ("harbor-00000-000", "harbor-00000-001")}
     )
-    signal = resolve_objective("task_group").prepare(p.build_batch(BATCH_SIZE), {"steps": 3})
+    signal = resolve_objective("task_group").prepare(p.build_job_data(BATCH_SIZE), {"steps": 3})
     assert signal.action == "skip" and signal.advantages is None
     assert signal.next_algorithm_state == {"steps": 3}
     assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
@@ -452,10 +452,10 @@ def rounds(
     generation = GeneratedTaskTasks(
         context, round_settings, stage, task_generator=task_generator, generator_service=service, worker=worker
     )
-    batches = GeneratedTaskBatches(
+    batches = GeneratedTaskJobData(
         context, batch_settings, record2record=stage, record2task=generation, worker=rollout_worker
     )
-    built = TrainingPipeline(context, record2record=stage, record2task=generation, task2batch=batches)
+    built = TrainingPipeline(context, record2record=stage, record2task=generation, task2job=batches)
     worker.generation = generation
     rollout_worker.generation = batches
     return built, service
@@ -468,11 +468,11 @@ def looked(p: TrainingPipeline) -> bool:
     return p.ready(BATCH_SIZE)
 
 
-def train_rollout(p: TrainingPipeline, *, trained: bool = True) -> None:
+def train_rollout(p: TrainingPipeline) -> None:
     """Wait for the running rollout's episodes, then build and acknowledge its batch."""
     assert rollout_of(p) is not None, "a rollout runs"
     assert p.ready(BATCH_SIZE), "the rollout's episodes ended"
-    p.acknowledge(p.build_batch(BATCH_SIZE).batch_id, trained=trained)
+    p.acknowledge(p.build_job_data(BATCH_SIZE).data_id)
     # The trainer releases the consumed IDs once the step's commit is durable.
     p.release_records(p.releasable_record_ids())
 
@@ -719,7 +719,7 @@ def test_a_restart_rolls_out_the_saved_tasks_that_did_not_train_without_generati
     task_generator = ScriptedGenerator()
     service = StandInGenerator(tmp_path / "tasks")
     restarted, _ = rounds(tmp_path, task_generator, service, rounds=1)
-    assert len(restarted.task2batch.task_pool) == 1, "the sibling that did not train is back in the task pool"
+    assert len(restarted.task2job.task_pool) == 1, "the sibling that did not train is back in the task pool"
     looked(restarted)
     assert service.writes == ["harbor-00000-001"] and task_generator.requests == []
     assert task_generator.result_generations == [], "the generation's results went out before the stop"
@@ -744,7 +744,7 @@ def test_a_task_that_an_earlier_generation_published_is_rejected_as_a_duplicate(
     first = generated(0, 0, 1)
     task_generator = ScriptedGenerator([first, (first[0], *generated(1, 5))])
     worker = DeferredWorker()
-    p, _ = rounds(tmp_path, task_generator, worker=worker, rounds=2, batches_per_round=1)
+    p, _ = rounds(tmp_path, task_generator, worker=worker, rounds=2, jobs_per_round=1)
     for _ in range(3):
         p.ready(BATCH_SIZE)
         worker.finish()
@@ -852,10 +852,10 @@ def rollout_rounds(
     generation = GeneratedTaskTasks(
         context, round_settings, stage, task_generator=task_generator, generator_service=service, worker=worker
     )
-    batches = GeneratedTaskBatches(
+    batches = GeneratedTaskJobData(
         context, batch_settings, record2record=stage, record2task=generation, worker=rollout_worker
     )
-    built = TrainingPipeline(context, record2record=stage, record2task=generation, task2batch=batches)
+    built = TrainingPipeline(context, record2record=stage, record2task=generation, task2job=batches)
     worker.generation = generation
     rollout_worker.generation = batches
     return built, service, rollout_worker
@@ -871,11 +871,11 @@ def test_saved_tasks_roll_out_as_one_batch_and_train_on_the_samples_of_their_epi
     names = [task.metadata["task"]["name"] for _, task in job.task_uses]
     assert [call["task"] for call in service.episode_requests] == names
     assert p.ready(BATCH_SIZE), "the episodes ended, and each task's two samples form its group"
-    built = p.build_batch(BATCH_SIZE)
+    built = p.build_job_data(BATCH_SIZE)
     assert [item.group_id for item in built.items] == [names[0], names[0], names[1], names[1]]
     assert all(not item.source_agent_record_ids for item in built.items), "a rollout sample comes from no record"
     assert p.status()["ready_samples"] == 0, "no record reached the record stage"
-    assert p.acknowledge(built.batch_id) == {f"rollout:{task_use}" for task_use, _ in job.task_uses}
+    assert p.acknowledge(built.data_id) == {f"rollout:{task_use}" for task_use, _ in job.task_uses}
     assert p.status()["task_store"]["trained"] == 0, "the commit is not durable yet"
     p.release_records(p.releasable_record_ids())
     assert p.status()["rollout"] is None
@@ -901,12 +901,25 @@ def test_stale_groups_do_not_train_and_their_tasks_roll_out_again(tmp_path: Path
     assert p.ready(BATCH_SIZE), "the groups of the version that the scenario serves train"
 
 
+def test_rollout_groups_within_the_record_stage_max_staleness_train(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    service.runtime_load_id = "v1"
+    p, _, rollout_worker = rollout_rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), service, max_staleness=2)
+    assert p.task2job.record2record.max_staleness == 2
+    for version in ("v1", "v2", "v3"):
+        p.observe_serving_runtime_load_id(version)
+    assert not p.ready(BATCH_SIZE), "the generation saves two tasks"
+    assert not p.ready(BATCH_SIZE), "the rollout of both starts"
+    assert p.ready(BATCH_SIZE), "both groups are two versions behind, which the record stage's limit allows"
+    assert len(rollout_worker.submitted) == 1
+
+
 def test_a_rollout_without_a_group_lets_its_tasks_wait_for_a_restart(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", episode_error="the sandbox is gone")
     p, _, _ = rollout_rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), service)
     assert not looked(p)
-    stage = p.task2batch
-    assert isinstance(stage, GeneratedTaskBatches)
+    stage = p.task2job
+    assert isinstance(stage, GeneratedTaskJobData)
     assert stage.rollout is None and stage.task_pool.is_idle, "no task has a group, so none goes back to the pool"
 
 
@@ -916,13 +929,13 @@ def test_a_rollout_that_the_worker_refuses_keeps_its_tasks_in_the_pool(tmp_path:
     assert not p.ready(BATCH_SIZE), "the generation saves two tasks"
     with pytest.raises(RuntimeError, match="cannot run"):
         p.ready(BATCH_SIZE)
-    assert len(p.task2batch.task_pool) == 2
+    assert len(p.task2job.task_pool) == 2
 
 
-def test_the_batch_stage_needs_the_generated_task_stages() -> None:
+def test_the_task_to_job_stage_needs_the_generated_task_stages() -> None:
     context = PipelineContext("tasks")
     with pytest.raises(PluginConfigError, match="needs GeneratedTaskRecord2Record"):
-        GeneratedTaskBatches.from_config(
+        GeneratedTaskJobData.from_config(
             {}, context=context, record2record=InferenceRecord2Record(), record2task=NoTasks(), environ={}
         )
 
@@ -1077,19 +1090,19 @@ def test_rounds_need_a_description_the_generator_service_and_task_storage() -> N
 
 def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
-    return GeneratedTaskRecipe(training_runtime=StubTrainingRuntime(), runtime=runtime, **fields)
+    return GeneratedTaskRecipe(StubTrainingComponent(), runtime=runtime, **fields)
 
 
-def test_the_recipe_binds_the_objective_its_schedule_and_its_stages() -> None:
+def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     spec = GeneratedTaskRecipe.training_spec()
-    assert GeneratedTaskRecipe.pipeline_spec().task2batch is GeneratedTaskBatches and spec.objective == "task_group"
+    assert GeneratedTaskRecipe.pipeline_spec().task2job is GeneratedTaskJobData and spec.objective == "task_group"
     assert spec.loss_family == "importance_sampling"
-    assert spec.scheduling.unit == "sample"
+    assert TaskGroupObjective.rollout_unit == "sample"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     built = training_recipe().build_pipeline(PipelineContext("one"))
     assert isinstance(built.record2record, GeneratedTaskRecord2Record)
     assert isinstance(built.record2task, GeneratedTaskTasks) and built.record2task.worker is None, "no round runs"
-    assert isinstance(built.task2batch, GeneratedTaskBatches) and built.task2batch.tasks_per_step == 4
+    assert isinstance(built.task2job, GeneratedTaskJobData) and built.task2job.tasks_per_step == 4
     assert built.buffer_size is None, "a rollout batch bounds its own samples"
     built.close()
 
@@ -1099,7 +1112,7 @@ def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str,
         environ,
         config={"data": {}, "model": {"path": "Qwen/Qwen3-8B"}, "pipeline": pipeline},
         runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
-        training_runtime=StubTrainingRuntime(),
+        training_component=StubTrainingComponent(),
     )
 
 
@@ -1121,8 +1134,8 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
                     "generator": generator,
                 },
             },
-            "task2batch": {
-                "module": "reef.recipe.generated_tasks:GeneratedTaskBatches",
+            "task2job": {
+                "module": "reef.recipe.generated_tasks:GeneratedTaskJobData",
                 "config": {"tasks_per_step": 2, "episodes_per_task": 3},
             },
         },
@@ -1133,15 +1146,15 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     assert isinstance(built.record2task.task_generator, ScriptedGenerator)
     assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
     assert built.record2task.task_store is not None
-    batches = built.task2batch
-    assert isinstance(batches, GeneratedTaskBatches) and (batches.tasks_per_step, batches.episodes_per_task) == (2, 3)
+    batches = built.task2job
+    assert isinstance(batches, GeneratedTaskJobData) and (batches.tasks_per_step, batches.episodes_per_task) == (2, 3)
     built.close()
 
 
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"record2task": {"module": "reef.recipe.generated_tasks:GeneratedTaskBatches"}}, "inherits Record2Task"),
+        ({"record2task": {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData"}}, "inherits Record2Task"),
         ({"record2tasks": {"module": "reef.recipe.generated_tasks:GeneratedTaskTasks"}}, "unknown key"),
     ],
 )
@@ -1181,7 +1194,7 @@ def test_a_stage_without_from_config_cannot_be_named_in_the_pipeline_section() -
 
 def test_a_rollout_that_trains_nothing_lets_the_next_round_start(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3)])
-    p, _, _ = rollout_rounds(tmp_path, task_generator, BrokenRunner(tmp_path / "tasks"), rounds=2, batches_per_round=1)
+    p, _, _ = rollout_rounds(tmp_path, task_generator, BrokenRunner(tmp_path / "tasks"), rounds=2, jobs_per_round=1)
     for _ in range(10):
         assert not p.ready(BATCH_SIZE)
     assert p.status()["task_generation"]["completed"] == 2, "the failed rollout ends without a batch to wait for"
@@ -1209,7 +1222,7 @@ def test_a_task_whose_result_cannot_be_saved_still_trains_and_the_next_job_saves
 
 def test_rounds_continue_when_the_task_pool_drains_before_batches_per_round(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator([generated(0, 0, 1), generated(1, 2, 3)])
-    p, _, _ = rollout_rounds(tmp_path, task_generator, rounds=2, batches_per_round=2)
+    p, _, _ = rollout_rounds(tmp_path, task_generator, rounds=2, jobs_per_round=2)
     for _ in range(3):
         p.ready(BATCH_SIZE)
     train_rollout(p)
@@ -1272,19 +1285,8 @@ def test_a_task_that_trained_before_its_result_was_saved_gets_a_lost_result_afte
     again, _ = rounds(tmp_path, task_generator, rounds=1)
     (lost,) = [result for result in rollout_results(again.record2task.task_store).values() if result.error]
     assert lost.task_name == "harbor-00000-000" and lost.infrastructure_failure
-    assert len(again.task2batch.task_pool) == 0, "a trained task does not run again"
+    assert len(again.task2job.task_pool) == 0, "a trained task does not run again"
     assert asyncio.run(again.record2task.deliver_results()) == "" and task_generator.result_generations == [0]
-
-
-def test_tasks_of_a_batch_that_did_not_train_roll_out_again(tmp_path: Path) -> None:
-    p, _, _ = rollout_rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
-    for _ in range(3):
-        p.ready(BATCH_SIZE)
-    train_rollout(p, trained=False)
-    p.ready(BATCH_SIZE)
-    rollout = rollout_of(p)
-    assert rollout is not None and len(rollout.task_uses) == 2, "both tasks roll out again"
-    assert p.status()["task_store"]["trained"] == 0
 
 
 def test_a_rollout_job_that_fails_gives_its_tasks_lost_results_so_the_feedback_goes_out(tmp_path: Path) -> None:
@@ -1294,7 +1296,7 @@ def test_a_rollout_job_that_fails_gives_its_tasks_lost_results_so_the_feedback_g
     async def failing_run(job: SupportsReceipt) -> SupportsReceipt:
         raise RuntimeError("the worker lost its database connection")
 
-    p.task2batch.run = failing_run
+    p.task2job.run = failing_run
     for _ in range(4):
         p.ready(BATCH_SIZE)
     results = rollout_results(p.record2task.task_store).values()
@@ -1350,12 +1352,12 @@ def test_an_identical_candidate_in_the_same_generation_is_rejected_as_a_duplicat
 def test_a_task_whose_step_did_not_commit_rolls_out_again_after_a_restart(tmp_path: Path) -> None:
     first, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1)
     assert looked(first) and rollout_of(first) is not None
-    first.acknowledge(first.build_batch(BATCH_SIZE).batch_id)
+    first.acknowledge(first.build_job_data(BATCH_SIZE).data_id)
     # The process stops before the step's commit is durable, so no ID is released.
     assert first.record2task.task_store.trained_task_names() == frozenset()
     first.close()
     restarted, _ = rounds(tmp_path, ScriptedGenerator(), rounds=1)
-    assert len(restarted.task2batch.task_pool) == 2, "both tasks roll out again"
+    assert len(restarted.task2job.task_pool) == 2, "both tasks roll out again"
 
 
 def test_a_generation_outcome_that_is_incomplete_holds_no_task_and_names_its_error() -> None:

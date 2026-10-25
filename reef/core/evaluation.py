@@ -94,7 +94,19 @@ class CandidateEvaluator(ABC):
 
 
 class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
-    """Measure a candidate and decide whether it passes the publication gate."""
+    """Measure a candidate and decide whether Reef serves it."""
+
+    def evaluate_and_decide(self, candidate: UpdateCandidate) -> SelectionDecision:
+        """Evaluate ``candidate`` and decide on that evaluation.
+
+        Raise ``ValueError`` when the decision does not carry the evaluation
+        that ``evaluate`` returned, since Reef records the two together.
+        """
+        evaluation = self.evaluate(candidate)
+        decision = self.decide(candidate, evaluation)
+        if decision.evaluation is not evaluation:
+            raise ValueError("candidate evaluator must retain the evaluation result supplied by Reef")
+        return decision
 
 
 __all__ = [

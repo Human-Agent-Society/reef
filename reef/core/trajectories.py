@@ -13,7 +13,7 @@ import mimetypes
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord
 
 
