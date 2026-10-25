@@ -1,7 +1,7 @@
-"""Terminus 2 for the generator's plays: an episode the agent itself ends badly is still verified.
+"""Terminus 2 for the generator's episodes: an episode the agent itself ends badly is still verified.
 
 Harbor runs a task's verifier after the agent only when the agent finished, timed out or exited nonzero; any
-other agent error skips it, so the play has no reward and the task player files no report.
+other agent error skips it, so the episode has no reward and the episode runner files no report.
 :class:`VerifiedTerminus2` ends the run instead on two such errors, so the verifier scores the workspace as the
 agent left it: the agent filled its context window, or a send-keys to its tmux pane failed. Every other error
 still fails the trial.

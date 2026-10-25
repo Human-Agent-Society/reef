@@ -2,7 +2,7 @@
 
 One call asks the served model for one Harbor task: an instruction, a container, a verifier and a
 reference solution. The prompt carries the task contract (the rules every task must meet so any Harbor
-agent can play it and Harbor can score it), the target the task should test, and whatever text the
+agent can run it and Harbor can score it), the target the task should test, and whatever text the
 method wants the designer to know about earlier tasks (``DesignerRequest.experience_text``). Grounding and
 earlier text enter the prompt fenced as data, never as instructions. The reply's ``json`` block is read
 into the instruction, the three file mappings and an optional hint. The call goes through Reef, so every

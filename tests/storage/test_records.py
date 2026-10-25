@@ -8,7 +8,7 @@ from dataclasses import replace
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from reef.artifact import ArtifactRef, LiveWeightArtifactRef
+from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.records import RecordConflict
@@ -99,12 +99,7 @@ def test_inference_data_can_record_release_id() -> None:
 @pytest.mark.unit
 def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
-    artifact = LiveWeightArtifactRef(
-        "artifact-1",
-        "version-1",
-        "initial",
-        runtime_load_id="weights-1",
-    )
+    artifact = ArtifactRef("artifact-1", "version-1", "initial")
     original = AgentRecord.create(
         agent_record_id="persisted",
         scenario="math",

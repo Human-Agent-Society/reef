@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
-from reef.core.config import config_option
+from reef.core.config import config_metadata, config_option
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,10 @@ class TinkerConfig:
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
     inference_timeout_s: float = config_option(300.0)
     train_timeout_s: float | None = config_option(None)
+    #: Empty when Tinker samples; else the inference component that serves the adapters, set by the deployment.
+    serving: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Serving engines, set by the deployment.")
+    )
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():

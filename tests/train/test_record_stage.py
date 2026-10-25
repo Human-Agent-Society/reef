@@ -576,6 +576,52 @@ def test_the_batch_stage_buffer_size_is_its_own_or_else_the_context_default() ->
     assert PairBatches(PipelineContext("s"), None).buffer_size is None, "no default holds every sample"
 
 
+class OwnBatches(RecordingBatches):
+    """A batch stage with samples of its own: ``samples`` trains as one batch that consumes ``own:<n>``."""
+
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context)
+        self.samples: tuple[TrainDataItem, ...] | None = None
+        self.batches_done: list[bool] = []
+        self.released: set[str] = set()
+
+    def own_batch(self) -> tuple[TrainDataItem, ...] | None:
+        return self.samples
+
+    def own_batch_done(self, *, trained: bool) -> frozenset[str]:
+        self.batches_done.append(trained)
+        self.samples = None
+        return frozenset({f"own:{len(self.batches_done)}"}) if trained else frozenset()
+
+    def release_own_ids(self, ids: frozenset[str]) -> None:
+        self.released |= ids
+
+
+@pytest.mark.unit
+def test_the_batch_stage_own_batch_trains_alone_and_its_ids_release_after_the_commit() -> None:
+    context = PipelineContext("s")
+    batches = OwnBatches(context)
+    processor = TrainingPipeline(
+        context, record2record=InferenceRecord2Record(), record2task=RecordingTasks(), task2batch=batches
+    )
+    assert not processor.ready(4)
+    batches.samples = (TaskItem(Path("a")),)
+    assert processor.ready(4), "an own batch is ready whatever its sample count"
+    built = processor.build_batch(4)
+    processor.release_batch(built.batch_id)
+    assert batches.batches_done == [] and processor.ready(4), "a released own batch stays the stage's"
+    built = processor.build_batch(4)
+    assert [item.task_path for item in built.items] == [Path("a")]
+    assert processor.acknowledge(built.batch_id) == {"own:1"}
+    assert processor.releasable_record_ids() == {"own:1"}
+    processor.release_records(frozenset({"own:1"}))
+    assert batches.released == {"own:1"} and not processor.releasable_record_ids()
+    batches.samples = (TaskItem(Path("b")),)
+    dropped = processor.build_batch(4)
+    assert processor.acknowledge(dropped.batch_id, trained=False) == frozenset()
+    assert batches.batches_done == [True, False] and not processor.ready(4)
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("legacy_stripped", [False, True], ids=["captured", "legacy-stripped"])
 @pytest.mark.parametrize("replay_before_commit", [False, True], ids=["live", "replay"])

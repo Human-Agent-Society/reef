@@ -184,20 +184,21 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
                 # generated_task with candidate_task and published_task, which keep each task by the digest
-                # of its directory, and no longer uses task_store. create_all adds them to an older schema.
+                # of its directory, and no longer uses task_store. Version 8 adds task_trained and task_document, the
+                # trained marks and the stage documents of a task store. create_all adds them to an older schema.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [7]:
-                    connection.execute(version.update().values(version=7))
+                if versions and versions != [8]:
+                    connection.execute(version.update().values(version=8))
                 elif not versions:
-                    connection.execute(version.insert().values(version=7))
+                    connection.execute(version.insert().values(version=8))
         except BaseException:
             self._engine.dispose()
             raise

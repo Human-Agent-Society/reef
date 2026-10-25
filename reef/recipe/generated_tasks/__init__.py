@@ -6,34 +6,49 @@ names the generator (:class:`reef.recipe.generated_tasks.TaskGenerator`) in
 generator's method:
 
 - ``generator``: the contract of the task generator: ``TaskGenerator``,
-  ``TaskValidationResult`` and ``TaskPlayResult``. The request,
+  ``TaskValidationResult`` and ``GeneratedTaskResult``, one of
+  ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
   (``reef.record2task.generator.inputs``).
-- ``processor``: the three stages. ``GeneratedTaskRecord2Record`` groups the
-  training plays by task and starts each task-generation round when it is
-  due; ``GeneratedTaskTasks`` runs the rounds (generate, validate, play
-  through the generator service, send the results back) and turns the
-  training arm's episodes into tasks; and
-  ``GeneratedTaskBatches`` batches complete task groups.
+- ``processor``: the three stages. ``GeneratedTaskRecord2Record`` holds the
+  source sessions and starts each task-generation round when it is due;
+  ``GeneratedTaskTasks`` runs the rounds (generate, validate, send the results
+  back) and each saved task's episodes through the generator service; and
+  ``GeneratedTaskBatches`` rolls saved tasks out and batches the samples of
+  their episodes, which are not records.
+- ``results``: each train task's first rollout result and the generations
+  delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on Tinker's
   importance sampling loss.
 - ``recipe``: the objective, the step schedule, and the report contract.
 
-The recipe plays tasks through the generator service (``reef.record2task.generator``).
+The recipe runs the episodes of its tasks through the generator service (``reef.record2task.generator``).
 """
 
-from reef.recipe.generated_tasks.generator import TaskGenerator, TaskPlayResult, TaskValidationResult
+from reef.recipe.generated_tasks.generator import (
+    FailedTask,
+    GeneratedTaskResult,
+    HeldOutTask,
+    RejectedTask,
+    RolledOutTask,
+    TaskGenerator,
+    TaskValidationResult,
+)
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.generated_tasks.processor import GeneratedTaskBatches, GeneratedTaskRecord2Record, GeneratedTaskTasks
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
+    "FailedTask",
     "GeneratedTaskBatches",
     "GeneratedTaskRecipe",
     "GeneratedTaskRecord2Record",
+    "GeneratedTaskResult",
     "GeneratedTaskTasks",
+    "HeldOutTask",
+    "RejectedTask",
+    "RolledOutTask",
     "TaskGenerator",
     "TaskGroupObjective",
-    "TaskPlayResult",
     "TaskValidationResult",
 ]

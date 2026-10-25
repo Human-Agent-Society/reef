@@ -326,15 +326,7 @@ class Repository(ArtifactRepository):
         return self.backend.materialize(ref).with_repository(self)
 
     def resolve(self, ref: ArtifactRef) -> Artifact:
-        """Resolve an artifact reference to a usable Artifact.
-
-        Returns a live artifact for a ``LiveWeightArtifactRef`` — the bytes are in
-        the serving engine, not on disk. Otherwise materializes the artifact
-        to a local path. Use ``Artifact.is_live`` to distinguish the two.
-        """
-        artifact = Artifact(ref, self)
-        if artifact.is_live:
-            return artifact
+        """Resolve an artifact reference to an Artifact materialized at a local path."""
         return self.materialize(ref)
 
     def stage(

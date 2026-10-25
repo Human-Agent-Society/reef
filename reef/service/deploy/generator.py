@@ -36,12 +36,12 @@ class GeneratorSettings(Settings):
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
     port: int = config_option(DEFAULT_PORT, help="The generator's bind port.")
     work_dir: str | None = config_option(
-        None, help="Where the task player keeps trials; <tasks-root>/.play by default."
+        None, help="Where the episode runner keeps trials; <tasks-root>/.episodes by default."
     )
     agent: Mapping[str, Any] | None = dataclasses.field(
         default=None,
         metadata=config_metadata(
-            "The Harbor agent the task player runs, with {model}, {base_url} and {api_key} placeholders; "
+            "The Harbor agent each episode runs, with {model}, {base_url} and {api_key} placeholders; "
             "terminus-2 by default."
         ),
     )
@@ -51,7 +51,7 @@ class GeneratorSettings(Settings):
     harbor: str | None = config_option(
         None, help="The harbor command line for the oracle check; found on PATH by default."
     )
-    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all play requests.")
+    concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all episode requests.")
     designer_url: str | None = config_option(
         None, help="A Reef service the designer calls go to instead of this deployment's."
     )

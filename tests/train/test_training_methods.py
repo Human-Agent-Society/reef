@@ -120,6 +120,7 @@ class RecordingRuntime(StubTrainingRuntime):
         scenario_step: int,
         *,
         parent_runtime_load_id: str | None = None,
+        scenario: str | None = None,
     ) -> PreparedTrainingStep:
         self.prepared.append((method, dict(algorithm_state)))
         return PreparedTrainingStep("skip", {"steps": algorithm_state.get("steps", 0) + 1}, {"steps": 1})

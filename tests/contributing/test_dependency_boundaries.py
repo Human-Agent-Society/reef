@@ -448,7 +448,16 @@ def test_runtime_coordination_never_imports_concrete_model_backends() -> None:
 
 def test_runtime_directory_has_only_its_owned_modules() -> None:
     root = REPO_ROOT / "reef/runtime"
-    expected = {"interfaces.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"}
+    expected = {
+        "interfaces.py",
+        "jobs.py",
+        "scheduler.py",
+        "deployment.py",
+        "publication.py",
+        "recovery.py",
+        "serving.py",
+        "executor",
+    }
 
     assert {path.name for path in root.iterdir() if path.name != "__pycache__"} == expected
     assert (root / "executor").is_dir()
@@ -460,6 +469,7 @@ def test_runtime_modules_follow_their_dependency_order() -> None:
     # publication/recovery dependency cycle a valid module boundary.
     allowed = {
         "interfaces.py": (),
+        "jobs.py": (),
         "publication.py": ("reef.runtime.interfaces",),
         "recovery.py": ("reef.runtime.interfaces", "reef.runtime.publication"),
         "scheduler.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.recovery"),
@@ -470,6 +480,7 @@ def test_runtime_modules_follow_their_dependency_order() -> None:
             "reef.runtime.scheduler",
             "reef.runtime.executor",
         ),
+        "serving.py": ("reef.runtime.interfaces", "reef.runtime.publication", "reef.runtime.deployment"),
         "executor": ("reef.runtime.interfaces", "reef.runtime.executor"),
     }
     root = REPO_ROOT / "reef/runtime"

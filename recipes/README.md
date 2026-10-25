@@ -64,7 +64,7 @@ verifiable binary reward, and every scored rollout is one training step.
 
 [SAO on CEO-Bench](sao/examples/ceobench/README.md) runs
 [CEO-Bench](https://ceobench.com), a 500-day simulated startup, as one Harbor
-task. The harness is the benchmark's own bash agent, played from the host
+task. The harness is the benchmark's own bash agent, run from the host
 with its prompt, tools, and tool executor taken from the pinned checkout in
 the task image and its model calls served by Reef; the two simulator roles
 stay outside Reef, the verifier scores the run from its `world.nmdb`, and
@@ -199,9 +199,9 @@ under `recipes/beta/spade/`: one policy plays an Environment Designer that
 writes executable environments and a Reasoning Agent that learns in them.
 Reef knows one task format, Harbor, and the Designer writes it directly: an
 instruction, a container, a verifier and a reference solution, a task any
-Harbor agent can play. SPADE is a task generator. The deployment selects it as
+Harbor agent can run. SPADE is a task generator. The deployment selects it as
 the generator of the generated-task stages in its `pipeline` section, and the
-built-in generated-task recipe plays the tasks and trains on them. Writing, checking and playing tasks is Reef's
+built-in generated-task recipe runs the tasks and trains on them. Writing, checking and running tasks is Reef's
 (`reef.record2task.generator`, the generator service `reef serve` starts beside the
 HTTP service). The package holds the method: the Designer's adversarial
 experience section, the hint arm each task asks for, and the hint based regret
@@ -216,6 +216,6 @@ through the generator service, and revises until the check passes. A model call
 reviews each task's tests and refuses a task whose tests check what its
 instruction does not state. A pass-rate band marks the tasks the Reasoning Agent
 can reach. The deployment selects it as the generator of the generated-task
-stages in its `pipeline` section, and the built-in generated-task recipe plays
+stages in its `pipeline` section, and the built-in generated-task recipe runs
 the tasks and trains on them. With `author: prompt`, the generator service's
 one-reply prompt Designer rebuilds the same sessions as the baseline.

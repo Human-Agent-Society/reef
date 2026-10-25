@@ -526,6 +526,7 @@ _BUILTIN_FACTORIES = {
     "none": "reef.inference.null:NullRuntimeFactory",
     "ray_training": "reef.service.runtime:RayTrainingRuntimeFactory",
     "remote": "reef.inference.remote.runtime:RemoteRuntimeFactory",
+    "remote_adapters": "reef.inference.remote.runtime:RemoteAdapterRuntimeFactory",
     "sglang": "reef.inference.sglang.runtime:SGLangRuntimeFactory",
     "slime_training": "reef.train.slime_backend.runtime:SlimeRuntimeFactory",
     "tinker": "reef.inference.tinker:TinkerInferenceRuntimeFactory",

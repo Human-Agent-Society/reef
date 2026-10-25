@@ -27,7 +27,6 @@ from tests.support.runtime_stubs import runtime_bindings
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
-from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -214,19 +213,6 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_live_version_is_listed_but_cannot_be_a_rollback_target(tmp_path) -> None:
-    value, _, _ = dispatcher(tmp_path, save_interval=2)
-    train(value, 1)
-    train(value, 2)
-
-    versions = value.list_releases("math")
-    live = next(version for version in versions if not version["checkpoint"])
-    assert not live["restorable"]
-    with pytest.raises(ReleaseNotRestorable, match="no durable checkpoint bytes"):
-        value.rollback("math", live["release_id"])
-
-
-@pytest.mark.unit
 def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) -> None:
     async def run() -> None:
         value, _, _ = dispatcher(tmp_path)
@@ -296,7 +282,7 @@ def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_p
     scenario = value.get_or_create_scenario("math")
     head = scenario.current_artifact_ref()
 
-    def fail_restore(artifact):
+    def fail_restore(artifact, *, scenario=None):
         raise RuntimeError("restore failed")
 
     target = training if component == "training" else training.inference

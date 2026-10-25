@@ -173,11 +173,11 @@ synthetic executable environments, `arXiv:2608.19197
 executable environments and a Reasoning Agent that learns in them. Reef knows
 one task format, Harbor, and the Designer writes it directly: an instruction,
 a container, a verifier and a reference solution, a task any Harbor agent can
-play. SPADE is a task generator. The deployment selects it as the generator of
+run. SPADE is a task generator. The deployment selects it as the generator of
 the generated-task stages in its ``pipeline`` section, and the built-in
-generated-task recipe plays the tasks and trains on them (see `generated tasks
+generated-task recipe runs the tasks and trains on them (see `generated tasks
 <../reference/configuration.rst#generated-tasks>`__). Writing,
-checking and playing tasks is Reef's (``reef.record2task.generator``, the generator
+checking and running tasks is Reef's (``reef.record2task.generator``, the generator
 service ``reef serve`` starts beside the HTTP service). The package holds the
 method: the Designer's adversarial experience section, the hint arm each task
 asks for, and the hint based regret reported against the Designer's receipt.
@@ -193,7 +193,7 @@ passes. A model call reviews each task's tests and refuses a task whose tests
 check what its instruction does not state. A pass-rate band marks the tasks the
 Reasoning Agent can reach. The deployment selects it as the generator of the
 generated-task stages in its ``pipeline`` section, and the built-in
-generated-task recipe plays the tasks and trains on them (see `generated tasks
+generated-task recipe runs the tasks and trains on them (see `generated tasks
 <../reference/configuration.rst#generated-tasks>`__). With ``author: prompt``,
 the generator service's one-reply prompt Designer rebuilds the same sessions as
 the baseline.

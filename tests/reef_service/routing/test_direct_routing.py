@@ -33,6 +33,7 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
+from reef.core.records_types import ROLLOUT_HEADER
 from reef.dispatcher import Dispatcher
 from reef.service import routing_preview
 from reef.service.app import CONTROL_APPLICATION, MAX_REQUEST_BYTES, create_app
@@ -285,6 +286,20 @@ def test_a_stream_shares_the_selection_and_its_receipt_links_feedback(tmp_path: 
                 "/reef/report", headers=routing_headers(), json={"score": 0, "references": [receipt]}
             )
             assert report.status == 200, await report.text()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("rollout", ["1", "TrUe"])
+def test_routed_rollout_calls_are_refused_before_selection(tmp_path: Path, managed: bool, rollout: str) -> None:
+    async def run() -> None:
+        async with routed_service(tmp_path, managed=managed) as service:
+            status, text, headers = await service.chat(REQUEST, **{ROLLOUT_HEADER: rollout})
+            assert status == 400 and "unsupported_rollout" in text
+            assert service.router.selections == [] and service.provider.received == []
+            assert "x-reef-agent-record-id" not in headers
+            assert service.dispatcher.list_scenarios() == ()
 
     asyncio.run(run())
 

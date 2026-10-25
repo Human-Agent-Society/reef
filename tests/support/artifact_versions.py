@@ -32,7 +32,15 @@ class RollbackRuntime(StubTrainingRuntime):
         return None
 
     def prepare_training_step(
-        self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+        self,
+        batch,
+        objective,
+        algorithm_state,
+        scheduling,
+        scenario_step,
+        *,
+        parent_runtime_load_id=None,
+        scenario=None,
     ):
         del batch, objective
         return PreparedTrainingStep(
@@ -46,7 +54,7 @@ class RollbackRuntime(StubTrainingRuntime):
         self.trained += 1
         version = f"w{self.trained}"
         if (payload["scenario_step"] + 1) % self.save_interval:
-            # A job between two saves publishes live weights.
+            # A job between two saves publishes nothing.
             checkpoint_path = None
         else:
             checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
@@ -72,7 +80,7 @@ class RollbackRuntime(StubTrainingRuntime):
     def supports_checkpoint_restore(self):
         return True
 
-    def restore_checkpoint(self, artifact):
+    def restore_checkpoint(self, artifact, *, scenario=None):
         assert not self.inference.inference_admission_status["open"]
         self.restore_order.append("training")
 

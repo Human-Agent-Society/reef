@@ -17,7 +17,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
 from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2record.staleness import canonical_runtime_load_id, stale_units
+from reef.record2record.staleness import ServedVersions, stale_units
 from reef.runtime.interfaces import inference_aborted
 
 
@@ -103,7 +103,7 @@ class Record2Record(ABC, Plugin):
         #: The runtime load IDs that produced each held record set's training data, by set ID.
         self.producing_runtime_load_ids: dict[Hashable, frozenset[str | None]] = {}
         #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
-        self.served_runtime_load_ids: list[str] = []
+        self.served_versions = ServedVersions()
 
     @abstractmethod
     def push(self, record: AgentRecord) -> None:
@@ -183,19 +183,8 @@ class Record2Record(ABC, Plugin):
     # ------------------------------------------------------------- staleness
 
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Add the version that the scenario serves now, if the version changed.
-
-        A version of another incarnation starts the list again. The engine
-        restarted, so no earlier version can train.
-        """
-        served = self.served_runtime_load_ids
-        if served and served[-1] == runtime_load_id:
-            return
-        previous = canonical_runtime_load_id(served[-1]) if served else None
-        current = canonical_runtime_load_id(runtime_load_id)
-        if previous is not None and current is not None and previous.incarnation != current.incarnation:
-            served.clear()
-        served.append(runtime_load_id)
+        """Add the version that the scenario serves now, if the version changed (``ServedVersions.observe``)."""
+        self.served_versions.observe(runtime_load_id)
 
     def drop_stale_units(self, max_staleness: int) -> None:
         """End the held units whose training data is more than ``max_staleness`` versions behind.
@@ -205,7 +194,7 @@ class Record2Record(ABC, Plugin):
         if self.pool.reserved is not None:
             return
         for unit in stale_units(
-            self.pool.units(), self.producing_runtime_load_ids, self.served_runtime_load_ids, max_staleness
+            self.pool.units(), self.producing_runtime_load_ids, self.served_versions.versions, max_staleness
         ):
             self.drop_held_unit(unit, reason=UnitDropReason.STALE)
 

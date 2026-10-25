@@ -250,7 +250,7 @@ The public layout groups fields by their owner:
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
 * ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
-* ``generator``: the generator service that writes, checks and plays Harbor tasks.
+* ``generator``: the generator service that writes and checks Harbor tasks and runs their episodes.
 
 A configuration file contains no process definitions. ``service`` and
 ``services`` are rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
@@ -284,7 +284,7 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime`` for compatibility. The optional
 ``tinker`` backend provides remote LoRA training and immutable sampling without
-local GPUs, or trains behind Reef's coordinator for a local SGLang engine when
+local GPUs, or serves its saved adapters on Reef's SGLang engines when
 ``inference.backend: sglang`` is selected; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
 ``package.module:Deployment`` class. The selected definition describes the process
@@ -523,12 +523,11 @@ A training step in this mode works as follows:
 
 - The trainer stays on its GPUs between steps. Reef does not offload or
   reload it, because no other model shares the GPUs.
-- Each step commits a scenario version with its records, metrics and runtime
-  load ID, as with an engine. No weights leave the trainer: the version names
-  the weights that the trainer holds.
-- The step after each ``save-interval`` versions saves the Megatron
-  checkpoint and the HF export, and Reef publishes that version as an
-  artifact. See `Set the checkpoint cadence
+- Each step commits its records, metrics and algorithm state. No weights leave
+  the trainer between saves.
+- Each ``save-interval``-th step saves the Megatron checkpoint and the HF
+  export, and Reef publishes that version as an artifact. See `Set the
+  checkpoint cadence
   <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 - A restart continues from the last saved checkpoint, as with an engine.
 
@@ -623,9 +622,10 @@ The connector moves no KV and composes with another connector under vLLM's
 ``MultiConnector``. To combine it with vLLM's native CPU offloading, list
 ``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
 in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
-configured connector, so it cannot be combined with this one. A local release
-without the connector serves under its release id; a live release without it
-is rejected.
+configured connector, so it cannot be combined with this one. Without the
+connector the engine reports no runtime load ID: a scenario that trains rejects
+the response, and a scenario that does not train serves it under its release
+id.
 
 ``rollout_log_probs`` must mean the same thing on every engine as in the
 trainer. Sampling runs through::
@@ -1265,14 +1265,16 @@ names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
 ``reef serve`` refuses the section unless the training backend supports remote
-engines. Tinker publishes its adapters. Slime publishes full weights, or
-per-scenario adapters with LoRA, and refuses ``training.colocate`` with remote
-engines. The section tells Reef how to reach the component:
+engines. Tinker serves each scenario's saved adapter; without the section,
+Tinker's engines run on a component that ``reef serve`` starts on this host.
+Slime publishes full weights, or per-scenario adapters with LoRA, and refuses
+``training.colocate`` with remote engines. The section tells Reef how to reach
+the component:
 
 .. config::
 
    inference.remote.url | the component's HTTP(S) base URL, without credentials, query or fragment
-   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the model driver reads it
+   inference.remote.control-token-env | REEF_REMOTE_CONTROL_TOKEN | variable with the component's control token; the process that starts the engines reads it
    inference.remote.inference-token-env | REEF_REMOTE_INFERENCE_TOKEN | variable with the component's inference token; the HTTP service reads it
    inference.remote.startup-timeout-s | 3600 | deadline for one engine start on the component, including the model download
    inference.remote.model-path | ``inference.model-path`` as written | the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot
@@ -1396,8 +1398,8 @@ The built-in generated-task recipe,
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
 ``GeneratedTaskTasks``, and ``GeneratedTaskBatches``. Without
-``pipeline.record2task.config.rounds`` no round runs, and the recipe trains on
-the training arm's reports only.
+``pipeline.record2task.config.rounds`` no round runs, no task rolls out, and
+nothing trains.
 
 .. code:: yaml
 
@@ -1406,62 +1408,71 @@ the training arm's reports only.
    pipeline:
      record2record:
        config:
-         plays_per_task: 4
          batches_per_round: 2
      record2task:
        config:
          generator_url: ${endpoints.generator}
          rounds: 20
          description: shell tasks with hidden state under /var and /etc
-         state_dir: ${REEF_STATE_DIR}/rounds
          generator:
            module: recipes.beta.spade:SpadeTaskGenerator
            config:
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
              state_dir: ${REEF_STATE_DIR}/generations
+     task2batch:
+       config:
+         episodes_per_task: 4
 
-``GeneratedTaskRecord2Record`` groups the training plays by task and requests
-the rounds:
+``GeneratedTaskRecord2Record`` paces the rounds and holds their source
+sessions. It trains on no report: the recipe trains on its rollout episodes,
+which are not records.
 
 .. config::
 
-   pipeline.record2record.config.plays_per_task | 4 | training plays of each task; a group is complete at this count, or at the plays that reported when fewer did. At least 2.
    pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
+   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
 
-``GeneratedTaskTasks`` runs the rounds and turns the training plays into
-tasks. It plays each task ``plays_per_task`` times, as its record stage
-groups them:
+``GeneratedTaskTasks`` runs the generations, and stages and runs each saved
+task's episodes for the rollout:
 
 .. config::
 
-   pipeline.record2task.config.rounds | 0 | rounds of task generation; 0 generates nothing
+   pipeline.record2task.config.rounds | 0 | rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
    pipeline.record2task.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
    pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
    pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
-   pipeline.record2task.config.state_dir | where each scenario keeps its round summaries. Required with rounds.
-   pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before play; between 0 and 1
+   pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
    pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
-   pipeline.record2task.config.served_model | the model the task player asks for; the deployment's by default
-   pipeline.record2task.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+   pipeline.record2task.config.served_model | the model the episodes ask for; the deployment's by default
+   pipeline.record2task.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
+   pipeline.record2task.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
 
-With rounds enabled, each valid task and its split are saved in the scenario's task store before play.
+With rounds enabled, each valid task and its split are saved in the scenario's task store.
+A generation saves tasks and runs no episodes; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
 <../user-guide/operate.rst#choose-the-task-file-store>`__.
 Related source sessions keep the same split across generations.
 A task that joins existing train and eval source groups is rejected.
-Eval tasks are saved without plays or Designer rewards.
+Eval tasks are saved without episodes or Designer rewards.
 The generator's pass-rate band does not filter the store.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskBatches`` batches complete task groups. A batch takes whole
-groups, in arrival order, until it holds Tinker's batch size
-(``training.options.batch-size``) of episodes. Its only key is ``buffer_size``.
+``GeneratedTaskBatches`` rolls saved tasks out, assembles one sample from each
+episode that ran, and batches the groups of each task. A rollout batch trains on
+all of its fresh groups, whatever Tinker's batch size
+(``training.options.batch-size``) is, so the stage has no ``buffer_size``:
+
+.. config::
+
+   pipeline.task2batch.config.tasks_per_step | 4 | saved tasks of one rollout batch
+   pipeline.task2batch.config.episodes_per_task | 4 | training episodes of each task in a rollout. At least 2.
+   pipeline.task2batch.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
@@ -1480,23 +1491,23 @@ The ``generator`` section
 Absent by default. When present, ``reef serve`` starts the generator service
 (``python -m reef.service.deploy.generator_process``) before the HTTP service, which depends on
 it, and publishes its address as ``${endpoints.generator}`` for the
-generated-task stages to consume. The generator writes, checks and plays Harbor tasks for the
+generated-task stages to consume. The generator writes and checks Harbor tasks and runs their episodes for the
 generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker. The generator runs its proposals, checks and plays at the same time.
-``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind a play.
+place it on the host that has Docker. The generator runs its proposals, checks and episodes at the same time.
+``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind episodes.
 
 .. config::
 
    generator.tasks-root | the directory generated tasks and Harbor job files live under. Required.
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
-   generator.work-dir | ``<tasks-root>/.play`` | where the task player keeps trials
-   generator.agent | terminus-2 | the Harbor agent the task player runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
+   generator.work-dir | ``<tasks-root>/.episodes`` | where the episode runner keeps trials
+   generator.agent | terminus-2 | the Harbor agent each episode runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
-   generator.concurrency | 2 | episodes in flight across all play requests of the generator service
+   generator.concurrency | 2 | episodes in flight across all episode requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``
    generator.designer-model | the served model the designer asks for; the deployment's by default
@@ -1626,6 +1637,10 @@ The following names are relative to ``operations/``:
      - The same measurements for calls on the evaluation route, a step's
        episodes and proposer calls, which keep no record; counted apart so a
        step does not read as served traffic.
+   * - ``rollout/request/*``, ``rollout/admission/*``
+     - The same measurements for the calls of rollout episodes that Reef runs
+       itself (``x-reef-rollout``), which keep no record. Their retries,
+       timeouts and version mismatches count under ``rollout/``.
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.

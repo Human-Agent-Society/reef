@@ -13,11 +13,6 @@ class NoArtifactPublication:
 
 
 @dataclass(frozen=True)
-class LiveWeightPublication:
-    runtime_load_id: str
-
-
-@dataclass(frozen=True)
 class SavedArtifactPublication:
     """A materialized publication identified by its durable release.
 
@@ -39,7 +34,7 @@ class DurableWeightsPublication:
     ``runtime_load_id`` is the version the engine serves from those weights.
     The committer reads it and publishes ``checkpoint_path`` as an artifact
     version of the surface's loader component, with ``runtime_load_id`` in its
-    metadata. A step that saved no checkpoint is a ``LiveWeightPublication``.
+    metadata. Weights that were not saved are never published.
     """
 
     checkpoint_path: str
@@ -49,19 +44,18 @@ class DurableWeightsPublication:
 # A closed sum type, deliberately not a base class: an empty base would be
 # instantiable and would leave every ``isinstance`` chain open, so a type
 # checker could not prove a new member is handled everywhere it must be.
-ArtifactPublication = (
-    NoArtifactPublication | LiveWeightPublication | SavedArtifactPublication | DurableWeightsPublication
-)
+ArtifactPublication = NoArtifactPublication | SavedArtifactPublication | DurableWeightsPublication
 
 
 @dataclass(frozen=True)
 class TrainStepResult:
     """One training step's outcome, including what it wants published.
 
-    The publication fields are a small ordered precedence rather than four
+    The publication fields are a small ordered precedence rather than
     independent flags: ``artifact`` (bytes already materialized) outranks
-    ``checkpoint_path`` (bytes the backend exported, still to be imported),
-    which outranks a bare ``runtime_load_id`` (live weights only). Setting both
+    ``checkpoint_path`` (bytes the backend exported, still to be imported), and
+    ``runtime_load_id`` is the version those bytes serve under. Only saved bytes
+    are published, so ``runtime_load_id`` requires one of the two. Setting both
     ``artifact`` and ``runtime_load_id`` is normal for a durable train step; the
     version travels in the artifact's metadata. Combinations with no meaning
     are rejected here instead of being silently dropped by ``publication``.
@@ -69,8 +63,8 @@ class TrainStepResult:
     ``pending`` asks for the publication to be minted into the catalog without
     being served, for a person to promote later. It is a publication decision,
     so it travels as a field rather than as a metrics key: only durable bytes
-    can be held back, and a step that publishes live weights or nothing at all
-    is rejected here instead of having the request silently dropped.
+    can be held back, and a step that publishes nothing is rejected here
+    instead of having the request silently dropped.
 
     ``component`` names the release component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other
@@ -91,6 +85,8 @@ class TrainStepResult:
     def __post_init__(self) -> None:
         if self.checkpoint_path is not None and self.runtime_load_id is None:
             raise ValueError("checkpoint_path requires the runtime_load_id it was exported from")
+        if self.runtime_load_id is not None and self.artifact is None and self.checkpoint_path is None:
+            raise ValueError("runtime_load_id names saved weights: set artifact or checkpoint_path")
         if self.component is not None:
             if not isinstance(self.component, str) or not self.component:
                 raise ValueError("component must be a non-empty string or None")
@@ -114,8 +110,6 @@ class TrainStepResult:
     def publication(self) -> ArtifactPublication:
         if self.artifact is not None:
             return SavedArtifactPublication(self.artifact, self.component)
-        if self.runtime_load_id is not None:
-            if self.checkpoint_path is not None:
-                return DurableWeightsPublication(self.checkpoint_path, self.runtime_load_id)
-            return LiveWeightPublication(self.runtime_load_id)
+        if self.checkpoint_path is not None and self.runtime_load_id is not None:
+            return DurableWeightsPublication(self.checkpoint_path, self.runtime_load_id)
         return NoArtifactPublication()

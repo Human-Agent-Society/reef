@@ -1,6 +1,6 @@
 """Container-only tests for the SAO branch of the Reef -> Slime bridge.
 
-These exercise the SAO payload builder (``recipes.sao.slime.utils.data_builder``) and
+These exercise the SAO payload builder (``build_sao_rollout_data`` in ``recipes.sao.slime``) and
 the SAO path through
 ``execute_training_job``, which live in the Slime plugin package and
 transitively import ``ray`` and ``torch``. Like ``test_slime_bridge.py`` they

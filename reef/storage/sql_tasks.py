@@ -40,11 +40,15 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
+    ``trained`` holds one row for each task that trained, and ``documents``
+    one row for each document key with its document text.
     """
 
     generations: Table
     candidates: Table
     published: Table
+    trained: Table
+    documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -91,6 +95,19 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("sequence", BigInteger, nullable=False),
             Column("files_digest", String(64), nullable=False),
             Column("split", Text, nullable=False),
+        ),
+        trained=Table(
+            "task_trained",
+            metadata,
+            *key_columns(),
+            Column("task_name", Text, primary_key=True),
+        ),
+        documents=Table(
+            "task_document",
+            metadata,
+            *key_columns(),
+            Column("document_key", Text, primary_key=True),
+            Column("document", Text, nullable=False),
         ),
     )
 
@@ -242,6 +259,40 @@ class SQLTaskStore(TaskStore):
 
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
+
+    def write_document(self, *, key: str, document: str) -> None:
+        if not key:
+            raise TaskStoreError("a document needs a non-empty key")
+        documents = self.tables.documents
+        with self.records._transaction(write=True) as connection:
+            existing = connection.execute(
+                select(documents.c.document).where(self.matching(documents, document_key=key))
+            ).scalar()
+            if existing is None:
+                connection.execute(documents.insert().values(**self.key, document_key=key, document=document))
+            elif existing != document:
+                raise TaskStoreError(f"document {key!r} is already saved with other text")
+
+    def documents(self) -> Mapping[str, str]:
+        documents = self.tables.documents
+        with self.records._transaction(write=False) as connection:
+            rows = connection.execute(
+                select(documents.c.document_key, documents.c.document).where(self.matching(documents))
+            )
+            return {row.document_key: row.document for row in rows}
+
+    def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
+        with self.records._transaction(write=True) as connection:
+            for name in task_names:
+                published = self.published_tasks(connection, task_name=name)
+                if not published or published[0].split != "train":
+                    raise TaskStoreError(f"task {name!r} is not a published train task")
+                self.records._insert_if_absent(connection, self.tables.trained, {**self.key, "task_name": name})
+
+    def trained_task_names(self) -> frozenset[str]:
+        trained = self.tables.trained
+        with self.records._transaction(write=False) as connection:
+            return frozenset(connection.execute(select(trained.c.task_name).where(self.matching(trained))).scalars())
 
     def publish(self, connection: Connection, name: str, digest: str, split: SplitName) -> StoredTask:
         """Record ``name`` as published with the files ``digest`` to ``split``, and return the published task.

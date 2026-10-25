@@ -136,6 +136,13 @@ Headers
 |                                   | ``metadata.tags``. The ``release`` tag can select the   |
 |                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
+| ``x-reef-rollout: 1``             | optional on inference: a call of a rollout episode that |
+|                                   | Reef runs itself. It is served from the scenario's      |
+|                                   | release like any other call, but no record is kept, and |
+|                                   | the response keeps its ``training`` block with the      |
+|                                   | runtime load ID that answered. The call must not        |
+|                                   | stream (HTTP 400). Only the service token opens it.     |
++-----------------------------------+---------------------------------------------------------+
 
 Client release tags
 ~~~~~~~~~~~~~~~~~~~
@@ -164,7 +171,8 @@ When `Scenario routing <configuration.rst#scenario-routing-between-students-and-
 is enabled, clients send ``POST /v1/chat/completions`` directly to Reef with a
 service token. Only the base record-only Recipe is supported. A routed Reef
 serves only this route, ``POST /reef/report`` and ``GET /healthz``; other
-routes return 404.
+routes return 404. Calls with ``x-reef-rollout: 1`` or ``true`` return 400
+(``unsupported_rollout``). Rollout calls remain available when routing is disabled.
 
 .. list-table:: Client fields
    :header-rows: 1
@@ -790,20 +798,16 @@ the outgoing payload, and Reef forwards *and records* the transformed payload.
 ``verify_response`` checks the provider's answer against the frozen release. On
 failure Reef records nothing and returns the error.
 
-Rejection if out of release window
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Serving version of a training response
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For live weights, Reef asks the engine to report the ``runtime_load_id`` for
-each generated token span. A response may cover several runtime loads if an
-update lands mid-generation; Reef accepts it only when the span information
-accounts for
-every generated token and is consistent with the frozen release. Missing or
-inconsistent spans are a backend contract error and return HTTP 409.
-
-Pass-through streaming cannot do that check. Reef leaves ``return_meta_info``
-disabled when ``stream`` is true and records a plain SSE exchange. The training
-backend buffers its stream instead and validates the complete response against
-the frozen release before recording.
+For a training scenario, Reef records which engine weights answered. The engine
+reports the ``runtime_load_id`` of the response, or of each generated token
+span when a publication lands mid-generation. The spans must be contiguous and
+must not return to an earlier version. A training response that reports no
+``runtime_load_id``, or reports inconsistent spans, is a backend contract error
+and returns HTTP 409. A streamed training response must be buffered and
+recorded as a whole, so that its versions can be read.
 
 Report
 ------
@@ -836,7 +840,7 @@ data inside ``metadata`` or ``feedback``.
      - no
      - Recipe metadata; ``training.eligible`` is not supported. ``metadata.task``
        (``name``, with ``path`` and ``digest`` when known) or
-       ``metadata.harbor.task_name`` names the Harbor task the episode played;
+       ``metadata.harbor.task_name`` names the Harbor task the episode ran;
        the assembled training sample carries it as ``task``, so a recipe can
        group samples by task.
 

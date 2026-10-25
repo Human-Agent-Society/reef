@@ -169,7 +169,7 @@ def _selection_reference(value: object) -> PluginReference:
 def require_task_directories(evolution: Mapping[str, Any], setting: str) -> None:
     """Refuse ``evolution.<setting>``, whose tasks are directories, with an adapter that takes a prompt.
 
-    ``promote_failures`` is refused too: it adds prompts, which an evaluation of task directories cannot play.
+    ``promote_failures`` is refused too: it adds prompts, which an evaluation of task directories cannot run.
     """
     adapter_name = str(evolution.get("adapter", "pi"))
     try:

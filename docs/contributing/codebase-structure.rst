@@ -91,7 +91,7 @@ import a concrete integration.
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2task/``   | turning a record set into tasks (``Record2Task``,        | which records train, batch shape,          |
 |                         | ``ReportTasks``, ``JudgedTasks``), and the generator     | training loops                             |
-|                         | service that writes, checks, and plays Harbor tasks      |                                            |
+|                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | proposing candidates, training loops,      |
 |                         | episodes, built-in selection policies, and the           | artifact publication                       |
@@ -185,17 +185,19 @@ with surface contracts.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` independently selects training and inference
 definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
-``runtime/`` is a namespace package with exactly five Python modules and the
+``runtime/`` is a namespace package with exactly seven Python modules and the
 ``executor/`` package; it has no ``__init__.py`` or import facade:
 
 .. code:: text
 
    runtime/
      interfaces.py
+     jobs.py
      scheduler.py
      deployment.py
      publication.py
      recovery.py
+     serving.py
      executor/
 
 ``interfaces.py`` defines the independent ``TrainingRuntime`` and
@@ -203,8 +205,10 @@ definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdo
 ``InferenceBackend`` contracts, and shared values and storage interfaces.
 ``scheduler.py`` owns recipe-facing candidate/commit coordination, remote job
 serialization and train/checkpoint ordering.
-``publication.py`` owns weight publication, version allocation, LoRA residency
-and transfer locking. ``recovery.py`` owns durable markers, scenario history,
+``jobs.py`` defines bounded training jobs and the ``TrainingComponent``
+interface. ``publication.py`` owns weight publication, version allocation, LoRA residency
+and transfer locking. ``serving.py`` loads saved adapters into serving engines
+that the control plane controls directly. ``recovery.py`` owns durable markers, scenario history,
 engine monitoring and restart recovery. ``deployment.py`` owns component
 lifecycle, runtime configuration and factory resolution. ``executor/`` owns
 worker launch, control RPC and coordinator connections.
@@ -275,10 +279,10 @@ The extension points those packages expose are in `Python API
   and opens the scenario's task stores (``reef/storage/tasks.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
-  or play them with an agent? Put it in ``reef/record2task/generator/``, the
+  or run them with an agent? Put it in ``reef/record2task/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
-  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which plays generated tasks
+  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which runs generated tasks
   through that service and trains on them, is in
   ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
   (``generator.py``). The request, ``TaskGenerationRequest``, is in

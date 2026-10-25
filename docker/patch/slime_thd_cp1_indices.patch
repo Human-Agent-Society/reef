@@ -1,0 +1,13 @@
+--- a/slime_plugins/models/qwen3_5_vl_utils.py
++++ b/slime_plugins/models/qwen3_5_vl_utils.py
+@@ -15,6 +15,10 @@
+     """Map a THD CP rank's local tokens back to the full packed token stream."""
+ 
+     boundaries = [int(value) for value in cu_seqlens]
++    if cp_size == 1:
++        # Without CP the local stream is the full packed stream. slice_with_cp only pads when cp_size > 1,
++        # and the --allgather-cp path never pads per sequence, so lengths can be odd here.
++        return torch.arange(boundaries[0], boundaries[-1], device=device)
+     indices = []
+     for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
+         sequence_length = end - start

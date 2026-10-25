@@ -10,14 +10,7 @@ from collections.abc import Mapping, Sequence
 from threading import RLock
 from typing import Any
 
-from reef.artifact.artifact import (
-    Artifact,
-    ArtifactError,
-    ArtifactNotFound,
-    ArtifactRef,
-    LiveWeightArtifactRef,
-    is_local_release,
-)
+from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.storage.scenario import ScenarioStore
 
@@ -149,7 +142,7 @@ class ScenarioReleases:
         A fresh scenario is still on it, so the chain head is the creation
         artifact. After a recovery the fork point is reconstructed from the
         first commit record: normally the durable parent of step 1's artifact
-        (a checkpoint, live, or local ref still knows its parent version); if
+        (a checkpoint or local ref still knows its parent version); if
         step 1 never recorded a durable parent (a plain non-checkpoint ref),
         that ref itself is the earliest version the release list can show. When
         the parent has since disappeared from the backend, fall back to the
@@ -161,9 +154,7 @@ class ScenarioReleases:
         if records and records[0].step == 1:
             first = records[0]
             ref = first.artifact_ref
-            if (
-                first.checkpoint or isinstance(ref, LiveWeightArtifactRef) or is_local_release(ref.release_id)
-            ) and ref.parent_release_id is not None:
+            if (first.checkpoint or is_local_release(ref.release_id)) and ref.parent_release_id is not None:
                 try:
                     return self._artifacts.repository.backend.resolve_release(ref.parent_release_id)
                 except ArtifactNotFound:
@@ -225,10 +216,6 @@ class ScenarioReleases:
         if found is None:
             raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
         ref, _ = found
-        if isinstance(ref, LiveWeightArtifactRef):
-            raise ArtifactNotFound(
-                f"scenario {self._name!r} release {release_id!r} is live weights and has no file tree"
-            )
         try:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
@@ -268,9 +255,8 @@ class ScenarioReleases:
             "release_id": artifact_ref.release_id,
             "parent_release_id": artifact_ref.parent_release_id,
             "content_id": artifact_ref.content_id,
-            "content_kind": "live_weights" if isinstance(artifact_ref, LiveWeightArtifactRef) else "saved_artifact",
             "checkpoint": checkpoint,
-            "restorable": checkpoint and not isinstance(artifact_ref, LiveWeightArtifactRef),
+            "restorable": checkpoint,
             "recorded_at": recorded_at,
             "operation": operation,
             "pending": pending,
@@ -282,8 +268,6 @@ class ScenarioReleases:
         }
         if rollback_target_release_id is not None:
             row["rollback_target_release_id"] = rollback_target_release_id
-        if isinstance(artifact_ref, LiveWeightArtifactRef):
-            row["runtime_load_id"] = artifact_ref.runtime_load_id
         if metrics is not None:
             row["metrics"] = dict(metrics)
         if component is not None:

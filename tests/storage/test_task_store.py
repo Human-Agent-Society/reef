@@ -214,6 +214,31 @@ def test_an_added_task_conflicts_with_a_published_name(session, tmp_path):
     assert [task.name for task in store.tasks()] == ["image-task"]
 
 
+def test_documents_are_written_once_and_trained_marks_name_published_train_tasks(session, tmp_path):
+    store = session.tasks.open("tasks")
+    store.begin_generation(generation=0, source_record_ids=("record-1",))
+    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
+    store.publish_task(generation=0, index=0, split="train")
+    store.publish_task(generation=0, index=1, split="eval")
+
+    store.write_document(key="rollout/alpha", document='{"a":1}')
+    store.write_document(key="rollout/alpha", document='{"a":1}')
+    store.write_document(key="delivered/0", document="")
+    assert store.documents() == {"rollout/alpha": '{"a":1}', "delivered/0": ""}, "an identical retry changes nothing"
+    with pytest.raises(TaskStoreError, match="other text"):
+        store.write_document(key="rollout/alpha", document='{"a":2}')
+    with pytest.raises(TaskStoreError, match="non-empty key"):
+        store.write_document(key="", document="x")
+    assert session.tasks.open("other").documents() == {}
+
+    store.mark_trained(task_names=("alpha",))
+    store.mark_trained(task_names=("alpha",))
+    assert store.trained_task_names() == {"alpha"}
+    with pytest.raises(TaskStoreError, match="not a published train task"):
+        store.mark_trained(task_names=("beta",))
+    assert session.tasks.open("other").trained_task_names() == frozenset()
+
+
 def test_store_names_are_separate(session, tmp_path):
     alpha = session.tasks.open("alpha")
     alpha.begin_generation(generation=0, source_record_ids=("record-1",))
@@ -250,6 +275,8 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
         store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
         added = store.add_task(directory=binary_task(sources, "image-task"), split="eval")
+        store.write_document(key="rollout/alpha", document="saved")
+        store.mark_trained(task_names=("alpha",))
 
     with closing(open_durable_storage()) as storage:
         with closing(storage.open("math")) as session:
@@ -261,10 +288,11 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
             assert restored == added
             assert (store.path(restored.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
+            assert store.documents() == {"rollout/alpha": "saved"} and store.trained_task_names() == {"alpha"}
         storage.archive("math")
         with closing(storage.open("math")) as session:
             store = session.tasks.open("tasks")
-            assert store.generations() == ()
+            assert store.generations() == () and store.trained_task_names() == frozenset() and store.documents() == {}
             with pytest.raises(TaskStoreError, match="no files"):
                 store.path(published.files_digest)
 

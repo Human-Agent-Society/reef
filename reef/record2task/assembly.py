@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def reported_task(metadata: object) -> dict[str, Any] | None:
     """The task a report names, so a recipe can group samples by task; None when the report names none.
 
-    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``metadata.task`` is a mapping with at least a ``name`` (the episode runner also sends ``path`` and
     ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
     """
     if not isinstance(metadata, Mapping):
@@ -75,20 +75,19 @@ class SampleAssembly:
     def __init__(self, settings: SampleAssemblySettings) -> None:
         self.settings = settings
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
-        """One model call as one sample: the shared tensor reader."""
-        return make_policy_trajectory(record, score)
+    def assemble(self, inferences: tuple[AgentRecord, ...], score: float, *, source_id: str) -> TrajectoryItem:
+        """Assemble ordered model calls and their score into one sample, raising if they cannot be used.
 
-    def build(self, context: ReportContext, score: float) -> TrajectoryItem:
-        """Build training data, raising if the recorded trajectory cannot be used."""
-        inferences = context.inferences
+        ``source_id`` names what the calls came from: a report, or a rollout episode, whose calls are
+        in-memory values that Reef never stored.
+        """
         if len(inferences) == 1:
             sample: TrajectoryItem | None = self.single_sample(inferences[0], score)
         else:
             sample = make_multi_turn_policy_trajectory(
                 inferences,
                 score,
-                source_agent_record_id=context.report.agent_record_id,
+                source_agent_record_id=source_id,
                 realign_threshold=self.settings.realign_threshold,
                 scaffold_tolerance=self.settings.scaffold_tolerance,
             )
@@ -96,6 +95,15 @@ class SampleAssembly:
             raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
         if sample.training.get("turn_count", 1) > 1 and not self.settings.accept_multi_turn_policy_samples:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
+        return sample
+
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+        """One model call as one sample: the shared tensor reader."""
+        return make_policy_trajectory(record, score)
+
+    def build(self, context: ReportContext, score: float) -> TrajectoryItem:
+        """Build training data, raising if the recorded trajectory cannot be used."""
+        sample = self.assemble(context.inferences, score, source_id=context.report.agent_record_id)
         fields: dict[str, Any] = {
             "feedback": context.report.payload.get("feedback"),
             "report_agent_record_id": context.report.agent_record_id,

@@ -9,7 +9,7 @@ from types import MappingProxyType
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
 # storage implementations.
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, decode_artifact_ref, encode_artifact_ref
+from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.components import ReleaseComponents, release_components
 from reef.core.errors import ReefError
 
@@ -25,7 +25,6 @@ __all__ = [
     "ArtifactRepository",
     "ArtifactSourceError",
     "ArtifactValidator",
-    "LiveWeightArtifactRef",
     "decode_artifact_ref",
     "encode_artifact_ref",
     "is_local_release",
@@ -35,6 +34,8 @@ __all__ = [
 #: ``Artifact.local`` and repository staging both mint releases under it;
 #: ``is_local_release`` is the shared predicate for recognizing them.
 LOCAL_RELEASE_PREFIX = "local:"
+#: Files a repository adds to a materialized release; a release with nothing else holds no weights.
+REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 
 
 def is_local_release(release_id: str) -> bool:
@@ -109,15 +110,6 @@ class Artifact:
         return self._local_path
 
     @property
-    def is_live(self) -> bool:
-        """True when this artifact references a live serving weight without a materialized local path.
-
-        Live artifacts use ``LiveWeightArtifactRef``; their bytes live in the
-        serving engine, not on disk.
-        """
-        return self._local_path is None and isinstance(self._ref, LiveWeightArtifactRef)
-
-    @property
     def metadata(self) -> Mapping[str, object]:
         return MappingProxyType(self._metadata)
 
@@ -189,7 +181,7 @@ class Artifact:
         )
 
     def materialize(self) -> Artifact:
-        if self.local_path is not None or isinstance(self.ref, LiveWeightArtifactRef):
+        if self.local_path is not None:
             return self
         if self.repository is None:
             raise RuntimeError("artifact has no repository")

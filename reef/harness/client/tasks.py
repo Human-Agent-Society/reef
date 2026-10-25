@@ -1,4 +1,4 @@
-"""Play Harbor task directories with a Harbor agent through Reef, and report each scored episode.
+"""Run episodes of Harbor task directories with a Harbor agent through Reef, and report each scored episode.
 
 The agent's model calls go through Reef's capture proxy, so every inference is a record on the service
 and its receipt comes back here. When the verifier scores the episode, one report goes to
@@ -50,13 +50,13 @@ LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 RESERVED_LABELS = ("task", "episode")
 
 
-class TaskPlayError(RuntimeError):
-    """A task could not be played, or its episode could not be reported."""
+class TaskEpisodeError(RuntimeError):
+    """A task's episode could not run, or could not be reported."""
 
 
 @dataclass(frozen=True)
 class EpisodeRow:
-    """What one played episode came back with: the verifier's rewards, an error text, and where the trial is."""
+    """What one episode came back with: the verifier's rewards, an error text, and where the trial is."""
 
     rewards: Mapping[str, float]
     error: str = ""
@@ -64,7 +64,7 @@ class EpisodeRow:
 
 
 class TaskLab(ABC):
-    """What plays one Harbor task under one agent: reef-eval's Lab, behind an interface a test can stand in for."""
+    """What runs one episode of a Harbor task under one agent: reef-eval's Lab, behind an interface a test can stand in for."""
 
     @abstractmethod
     async def run(
@@ -96,8 +96,8 @@ class ReefEvalLab(TaskLab):
         try:
             from reef_eval import Lab
         except ImportError as exc:
-            raise TaskPlayError(
-                "playing tasks needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
+            raise TaskEpisodeError(
+                "running episodes needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
             ) from exc
         # A Lab binds its asyncio primitives to the loop of its first use, so every episode gets its own Lab.
         # reef-eval types each override by name; the caller's mapping passes through as it is.
@@ -146,13 +146,13 @@ def checked_labels(labels: Mapping[str, str]) -> dict[str, str]:
         name = str(raw_name).strip().lower()
         value = str(raw_value).strip()
         if LABEL_NAME.fullmatch(name) is None:
-            raise TaskPlayError(
+            raise TaskEpisodeError(
                 f"label name {raw_name!r} must be letters, digits, '_', '.' or '-' (it rides as a header)"
             )
         if name in RESERVED_LABELS:
-            raise TaskPlayError(f"label {name!r} is the player's own tag; choose another name")
+            raise TaskEpisodeError(f"label {name!r} is the episode runner's own tag; choose another name")
         if not value or not value.isascii() or not value.isprintable():
-            raise TaskPlayError(f"label {name!r} needs a non-empty printable ASCII value, not {raw_value!r}")
+            raise TaskEpisodeError(f"label {name!r} needs a non-empty printable ASCII value, not {raw_value!r}")
         checked[name] = value
     return checked
 
@@ -190,9 +190,39 @@ def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
     return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
 
 
+def rollout_call_failure(turns: Sequence[Mapping[str, object]]) -> str:
+    """Why no model call of a rollout episode answered: the count of failed calls and the first answer."""
+    failed = [turn for turn in turns if turn.get("status") != 200]
+    if not failed:
+        return "the agent made no model call"
+    first = failed[0]
+    response = first.get("response")
+    detail = json.dumps(response)[:200] if isinstance(response, Mapping) else str(response or "no body")[:200]
+    return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
+
+
 @dataclass(frozen=True)
-class TaskPlay:
-    """One played task: what the verifier said and what reached Reef."""
+class EpisodeTurn:
+    """One answered model call of a rollout episode.
+
+    Values: ``(request, response)`` with ``request`` the JSON body the agent sent and ``response`` the JSON
+    body that Reef answered, with its ``training`` block.
+    Purpose: ``TaskEpisodeRunner`` makes it for each call of a rollout episode that answered 200, in call
+    order; the rollout's caller assembles the episode's training sample from them. A rollout episode is not
+    a record: Reef keeps no record of these calls.
+    """
+
+    request: Mapping[str, Any]
+    response: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class TaskEpisode:
+    """One episode of a task: what the verifier said and what reached Reef.
+
+    ``turns`` holds the answered model calls of a rollout episode, in call order; an episode that reports to
+    Reef has none, because its calls are records.
+    """
 
     task_path: Path
     name: str
@@ -204,6 +234,7 @@ class TaskPlay:
     failed_calls: int
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
+    turns: tuple[EpisodeTurn, ...] = ()
 
     @property
     def is_reported(self) -> bool:
@@ -229,8 +260,8 @@ class TaskPlay:
         }
 
 
-class TaskPlayer:
-    """Plays task directories with one agent against one Reef scenario, and reports every scored episode."""
+class TaskEpisodeRunner:
+    """Runs episodes of task directories with one agent against one Reef scenario, and reports every scored episode."""
 
     def __init__(
         self,
@@ -247,6 +278,7 @@ class TaskPlayer:
         extra_instruction_paths: Sequence[Path] = (),
         per_receipt: bool = False,
         is_reporting: bool = True,
+        is_rollout: bool = False,
         lab: TaskLab | None = None,
         verifier_timeout_reward: float | None = None,
     ) -> None:
@@ -257,9 +289,11 @@ class TaskPlayer:
             ("environment", environment),
         ):
             if not isinstance(value, str) or not value.strip():
-                raise TaskPlayError(f"{label} must be a non-empty string")
+                raise TaskEpisodeError(f"{label} must be a non-empty string")
+        if is_rollout and is_reporting:
+            raise TaskEpisodeError("a rollout episode is not a record, so it reports nothing")
         if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
-            raise TaskPlayError("agent_host must be a non-empty host name or address")
+            raise TaskEpisodeError("agent_host must be a non-empty host name or address")
         self.reef_url = reef_url.rstrip("/")
         self.scenario = scenario
         self.model = model
@@ -267,17 +301,19 @@ class TaskPlayer:
         self.work_dir = Path(work_dir)
         self.agent: dict[str, object] = dict(agent) if agent is not None else dict(DEFAULT_AGENT)
         if not (self.agent.get("name") or self.agent.get("import_path")):
-            raise TaskPlayError("agent must carry a Harbor agent name or an import_path")
+            raise TaskEpisodeError("agent must carry a Harbor agent name or an import_path")
         self.agent_host = agent_host
         self.environment = environment
         self.labels = checked_labels(dict(labels or {}))
         for path in extra_instruction_paths:
             if not Path(path).is_file():
-                raise TaskPlayError(f"extra instruction file {path} does not exist")
+                raise TaskEpisodeError(f"extra instruction file {path} does not exist")
         self.extra_instruction_paths = tuple(Path(path) for path in extra_instruction_paths)
         self.per_receipt = per_receipt
-        # A measurement run (an arm played for its reward alone) keeps its episodes out of the training data.
+        # A measurement run (an arm run for its reward alone) keeps its episodes out of the training data.
         self.is_reporting = is_reporting
+        # A rollout episode that Reef runs itself: its calls are no records, and the episode keeps its turns.
+        self.is_rollout = is_rollout
         # The reward for an episode whose verifier ran past its timeout; None leaves such an episode unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -288,18 +324,20 @@ class TaskPlayer:
     def agent_name(self) -> str:
         return str(self.agent.get("name") or self.agent.get("import_path"))
 
-    def play(self, task_path: Path) -> TaskPlay:
-        """Play one task directory and report its episode when the verifier scored it."""
-        return asyncio.run(self.play_async(task_path))
+    def run(self, task_path: Path) -> TaskEpisode:
+        """Run one episode of a task directory and report it when the verifier scored it."""
+        return asyncio.run(self.run_async(task_path))
 
-    async def play_async(self, task_path: Path) -> TaskPlay:
+    async def run_async(self, task_path: Path) -> TaskEpisode:
         task_path = Path(task_path)
         if not (task_path / "task.toml").is_file():
-            raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
+            raise TaskEpisodeError(f"{task_path} is not a Harbor task directory: no task.toml")
         episode_id = uuid.uuid4().hex
         tags = {**self.labels, "task": task_path.name, "episode": episode_id}
         listen_host = "0.0.0.0" if self.agent_host else "127.0.0.1"
-        proxy = CaptureProxy(self.reef_url, self.scenario, self.token, tags=tags, listen_host=listen_host)
+        proxy = CaptureProxy(
+            self.reef_url, self.scenario, self.token, tags=tags, listen_host=listen_host, is_rollout=self.is_rollout
+        )
         proxy.start()
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
@@ -311,9 +349,24 @@ class TaskPlayer:
         finally:
             turns = proxy.drain()
             proxy.stop()
-        receipts = tuple(str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200)
-        failed_calls = len(turns) - len(receipts)
-        error = row.error or ("" if receipts else call_failure(turns))
+        receipts: tuple[str, ...] = ()
+        answered: tuple[EpisodeTurn, ...] = ()
+        if self.is_rollout:
+            answered = tuple(
+                EpisodeTurn(turn["request"], turn["response"])
+                for turn in turns
+                if turn.get("status") == 200
+                and isinstance(turn.get("request"), Mapping)
+                and isinstance(turn.get("response"), Mapping)
+            )
+            failed_calls = len(turns) - len(answered)
+            error = row.error or ("" if answered else rollout_call_failure(turns))
+        else:
+            receipts = tuple(
+                str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
+            )
+            failed_calls = len(turns) - len(receipts)
+            error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
         if row.rewards and primary_reward(row.rewards) is None and not error:
             error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
@@ -323,11 +376,11 @@ class TaskPlayer:
         if self.is_reporting and reward is not None and receipts:
             try:
                 report_ids = self.report(task_path, episode_id, reward, row, receipts)
-            except TaskPlayError as exc:
-                # A refused report is this episode's failure, not the caller's: the play comes back unreported
+            except TaskEpisodeError as exc:
+                # A refused report is this episode's failure, not the caller's: the episode comes back unreported
                 # with the reason, and the other episodes in flight go on.
                 error = str(exc)
-        return TaskPlay(
+        return TaskEpisode(
             task_path=task_path,
             name=task_path.name,
             episode_id=episode_id,
@@ -338,6 +391,7 @@ class TaskPlayer:
             failed_calls=failed_calls,
             report_agent_record_ids=report_ids,
             trial_uri=row.trial_uri,
+            turns=answered,
         )
 
     def report(
@@ -364,11 +418,13 @@ class TaskPlayer:
             try:
                 answer = self.client.report(self.scenario, payload, references=references)
             except ReefClientError as exc:
-                raise TaskPlayError(
+                raise TaskEpisodeError(
                     f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
                 ) from exc
             except OSError as exc:
-                raise TaskPlayError(f"the report for {task_path.name} did not reach {self.reef_url}: {exc}") from exc
+                raise TaskEpisodeError(
+                    f"the report for {task_path.name} did not reach {self.reef_url}: {exc}"
+                ) from exc
             record_ids.append(str(answer.get("agent_record_id", "")))
         return tuple(record_ids)
 
@@ -378,16 +434,16 @@ def parsed_labels(pairs: Sequence[str]) -> dict[str, str]:
     for pair in pairs:
         name, separator, value = pair.partition("=")
         if not separator or not name:
-            raise TaskPlayError(f"a label is NAME=VALUE, not {pair!r}")
+            raise TaskEpisodeError(f"a label is NAME=VALUE, not {pair!r}")
         labels[name] = value
     return labels
 
 
 def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> int:
-    """Play task directories, or one side of a split manifest, and print one JSON line per task as it finishes."""
+    """Run an episode of each task directory, or of one side of a split manifest, and print one JSON line per task as it finishes."""
     parser = argparse.ArgumentParser(
         prog="python -m reef.harness.client.tasks",
-        description="Play Harbor task directories through Reef and report each scored episode.",
+        description="Run an episode of each Harbor task directory through Reef and report each scored episode.",
     )
     parser.add_argument("tasks", nargs="*", type=Path, help="task directories; or --manifest with --tasks-root")
     parser.add_argument("--manifest", type=Path, help="a split manifest written by reef.core.tasks")
@@ -397,7 +453,7 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
     parser.add_argument("--scenario", required=True, help="the scenario the records and reports belong to")
     parser.add_argument("--model", required=True, help="the served model name the agent asks for")
     parser.add_argument("--token", default=os.environ.get("REEF_TOKEN") or None, help="defaults to REEF_TOKEN")
-    parser.add_argument("--work-dir", type=Path, default=Path("work/play"), help="trials and results land here")
+    parser.add_argument("--work-dir", type=Path, default=Path("work/episodes"), help="trials and results land here")
     parser.add_argument(
         "--agent-json",
         default=None,
@@ -423,23 +479,23 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
     try:
         if arguments.manifest is not None:
             if arguments.tasks or arguments.tasks_root is None:
-                raise TaskPlayError("--manifest goes with --tasks-root and no task directories")
+                raise TaskEpisodeError("--manifest goes with --tasks-root and no task directories")
             task_paths: tuple[Path, ...] = manifest_task_paths(
                 arguments.manifest, arguments.tasks_root, arguments.side
             )
             if not task_paths:
-                raise TaskPlayError(f"the manifest's {arguments.side} side names no task")
+                raise TaskEpisodeError(f"the manifest's {arguments.side} side names no task")
         elif arguments.tasks:
             task_paths = tuple(arguments.tasks)
         else:
-            raise TaskPlayError("name task directories or a --manifest")
+            raise TaskEpisodeError("name task directories or a --manifest")
         for task_path in task_paths:
             if not (task_path / "task.toml").is_file():
-                raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
+                raise TaskEpisodeError(f"{task_path} is not a Harbor task directory: no task.toml")
         agent = json.loads(arguments.agent_json) if arguments.agent_json else None
         if agent is not None and not isinstance(agent, dict):
-            raise TaskPlayError("--agent-json must hold an object")
-        player = TaskPlayer(
+            raise TaskEpisodeError("--agent-json must hold an object")
+        runner = TaskEpisodeRunner(
             reef_url=arguments.reef_url,
             scenario=arguments.scenario,
             model=arguments.model,
@@ -453,13 +509,13 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
             per_receipt=arguments.per_receipt,
             lab=lab,
         )
-    except (TaskPlayError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:
+    except (TaskEpisodeError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     is_complete = True
     for task_path in task_paths:
         try:
-            line = player.play(task_path).as_line()
-        except TaskPlayError as exc:
+            line = runner.run(task_path).as_line()
+        except TaskEpisodeError as exc:
             line = {"task": task_path.name, "error": str(exc)}
         print(json.dumps(line), flush=True)
         is_complete = is_complete and bool(line.get("reports"))

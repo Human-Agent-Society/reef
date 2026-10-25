@@ -4,7 +4,7 @@
 It accepts the same ``evolution`` settings as ``CordisRecipe``; the shipped
 ``reefine`` profile supplies the health task and seed. Custom tasks should
 also supply their own ``evolution.evaluate`` scorer. The bundled scorer only
-recognizes the profile's health task: the prompt, or on an adapter that plays
+recognizes the profile's health task: the prompt, or on an adapter that runs
 a Harbor task directory (terminus) the ``health`` task directory beside this
 module, which the recipe runs in the prompt's place.
 """

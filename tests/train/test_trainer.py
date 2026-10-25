@@ -866,7 +866,15 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             return None
 
         def prepare_training_step(
-            self, batch, objective, algorithm_state, scheduling, scenario_step, *, parent_runtime_load_id=None
+            self,
+            batch,
+            objective,
+            algorithm_state,
+            scheduling,
+            scenario_step,
+            *,
+            parent_runtime_load_id=None,
+            scenario=None,
         ):
             prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling, step_size=self.batch_size)
             assert prepared.payload is not None

@@ -61,7 +61,9 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         scenario_step: int,
         *,
         parent_runtime_load_id: str | None = None,
+        scenario: str | None = None,
     ) -> PreparedTrainingStep:
+        # The coordinator learns the scenario from the job payload.
         prepared = self._train_group_handle.prepare_training_step(batch, method, algorithm_state, scheduling)
         if not isinstance(prepared, PreparedTrainingStep):
             raise TrainingRuntimeError(

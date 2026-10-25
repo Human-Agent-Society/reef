@@ -11,7 +11,7 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef
+from reef.core.artifact_ref import ArtifactRef
 from reef.dispatcher import Dispatcher
 from reef.observability import TracingConfig, build_record_observer
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -149,13 +149,14 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
     observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
-    served = LiveWeightArtifactRef(content_id="c1", release_id="v3", parent_release_id="v2", runtime_load_id="load-3")
+    served = ArtifactRef(content_id="c1", release_id="v3", parent_release_id="v2")
     item = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
         payload={
             "model": "qwen",
             "messages": [{"role": "user", "content": "2+2?"}],
+            "runtime_load_id": "load-3",
             "metadata": {"tags": ["eval", "smoke"]},
             "response": {
                 "id": "chatcmpl-1",

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 import socket
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from reef.inference.http import PROVIDER_APIS
+from reef.inference.remote.config import RemoteInferenceSettings
 from reef.runtime.deployment import http_readiness_command
 from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy.config_utils import DeployConfigError
@@ -117,15 +119,7 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
     reserved = {token[2:] for token in definition.command if token.startswith("--")}
     extra_args = native_arguments(settings.inference_options, reserved=reserved | set(definition.reserved_options))
     python = os.environ.get("REEF_PYTHON", sys.executable)
-    # The HTTP child and inference engine share one resolved loopback endpoint. The
-    # actual server bind remains authoritative if another process races it.
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        if port == settings.port:
-            with socket.socket() as alternative:
-                alternative.bind(("127.0.0.1", 0))
-                port = alternative.getsockname()[1]
+    port = free_loopback_port(settings.port)
     endpoint = f"http://127.0.0.1:{port}"
     config["reef"].update(
         inference_backend=backend,
@@ -150,6 +144,74 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
         "command": [*(token.format_map(bindings) for token in definition.command), *extra_args],
         "ready": http_readiness_command(python, endpoint + definition.health_path),
         "ready_timeout": config.get("ready_timeout", 3600),
+    }
+
+
+def free_loopback_port(reserved: int) -> int:
+    """A free loopback port other than ``reserved``, the Reef HTTP service's port.
+
+    The HTTP child and the process that listens on the port share one
+    resolved endpoint. The actual server bind remains authoritative if another
+    process races it.
+    """
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        if port == reserved:
+            with socket.socket() as alternative:
+                alternative.bind(("127.0.0.1", 0))
+                port = alternative.getsockname()[1]
+    return port
+
+
+#: The service name of an inference component that ``reef serve`` starts on this host.
+INFERENCE_COMPONENT_SERVICE = "inference"
+
+
+def local_inference_component(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+    """Start an inference component on this host, and record its address as the ``inference.remote`` section.
+
+    The component (``python -m reef.inference.remote``) listens on a free
+    loopback port and may start only ``inference.backend`` engines. Its two
+    tokens are generated into this process's environment, unless set, so the
+    component and the HTTP service inherit them. It joins the Ray cluster at
+    ``training.ray-address`` when one is set; otherwise it starts its own.
+    """
+    python = os.environ.get("REEF_PYTHON", sys.executable)
+    port = free_loopback_port(settings.port)
+    remote = RemoteInferenceSettings(url=f"http://127.0.0.1:{port}")
+    control_token = os.environ.setdefault(remote.control_token_env, secrets.token_urlsafe(32))
+    if os.environ.setdefault(remote.inference_token_env, secrets.token_urlsafe(32)) == control_token:
+        raise DeployConfigError(f"{remote.control_token_env} and {remote.inference_token_env} must differ")
+    config["reef"]["inference_remote"] = asdict(remote)
+    command = [
+        python,
+        "-m",
+        "reef.inference.remote",
+        "--engine",
+        settings.inference_backend or "sglang",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--work-dir",
+        str(Path(config.get("run_dir", ".reef/run")) / INFERENCE_COMPONENT_SERVICE),
+    ]
+    if settings.ray_address:
+        command.extend(["--ray-address", settings.ray_address])
+    return {
+        "name": INFERENCE_COMPONENT_SERVICE,
+        "executor": "uni",
+        "endpoint": remote.url,
+        "command": command,
+        # The component answers only authenticated control calls, so readiness is an accepted connection.
+        "ready": [
+            python,
+            "-c",
+            "import socket, sys; socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5).close()",
+            str(port),
+        ],
+        "ready_timeout": settings.training_ready_timeout,
     }
 
 

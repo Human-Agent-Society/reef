@@ -331,7 +331,8 @@ class ModelCandidate(UpdateCandidate):
     """A trained model update that has not changed serving weights.
 
     ``checkpoint_path`` is None if the backend saved no checkpoint for this
-    job. That occurs with a checkpoint interval larger than 1.
+    job, which occurs with a checkpoint interval larger than 1. Such a
+    candidate publishes nothing: Reef serves only saved weights.
     """
 
     training_job_id: str
@@ -380,7 +381,7 @@ class TrainingJobResult:
     training_job_id: str | None = None
 
     def __post_init__(self) -> None:
-        # None: the backend saved no checkpoint for this job. The committer publishes its version as live weights.
+        # None: the backend saved no checkpoint for this job, so the job publishes nothing.
         if self.checkpoint_path is not None:
             _require_non_empty(self.checkpoint_path, "checkpoint_path")
         if not self.runtime_load_id:
@@ -804,7 +805,7 @@ class InferenceRuntime(AdapterWeightRuntime):
 
     # -- Weight updates
 
-    def restore_checkpoint(self, artifact: Artifact) -> str:
+    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Restore served weights from a durable artifact.
 
         Runtimes that support weight rollback override this and return the new
@@ -874,6 +875,7 @@ class TrainingRuntime(ABC):
         scenario_step: int,
         *,
         parent_runtime_load_id: str | None = None,
+        scenario: str | None = None,
     ) -> PreparedTrainingStep:
         """Turn one reserved batch into backend work, or a state-only skip.
 
@@ -882,6 +884,7 @@ class TrainingRuntime(ABC):
         the backend resolves the objective in its own process, refuses a method
         it cannot train, and records the method in the job's payload.
         ``parent_runtime_load_id`` is the published version that the job trains from, if known.
+        ``scenario`` names the batch's scenario exactly when the runtime trains several scenarios.
         """
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -901,12 +904,18 @@ class TrainingRuntime(ABC):
         """Whether :meth:`restore_checkpoint` can run; a rollback of the weights needs it."""
         return False
 
-    def restore_checkpoint(self, artifact: Artifact) -> None:
-        """Restore training weights and optimizer state, without touching inference."""
+    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> None:
+        """Restore training weights and optimizer state, without touching inference.
+
+        ``scenario`` names the scenario whose weights the release restores
+        exactly when the runtime trains several scenarios.
+        """
         raise ReefError(f"{type(self).__name__} does not support training checkpoint restore")
 
-    def commit_candidate(self, training_job_id: str) -> None:
-        """Learn that Reef committed the candidate ``training_job_id`` trained here.
+    def commit_candidate(self, training_job_id: str, *, scenario: str | None = None) -> None:
+        """Learn that Reef committed the candidate ``training_job_id`` trained here for ``scenario``.
+
+        ``scenario`` is given exactly when the runtime trains several scenarios.
 
         Called after the durable commit, including once at startup for the
         head's job. The default does nothing: a trainer whose weights advance

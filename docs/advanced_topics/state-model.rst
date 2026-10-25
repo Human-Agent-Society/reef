@@ -29,39 +29,14 @@ The release chain
 Every accepted update creates a release with a parent. Three identities stay
 separate: ``release_id`` names Reef's publication decision, ``content_id`` names
 the selected model or harness content, and ``runtime_load_id`` names a concrete
-serving-engine weight load. A release may refer to durable bytes or to live
-weights held only by the current process; its identity is stored durably either
-way.
+serving-engine weight load. Every release refers to durable bytes: Reef serves
+only weights that a training job saved and that passed candidate evaluation.
 
-.. code:: mermaid
-
-   flowchart TB
-       accTitle: When releases become durable
-       subgraph START["1. Durable start"]
-           direction LR
-           C0[("Checkpoint r0")] -->|"scenario starts"| S0["Serving r0"]
-       end
-       subgraph LIVE["2. Engine memory (restart restores r0)"]
-           direction LR
-           V1["Live release r1 / load l1"] -->|"step 2: train and sync"| V2["Live release r2 / load l2"]
-       end
-       subgraph NEXT["3. Next durable release"]
-           direction LR
-           C1[("Checkpoint r3")] -->|"continue serving"| S1["Serving r3"]
-       end
-       START -->|"step 1: train and sync"| LIVE
-       LIVE -->|"step 3: export and publish"| NEXT
-       class C0,C1 durable
-       class V1,V2 volatile
-
-The training backend decides when live weights become durable: each version
-whose checkpoint the backend saves is published as an artifact. A Slime
-deployment saves each ``save-interval``-th version, so any number of live steps
-may occur between checkpoints. A live release's
-``runtime_load_id`` is an opaque ``<incarnation>:<sequence>`` token, where the
-incarnation keeps tokens unique across training-group restarts. The release
-record is durable; the bytes are not, so a restart restores the last checkpoint.
-The step counter, algorithm state, and record progress do survive.
+The training backend decides which versions are saved. A Slime deployment saves
+each ``save-interval``-th version. The versions between two saves are trained
+but not published: serving stays on the last saved release, and the next saved
+version carries their updates. A restart resumes training from the last saved
+checkpoint; the step counter, algorithm state, and record progress survive.
 
 A release binds one or more named components. Every shipped recipe declares
 one, so its releases are flat: the artifact is the component and its
@@ -72,9 +47,7 @@ publishes one component and the committer carries the others forward from
 the previous checkpoint, so the release still binds the whole combination:
 its ``content_id`` derives from the component content ids, a rollback
 restores every component together, and only a component whose content the
-engine does not already serve is loaded or activated. Such a scenario must
-checkpoint every step, because a live weight release names an engine load and
-nothing else.
+engine does not already serve is loaded or activated.
 
 Durable releases are Git-backed, one ref per scenario, with LFS patterns for
 weight files and a ``reef-artifact.json`` manifest in every release. Heads move
@@ -120,9 +93,6 @@ durable store, the order is:
 
    * - Commit kind
      - Order after trainer preparation
-   * - Live weights
-     - Prepare the live ref, commit the store, advance the serving head,
-       apply trainer state.
    * - Saved checkpoint or rollback
      - Publish durable bytes, commit the store, install the committed heads,
        synchronize the backend pointer, apply trainer state.

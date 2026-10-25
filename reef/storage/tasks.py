@@ -20,6 +20,10 @@ changes nothing. A deployment selects the file store in
 ``storage.task_file_backend``: ``local`` selects :class:`LocalTaskFileStore`,
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
+A store also keeps the train tasks that trained, and documents that the
+stage writing the store saves under keys of its own. The store keeps each
+document as text and does not read it.
+
 A task store belongs to a scenario session. Archiving the scenario retires its
 task stores and task files with its records and commits. Record retention
 does not delete tasks.
@@ -72,7 +76,7 @@ class TaskCandidate:
 
     Purpose: ``TaskStore`` makes it in ``GenerationState.candidates``. The
     record-to-task stage reads the task directory (``TaskStore.path``) and the
-    outcome, to validate, publish or play the candidate, also after a restart.
+    outcome, to validate, publish or run the candidate, also after a restart.
     """
 
     name: str
@@ -150,18 +154,25 @@ class StoredTask:
 class TaskStore(ABC):
     """The generations and published tasks of one named store of a scenario.
 
-    Values: the state of a store is a finite sequence of generations in
-    increasing ``generation``, and a finite sequence of published tasks in
-    publication order. No two published tasks have the
-    same name. A published task does not change.
+    Values: the state of a store is a tuple ``(G, P, T, D)``. ``G`` is a finite
+    sequence of generations in increasing ``generation``. ``P`` is a finite
+    sequence of published tasks in publication order; no two have the same
+    name, and a published task does not change. ``T`` is a set of task names
+    with ``T ⊆ {name(p) : p ∈ P, split(p) = train}``: the train tasks that
+    trained. ``D : K ⇀ Str`` maps non-empty keys to documents, each key written
+    once. Nothing is removed from ``G``, ``P``, ``T`` or ``D``.
 
     Purpose: a record-to-task stage writes its generations and publishes their
     candidates. A caller adds task directories (``add_task``). Readers take the
     published tasks of a split (``tasks``) and their directories (``path``).
+    The rollout of a task pool marks the tasks that trained (``mark_trained``),
+    so a restart rolls out only the others. The stage that writes the store
+    keeps its own durable state about its tasks in ``D``; the store does not
+    interpret a document.
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
-    The caller serializes the writers of one store.
+    Each write is atomic, so writers may run on several threads.
     """
 
     @abstractmethod
@@ -173,7 +184,7 @@ class TaskStore(ABC):
 
     @abstractmethod
     def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
-        """Save a copy of each candidate task directory of a generation, in order, before validation or play.
+        """Save a copy of each candidate task directory of a generation, in order, before validation or episodes.
 
         The name of a candidate is the name of its directory. Raises
         ``TaskStoreError`` if the generation does not exist or has other
@@ -230,6 +241,29 @@ class TaskStore(ABC):
     @abstractmethod
     def tasks(self, *, split: SplitName | None = None) -> tuple[StoredTask, ...]:
         """Return the published tasks in publication order, optionally of one split."""
+
+    @abstractmethod
+    def write_document(self, *, key: str, document: str) -> None:
+        """Save ``document`` under ``key``: after the call, ``D(key) = document``.
+
+        An identical retry changes nothing. Raises ``TaskStoreError`` if ``key``
+        is empty, or if ``D(key)`` is already another document.
+        """
+
+    @abstractmethod
+    def documents(self) -> Mapping[str, str]:
+        """Return ``D``: every saved document by its key."""
+
+    @abstractmethod
+    def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
+        """Save that these published train tasks trained. A task marked again changes nothing.
+
+        Raises ``TaskStoreError`` if a name is not a published train task.
+        """
+
+    @abstractmethod
+    def trained_task_names(self) -> frozenset[str]:
+        """Return the names of the tasks that trained."""
 
     @abstractmethod
     def path(self, files_digest: str) -> Path:

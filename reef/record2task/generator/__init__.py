@@ -1,4 +1,4 @@
-"""The generator service: a served model writes Harbor tasks, and Reef checks and plays them.
+"""The generator service: a served model writes Harbor tasks, and Reef checks them and runs their episodes.
 
 The generated-task recipe (``reef.recipe.generated_tasks``) and the deployment's task generator
 (:class:`reef.recipe.generated_tasks.TaskGenerator`) run inside the Reef service, where nothing may block the trainer
@@ -11,7 +11,7 @@ and the recipe and the generator drive it over HTTP:
 - ``harbor``: the reply held to the authoring rules, the task written with ``reef.core.tasks``, tasks
   deduplicated by content, Harbor's oracle and nop agents run through the ``harbor`` command line, a split
   per generation.
-- ``terminus``: Terminus 2 for the generator's plays, whose episode is still verified when the agent fills its
+- ``terminus``: Terminus 2 for the generator's episodes, whose episode is still verified when the agent fills its
   context or a send-keys to its terminal fails (selected by ``import_path``; the only module here that imports
   harbor).
 - ``inputs``: ``TaskGenerationRequest``, what a task generator is asked for, and the materials the designer
@@ -61,9 +61,9 @@ from reef.record2task.generator.service import (
     HarborChecks,
     JobRunner,
     ReadinessProbe,
-    ReefTaskPlays,
+    ReefTaskEpisodes,
     TaskChecks,
-    TaskPlays,
+    TaskEpisodes,
     readiness_probes,
 )
 
@@ -88,11 +88,11 @@ __all__ = [
     "ProposedTask",
     "ReadinessProbe",
     "ReefDesigner",
-    "ReefTaskPlays",
+    "ReefTaskEpisodes",
     "TaskChecks",
+    "TaskEpisodes",
     "TaskGenerationRequest",
     "TaskNameConflict",
-    "TaskPlays",
     "WrittenTask",
     "content_hash",
     "designer_messages",

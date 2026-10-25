@@ -614,7 +614,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        record ids returns the checkpoint.
    * - ``save_candidates(generation=..., directories=...)``
      - Save a copy of each candidate task directory once, before validation or
-       play. The name of a candidate is the name of its directory.
+       episodes. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
@@ -634,8 +634,17 @@ images, and then records its publication. A ``StoredTask`` holds the task
        return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskPlayer.play``. Do not
+       for example for ``read_harbor_task`` or ``TaskEpisodeRunner.run``. Do not
        change it.
+   * - ``mark_trained(task_names=...)``, ``trained_task_names()``
+     - Mark published train tasks as trained, or return the trained ones. The
+       rollout of a task pool marks a task once the commit of its training step
+       is durable, so a restart rolls out only the others.
+   * - ``write_document(key=..., document=...)``, ``documents()``
+     - Save a text document under a non-empty key, or return every document by
+       key. Each key holds one document; another document under a used key
+       raises ``TaskStoreError``. The store does not read a document: the stage
+       that writes the store keeps its own state about its tasks here.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -1105,7 +1114,7 @@ Task generation
 .. code:: python
 
    from reef.core.tasks import HarborTask
-   from reef.recipe.generated_tasks import TaskGenerator, TaskPlayResult, TaskValidationResult
+   from reef.recipe.generated_tasks import TaskGenerator, GeneratedTaskResult, TaskValidationResult
    from reef.record2task.generator import TaskGenerationRequest
 
 ``TaskGenerator`` is the plugin base class that a deployment names in
@@ -1116,14 +1125,17 @@ Task generation
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
-``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
+``async record_results(results: tuple[GeneratedTaskResult, ...], *, generation: int)``
+is optional. It receives the results of one earlier ``generate`` call, named by
+``TaskGenerationRequest.generation``, possibly after later calls and after a
+restart. A second call for the same generation must have no effect. The
 default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
 
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
-carries source records and non-empty requirements text.
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={}, generation=0)``
+carries source records, non-empty requirements text, and the number of the generation.
 Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
 Use an empty record tuple for description-only generation.
 For local materials, pass a tuple of ``Path`` values in ``assets``.
@@ -1136,9 +1148,12 @@ Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
 task preserves source record IDs in order.
 
-``TaskPlayResult(task, training_rewards=(), error="", split="train")`` holds
-the rewards of the training plays, only of the episodes that ran. ``is_played`` is true when
-``error`` is empty. A task that was not played has no rewards.
+``GeneratedTaskResult`` is ``RejectedTask(task, reason)``, ``HeldOutTask(task)``,
+``RolledOutTask(task, rollout_rewards)`` or ``FailedTask(task, error,
+infrastructure_failure)``. ``rollout_rewards`` is a non-empty tuple of finite
+numbers; ``reason`` and ``error`` are non-empty. See `the task generation
+contract <../developer-guide/processors.rst#task-generation-contract>`__ for
+when the recipe sends each case.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
@@ -1151,7 +1166,7 @@ its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
 - ``validate`` receives the ``HarborTask`` instead of a directory path.
 - Import ``TaskValidationResult`` from ``reef.recipe.generated_tasks``.
 
-Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
+Name the class in ``pipeline.record2task.config.generator`` and use the generated-task recipe. The recipe runs the tasks and trains, so the processor half of the method is
 not needed.
 
 Batch
@@ -1590,8 +1605,8 @@ classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
 unchanged. Adding another backend combination still requires compatible native
 weight transport and recovery behavior.
 
-``reef.runtime`` is a namespace package without an import facade. Its five modules
-are ``interfaces``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
+``reef.runtime`` is a namespace package without an import facade. Its six modules
+are ``interfaces``, ``jobs``, ``scheduler``, ``deployment``, ``publication`` and ``recovery``;
 ``executor/`` contains worker transports. Import the ABCs and shared values from
 ``reef.runtime.interfaces`` and the factory registry from
 ``reef.runtime.deployment``. Concrete scheduling connections live in their owning
@@ -1600,32 +1615,73 @@ integration: ``SlimeTrainingRuntime`` in ``reef.train.slime_backend.runtime`` an
 distinct from the native ``TrainingBackend``/``InferenceBackend`` pair consumed by
 Reef's coordinator.
 
+Training jobs and components
+----------------------------
+
+``reef.runtime.jobs`` defines bounded training jobs. A ``TrainingJob`` is a data
+snapshot (``data``, a ``TrainingBatch``), the directory of the weights it starts
+from (``start``, or ``None`` for the backend's base model), and the backend's
+``parameters``. Reef reads none of the parameters; they override the backend's
+own configuration. ``job_id_for`` names a job by its backend, start, data and
+parameters, so a retry of the same request is the same job.
+
+A ``TrainingComponent`` runs whole jobs with its framework's own training loop.
+``submit`` starts a job and does nothing for a job ID it already has;
+``status`` returns a ``JobStatus`` (``running``, ``finished`` or ``failed``,
+the ``SavedCheckpoint`` values so far, the backend's metrics, and, once
+finished, the algorithm state the job proposes); ``cancel`` stops a job; and
+``check_start`` refuses weights that a job cannot start from. A component that
+runs a job inside ``submit`` raises from ``submit`` when the job fails.
+
+``reef.train.job_runtime.JobTrainingRuntime`` is the ``TrainingRuntime`` over
+one component. Each training step submits one job with the step's batch and
+the parameters ``method``, ``scheduling`` and ``algorithm_state``, and waits for
+it to end. A job that saved no checkpoint is a state-only skip; otherwise its
+last checkpoint is the step's candidate. The runtime keeps the start of the next
+job in its state directory: committing a candidate makes its checkpoint the
+start, a rollback copies the restored release there, and rejecting a candidate
+keeps the start.
+
 Tinker integration
 ------------------
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
 ``tinker`` backend. Its ``runtime_factory`` builds, from ``TinkerConfig`` and only
-after deployment selection, a ``TinkerTrainingRuntime`` and, through the
-``tinker`` inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``.
-The two hold no shared object: the training runtime branches every candidate
-from the incumbent it remembers on disk, learning commits through
-``TrainingRuntime.commit_candidate`` and rollbacks through
-``restore_checkpoint``; the inference runtime reads each candidate's or
+after deployment selection, a training runtime and, through the ``tinker``
+inference kind, a ``reef.inference.tinker.TinkerInferenceRuntime``. The training
+runtime is ``reef.train.job_runtime.JobTrainingRuntime`` over
+``reef.train.tinker_backend.component.TinkerTrainingComponent``, a training
+component (below). The two runtimes hold no shared object: every job branches
+from the start checkpoint the training runtime remembers on disk, which commits
+(``TrainingRuntime.commit_candidate``) and rollbacks (``restore_checkpoint``)
+move; the inference runtime reads each candidate's or
 artifact's ``tinker-checkpoint.json`` manifest, samples from the immutable
 sampler it names, activates selected candidates and binds the head Reef
-publishes through ``activate_checkpoint``. With a local inference engine the
-same deployment instead returns a model-driver plan: ``TinkerTrainingService``
-supplies ``TinkerTrainingBackend``, a ``reef.runtime.interfaces.TrainingBackend``
-that delivers each published adapter as a PEFT directory through
-``weight_files``, which returns a ``WeightFiles`` value with the ``"adapter"``
-layout. Reef's publisher then calls the receiver's
-``InferenceBackend.load_weight_files``, so the trainer never holds an engine
-handle. This is the ``reef-weight-files-v1`` transfer. A receiver that declares
-it loads both layouts: ``"adapter"`` under the adapter name Reef chooses, and
-``"full"`` (a Hugging Face checkpoint) in place of the served weights. The HTTP service connects through the
-``coordinator_training`` runtime kind like any coordinator-driven trainer. ``TrainingDeployment``
+publishes through ``activate_checkpoint``. With inference engines the same
+deployment builds ``JobTrainingRuntime(component, ..., per_scenario=True)``,
+whose component also exports each job's PEFT adapter into ``adapter/`` beside
+the manifest, and, through the ``remote_adapters`` inference kind, a
+``reef.runtime.serving.AdapterServingRuntime``. That runtime controls the
+engines of an inference component through ``RemoteInferenceBackend``: it loads
+a selected candidate's ``adapter/`` directory as a ``WeightFiles`` value with
+the ``"adapter"`` layout under ``adapter_name(scenario, version)``, and loads a
+release's adapter again when a scenario starts or rolls back.
+``TrainingDeployment.serves_on_inference_component(settings)`` returns true for
+such a deployment; ``reef serve`` then starts a local component unless
+``inference.remote`` names one. With per-scenario weights, Reef passes
+``scenario`` to ``TrainingRuntime.prepare_training_step``,
+``restore_checkpoint`` and ``commit_candidate``, and to
+``WeightRuntime.restore_checkpoint`` and ``activate_checkpoint``. ``TrainingDeployment``
 defaults ``requires_local_model`` to true; hosted integrations set it to false
 to preserve remote model identifiers during deployment resolution.
+
+The ``reef-weight-files-v1`` transfer delivers saved weights as files: a
+trainer returns a ``WeightFiles`` value from ``TrainingBackend.weight_files``,
+and Reef's publisher calls the receiver's
+``InferenceBackend.load_weight_files``, so the trainer never holds an engine
+handle. A receiver that declares the transfer loads both layouts:
+``"adapter"`` under the adapter name Reef chooses, and ``"full"`` (a Hugging
+Face checkpoint) in place of the served weights.
 
 Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
 and register it with ``register_loss_family_ref(name, "package.module:CLASS",

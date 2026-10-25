@@ -40,12 +40,19 @@ class Scenario:
         trainers: tuple[ComponentTrainer, ...],
         model_config: ModelConfig | None = None,
         scenario_step: int = 0,
-        process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
+            (
+                "serve/request",
+                "serve/admission",
+                "evaluate/request",
+                "evaluate/admission",
+                "rollout/request",
+                "rollout/admission",
+                "ingest/write",
+            ),
             counters=(
                 "serve/retries_total",
                 "serve/version_mismatch_total",
@@ -53,6 +60,9 @@ class Scenario:
                 "evaluate/retries_total",
                 "evaluate/version_mismatch_total",
                 "evaluate/timeouts_total",
+                "rollout/retries_total",
+                "rollout/version_mismatch_total",
+                "rollout/timeouts_total",
                 "ingest/accepted_total",
                 "ingest/duplicates_total",
                 "ingest/rejected_report_total",
@@ -68,7 +78,7 @@ class Scenario:
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.surface)
-        self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
+        self._artifact_chain = ArtifactReleaseChain(repository)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,
