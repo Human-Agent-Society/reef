@@ -592,6 +592,7 @@ def critic_prep_args(**overrides):
         "critic_init": None,
         "critic_lr": None,
         "megatron_lora_rank": 0,
+        "custom_model_provider_path": None,
         "custom_megatron_init_path": None,
         "load": "/ckpt/megatron",
         "save": "/ckpt/megatron",
@@ -709,17 +710,35 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 
 
 @pytest.mark.unit
-def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
+@pytest.mark.parametrize("provider", [None, "recipes.sao.examples.servelearnbench.long_context.provide_model"])
+def test_prepare_critic_args_without_lora_preserves_the_user_provider(provider) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
-    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
+    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path=provider)
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
     assert critic_args.megatron_lora_rank == 0
     assert critic_args.megatron_lora_alpha is None
-    assert critic_args.custom_model_provider_path == getattr(args, "reef_chained_model_provider_path", None)
+    assert critic_args.custom_model_provider_path == provider
+    assert args.custom_model_provider_path == provider
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("provider", [None, "my.provider:build"])
+def test_prepare_critic_args_without_lora_unwraps_only_the_reef_provider(provider) -> None:
+    from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+    from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
+
+    args = critic_prep_args(
+        custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
+        reef_chained_model_provider_path=provider,
+    )
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.custom_model_provider_path == provider
+    assert args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
 
 
 @pytest.mark.unit
