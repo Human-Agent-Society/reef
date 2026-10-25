@@ -34,12 +34,18 @@ def prepare_tinker_job(
     signal = objective.prepare(data, state)
     if signal.action == "skip":
         return PreparedJob("skip", signal.next_algorithm_state, signal.metrics)
-    resolve_tinker_loss(objective.loss_family).check_kl_coef(kl_coef)
+    loss = resolve_tinker_loss(objective.loss_family)
+    loss.check_kl_coef(kl_coef)
     items = trajectories(data)
-    if signal.advantages is None or len(signal.advantages) != len(items):
+    if not loss.uses_advantages:
+        advantages: tuple[float, ...] = (0.0,) * len(items)
+    elif signal.advantages is None or len(signal.advantages) != len(items):
         raise ValueError("Tinker policy training requires one advantage per trajectory")
+    else:
+        advantages = signal.advantages
     rows = [
-        asdict(TokenRow.from_item(item, advantage)) for item, advantage in zip(items, signal.advantages, strict=True)
+        asdict(TokenRow.from_item(item, advantage, rollout_log_probs=loss.uses_rollout_log_probs))
+        for item, advantage in zip(items, advantages, strict=True)
     ]
     schedule = schedule_job_data(data, objective.rollout_unit, scheduling, step_size=batch_size)
     batches: list[list[dict[str, Any]]] = []

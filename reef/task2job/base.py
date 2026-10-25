@@ -179,6 +179,16 @@ class Task2Job(ABC, Plugin):
         """The commit that listed these IDs of ``own_job_data_done`` is durable. The default does nothing."""
         return
 
+    def job_ended(self, outcome: Mapping[str, Any]) -> None:
+        """A training job ended and the commit of its end is durable; the default does nothing.
+
+        ``outcome`` is ``JobLoopState.last_job``: ``job_id``, ``backend``, ``event`` (``finished`` or
+        ``failed``), the component's ``metrics`` and, for a failed job, ``error``. A stage that hands out
+        tasks reads their results from it. A trainer that starts with no running job calls it again for the
+        last job that ended, so a call for an end that the stage already took must change nothing.
+        """
+        return
+
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
         """The version that the scenario serves now, for a stage that checks its own samples for staleness."""
         return

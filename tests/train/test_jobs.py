@@ -6,11 +6,12 @@ import math
 from pathlib import Path
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import EvaluationResult, SelectionDecision
+from reef.pipeline_context import PipelineContext
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.jobs import (
@@ -24,6 +25,7 @@ from reef.train.jobs import (
     RunningJob,
     TrainingMetricsSelectPlugin,
 )
+from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
 
@@ -406,3 +408,57 @@ def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_sta
     assert trainer.run_once() is not None
     [job] = component.jobs
     assert job.start == "/start"
+
+
+class EndedJobs(ThresholdJobData):
+    """Threshold job data that keeps each job outcome the pipeline gives it, in order."""
+
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context, None, None)
+        self.outcomes: list[dict[str, object]] = []
+
+    def job_ended(self, outcome) -> None:
+        self.outcomes.append(dict(outcome))
+
+
+@pytest.mark.unit
+def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_settles(component, tmp_path):
+    stages: list[EndedJobs] = []
+
+    def pipeline(context: PipelineContext) -> TrainingPipeline:
+        stages.append(EndedJobs(context))
+        return threshold_pipeline(context, task2job=stages[-1])
+
+    trainer = Trainer.build(
+        "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
+    )
+    [ended] = stages
+    submitted = trainer.run_once()
+    trainer.commit(trainer.prepare_commit(submitted))
+    [job] = component.jobs
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
+    decided = trainer.run_once()
+    trainer.commit(trainer.prepare_commit(decided))
+    assert ended.outcomes == [], "neither the submission nor a checkpoint decision ends the job"
+
+    metrics = {"rollout_rewards": {"task-a": [1.0, 0.0]}}
+    component.statuses[job.job_id] = JobStatus(job.job_id, "finished", (saved,), metrics)
+    finished = trainer.run_once()
+    prepared = trainer.prepare_commit(finished)
+    assert ended.outcomes == [], "the end is not durable before its commit settles"
+    trainer.commit(prepared)
+    assert ended.outcomes == [{"job_id": job.job_id, "backend": "fake", "event": "finished", "metrics": metrics}]
+    trainer.commit(prepared)
+    assert len(ended.outcomes) == 1, "a settled commit is not applied again"
+
+    # A restart can fall between the end's commit and the stage taking it: the next trainer gives it again.
+    Trainer.build(
+        "math",
+        scored_records(),
+        pipeline_factory=pipeline,
+        job_loop=loop_with(component),
+        algorithm_state=trainer.algorithm_state_dict(),
+        default_job_samples=1,
+    )
+    assert stages[-1].outcomes == ended.outcomes

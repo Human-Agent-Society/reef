@@ -77,9 +77,14 @@ FAKE_SDK = textwrap.dedent(
         def save_state(self, name, ttl_seconds=None): return self._save(name, "weights")
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
 
+    class _Tokenizer:
+        # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
+        def apply_chat_template(self, *args, **kwargs): raise AssertionError("the trainer never renders")
+        def decode(self, *args, **kwargs): raise AssertionError("the trainer never renders")
+
     class _Sampler:
         def get_base_model(self): return MODEL
-        def get_tokenizer(self): raise AssertionError("the trainer never renders")
+        def get_tokenizer(self): return _Tokenizer()
         def compute_logprobs(self, model_input): return _Future([None] + [-0.5] * (model_input.length - 1))
 
     class _Rest:

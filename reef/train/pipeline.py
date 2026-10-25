@@ -401,6 +401,10 @@ class TrainingPipeline:
         if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
             self.uploaded_trajectories.setdefault(trajectory_id, trajectory)
 
+    def job_ended(self, outcome: Mapping[str, Any]) -> None:
+        """Give the task-to-job stage the outcome of a job whose end the trainer committed (``JobLoopState.last_job``)."""
+        self.task2job.job_ended(outcome)
+
     def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
         """Give the stages the runtime load ID that serves the scenario now, for their staleness checks."""
         self.record2record.observe_serving_runtime_load_id(runtime_load_id)

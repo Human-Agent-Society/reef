@@ -17,7 +17,8 @@ from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
 from reef.cli import main
 from reef.core.job_data import JobData, TrajectoryItem
-from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
+from reef.inference.tinker import TinkerInferenceRuntime
+from reef.recipe.sft import SftObjective
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import (
     LearningRateSchedule,
@@ -29,6 +30,7 @@ from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
+from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
@@ -296,6 +298,7 @@ def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenari
         "kl_coef": 0.2,
         "learning_rate": config.learning_rate,
         "save_interval": None,
+        "rollout": None,
     }
     assert component.shares_scenarios is True
 
@@ -391,8 +394,8 @@ def test_skip_and_unsupported_loss_do_not_mutate_remote(component, client, objec
 
 
 def test_a_method_without_a_tinker_loss_is_refused_before_training(component, client):
-    status = train(component, batch(), "sft")
-    assert status.state == "failed" and "unsupported Tinker loss family 'sft'" in status.error
+    status = train(component, batch(), "sdpo")
+    assert status.state == "failed" and "unsupported Tinker loss family 'sdpo'" in status.error
     assert client.calls == []
 
 
@@ -858,3 +861,39 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         dispatcher.close()
         component.close()
         inference.shutdown()
+
+
+def sft_item(name: str) -> TrajectoryItem:
+    """A supervised sample: three prompt tokens, two target tokens and no rollout log probabilities."""
+    return TrajectoryItem(
+        {
+            "schema_version": "ATIF-v1.6",
+            "agent": {"name": name},
+            "steps": [{"step_id": 1}],
+            "extra": {"reef": {"training": {"tokens": [10, 11, 12, 30, 31], "loss_mask": [1, 1]}}},
+        }
+    )
+
+
+def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_log_probs():
+    data = JobData("sft", (sft_item("a"), sft_item("b")))
+    step = prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0)
+
+    loss = resolve_tinker_loss("sft")
+    (batch,) = step.payload["batches"]
+    rows = [TokenRow(**{**row, "tokens": tuple(row["tokens"]), "mask": tuple(row["mask"])}) for row in batch]
+    assert loss.loss_fn == "cross_entropy"
+    # Position i predicts token i+1: the two prompt positions before the target weigh 0.
+    assert loss.inputs(rows, [], kl_coef=0.0)[0] == {
+        "target_tokens": [11, 12, 30, 31],
+        "weights": [0.0, 0.0, 1.0, 1.0],
+    }
+    with pytest.raises(ValueError, match="sft trains no KL penalty"):
+        prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.1)
+
+
+def test_an_sft_job_trains_cross_entropy_on_the_component_and_saves_its_checkpoint(component, client):
+    status = train(component, JobData("sft", (sft_item("a"), sft_item("b"))), SftObjective.name)
+    assert status.state == "finished" and len(status.checkpoints) == 1, status.error
+    ((_, batches, loss),) = client.calls
+    assert loss.loss_fn == "cross_entropy" and sum(len(rows) for rows in batches) == 2

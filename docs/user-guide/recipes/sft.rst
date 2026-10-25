@@ -13,7 +13,7 @@ also use it to train on a dataset that you import. SFT ships with
 | Signal      | one report for each recorded request; the target is the    |
 |             | report's ``teacher_context`` or the recorded response      |
 +-------------+------------------------------------------------------------+
-| Loss family | ``sft`` (Slime's ``sft_loss``)                             |
+| Loss family | ``sft`` (Slime's ``sft_loss``, Tinker's ``cross_entropy``) |
 +-------------+------------------------------------------------------------+
 | Package     | ``reef/recipe/sft/``                                       |
 +-------------+------------------------------------------------------------+
@@ -56,9 +56,11 @@ SFT has three pipeline stages
 - ``DistillJobData`` puts the tasks into job data in arrival order. One job's
   data holds ``pipeline.task2job.config.job_samples`` samples.
 
-The ``sft`` objective (``SftObjective``) sends no advantages. The ``sft`` loss
-family in ``reef/train/slime_backend/sft.py`` selects Slime's ``sft_loss``.
-This loss reads no old-policy log probs. Thus the objective accepts more than
+The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
+``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
+``sft_loss``. On Tinker, the built-in ``sft`` family trains Tinker's
+``cross_entropy`` on the target tokens (``training.backend: tinker``). Both
+losses read no old-policy log probs. Thus the objective accepts more than
 one epoch on a job's data.
 
 The report contract
@@ -234,8 +236,6 @@ optimizer state and learning-rate schedule.
 Limitations
 -----------
 
-- Only the Slime backend implements the ``sft`` family. The Tinker backend
-  refuses it before training starts (`Train with Tinker <../tinker.rst>`__).
 - A report must reference exactly one recorded request. A report that
   references more than one request raises an error. To train each turn of an
   agent episode, report each request separately.

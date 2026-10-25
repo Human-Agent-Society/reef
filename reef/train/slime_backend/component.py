@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.core.job_data import TaskItem
 from reef.runtime.executor import resolve
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
@@ -280,6 +281,8 @@ class SlimeTrainingComponent(LocalJobComponent):
         return str(directory)
 
     def check_job(self, job: TrainingJob) -> None:
+        if any(isinstance(item, TaskItem) for item in job.data.items):
+            raise ValueError("Slime trains trajectories; it does not roll tasks out (task jobs) yet")
         unknown = set(job.parameters) - {"method", "scheduling", "save_interval"}
         if unknown:
             raise ValueError(f"Slime jobs accept no parameters {sorted(unknown)}")

@@ -571,57 +571,46 @@ sessions again, so it finishes the same generation. A round that made train
 tasks puts them in the task pool. A task identical to one that
 was already published is rejected as a duplicate.
 
-Saved tasks roll out in rollout batches. A rollout episode is not a record: its
-agent's model calls carry the ``x-reef-rollout`` header, so the service serves
-them from the scenario's release but keeps no record of them, and answers with
-each call's training block. ``GeneratedTaskJobData`` runs a second loop, which
-the pipeline drives through the stage's own-job-data hooks:
+Saved tasks train as task jobs. Reef runs no episode of them: the training
+component rolls each job's tasks out on its own sampler, at the job's start
+weights, and trains on their episodes. ``GeneratedTaskJobData`` drives the
+loop through the stage's own-job-data hooks:
 
-1. When no rollout batch runs, the stage takes up to ``tasks_per_step``
-   tasks from its task pool and submits them as one rollout batch.
-2. ``GeneratedTaskJobData`` runs them all at once on its own worker. It
-   stages each saved task in the generator service (``write_task``) and runs
-   ``episodes_per_task`` episodes of it on the training arm. Staging the same
-   task again returns its staged copy, so episodes that a stop interrupted can
-   stage the task and run again. The generator service runs at most
-   ``generator.concurrency`` episodes at once, across all requests. A task's
-   first episodes save its result. An episode with an error and no reward
-   could not run; when every training episode of a task could not run, the
-   task's result is an infrastructure failure, not a solver failure.
-3. Each episode comes back with its answered calls. The stage assembles one
-   sample from the calls of each episode that ran, scored with the episode's
-   verifier reward, and the samples of one task form its group. An episode
-   with a call that the engine aborted has no sample. A group of fewer than
-   two samples has no relative reward and does not train.
-4. When the rollout batch's episodes end, the staleness check drops each group whose
-   samples a version produced that is more than ``max_staleness`` versions
-   behind. The limit is the setting of the record stage,
-   ``GeneratedTaskRecord2Record``, in ``pipeline.record2record.config``. The groups that are left train as the stage's own job data. Their tasks are
-   marked trained in the task store once the commit of the training step is
-   durable. A task whose group did not train, because it went stale or the
-   backend dropped the job data, goes back to the task pool. A task without a
-   group stays out of it until a restart. When no group is left, the next
-   rollout starts, and the next generation round does not wait for a job.
+1. When no tasks are handed out, the stage takes up to ``tasks_per_step``
+   tasks from its task pool as the next job's data: the ``TaskItem`` values.
+2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
+   tells the component how many episodes of each task to run, and with which
+   agent and sandbox. The Tinker component runs them, assembles one sample
+   from each episode that ran, scored with the task's verifier reward, and
+   trains on the groups of at least two samples. It reports each task's
+   episode rewards in the job's metrics (``rollout_rewards``).
+3. The commit of the submission consumes the tasks: each is marked trained
+   in the task store once that commit is durable. The tasks stay in the pool
+   until the job ends.
+4. When the commit of the job's end is durable, the trainer gives the job's
+   outcome to the stage (``Task2Job.job_ended``). The tasks leave the pool.
+   The stage gives each trained task without a result its rewards from
+   ``rollout_rewards``. A task without rewards, for example in a job that
+   failed or that a rollback cancelled, gets an infrastructure-failure
+   result, so its generation's feedback still goes out.
 
-When a submit fails, its tasks stay in the task pool. If a task's episodes
-fail, the other tasks of the rollout batch run on. If the whole rollout job fails, each
-of its tasks without a result gets an infrastructure-failure result, so its
-generation's feedback still goes out. A result that the task store fails to
-save is saved again by the next job. On a restart, the train tasks that did not
-train go back to the task pool, including the tasks of a rollout that the stop
-interrupted. The loop is the recipe's (``reef.recipe.generated_tasks.rollout``);
-the pipeline only reads the stage's own job data. Its
-``job_samples`` is the samples of one full rollout batch, ``tasks_per_step``
-times ``episodes_per_task``, so the deployment does not set it.
+A result that the task store fails to save is saved again by the next job. On
+a restart, the train tasks that did not train go back to the task pool. A job
+that runs across a restart saves its tasks' results when it ends. A trainer
+that starts with no running job gives the stage the last job's outcome again,
+so a restart just after a job's end loses no result. The loop is the
+recipe's (``reef.recipe.generated_tasks.rollout``); the pipeline only reads
+the stage's own job data. Its ``job_samples`` is ``tasks_per_step``, so the
+deployment does not set it.
 
 When every train task of a generation has a result, the next job sends the
 generation's results to ``record_results``. A generation can therefore close
 after later generations started. A generation whose delivery fails waits for
 the next job, and later generations still go out.
 
-The training episodes run on the arm ``plain``. A generator can run more
-episodes of a task through the generator service on another arm, as SPADE does
-for its hint plays; those episodes are not records either, and do not train.
+A generator can run episodes of a task through the generator service, as
+SPADE does for its hint plays; those episodes are not records, and do not
+train.
 The ``task_group`` objective centers and scales each reward within its task
 group, on Tinker's ``importance_sampling`` loss. The record stage trains on no
 report: it holds the reports that are source sessions, and releases the others,

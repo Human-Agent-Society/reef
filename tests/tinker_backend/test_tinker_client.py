@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.inference.tinker import TinkerSDKSampler
 from reef.runtime.interfaces import UpstreamStatusError
+from reef.tinker.sampling import TinkerSDKSampler
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig

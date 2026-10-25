@@ -79,7 +79,9 @@ job's optional ``scheduling`` parameter sets the epochs, the shuffle, and the
 Tinker computes the loss on its side from a built-in loss function and the
 per-sample inputs that function reads. The built-in ``importance_sampling``
 family places the trajectory advantage on every response token the loss mask
-selects. A method registers its own ``TinkerLoss`` with
+selects. The built-in ``sft`` family trains Tinker's ``cross_entropy`` on the
+same tokens, so the `SFT recipe <recipes/sft.rst>`__ runs on Tinker; its
+samples need no rollout log probabilities. A method registers its own ``TinkerLoss`` with
 ``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``,
 next to its Slime reference; the class is imported when the family is first
 resolved. Its ``loss_fn`` names the Tinker built-in it trains with and
@@ -94,6 +96,19 @@ sampler scores the original token IDs, and those probabilities never replace
 the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
+
+A job's data can also be Harbor tasks (a task job), as the `generated-task
+recipe <../reference/configuration.rst#generated-tasks>`__ makes. Before it
+trains, the component runs ``rollout.episodes_per_task`` episodes of each task
+on Tinker's sampler at the job's start weights, so the episodes sample the
+weights that the job trains. The agent's model calls go to a sampler endpoint
+on this host, which answers Tinker's text chat with the training capture; the
+task's verifier scores each episode. The component trains on each task's
+group of samples, keeps the rollouts in its job directory so a resumed job
+trains the same samples, and reports each task's rewards in the job's metrics.
+The ``rollout`` job parameter sets the episodes, the agent and the sandbox.
+Reef's serving takes no part, so another runtime, such as an inference
+component, can serve the releases.
 
 Each job trains the Tinker loss of the objective that its recipe selected
 (`Switch methods within a run

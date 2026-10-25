@@ -22,6 +22,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, finished
 
 from reef.core.artifact_ref import RuntimeLoadSpan
+from reef.core.job_data import TaskItem
 from reef.core.trajectories import trajectory_reward
 from reef.runtime.executor import ExecutorFuture, base
 from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
@@ -429,6 +430,17 @@ def test_a_job_with_parameters_slime_does_not_take_is_refused_and_records_nothin
     stack = stacks(tmp_path)
     with pytest.raises(ValueError, match=message):
         stack.component.submit(TrainingJob("job-0", "slime", None, batch_for(0), job_parameters))
+    with pytest.raises(KeyError):
+        stack.component.status("job-0")
+    assert stack.group.train_calls == []
+
+
+@pytest.mark.unit
+def test_a_job_of_tasks_is_refused_because_slime_rolls_no_task_out(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    tasks = JobData("tasks", (TaskItem(tmp_path / "task"),))
+    with pytest.raises(ValueError, match="does not roll tasks out"):
+        stack.component.submit(TrainingJob("job-0", "slime", None, tasks, parameters(TrainingMethod("sft"))))
     with pytest.raises(KeyError):
         stack.component.status("job-0")
     assert stack.group.train_calls == []

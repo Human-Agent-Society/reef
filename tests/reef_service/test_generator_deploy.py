@@ -135,7 +135,9 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
     pipeline = settings.pipeline_settings
     assert pipeline is not None
-    assert pipeline["task2job"]["config"]["episodes_per_task"] == 4
+    assert pipeline["task2job"]["config"]["tasks_per_step"] == 2
+    # Tinker rolls each task job out itself, with the recipe's rollout job parameter.
+    assert settings.recipe_settings["job_parameters"]["rollout"]["episodes_per_task"] == 4
     assert pipeline["record2task"]["config"]["rounds"] == 20
     generator = pipeline["record2task"]["config"]["generator"]
     assert generator["module"] == "recipes.beta.spade:SpadeTaskGenerator"

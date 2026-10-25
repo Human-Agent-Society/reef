@@ -4,9 +4,10 @@ Tinker computes the loss on its side: ``forward_backward`` takes the name of a
 Tinker built-in loss function and, per sample, the ``loss_fn_inputs`` that
 function reads. A :class:`TinkerLoss` therefore names the built-in ``loss_fn``
 it trains with and shapes those inputs from Reef's captured rows. The
-built-in family here uses ``importance_sampling``; a method may select
-another built-in and shape its inputs the same way, or compute the loss on
-the Reef host through :class:`TinkerCustomLoss`.
+built-in families here are ``importance_sampling`` and ``sft`` (Tinker's
+``cross_entropy``); a method may select another built-in and shape its inputs
+the same way, or compute the loss on the Reef host through
+:class:`TinkerCustomLoss`.
 
 Methods register their loss in the shared loss-family table with
 ``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``;
@@ -33,21 +34,30 @@ BACKEND = "tinker"
 
 @dataclass(frozen=True)
 class TokenRow:
+    """One trajectory's training row on Tinker.
+
+    ``tokens`` is the prompt and the response, ``mask`` has one 0/1 entry per
+    response token, and ``logprobs`` one rollout log probability per response
+    token, or is empty for a loss that reads none (``TinkerLoss.uses_rollout_log_probs``).
+    ``advantage`` is finite; a loss without advantages ignores it.
+    """
+
     tokens: tuple[int, ...]
     mask: tuple[int, ...]
     logprobs: tuple[float, ...]
     advantage: float
 
     @classmethod
-    def from_item(cls, item: TrajectoryItem, advantage: float) -> TokenRow:
+    def from_item(cls, item: TrajectoryItem, advantage: float, *, rollout_log_probs: bool = True) -> TokenRow:
+        """The row of ``item``; ``rollout_log_probs`` requires one rollout log probability per response token."""
         training = item.training
         row = cls(
             tuple(training.get("tokens", ())),
             tuple(training.get("loss_mask", ())),
-            tuple(training.get("rollout_log_probs", ())),
+            tuple(training.get("rollout_log_probs", ())) if rollout_log_probs else (),
             advantage,
         )
-        violation = policy_row_violation(row.tokens, row.mask, row.logprobs)
+        violation = policy_row_violation(row.tokens, row.mask, row.logprobs if rollout_log_probs else None)
         if violation:
             raise ValueError(f"invalid Tinker training row: {violation}")
         if any(isinstance(token, bool) or not isinstance(token, int) or token < 0 for token in row.tokens):
@@ -81,6 +91,9 @@ class TinkerLoss(ABC):
 
     loss_fn = "importance_sampling"
     needs_base_logprobs = False
+    #: Whether the inputs read each row's rollout log probabilities and the trajectory advantage.
+    uses_rollout_log_probs = True
+    uses_advantages = True
 
     def check_kl_coef(self, kl_coef: float) -> None:
         """Raise ``ValueError`` if this family cannot train with ``kl_coef``; any coefficient is accepted by default."""
@@ -105,6 +118,30 @@ class ImportanceSamplingLoss(TinkerLoss):
         return [row.inputs([row.advantage * mask for mask in row.mask]) for row in rows]
 
 
+class CrossEntropyLoss(TinkerLoss):
+    """Supervised fine-tuning: Tinker's ``cross_entropy`` on every response token the loss mask selects."""
+
+    loss_fn = "cross_entropy"
+    uses_rollout_log_probs = False
+    uses_advantages = False
+
+    def check_kl_coef(self, kl_coef: float) -> None:
+        if kl_coef:
+            raise ValueError("sft trains no KL penalty; set kl-coef to 0")
+
+    def inputs(
+        self, rows: Sequence[TokenRow], base_logprobs: Sequence[Sequence[float]], *, kl_coef: float
+    ) -> list[dict[str, list[Any]]]:
+        # Position i predicts token i+1; prompt positions weigh 0.
+        return [
+            {
+                "target_tokens": list(row.tokens[1:]),
+                "weights": [0.0] * (len(row.tokens) - len(row.mask) - 1) + [float(mask) for mask in row.mask],
+            }
+            for row in rows
+        ]
+
+
 class TinkerCustomLoss(TinkerLoss):
     """A loss family computed on the Reef host through ``forward_backward_custom``.
 
@@ -121,7 +158,7 @@ class TinkerCustomLoss(TinkerLoss):
     def loss(self, data: Sequence[Any], logprobs: Sequence[Any]) -> tuple[Any, Mapping[str, float]]: ...
 
 
-_BUILTIN: dict[str, TinkerLoss] = {"importance_sampling": ImportanceSamplingLoss()}
+_BUILTIN: dict[str, TinkerLoss] = {"importance_sampling": ImportanceSamplingLoss(), "sft": CrossEntropyLoss()}
 _resolved: dict[str, TinkerLoss] = {}
 
 

@@ -247,7 +247,11 @@ is the control plane's client for it, and ``inference/remote/runtime.py``
 supplies the ``remote_serving`` runtime kind and builds the engines' input
 (``serving_engine_config``). ``inference/null.py`` is the
 runtime of ``inference.backend: none``: it runs no engine and refuses every
-request. ``inference/tinker.py`` serves Tinker's sampler.
+request. ``inference/tinker.py`` serves Tinker's sampler. ``tinker/`` holds
+the Tinker SDK pieces that the Tinker training component and the Tinker
+serving runtime share: ``tinker/sampling.py`` renders and samples text chat
+with Reef's training capture, for serving and for the component's own
+rollouts.
 
 The extension points those packages expose are in `Python API
 <../reference/python-api.rst>`__.

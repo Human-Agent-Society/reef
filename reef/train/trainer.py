@@ -173,7 +173,7 @@ class Trainer:
         else:
             default_state = {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
-        return cls(
+        trainer = cls(
             scenario=scenario,
             records=records,
             pipeline=pipeline,
@@ -182,6 +182,12 @@ class Trainer:
             job_loop=job_loop,
             state=initial_state,
         )
+        if job_loop is not None:
+            restored = JobLoopState.from_dict(initial_state)
+            if restored.job is None and restored.last_job is not None:
+                # A restart can fall between the durable commit of a job's end and the pipeline learning it.
+                pipeline.job_ended(restored.last_job)
+        return trainer
 
     def __init__(
         self,
@@ -683,6 +689,12 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._pipeline.release_records(prepared.released_ids)
+            if self._job_loop is not None:
+                before = JobLoopState.from_dict(self._state)
+                after = JobLoopState.from_dict(prepared.algorithm_state)
+                if after.finished_jobs > before.finished_jobs and after.last_job is not None:
+                    # The job's end is durable: the pipeline learns its outcome, such as a task job's rewards.
+                    self._pipeline.job_ended(after.last_job)
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)

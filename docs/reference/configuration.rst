@@ -1310,13 +1310,21 @@ The built-in generated-task recipe,
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
 ``GeneratedTaskTasks``, and ``GeneratedTaskJobData``. Without
-``pipeline.record2task.config.rounds`` no round runs, no task rolls out, and
-nothing trains.
+``pipeline.record2task.config.rounds`` no round runs and nothing trains. Each
+job is a task job: the training component rolls the job's tasks out on its own
+sampler and trains on their episodes, as
+``recipe.config.job_parameters.rollout`` says. The recipe requires that
+parameter.
 
 .. code:: yaml
 
    recipe:
      implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+     config:
+       job_parameters:
+         rollout:
+           episodes_per_task: 4
+           environment: docker
    pipeline:
      record2record:
        config:
@@ -1334,11 +1342,11 @@ nothing trains.
              state_dir: ${REEF_STATE_DIR}/generations
      task2job:
        config:
-         episodes_per_task: 4
+         tasks_per_step: 2
 
 ``GeneratedTaskRecord2Record`` paces the rounds and holds their source
-sessions. It trains on no report: the recipe trains on its rollout episodes,
-which are not records.
+sessions. It trains on no report: the recipe trains on the episodes that the
+training component runs, which are not records.
 
 .. config::
 
@@ -1346,10 +1354,9 @@ which are not records.
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
    pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
-   pipeline.record2record.config.max_staleness | 0 | the versions that a rollout group's samples may lag behind the served version; ``GeneratedTaskJobData`` drops a group that lags more, and its tasks roll out again
 
-``GeneratedTaskTasks`` runs the generations, and stages and runs each saved
-task's episodes for the rollout:
+``GeneratedTaskTasks`` runs the generations and sends their results to the
+generator:
 
 .. config::
 
@@ -1359,7 +1366,6 @@ task's episodes for the rollout:
    pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
    pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
    pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
-   pipeline.record2task.config.served_model | the model the episodes ask for; the deployment's by default
    pipeline.record2task.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
    pipeline.record2task.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
 
@@ -1376,17 +1382,26 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskJobData`` rolls saved tasks out, assembles one sample from each
-episode that ran, and trains on the groups of each task. A rollout batch trains on
-all of its fresh groups as one job, whatever Tinker's batch size
-(``training.options.batch-size``) is, so the stage has no ``buffer_size`` and
-no ``job_samples``:
+``GeneratedTaskJobData`` hands saved tasks to the training component as one
+task job, whatever Tinker's batch size (``training.options.batch-size``) is,
+so the stage has no ``buffer_size`` and no ``job_samples``:
 
 .. config::
 
-   pipeline.task2job.config.tasks_per_step | 4 | saved tasks of one rollout batch
-   pipeline.task2job.config.episodes_per_task | 4 | training episodes of each task in a rollout. At least 2.
-   pipeline.task2job.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+   pipeline.task2job.config.tasks_per_step | 4 | saved tasks of one task job
+
+The Tinker component runs a task job's episodes on Tinker's sampler at the
+job's start weights. The ``rollout`` job parameter configures them:
+
+.. config::
+
+   rollout.episodes_per_task | required | training episodes of each task, at least 2; the samples of one task form its group
+   rollout.agent | terminus-2 | the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit Tinker's text chat: system, user and assistant text messages, no tools.
+   rollout.environment | docker | the Harbor environment type of the episodes, such as ``docker`` or ``e2b``
+   rollout.agent_host | none | the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
+   rollout.concurrency | 2 | episodes in flight
+   rollout.verifier_timeout_reward | 0.0 | the reward of an episode whose verifier timed out; ``null`` leaves it unscored
+   rollout.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its

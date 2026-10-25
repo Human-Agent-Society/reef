@@ -69,6 +69,7 @@ class TinkerRuntimeFactory(RuntimeFactory):
     def __call__(
         self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
     ) -> TrainingComponent:
+        from reef.tinker.sampling import TinkerSDKSampler
         from reef.train.tinker_backend.client import TinkerSDKClient
         from reef.train.tinker_backend.component import TinkerTrainingComponent
 
@@ -77,10 +78,17 @@ class TinkerRuntimeFactory(RuntimeFactory):
         if not key:
             raise ValueError(f"Tinker requires the environment variable {settings.api_key_env}")
         client = TinkerSDKClient(model_path, settings, key)
+        sampler = None
         try:
-            return TinkerTrainingComponent(model_path, settings, client)
+            # The sampler of the component's own rollouts, for task jobs.
+            sampler = TinkerSDKSampler(
+                model_path, api_key=key, project_id=settings.project_id, timeout_s=settings.inference_timeout_s
+            )
+            return TinkerTrainingComponent(model_path, settings, client, sampler=sampler)
         except BaseException:
             client.close()
+            if sampler is not None:
+                sampler.close()
             raise
 
 

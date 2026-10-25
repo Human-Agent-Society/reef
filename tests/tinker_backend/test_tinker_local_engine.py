@@ -63,6 +63,16 @@ class RemoteClient:
         self.closed = True
 
 
+class UnusedSampler:
+    """The sampler of the component's task jobs as an offline double; these jobs train trajectories, so none samples."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def close(self):
+        pass
+
+
 class Engines(InferenceBackend):
     """The engines on the inference component, as the control plane drives them."""
 
@@ -176,6 +186,7 @@ def serving_config(config, release_format=EXPORTED_ADAPTERS):
 def build(config, monkeypatch, engines):
     """The component and serving runtime the HTTP service builds, over the SDK double and the engine double."""
     monkeypatch.setattr("reef.train.tinker_backend.client.TinkerSDKClient", RemoteClient)
+    monkeypatch.setattr("reef.tinker.sampling.TinkerSDKSampler", UnusedSampler)
     seen = {}
 
     def serve(factory, config, model_path, recipe_config, environ):
@@ -335,6 +346,7 @@ def test_engines_serve_tinker_only_exported_adapters_that_their_engine_loads(tmp
     for name in TOKENS:
         monkeypatch.setenv(name, f"{name.lower()}-value")
     monkeypatch.setattr("reef.train.tinker_backend.client.TinkerSDKClient", RemoteClient)
+    monkeypatch.setattr("reef.tinker.sampling.TinkerSDKSampler", UnusedSampler)
     raw = remote_engine_config(tmp_path)
     monkeypatch.setenv("GPU_HOST_TOKEN", "gpu-host-token")
     raw["inference"]["backend"] = "vllm"

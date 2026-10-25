@@ -482,7 +482,9 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
     settings = _settings(
         recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, agent_record_dir=str(tmp_path / "ar")
     )
-    dispatcher = deploy.build_dispatcher(dataclasses.replace(settings, recipe_settings={}))
+    # The recipe trains task jobs, so its jobs carry the training component's rollout settings.
+    recipe_settings = {"job_parameters": {"rollout": {"episodes_per_task": 2}}}
+    dispatcher = deploy.build_dispatcher(dataclasses.replace(settings, recipe_settings=recipe_settings))
 
     stages = dispatcher.recipe.pipeline_stages
     # A stage the section leaves out is the recipe's own, with no config.

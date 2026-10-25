@@ -15,6 +15,7 @@ it. Nothing is shared in process.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -24,9 +25,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from reef.core.job_data import JobData, TaskItem, TrajectoryItem
 from reef.runtime.interfaces import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.recovery import read_json, write_json
 from reef.runtime.serving import ADAPTER_DIR, holds_weights
+from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
@@ -34,6 +38,10 @@ from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
 from reef.train.tinker_backend.preparation import prepare_tinker_job
+from reef.train.tinker_backend.rollout import RolloutSettings, TaskRollouts, roll_out
+
+#: The rollouts of a task job, in its job directory.
+ROLLOUTS_FILE = "rollouts.json"
 
 
 class TinkerTrainingComponent(LocalJobComponent):
@@ -49,6 +57,15 @@ class TinkerTrainingComponent(LocalJobComponent):
     Jobs of several scenarios can share the component, since each job trains
     from its own start.
 
+    A job's data is trajectories, which it trains as they are, or Harbor
+    tasks (``TaskItem``), a task job. A task job needs the ``rollout``
+    parameter (``RolloutSettings``) and a ``sampler``: before it trains, the
+    component runs the tasks' episodes on the sampler of the job's start
+    (``reef.train.tinker_backend.rollout``) and trains the samples of their
+    groups. It keeps the rollouts in ``rollouts.json`` in the job's
+    directory, so a resumed job trains the same samples, and reports each
+    task's episode rewards in the job's metrics (``rollout_rewards``).
+
     ``config.state_dir`` holds ``base/`` (the base checkpoint),
     ``imported/<digest>/`` (starts taken from releases) and ``jobs/`` (see
     ``LocalJobComponent``); a saved checkpoint is ``jobs/<job_id>/<step>/``,
@@ -57,10 +74,13 @@ class TinkerTrainingComponent(LocalJobComponent):
     the release Reef publishes.
     """
 
-    def __init__(self, base_model: str, config: TinkerConfig, client: TinkerClient) -> None:
+    def __init__(
+        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, sampler: TinkerSampler | None = None
+    ) -> None:
         self._model = base_model
         self._config = config
         self._client = client
+        self._sampler = sampler
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
         self._state_lock = (self._root / ".lock").open("a")
@@ -126,6 +146,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             "kl_coef": self._config.kl_coef,
             "learning_rate": self._config.learning_rate,
             "save_interval": None,
+            "rollout": None,
         }
         unknown = set(parameters) - {"method", "scheduling", *defaults}
         if unknown:
@@ -137,22 +158,77 @@ class TinkerTrainingComponent(LocalJobComponent):
         return merged
 
     def check_job(self, job: TrainingJob) -> None:
-        job_training(self.job_parameters(job.parameters))
+        parameters = self.job_parameters(job.parameters)
+        job_training(parameters)
         if job.start is not None:
             self._validated(TinkerCheckpoint.read(Path(job.start)))
+        tasks = [item for item in job.data.items if isinstance(item, TaskItem)]
+        if tasks and len(tasks) != len(job.data.items):
+            raise ValueError("a Tinker job trains either trajectories or tasks, not both")
+        if tasks:
+            if self._sampler is None:
+                raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
+            RolloutSettings.from_parameters(parameters)
+        elif parameters["rollout"] is not None:
+            raise ValueError("the rollout parameter applies only to a job of tasks")
 
     def close_resources(self) -> None:
         try:
             self._client.close()
+            if self._sampler is not None:
+                self._sampler.close()
         finally:
             self._state_lock.close()
+
+    def task_rollouts(self, job: TrainingJob, directory: Path, start: TinkerCheckpoint) -> TaskRollouts:
+        """The rollouts of a task job: those of an earlier attempt, else new ones on the start's sampler."""
+        record = directory / ROLLOUTS_FILE
+        kept = read_json(record)
+        if kept is not None:
+            samples = JobData.from_dict(kept["samples"]).items
+            rewards = {name: tuple(values) for name, values in kept["rewards"].items()}
+            return TaskRollouts(tuple(item for item in samples if isinstance(item, TrajectoryItem)), rewards)
+        if self._sampler is None:
+            raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
+        tasks = tuple(item for item in job.data.items if isinstance(item, TaskItem))
+        rollouts = asyncio.run(
+            roll_out(
+                tasks,
+                RolloutSettings.from_parameters(self.job_parameters(job.parameters)),
+                self._sampler,
+                start.sampler_path,
+                model=self._model,
+                runtime_load_id=f"tinker:{start.sampler_path}",
+                work_dir=directory / "rollouts",
+            )
+        )
+        write_json(
+            record,
+            {
+                "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
+                "rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+            },
+        )
+        return rollouts
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
         start = self._base if job.start is None else self._validated(TinkerCheckpoint.read(Path(job.start)))
         method, scheduling = job_training(parameters)
+        data = job.data
+        rollout_metrics: dict[str, Any] = {}
+        if data.items and isinstance(data.items[0], TaskItem):
+            rollouts = self.task_rollouts(job, directory, start)
+            rollout_metrics = {
+                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+                "rollout_samples": len(rollouts.samples),
+            }
+            if not rollouts.samples:
+                # No task has a group of two samples to compare, so the job trains nothing.
+                return rollout_metrics
+            data = JobData(data.data_id, rollouts.samples)
         prepared = prepare_tinker_job(
-            job.data,
+            data,
             method,
             start.state_for(method.objective),
             scheduling,
@@ -161,7 +237,7 @@ class TinkerTrainingComponent(LocalJobComponent):
         )
         if prepared.payload is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.
-            return prepared.metrics
+            return {**prepared.metrics, **rollout_metrics}
         batches = [[row_from_payload(row) for row in batch] for batch in prepared.payload["batches"]]
         schedule = resolve_learning_rate_schedule_state(
             start.learning_rate_schedule_state, method.learning_rate_schedule
@@ -208,4 +284,4 @@ class TinkerTrainingComponent(LocalJobComponent):
                     },
                 ),
             )
-        return {**prepared.metrics, "optimizer_steps": len(batches)}
+        return {**prepared.metrics, **rollout_metrics, "optimizer_steps": len(batches)}

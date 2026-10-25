@@ -56,6 +56,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/evaluation/` | Candidate evaluation: running and scoring evaluation episodes, deciding whether a candidate is published, and plugin configuration |
 | `reef/runtime/` | Backend-neutral runtime contracts, scheduling, and publication coordination |
 | `reef/inference/` | Concrete inference integrations, engine control, and weight reception |
+| `reef/tinker/` | Tinker SDK pieces that the Tinker training component and the Tinker serving runtime share |
 | `reef/surface/` | Delivery of published artifacts |
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |

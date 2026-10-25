@@ -13,16 +13,16 @@ generator's method:
 - ``processor``: the three stages. ``GeneratedTaskRecord2Record`` holds the
   source sessions and starts each task-generation round when it is due;
   ``GeneratedTaskTasks`` runs the rounds (generate, validate, send the results
-  back) and each saved task's episodes through the generator service; and
-  ``GeneratedTaskJobData`` rolls saved tasks out and makes job data of the
-  samples of their episodes, which are not records.
+  back); and ``GeneratedTaskJobData`` hands the saved tasks to the training
+  component as task jobs, which the component rolls out on its own sampler.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on Tinker's
   importance sampling loss.
-- ``recipe``: the objective, the step schedule, and the report contract.
+- ``recipe``: the objective and the report contract.
 
-The recipe runs the episodes of its tasks through the generator service (``reef.record2task.generator``).
+The generator service (``reef.record2task.generator``) writes and checks the tasks; the training component
+runs their training episodes.
 """
 
 from reef.recipe.generated_tasks.generator import (

@@ -1768,6 +1768,16 @@ algorithm state. This ``JobLoopState`` has four fields:
 A failed job ends like a finished one. Reef consumed the records of its data when
 it submitted the job, so they do not train again.
 
+Once the commit of a job's end is durable, the trainer calls
+``Task2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
+A trainer that starts with no running job calls it again for the last job
+that ended, so a second call for the same end must change nothing.
+A stage whose job data holds ``TaskItem`` values (Harbor tasks) reads each
+task's rollout results from the outcome's ``metrics``: the Tinker component
+reports ``rollout_rewards``, the rewards of each task's episodes, by task
+name. A component that cannot roll out tasks refuses such a job in
+``check_job``; Slime does.
+
 For a rollback, Reef first imports the release with ``import_start``. It then
 writes the rollback commit and cancels the running job. The next job starts
 from the imported release. A component that cannot load a release raises

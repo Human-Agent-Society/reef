@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskRecord2Record, GeneratedTaskTasks
 from reef.train.pipeline import PipelineSpec
@@ -15,14 +17,16 @@ from reef.train.pipeline import PipelineSpec
 class GeneratedTaskRecipe(WeightTrainingRecipe):
     """Group relative advantages per generated task, on Tinker's importance sampling loss.
 
-    The recipe binds the objective, the step schedule, and the report
-    contract. Its stages are ``GeneratedTaskRecord2Record``,
-    ``GeneratedTaskTasks``, and ``GeneratedTaskJobData``; the deployment's
-    ``pipeline`` section gives their config: the rounds, the task
-    generator, and the generator service in ``record2task``, the source
-    sessions and the pace of the rounds in ``record2record``, and the rollout
-    batches and their task groups in ``task2job``. Without that section, no round runs, no task rolls out,
-    and nothing trains.
+    The recipe binds the objective and the report contract. Its stages are
+    ``GeneratedTaskRecord2Record``, ``GeneratedTaskTasks``, and
+    ``GeneratedTaskJobData``; the deployment's ``pipeline`` section gives
+    their config: the rounds, the task generator, and the generator service
+    in ``record2task``, the source sessions and the pace of the rounds in
+    ``record2record``, and the tasks of one job in ``task2job``. Without that
+    section, no round runs and nothing trains. Each job is a task job: the
+    training component rolls its tasks out, as ``recipe.config.job_parameters.rollout``
+    says (the Tinker component's ``RolloutSettings``), which the recipe
+    requires.
 
     Enabled rounds save each task and its train/eval split in the scenario's task store before their episodes run.
     Eval tasks stay in the store without episodes or training feedback.
@@ -34,6 +38,14 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     def report_type(self) -> type[ReportBase]:
         # A scored report: what a source session ends with. The recipe trains on no report.
         return ScoredRolloutReport
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance((self.job_parameters or {}).get("rollout"), Mapping):
+            raise RecipeConfigError(
+                "the generated-task recipe trains task jobs: set recipe.config.job_parameters.rollout "
+                "(the episodes of each task and the agent that runs them)"
+            )
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:

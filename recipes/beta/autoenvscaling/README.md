@@ -40,7 +40,7 @@ beta/autoenvscaling/
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
-AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2task.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) runs the tasks and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
+AutoEnvScaling is a task generator. The deployment selects it in `pipeline.record2task.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) hands the tasks to the training component, which runs them and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
 
 ## The generator
 
@@ -49,7 +49,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. The test review follows ([the task checks](#the-task-checks)). A duplicate task is invalid.
-4. The recipe saves each valid task with its train/eval split. Later it runs `episodes_per_task` episodes of each training task; it runs no eval tasks.
+4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.episodes_per_task` episodes of each training task in a task job; the recipe runs no eval tasks.
 5. When every training task of the generation has a result, `record_results` computes the pass rate of each task that ran and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
 Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
