@@ -410,18 +410,18 @@ def prepare_critic_args(args: SlimeArguments) -> SlimeArguments:
         critic_args.lr = float(critic_lr)
     # A LoRA actor gets a LoRA critic: the value model keeps the same frozen
     # base with its own adapters and a trainable value head (Slime swaps the
-    # head in after Reef's provider wraps the model), so a critic the size of
-    # the policy fits beside it. Without LoRA the critic trains every
-    # parameter through the user's own provider, as before.
+    # head in after Reef's provider returns), so a critic the size of the
+    # policy fits beside it. Without LoRA the critic trains every parameter.
+    # Either way it builds through Reef's provider, which also installs the
+    # checkpoint's YaRN scaling; a role config's own provider chains behind it.
     if not critic_args.megatron_lora_rank:
-        # Imported here: slime_arguments loads the Megatron stack, which the
-        # bridge's import chain must not pull in.
-        from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
-
         critic_args.megatron_lora_alpha = None
         critic_args.megatron_lora_target_modules = None
-        if critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH:
-            critic_args.custom_model_provider_path = critic_args.reef_chained_model_provider_path
+    # Imported here: slime_arguments loads the Megatron stack, which the
+    # bridge's import chain must not pull in.
+    from reef.train.slime_backend.reef_adapters.slime_arguments import install_reef_model_provider
+
+    install_reef_model_provider(critic_args)
     apply_critic_checkpoint_roots(critic_args)
     return critic_args
 

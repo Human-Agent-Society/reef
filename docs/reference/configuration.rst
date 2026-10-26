@@ -427,6 +427,14 @@ options reach ``reef.service.training_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
 argument handling and Slime's native parser.
 
+Every Slime actor and critic builds through Reef's Megatron model provider; a
+``custom-model-provider-path`` names a provider it chains behind its own. When
+the checkpoint's ``config.json`` declares ``rope_scaling`` of type ``yarn``, the
+provider installs the same YaRN rotary embedding in Megatron, with the
+attention factor the Hugging Face model applies, and turns the fused RoPE
+kernel off. ``rotary-base`` must equal the config's ``rope_theta``. Serve and
+train one checkpoint directory, so both sides read the same scaling.
+
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
 The factory path must name an ``InferenceHandler`` subclass with a
@@ -442,8 +450,18 @@ rollout log probabilities and the weight version that produced each token.
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
 Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
-``sampling_defaults``, ``force_reasoning`` and ``chat_template_kwargs``; per-request sampling extras pass
+``sampling_defaults``, ``force_reasoning``, ``chat_template_kwargs`` and
+``episode_continuation``; per-request sampling extras pass
 through ``sglang_sampling_params`` or ``vllm_sampling_params``.
+``episode_continuation: true`` serves a multi-turn episode from its exact
+sampled tokens. The client names the episode in the OpenAI ``user`` field and
+sends each later request as the previous messages, the sampled assistant turn
+and the new user or tool messages. The handler renders only the new messages
+and appends them to the previous call's tokens, so a template that rewrites
+earlier turns, as Qwen3's drops their reasoning, cannot change the trained
+tokens, and the multi-turn sample assembles with ``realign_threshold: 0``. A
+request without ``user`` renders as usual. A request that names an episode
+but does not extend it is refused.
 ``chat_template_kwargs`` renders a request that omits them, for example
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
