@@ -33,7 +33,7 @@ from recipes.beta.autoenvscaling import (
     load_sources,
     workspace_reply,
 )
-from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
+from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2task.generator import GeneratorError, WrittenTask
@@ -271,8 +271,9 @@ class StandInAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
+        variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        self.calls.append({"source": source.record_id, "tags": dict(tags), "work_dir": work_dir})
+        self.calls.append({"source": source.record_id, "tags": dict(tags), "work_dir": work_dir, "variant": variant})
         if source.record_id in self.unusable:
             raise SourceError(f"the record {source.record_id} holds no session messages")
         if source.record_id in self.unreachable:

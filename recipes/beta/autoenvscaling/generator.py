@@ -11,6 +11,11 @@ A second call for a closed generation does nothing.
 Eval tasks run no episodes and receive no band measurement. A task that could not run is an outage, not a band
 measurement. The generator reports nothing to the Designer, which is not trained here. A cursor under the state
 directory lets a restart continue with the next session.
+
+With ``adaptive`` on, ``record_results`` also keeps each training task whose pass rate fell outside the band, and a
+later generation gives up to ``variant_share`` of its slots to variants of those tasks: harder for a task the solver
+passes too often, simpler for one it passes too rarely. A variant comes from the same session, so it shares the
+parent's split. Eval tasks and outages never become parents, and each parent is varied once.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import statistics
 import threading
 from collections.abc import Mapping
@@ -30,18 +36,21 @@ from typing import Any, Self
 from pydantic import TypeAdapter
 
 from recipes.beta.autoenvscaling.author import (
+    VARIANT_HARDER,
+    VARIANT_SIMPLER,
     AgentAuthor,
     AuthorError,
     CandidateChecks,
     PromptAuthor,
     SourceError,
     TaskAuthor,
+    TaskVariant,
     workspace_reply,
 )
 from recipes.beta.autoenvscaling.checks import CheckResult, OracleCheck, ReviewCheck, TaskCheck, check_mode
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
-from reef.core.tasks import HarborTask, HarborTaskError
+from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -60,6 +69,13 @@ from reef.sandbox.process import SandboxUnavailable
 logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
+DEFAULT_VARIANT_SHARE = 0.5
+# The most parents an adaptive generator keeps; the oldest go first.
+MAX_PARENTS = 256
+FEEDBACK_FILE = "adaptive.json"
+PARENTS_DIR = "parents"
+# A variant takes no session from the walk, so its proposal has no walk position.
+VARIANT_POSITION = -1
 DEFAULT_BAND_LOW = 0.25
 DEFAULT_BAND_HIGH = 0.75
 DEFAULT_MAX_CHECKS = 6
@@ -139,6 +155,8 @@ CONFIG_KEYS = frozenset(
         "behaviour_rule",
         "review",
         "review_model",
+        "adaptive",
+        "variant_share",
     }
 )
 
@@ -318,7 +336,8 @@ class SessionProposal:
 
     ``task_name`` is set once the author's task was admitted. ``stage`` says where a session that became no
     task inside the band stopped (``STAGE_*``); it is empty for a task inside the band. ``designer_record_id`` is
-    the author's last recorded call, the one that wrote the task.
+    the author's last recorded call, the one that wrote the task. A variant has ``position`` -1, the name of the
+    task it varies in ``parent_task`` and ``harder`` or ``simpler`` in ``direction``; both are empty otherwise.
     """
 
     index: int
@@ -328,6 +347,8 @@ class SessionProposal:
     task_name: str | None = None
     stage: str = ""
     refusal: str = ""
+    parent_task: str = ""
+    direction: str = ""
 
 
 @dataclass(frozen=True)
@@ -352,6 +373,36 @@ class OpenGeneration:
 
 
 OPEN_GENERATION = TypeAdapter(OpenGeneration)
+
+
+@dataclass(frozen=True)
+class ParentTask:
+    """A training task whose pass rate fell outside the band: one an adaptive generation may vary.
+
+    Values: ``name`` is the task's name and ``source_record_id`` its session's record id. ``generation`` is the
+    generator's number of the generation that made it, a non-negative int. ``pass_rate`` is in [0, 1], the mean of
+    its ``episodes`` (a positive int) rollout rewards, and ``direction`` is ``harder`` or ``simpler``. ``varied``
+    is true once a generation gave it a variant slot.
+    Purpose: ``record_results`` adds one per training task outside the band and keeps the task's files under
+    ``parents/<name>``; ``generate`` picks the newest unvaried parents for its variant slots.
+    """
+
+    name: str
+    source_record_id: str
+    generation: int
+    pass_rate: float
+    episodes: int
+    direction: str
+    varied: bool = False
+
+    def __post_init__(self) -> None:
+        if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
+            raise ValueError(f"a parent's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
+        if not 0 <= self.pass_rate <= 1 or self.episodes < 1 or self.generation < 0:
+            raise ValueError("a parent needs a pass rate in [0, 1], positive episodes and a generation")
+
+
+PARENTS = TypeAdapter(list[ParentTask])
 
 
 @dataclass(frozen=True)
@@ -468,9 +519,19 @@ class AutoEnvScalingGenerator(TaskGenerator):
         band_high: float | None = DEFAULT_BAND_HIGH,
         max_checks: int = DEFAULT_MAX_CHECKS,
         task_checks: tuple[TaskCheck, ...] = (),
+        is_adaptive: bool = False,
+        variant_share: float = DEFAULT_VARIANT_SHARE,
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
+        if not isinstance(is_adaptive, bool):
+            raise ValueError("adaptive must be true or false")
+        if (
+            isinstance(variant_share, bool)
+            or not isinstance(variant_share, (int, float))
+            or not 0 < variant_share <= 1
+        ):
+            raise ValueError("variant_share must be in (0, 1]")
         for label, bound in (("band_low", band_low), ("band_high", band_high)):
             if bound is not None and not 0 <= bound <= 1:
                 raise ValueError(f"{label} must be in [0, 1] or null")
@@ -498,6 +559,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         )
         # The generation that generate makes now; generate takes the next number from the cursor.
         self.generation = self.cursor.next_generation
+        self.is_adaptive = is_adaptive
+        self.variant_share = float(variant_share)
+        feedback_path = state_dir / FEEDBACK_FILE
+        self.parents: list[ParentTask] = (
+            PARENTS.validate_json(feedback_path.read_bytes()) if is_adaptive and feedback_path.is_file() else []
+        )
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -514,6 +581,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
         sources_path = str(config.get("sources_path", "") or "")
         if not state_dir or not sources_path:
             raise PluginConfigError("AutoEnvScalingGenerator needs a state_dir and a sources_path")
+        is_adaptive = config.get("adaptive", False)
+        if not isinstance(is_adaptive, bool):
+            raise PluginConfigError("AutoEnvScalingGenerator adaptive must be true or false")
+        if is_adaptive and config.get("author", DEFAULT_AUTHOR) != "agent":
+            raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs author: agent")
         # Each scenario keeps its own cursor, reports, runs and repository snapshots.
         scenario_dir = Path(state_dir) / scenario
         try:
@@ -530,6 +602,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 band_high=band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high"),
                 max_checks=int(config.get("max_checks", DEFAULT_MAX_CHECKS)),
                 task_checks=() if review is None else (review,),
+                is_adaptive=is_adaptive,
+                variant_share=float(config.get("variant_share", DEFAULT_VARIANT_SHARE)),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
@@ -542,6 +616,33 @@ class AutoEnvScalingGenerator(TaskGenerator):
         partial.write_text(json.dumps(asdict(cursor)) + "\n", encoding="utf-8")
         os.replace(partial, path)
         self.cursor = cursor
+
+    def save_parents(self) -> None:
+        """Keep the parents in the state directory, replacing the file whole."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / FEEDBACK_FILE
+        partial = path.with_name(f"{FEEDBACK_FILE}.partial")
+        partial.write_bytes(PARENTS.dump_json(self.parents))
+        os.replace(partial, path)
+
+    def variants(self) -> list[tuple[ParentTask, SessionSource]]:
+        """The parents this generation varies, newest first, with their sessions; none unless adaptive.
+
+        At most ``variant_share`` of ``count`` slots, rounded down; a parent whose session left the sources file,
+        or whose files are gone, is skipped.
+        """
+        if not self.is_adaptive:
+            return []
+        sessions = {source.record_id: source for source in self.sources}
+        chosen: list[tuple[ParentTask, SessionSource]] = []
+        for parent in sorted(self.parents, key=lambda parent: (-parent.generation, parent.name)):
+            if len(chosen) >= int(self.count * self.variant_share):
+                break
+            source = sessions.get(parent.source_record_id)
+            if parent.varied or source is None or not (self.state_dir / PARENTS_DIR / parent.name).is_dir():
+                continue
+            chosen.append((parent, source))
+        return chosen
 
     async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
         """One generation: the next ``count`` sessions, each rebuilt and admitted; an outage ends it with what ran.
@@ -560,12 +661,31 @@ class AutoEnvScalingGenerator(TaskGenerator):
         pending: dict[str, SessionProposal] = {}
         error = ""
         tasks: list[HarborTask] = []
+        variants = self.variants()
         for index in range(self.count):
-            position = self.cursor.next_position
-            source = self.sources[position % len(self.sources)]
-            proposal = SessionProposal(index, position, source.record_id)
+            variant: TaskVariant | None = None
+            if index < len(variants):
+                parent, source = variants[index]
+                position = VARIANT_POSITION
+                variant = TaskVariant(
+                    parent=parent.name,
+                    parent_dir=self.state_dir / PARENTS_DIR / parent.name,
+                    direction=parent.direction,
+                    pass_rate=parent.pass_rate,
+                    episodes=parent.episodes,
+                )
+                proposal = SessionProposal(
+                    index, position, source.record_id, parent_task=parent.name, direction=parent.direction
+                )
+                # Each parent gets one variant slot, whatever becomes of the variant.
+                self.parents = [replace(kept, varied=kept.varied or kept.name == parent.name) for kept in self.parents]
+                self.save_parents()
+            else:
+                position = self.cursor.next_position
+                source = self.sources[position % len(self.sources)]
+                proposal = SessionProposal(index, position, source.record_id)
             try:
-                task = await self.rebuilt(source, index)
+                task = await self.rebuilt(source, index, variant=variant)
             except ProposalRefused as exc:
                 refused.append(replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc)))
             except AuthorError as exc:
@@ -578,7 +698,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 )
                 tasks.append(task)
             # The session is taken; a restart continues with the next one. A cancelled run takes none.
-            self.save_cursor(replace(self.cursor, next_position=position + 1))
+            if variant is None:
+                self.save_cursor(replace(self.cursor, next_position=position + 1))
             if error:
                 logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                 break
@@ -616,9 +737,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 )
                 return
 
-    async def rebuilt(self, source: SessionSource, index: int) -> HarborTask:
-        """The author's task from one session, admitted; its sources are the author's last recorded call and the
-        session.
+    async def rebuilt(self, source: SessionSource, index: int, *, variant: TaskVariant | None = None) -> HarborTask:
+        """The author's task from one session, or a variant of a parent from it, admitted; its sources are the
+        author's last recorded call and the session, so a variant shares its parent's split.
 
         Raises :class:`ProposalRefused` when the session becomes no task, and ``AuthorError`` when the author
         could not run.
@@ -637,7 +758,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         work_dir = self.state_dir / "runs" / f"{self.generation:05d}-{index:03d}"
         stop = threading.Event()
         try:
-            authored = await asyncio.to_thread(self.author.author, source, work_dir, checks, tags=tags, stop=stop)
+            authored = await asyncio.to_thread(
+                self.author.author, source, work_dir, checks, tags=tags, stop=stop, variant=variant
+            )
         except asyncio.CancelledError:
             # The thread outlives the cancelled await; the stop signal ends the agent's run in it.
             stop.set()
@@ -664,10 +787,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ProposalRefused(
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
+        lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
         return replace(
             task,
             source_agent_record_ids=(record_id, source.record_id),
-            metadata={**task.metadata, "designer_record_id": record_id},
+            metadata={**task.metadata, "designer_record_id": record_id, **lineage},
         )
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:
@@ -712,6 +836,34 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.save_validation(task.name, tuple(results), stage, str(written.path))
         return TaskValidationResult(errors)
 
+    def keep_parents(
+        self, generation: int, outcomes: Mapping[str, TaskOutcome], ran: Mapping[str, HarborTask]
+    ) -> None:
+        """Keep each training task outside the band as a parent, with its files; the oldest beyond the bound go.
+
+        Only rolled out training tasks reach ``outcomes``: eval tasks and outages never become parents.
+        """
+        known = {parent.name for parent in self.parents}
+        root = self.state_dir / PARENTS_DIR
+        for name, outcome in outcomes.items():
+            if outcome.band == BAND_INSIDE or name in known:
+                continue
+            write_harbor_task(ran[name], root)
+            self.parents.append(
+                ParentTask(
+                    name=name,
+                    source_record_id=outcome.source_record_id,
+                    generation=generation,
+                    pass_rate=outcome.pass_rate,
+                    episodes=len(outcome.rollout_rewards),
+                    direction=VARIANT_HARDER if outcome.band == BAND_ABOVE else VARIANT_SIMPLER,
+                )
+            )
+        while len(self.parents) > MAX_PARENTS:
+            dropped = self.parents.pop(0)
+            shutil.rmtree(root / dropped.name, ignore_errors=True)
+        self.save_parents()
+
     async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
         """Close an open generation: save training pass rates, band measurements and held-out outcomes in its report.
 
@@ -726,6 +878,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         pending = dict(state.pending)
         proposals = list(state.refused)
         outcomes: dict[str, TaskOutcome] = {}
+        ran: dict[str, HarborTask] = {}
         for result in results:
             proposal = pending.pop(result.task.name)
             if isinstance(result, HeldOutTask):
@@ -760,6 +913,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 band=band,
             )
             outcomes[outcome.name] = outcome
+            ran[outcome.name] = result.task
             if outcome.band == BAND_INSIDE:
                 proposals.append(proposal)
                 continue
@@ -777,12 +931,15 @@ class AutoEnvScalingGenerator(TaskGenerator):
             "band": {"low": self.band_low, "high": self.band_high},
             "next_position": self.cursor.next_position,
             "proposals": [
-                {**asdict(proposal), "checks": checks_document(state, proposal.task_name)} for proposal in proposals
+                {**proposal_document(proposal), "checks": checks_document(state, proposal.task_name)}
+                for proposal in proposals
             ],
             "tasks": [
                 {**asdict(outcome), "checks": checks_document(state, outcome.name)} for outcome in outcomes.values()
             ],
         }
+        if self.is_adaptive:
+            self.keep_parents(state.number, outcomes, ran)
         report_path = self.state_dir / f"generation-{state.number:05d}.json"
         report_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         open_path.unlink()
@@ -795,6 +952,15 @@ class AutoEnvScalingGenerator(TaskGenerator):
             len(proposals),
             report_path,
         )
+
+
+def proposal_document(proposal: SessionProposal) -> dict[str, object]:
+    """A proposal as the report keeps it; a session rebuilt from scratch has no variant fields."""
+    document = asdict(proposal)
+    if not proposal.parent_task:
+        document.pop("parent_task")
+        document.pop("direction")
+    return document
 
 
 def checks_document(state: OpenGeneration, task_name: str | None) -> list[dict[str, object]]:

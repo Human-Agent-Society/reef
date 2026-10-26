@@ -107,6 +107,8 @@ The generator's `config` keys:
 | `max_checks` | 6 | the agent's checks that ran, in one run |
 | `max_model_calls` | 250 | the agent's model calls in one run |
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
+| `adaptive` | false | vary tasks outside the band in later generations ([adaptive generation](#adaptive-generation)); needs `author: agent` |
+| `variant_share` | 0.5 | with `adaptive`, the largest share of a generation's slots that go to variants |
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
@@ -123,6 +125,12 @@ The agent holds no credential. Its model calls go through a loopback gateway tha
 The pass rate of a task that ran is the mean reward of its training episodes. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
 The band does not decide what trains. The recipe trains on the training episodes of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every episode of a group whose rewards are all equal. With 0 or 1 rewards and four episodes per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+
+## Adaptive generation
+
+With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots, rounded down, to the newest parents. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
+
+Eval tasks and outages never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. A replayed result adds nothing, because a closed generation is not closed again. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. Calibration before admission, proposer training and retiring tasks from the pool are not part of this mode.
 
 ## The task checks
 

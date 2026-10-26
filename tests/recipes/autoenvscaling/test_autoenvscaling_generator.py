@@ -48,7 +48,7 @@ from recipes.beta.autoenvscaling import (
     admitted_task,
     workspace_reply,
 )
-from recipes.beta.autoenvscaling.author import AgentTools
+from recipes.beta.autoenvscaling.author import AgentTools, TaskVariant
 from recipes.beta.autoenvscaling.checks import CheckResult
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -136,6 +136,7 @@ class BlockingAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
+        variant: TaskVariant | None = None,
     ) -> AuthoredTask:
         self.work_dirs.append(work_dir)
         self.started.set()
