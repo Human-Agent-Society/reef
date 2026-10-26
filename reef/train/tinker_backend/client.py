@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.serving import ADAPTER_DIR
+from reef.tinker.sampling import close_service
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
@@ -118,7 +119,7 @@ class TinkerSDKClient(TinkerClient):
             status = "success"
             return checkpoint
         finally:
-            service.close(status).result(timeout=self._config.train_timeout_s)
+            close_service(self._sdk, service, status, timeout_s=self._config.train_timeout_s)
 
     def train(
         self,
@@ -170,7 +171,7 @@ class TinkerSDKClient(TinkerClient):
             status = "success"
             return result_checkpoint, metrics
         finally:
-            service.close(status).result(timeout=self._config.train_timeout_s)
+            close_service(self._sdk, service, status, timeout_s=self._config.train_timeout_s)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
         if self.base_client is None:
@@ -234,4 +235,4 @@ class TinkerSDKClient(TinkerClient):
             shutil.rmtree(staging, ignore_errors=True)
 
     def close(self) -> None:
-        self._service.close("success").result(timeout=self._config.train_timeout_s)
+        close_service(self._sdk, self._service, "success", timeout_s=self._config.train_timeout_s)

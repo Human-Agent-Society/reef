@@ -21,6 +21,18 @@ from typing import Any
 from reef.runtime.interfaces import UpstreamStatusError
 
 
+def close_service(sdk: Any, service: Any, status: str, *, timeout_s: float | None) -> None:
+    """Close the SDK ``ServiceClient`` ``service``, ending its session with ``status`` (``success`` or ``errored``).
+
+    A Tinker-compatible service without the session-finish call, such as Spindle, answers 404 to it and ends
+    the session when its heartbeats stop; closing still releases the client's connections.
+    """
+    try:
+        service.close(status).result(timeout=timeout_s)
+    except sdk.NotFoundError:
+        return
+
+
 @dataclass(frozen=True)
 class SampleResult:
     tokens: tuple[int, ...]
@@ -138,7 +150,7 @@ class TinkerSDKSampler(TinkerSampler):
         return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
 
     def close(self) -> None:
-        self._service.close("success").result(timeout=self._timeout_s)
+        close_service(self._sdk, self._service, "success", timeout_s=self._timeout_s)
 
 
 def chat_completion(

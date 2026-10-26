@@ -79,6 +79,8 @@ class Sampler:
 
 
 class Service:
+    close_refusal: Exception | None = None
+
     def __init__(self, events, *, fail=False):
         self.events = events
         self.fail = fail
@@ -108,6 +110,8 @@ class Service:
 
     def close(self, status):
         self.events.append(("close", status))
+        if self.close_refusal is not None:
+            raise self.close_refusal
         return Future(None)
 
 
@@ -121,8 +125,13 @@ class BadRequestError(Exception):
     pass
 
 
+class NotFoundError(Exception):
+    pass
+
+
 class SDK:
     BadRequestError = BadRequestError
+    NotFoundError = NotFoundError
     ModelInput = ModelInput
     Datum = SimpleNamespace
     AdamParams = SimpleNamespace
@@ -314,6 +323,27 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, samp
         sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
     client.close()
     assert client._sdk.events[-1] == ("close", "success")
+
+
+def test_a_null_seed_lets_the_service_choose(client):
+    # Spindle's multi-LoRA trainer refuses a per-model seed.
+    client._config = replace(client._config, seed=None)
+    client.initialize()
+    assert ("initialize", client._model, 32, None) in client._sdk.events
+
+
+def test_a_service_without_the_session_finish_call_still_trains(client):
+    # Spindle answers 404 to POST /api/v1/sessions/{id}/finish and ends the session when its heartbeats stop.
+    Service.close_refusal = NotFoundError("Error code: 404 - Not Found")
+    try:
+        base = TinkerCheckpoint(client._model, 32, "tinker://b/state", "tinker://b/sampler")
+        row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
+        checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
+        client.close()
+    finally:
+        Service.close_refusal = None
+    assert checkpoint.state_path == "tinker://next/state"
+    assert [event for event in client._sdk.events if event[0] == "close"] == [("close", "success")] * 2
 
 
 def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):

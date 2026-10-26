@@ -17,7 +17,9 @@ class TinkerConfig:
     batch_size: int = config_option(
         1, help="Rollouts per optimizer step; the component cuts each job's data into steps of this size."
     )
-    seed: int = config_option(0, help="Initial adapter seed.")
+    seed: int | None = config_option(
+        0, help="Initial adapter seed; null lets the service choose (Spindle's multi-LoRA trainer refuses a seed)."
+    )
     api_key_env: str = config_option("TINKER_API_KEY", help="Environment variable containing the Tinker API key.")
     base_url: str | None = config_option(
         None,
