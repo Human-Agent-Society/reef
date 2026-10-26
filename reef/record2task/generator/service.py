@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
 import importlib.util
 import json
 import logging
@@ -84,6 +85,9 @@ logger = logging.getLogger(__name__)
 DOCKER_PROBE_TIMEOUT_S = 5.0
 #: The Harbor environments the generator runs its checks and episodes in: local Docker, or E2B cloud sandboxes.
 HARBOR_ENVIRONMENTS = ("docker", "e2b")
+#: The names Harbor's e2b environment imports from the e2b package (harbor/environments/e2b.py); without one of them
+#: Harbor marks the environment missing and every check fails.
+HARBOR_E2B_NAMES = ("ALL_TRAFFIC", "AsyncSandbox", "AsyncTemplate", "FileType", "SandboxNetworkOpts", "Template")
 
 
 # ------------------------------------------------------------- the readiness
@@ -111,6 +115,40 @@ class ModuleProbe(ReadinessProbe):
         if importlib.util.find_spec(self.module) is not None:
             return ""
         reason = f"{self.module} does not import under {sys.executable}"
+        return f"{reason}; {self.hint}" if self.hint else reason
+
+
+class ModuleNamesProbe(ReadinessProbe):
+    """A module imports under this interpreter and defines the names a caller imports from it.
+
+    Values: ``module`` is a non-empty module name, and ``name`` is the same name. ``names`` is a tuple of non-empty
+    attribute names. ``hint`` is text appended to a reason, empty for none. ``missing`` returns "" if and only if
+    ``module`` imports and defines every name in ``names``; otherwise it returns a reason that names the module, the
+    interpreter and the import error or the absent names, followed by ``hint``.
+    Purpose: ``readiness_probes`` checks the e2b package with the names Harbor's e2b environment imports, so an e2b
+    too old for Harbor fails readiness instead of every check.
+    """
+
+    def __init__(self, module: str, names: tuple[str, ...], *, hint: str = "") -> None:
+        if not isinstance(module, str) or not module:
+            raise ValueError("module must be a non-empty module name")
+        if not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names):
+            raise ValueError("names must be a tuple of non-empty attribute names")
+        self.name = module
+        self.module = module
+        self.names = names
+        self.hint = hint
+
+    def missing(self) -> str:
+        try:
+            namespace = vars(importlib.import_module(self.module))
+        except ImportError as exc:
+            reason = f"{self.module} does not import under {sys.executable}: {exc}"
+        else:
+            absent = [name for name in self.names if name not in namespace]
+            if not absent:
+                return ""
+            reason = f"{self.module} under {sys.executable} lacks {', '.join(absent)}"
         return f"{reason}; {self.hint}" if self.hint else reason
 
 
@@ -154,8 +192,10 @@ class DockerProbe(ReadinessProbe):
 class EnvironmentVariableProbe(ReadinessProbe):
     """A variable of this process's environment is set and not empty.
 
-    Values: ``variable`` is a non-empty variable name, and ``name`` is the same name. ``missing`` names the
-    variable and never its value, since the value can be a secret.
+    Values: ``variable`` is a non-empty variable name, and ``name`` is the same name. ``hint`` is text appended to
+    a reason, empty for none. ``missing`` returns "" if and only if ``os.environ[variable]`` is set and not empty;
+    otherwise it returns "<variable> is not set where reef serve starts the generator", followed by ``hint``. It
+    names the variable and never its value, since the value can be a secret.
     Purpose: ``readiness_probes`` makes one for ``E2B_API_KEY`` when the Harbor environment is ``e2b``; the
     ``/healthz`` handler reads ``missing``.
     """
@@ -170,7 +210,7 @@ class EnvironmentVariableProbe(ReadinessProbe):
     def missing(self) -> str:
         if os.environ.get(self.variable):
             return ""
-        reason = f"{self.variable} is not set in the generator's environment"
+        reason = f"{self.variable} is not set where reef serve starts the generator"
         return f"{reason}; {self.hint}" if self.hint else reason
 
 
@@ -189,8 +229,10 @@ def readiness_probes(*, harbor: str | None = None, environment: str = "docker") 
     if environment == "e2b":
         return (
             *stack,
-            EnvironmentVariableProbe("E2B_API_KEY", hint="set it where reef serve starts the generator"),
-            ModuleProbe("e2b", hint="Harbor's e2b environment needs it; install reef-infra[e2b]"),
+            EnvironmentVariableProbe("E2B_API_KEY", hint="export it before reef serve starts"),
+            ModuleNamesProbe(
+                "e2b", HARBOR_E2B_NAMES, hint="Harbor's e2b environment needs it; install reef-infra[e2b]"
+            ),
         )
     raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
 
@@ -215,9 +257,8 @@ class TaskChecks(ABC):
 class HarborChecks(TaskChecks):
     """The checks through the harbor command line, in one Harbor environment.
 
-    Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is a non-empty
-    Harbor environment name, such as ``docker`` or ``e2b``. ``runs`` is the registry of harbor children, or None for
-    a registry per check.
+    Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
+    ``HARBOR_ENVIRONMENTS``. ``runs`` is the registry of harbor children, or None for a registry per check.
     Purpose: the generator process makes it with the ``runs`` of its job runner, so closing the runner stops a
     check; ``CheckJob`` calls ``oracle``, which runs both of a task's harbor runs in ``environment``.
     """
@@ -225,8 +266,8 @@ class HarborChecks(TaskChecks):
     def __init__(
         self, *, harbor: str | None = None, environment: str = "docker", runs: HarborRuns | None = None
     ) -> None:
-        if not isinstance(environment, str) or not environment:
-            raise ValueError("environment must name a Harbor environment, such as docker or e2b")
+        if environment not in HARBOR_ENVIRONMENTS:
+            raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
         self.harbor = harbor
         self.environment = environment
         self.runs = runs
@@ -256,10 +297,10 @@ class ReefTaskEpisodes(TaskEpisodes):
     """An episode runner per call, its episodes tagged with the arm; at most ``concurrency`` episodes of all calls in flight.
 
     Values: ``reef_url`` is the Reef service the agent's calls go to, with ``token`` as its bearer or None.
-    ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config or None for Terminus 2, and
-    ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is a non-empty
-    Harbor environment name, such as ``docker`` or ``e2b``, for every episode. ``concurrency`` is a positive int,
-    the number of episode slots.
+    ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config mapping or None for
+    Terminus 2, and ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is
+    one of ``HARBOR_ENVIRONMENTS``, for every episode. ``episode_slots`` is a semaphore with ``concurrency`` slots,
+    a positive int.
     Purpose: the generator process makes it; ``EpisodeJob`` calls ``run_episodes``. The service's job worker runs
     every episode on its one event loop, so all calls share the episode slots.
     """
@@ -275,8 +316,8 @@ class ReefTaskEpisodes(TaskEpisodes):
         environment: str = "docker",
         concurrency: int = 2,
     ) -> None:
-        if not isinstance(environment, str) or not environment:
-            raise ValueError("environment must name a Harbor environment, such as docker or e2b")
+        if environment not in HARBOR_ENVIRONMENTS:
+            raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
             raise ValueError("concurrency must be a positive int")
         self.reef_url = reef_url

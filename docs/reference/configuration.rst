@@ -1342,13 +1342,20 @@ Absent by default. When present, ``reef serve`` starts the generator service
 it, and publishes its address as ``${endpoints.generator}`` for the
 generated-task stages to consume. The generator writes and checks Harbor tasks and runs their episodes for the
 generated-task recipe and for a task generator such as SPADE, under the same
-interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs the ``harbor``
-command line and the Harbor environment that ``generator.environment`` selects; the Reef service itself needs
-neither. The default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task in an E2B cloud
-sandbox, so a host without Docker, such as a cluster node with only Apptainer, uses it; it needs
-``E2B_API_KEY`` in the generator's environment and ``reef-infra[e2b]``. ``execution.generator`` selects the
-generator's executor, so a deployment can place it on another host. The generator runs its proposals, checks and
-episodes at the same time.
+interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
+host needs the ``harbor`` command line and the Harbor environment that
+``generator.environment`` selects; the Reef service itself needs neither. The
+default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
+only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
+starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
+check looks there, so ``generator.harbor`` must come from the same Python
+environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+compose services), an agent inside the sandbox cannot reach a
+``generator.agent-host`` on a private host, and E2B builds a template for each
+new task image. ``execution.generator`` selects the generator's executor, so a
+deployment can place it on another host. The generator runs its proposals,
+checks and episodes at the same time.
 ``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind episodes.
 
 .. config::

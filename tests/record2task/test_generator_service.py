@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import json
 import logging
@@ -11,6 +12,7 @@ import stat
 import sys
 import threading
 import time
+import types
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -51,6 +53,7 @@ from reef.record2task.generator import (
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.record2task.generator.service import (
     CLOSE_GRACE_S,
+    HARBOR_E2B_NAMES,
     DockerProbe,
     EnvironmentVariableProbe,
     HarborProbe,
@@ -541,10 +544,10 @@ def test_the_checks_and_the_episodes_run_in_the_harbor_environment_they_are_give
     ):
         asyncio.run(task_episodes.run_episodes(tmp_path / "t", **episode_arguments))  # type: ignore[arg-type]
     assert environments == ["docker", "docker", "e2b", "e2b"]
-    with pytest.raises(ValueError, match="environment must name a Harbor environment"):
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b"):
         HarborChecks(environment="")
     for fields, message in (
-        ({"environment": ""}, "environment must name a Harbor environment"),
+        ({"environment": ""}, "the Harbor environment must be docker or e2b"),
         ({"concurrency": 0}, "concurrency must be a positive int"),
     ):
         with pytest.raises(ValueError, match=message):
@@ -716,7 +719,7 @@ def test_the_stack_probes_look_for_reef_eval_harbor_and_docker(
     )
 
 
-KEY_REASON = "E2B_API_KEY is not set in the generator's environment; set it where reef serve starts the generator"
+KEY_REASON = "E2B_API_KEY is not set where reef serve starts the generator; export it before reef serve starts"
 
 
 def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
@@ -732,12 +735,22 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
     assert key.missing() == KEY_REASON, "an empty key is no key"
     monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
     assert key.missing() == ""
-    find_spec = importlib.util.find_spec
-    monkeypatch.setattr(
-        importlib.util, "find_spec", lambda name, package=None: None if name == "e2b" else find_spec(name, package)
-    )
+    import_module = importlib.import_module
+
+    def without_e2b(name: str, package: str | None = None) -> types.ModuleType:
+        if name == "e2b":
+            raise ImportError("No module named 'e2b'")
+        return import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", without_e2b)
     reason = package.missing()
     assert reason.startswith(f"e2b does not import under {sys.executable}") and "install reef-infra[e2b]" in reason
+    too_old = types.ModuleType("e2b")
+    too_old.AsyncSandbox = object  # type: ignore[attr-defined]
+    monkeypatch.setattr(importlib, "import_module", lambda name, package=None: too_old)
+    reason = package.missing()
+    assert reason.startswith(f"e2b under {sys.executable} lacks ALL_TRAFFIC, AsyncTemplate"), reason
+    assert "SandboxNetworkOpts" in reason
     with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
         readiness_probes(environment="modal")
     with pytest.raises(ValueError, match="non-empty environment variable name"):
@@ -747,12 +760,19 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
 def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The test environment may lack reef-eval and the e2b extra; a stand in spec makes both import.
+    # The test environment may lack reef-eval and the e2b extra; a stand in spec and a stand in module make both import.
     find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util,
         "find_spec",
-        lambda name, package=None: find_spec("json" if name in ("reef_eval", "e2b") else name, package),
+        lambda name, package=None: find_spec("json" if name == "reef_eval" else name, package),
+    )
+    e2b = types.ModuleType("e2b")
+    for name in HARBOR_E2B_NAMES:
+        setattr(e2b, name, object)
+    import_module = importlib.import_module
+    monkeypatch.setattr(
+        importlib, "import_module", lambda name, package=None: e2b if name == "e2b" else import_module(name, package)
     )
     monkeypatch.delenv("E2B_API_KEY", raising=False)
     built, _, _, _ = service(tmp_path, probes=readiness_probes(harbor=sys.executable, environment="e2b"))
@@ -771,6 +791,15 @@ def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
     )
     monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
     assert run_with(built, body) == (200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})
+
+
+def test_the_checks_and_the_episodes_refuse_an_environment_the_generator_cannot_probe(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        HarborChecks(environment="modal")
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="modal")
+    assert HarborChecks(environment="e2b").environment == "e2b"
+    assert ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b").environment == "e2b"
 
 
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:

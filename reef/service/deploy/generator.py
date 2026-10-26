@@ -4,8 +4,9 @@ A deployment with a ``generator`` section gets a ``generator`` service before th
 depends on it, so ``${endpoints.generator}`` is published by the time the HTTP child and its recipe read
 their configuration. The generator reads the same resolved deployment through ``REEF_CONFIG``; it needs
 no arguments. Its executor is the ``generator`` role of ``execution:``, so a deployment can place it on a
-host with Docker and the ``harbor`` command line while the rest stays local. It runs under the
-same interpreter as the other children (``REEF_PYTHON``, otherwise the launcher's).
+host with the ``harbor`` command line and the Harbor environment ``generator.environment`` selects (Docker
+by default, or E2B with no Docker on the host) while the rest stays local. It runs under the same
+interpreter as the other children (``REEF_PYTHON``, otherwise the launcher's).
 """
 
 from __future__ import annotations
