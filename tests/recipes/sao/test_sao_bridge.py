@@ -710,10 +710,9 @@ def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("provider", [None, "my.provider:build"])
-def test_prepare_critic_args_without_lora_builds_the_critic_through_the_reef_provider(provider) -> None:
+@pytest.mark.parametrize("provider", [None, "recipes.sao.examples.servelearnbench.long_context.provide_model"])
+def test_prepare_critic_args_without_lora_preserves_the_user_provider(provider) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
-    from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
     args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path=provider)
@@ -722,25 +721,24 @@ def test_prepare_critic_args_without_lora_builds_the_critic_through_the_reef_pro
 
     assert critic_args.megatron_lora_rank == 0
     assert critic_args.megatron_lora_alpha is None
-    # The critic, like the actor, builds through Reef's provider (YaRN from the
-    # checkpoint config, no LoRA at rank 0) with the user's provider chained.
-    assert critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
-    assert critic_args.reef_chained_model_provider_path == provider
-    # The actor's arguments are left to finalize_reef_slime_args; the critic copy does not change them.
+    assert critic_args.custom_model_provider_path == provider
     assert args.custom_model_provider_path == provider
 
 
 @pytest.mark.unit
-def test_prepare_critic_args_chains_a_critic_role_provider_behind_the_reef_provider() -> None:
+@pytest.mark.parametrize("provider", [None, "my.provider:build"])
+def test_prepare_critic_args_without_lora_unwraps_only_the_reef_provider(provider) -> None:
     from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
     from reef.train.slime_backend.reef_adapters.train_groups import prepare_critic_args
 
-    # A critic role config that names its own provider: Reef's provider wraps it, as for the actor.
-    args = critic_prep_args(custom_model_provider_path="critic.provider:build")
+    args = critic_prep_args(
+        custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
+        reef_chained_model_provider_path=provider,
+    )
     critic_args = prepare_critic_args(args)
 
-    assert critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
-    assert critic_args.reef_chained_model_provider_path == "critic.provider:build"
+    assert critic_args.custom_model_provider_path == provider
+    assert args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
 
 
 @pytest.mark.unit

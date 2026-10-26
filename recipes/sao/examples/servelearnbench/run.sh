@@ -36,10 +36,7 @@ export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$XDG_CACHE_HOME/induct
 export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-$XDG_CACHE_HOME/cuda}
 mkdir -p "$MEGATRON_CONFIG_LOCK_DIR"
 export REEF_TOKEN=${REEF_TOKEN:-$("$python" -c 'import secrets; print(secrets.token_hex(24))')}
-source_model="$MODEL_DIR"
-export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$source_model")}
-"$python" "$PWD/prepare.py" "$source_model" "$CHECKPOINT_DIR/model-128k"
-export MODEL_DIR="$CHECKPOINT_DIR/model-128k"
+export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$MODEL_DIR")}
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send
 # no reports, so their training backend remains idle throughout the campaign.

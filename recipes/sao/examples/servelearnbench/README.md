@@ -14,9 +14,8 @@ Hidden rules, ground-truth actions, and verifier details never enter SAO feedbac
 
 ```text
 servelearnbench/
-  run.sh          prepares the 128k model view, starts reef serve, then runs the campaign
+  run.sh          starts reef serve, then runs the campaign
   run.py          the campaign: the fixed split, batches of eight, the training barrier, results.jsonl
-  prepare.py      writes the 128k YaRN configuration view of a Qwen3 checkpoint
   serve.yaml      the Reef stack: Qwen3-8B actor and critic, SAO, exact-token episodes
   harness/
     agent.py      the benchmark's LLM interface over reef_client and its episode loop with a turn limit
@@ -35,7 +34,7 @@ servelearnbench/
 | Actor cadence | One update per batch after warmup |
 | Learning rates | Actor `1e-6`; critic `5e-6` |
 | Evaluation | Frozen final actor, no test reports or updates |
-| Context / per-call output | 131,072 / 16,384 tokens; static YaRN factor four |
+| Context / per-call output | 40,960 / 16,384 tokens, the model's native context |
 | Episode budgets | Official 100 turns, 50 world-tool calls, 256,000 output tokens |
 
 This is a dense, batch-eight adaptation of SAO. It is not a reproduction of the paper's MoE, batch-128 experiment.
@@ -81,14 +80,9 @@ bash recipes/sao/examples/servelearnbench/run.sh
 The default is a launch configuration, not a measured minimum GPU requirement.
 Allocate the GPUs before running the script. Do not run the service on a login node.
 
-`prepare.py` writes a separate model view under `CHECKPOINT_DIR/model-128k`.
-It links the original weights and writes a Qwen3 configuration with YaRN factor four and original context 32,768.
-The source checkpoint stays unchanged. SGLang reads this configuration, and Reef's Megatron model provider installs the same YaRN rotary embedding for the actor and the critic.
-Published HF checkpoints keep this configuration.
-
 The defaults are 100 model calls and at most 16,384 output tokens per call.
-Thinking and the visible reply share the output budget; the cumulative context limit is 131,072 tokens.
-A 128k limit does not force a task to generate 128k tokens or establish a GPU capacity result.
+Thinking and the visible reply share the output budget; the context limit is the model's native 40,960 tokens.
+Retail episodes stay near 20,000 tokens. An episode that reaches the limit ends with the official context-overflow ending and keeps its score.
 
 For baselines, run `METHOD=blind` or `METHOD=oracle` with fresh directories and a separate stack.
 Both baselines use the same stack without reports; their training backend stays idle.
@@ -121,7 +115,7 @@ The summary records trained task counts and ending reasons, including budget and
 First run the CPU tests from the repository root:
 
 ```bash
-python -m pytest tests/recipes/sao/test_servelearnbench.py tests/recipes/sao/test_servelearnbench_prepare.py
+python -m pytest tests/recipes/sao/test_servelearnbench.py
 ```
 
 These tests run the official Retail verification with scripted inference and the real SAO sample assembly.

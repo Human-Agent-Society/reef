@@ -126,7 +126,7 @@ def main() -> None:
         "global_batch_size": args.batch_size,
         "micro_batch_size": 1,
         "critic_only_batches": int(os.environ.get("SAO_WARMUP", "10")),
-        "context_length": 131072,
+        "context_length": 40960,
         "tail_policy": "score_without_training",
         "untrained_tail_tasks": len(serving) - trainable_count,
         "max_steps": args.max_steps,
