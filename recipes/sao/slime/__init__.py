@@ -423,7 +423,7 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     ``freeze_params_name_list`` and never affect the actor.
     """
     is_moe_critic = bool(getattr(critic_args, "num_experts", 0))
-    explicit_freeze = vars(critic_args).get("sao_freeze_critic_attention", False)
+    explicit_freeze = getattr(critic_args, "sao_freeze_critic_attention", False)
     patterns = [CRITIC_ATTENTION_PARAM_PATTERN] if is_moe_critic or explicit_freeze else []
     if not patterns:
         return

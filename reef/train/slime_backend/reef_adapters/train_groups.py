@@ -415,6 +415,10 @@ def prepare_critic_args(args: SlimeArguments) -> SlimeArguments:
     # the policy fits beside it. Without LoRA the critic trains every
     # parameter through the user's own provider, as before.
     if not critic_args.megatron_lora_rank:
+        # Imported here: slime_arguments loads the Megatron stack, which the
+        # bridge's import chain must not pull in.
+        from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+
         critic_args.megatron_lora_alpha = None
         critic_args.megatron_lora_target_modules = None
         if critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH:

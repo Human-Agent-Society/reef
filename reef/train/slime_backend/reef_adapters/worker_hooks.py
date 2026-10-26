@@ -224,8 +224,6 @@ def _install_metric_capture() -> None:
         return
 
     def log(args, metrics, step_key):
-        from reef.train.slime_backend.reef_adapters.critic_metrics import finalize_critic_metrics
-
         metrics = finalize_critic_metrics(metrics)
         learning_rate = APPLIED_LEARNING_RATE.value
         if learning_rate is not None and step_key == "train/step":
@@ -506,6 +504,39 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
     for param_group in optimizer.param_groups:
         param_group["lr"] = learning_rate * param_group.get("lr_mult", 1.0)
     APPLIED_LEARNING_RATE.value = learning_rate
+
+
+def finalize_critic_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    """Replace the critic's additive moments with its token-weighted explained variance.
+
+    The value loss hook logs five moments per step: the token count and the
+    sums and square sums of the returns and of the value errors. Slime reduces
+    them over microbatches and ranks by the same factor, so their ratios give
+    the global moments. Zero return variance has no defined EV; the result
+    then carries ``explained_variance_valid`` 0 and no ``explained_variance``.
+    """
+    result = dict(metrics)
+    for key in metrics:
+        if not key.endswith("ev_count"):
+            continue
+        prefix = key.removesuffix("ev_count")
+        moments: list[float] = []
+        for name in ("count", "return_sum", "return_square_sum", "error_sum", "error_square_sum"):
+            value = result.pop(f"{prefix}ev_{name}")
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{prefix}ev_{name} must be a numeric scalar")
+            moments.append(float(value))
+        count, return_sum, return_square_sum, error_sum, error_square_sum = moments
+        if count > 0:
+            return_variance = max(0.0, return_square_sum / count - (return_sum / count) ** 2)
+            error_variance = max(0.0, error_square_sum / count - (error_sum / count) ** 2)
+        else:
+            return_variance, error_variance = 0.0, 0.0
+        result[f"{prefix}return_variance"] = return_variance
+        result[f"{prefix}explained_variance_valid"] = float(return_variance > 0)
+        if return_variance > 0:
+            result[f"{prefix}explained_variance"] = 1.0 - error_variance / return_variance
+    return result
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:

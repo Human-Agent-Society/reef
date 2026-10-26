@@ -12,6 +12,9 @@ EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/sao/examples/imo_answer
 
 @pytest.mark.parametrize("filename", ["run.py", "stream.py"])
 def test_training_drain_timeout(filename, monkeypatch):
+    if filename == "run.py":
+        # run.py drives reef-eval's Lab at import; the source suite does not install reef-eval.
+        pytest.importorskip("reef_eval")
     monkeypatch.syspath_prepend(str(EXAMPLE))
     # Both example harnesses use the self-contained package name `harness`.
     for name in list(sys.modules):
