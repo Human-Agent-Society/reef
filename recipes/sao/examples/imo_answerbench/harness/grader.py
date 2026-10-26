@@ -14,6 +14,7 @@ def _latex_to_float(expression: str) -> float | None:
     text = expression.strip().strip("$").replace(" ", "").replace("\\left", "").replace("\\right", "")
     text = text.replace("\\cdot", "*").replace("\\times", "*").replace("\\!", "").replace("\\,", "")
     text = text.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac").replace("\\pi", "P")
+    text = re.sub(r"\^\{([^{}]+)\}", r"**(\1)", text).replace("^", "**")
     for _ in range(20):
         new = re.sub(r"\\sqrt\{([^{}]*)\}", r"s(\1)", text)
         new = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"((\1)/(\2))", new)
