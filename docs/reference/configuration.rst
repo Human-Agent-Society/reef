@@ -293,6 +293,10 @@ engine routes. The trainer writes each checkpoint under
 Engine options come from ``inference.options`` in vLLM's own names and never
 pass through Slime's parser. One engine per stack: ``inference.num-gpus`` must
 equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
+This pairing runs on the vLLM training image (``docker/Dockerfile.reef-vllm``,
+built by ``docker/build-reef-vllm.sh``): Slime on torch 2.13 next to vLLM,
+which the default image's torch 2.11 cannot host. See the ``vLLM training
+image`` section of `docker/README.md <../../docker/README.md>`__.
 The Tinker backend still produces SGLang engine options and keeps
 ``inference.backend: sglang``.
 
