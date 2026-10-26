@@ -29,16 +29,18 @@ from tests.reef_service.routing.routing_fakes import (
     running_router,
 )
 
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import RequestType
 from reef.core.records_types import AgentRecord
 from reef.dispatcher import Dispatcher
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
+from reef.runtime.interfaces import InferenceStream
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.request_service import PendingInference, RequestService
 from reef.service.routing import RoutingDecision
 from reef.service.routing_preview import PreviewSettings
+from reef.service.streaming import stream_record
 from reef.service.wire import parse_request_headers
 from reef.storage.records import AppendResult
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -680,3 +682,58 @@ def test_a_pending_stream_has_both_or_neither_of_its_deferred_check_inputs(tmp_p
                 PendingInference(item, None, **fields)
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_routed_stream_whose_headers_name_another_scenario_never_reaches_the_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> None:
+        received: list[dict[str, object]] = []
+
+        async def upstream(request: web.Request) -> web.Response:
+            received.append(await request.json())
+            return web.Response(body=b"data: [DONE]\n\n", content_type="text/event-stream")
+
+        async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
+            url = str(provider.make_url("")).rstrip("/")
+            snapshot = routing_adapter(tmp_path, url).snapshot
+            decision = RoutingDecision(
+                snapshot.targets["student"], snapshot.version, "coding", "student", "explicit_pin"
+            )
+            handler = HttpInferenceHandler(url)
+            opened: list[InferenceStream] = []
+            open_stream = handler.inference_stream
+
+            async def keep_opened(artifact: Artifact, path: str, payload: dict[str, object]) -> InferenceStream:
+                stream = await open_stream(artifact, path, payload)
+                opened.append(stream)
+                return stream
+
+            monkeypatch.setattr(handler, "inference_stream", keep_opened)
+            dispatcher = routing_dispatcher(tmp_path)
+            service = RequestService(dispatcher)
+            payload = {"model": "student-v1", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+            try:
+                with pytest.raises(ValueError, match="Scenario"):
+                    await service.start_stream(
+                        routing_headers("other"), payload, "/v1/chat/completions", handler, decision=decision
+                    )
+                # Refused before any provider call, record or Scenario.
+                assert received == [] and opened == [] and dispatcher.list_scenarios() == ()
+                # The same Scenario, however its header is spelled, streams and is recorded under it.
+                stream, pending = await service.start_stream(
+                    {"X-Reef-Scenario": " coding "}, payload, "/v1/chat/completions", handler, decision=decision
+                )
+                body = b"".join([chunk async for chunk in stream.chunks])
+                await stream.close()
+                record = service.record_stream(pending, stream_record(stream, body, complete=True))
+                assert received == [payload] and record.scenario == "coding"
+                assert record.payload["metadata"]["routing"]["target_id"] == "student"
+                assert dispatcher.loaded_scenario("other") is None
+            finally:
+                for stream in opened:
+                    await stream.close()
+                dispatcher.close()
+
+    asyncio.run(run())

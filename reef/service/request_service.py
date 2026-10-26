@@ -619,12 +619,15 @@ class RequestService:
         decision: RoutingDecision | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
         """Open one provider stream. A routed request passes its ``decision`` and the ``handler`` it selected,
-        and ``payload`` is then its provider body."""
+        its ``headers`` name the decision's Scenario, and ``payload`` is then its provider body."""
         routing_request_id = ""
         routing_started = 0.0
         if decision is not None:
             if handler is None or not record:
                 raise ValueError("a routed stream needs its selected handler and keeps a record")
+            # Checked before the provider call: PendingInference refuses another Scenario only after the stream opens.
+            if parse_request_headers(headers, RequestType.INFERENCE).scenario != decision.scenario:
+                raise ValueError("a routed stream's headers name another Scenario than its routing decision")
             routing_request_id = uuid.uuid4().hex
         operations = await self.inference_operations(headers, record=record)
         measurement = operations.start(f"{request_family(record)}/request")
