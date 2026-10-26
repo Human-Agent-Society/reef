@@ -23,6 +23,16 @@ MANIFEST = "tinker-checkpoint.json"
 
 @dataclass(frozen=True)
 class TinkerCheckpoint:
+    """One durable Tinker checkpoint of a LoRA of ``base_model`` with rank ``lora_rank``.
+
+    Values: ``base_model`` is non-empty and ``lora_rank`` positive. ``state_path`` (the weights and optimizer state
+    that a later job restores) and ``sampler_path`` (the weights that Tinker's sampler serves) are ``tinker://``
+    paths. ``adapter_path`` is the ``tinker://`` path of the adapter that Tinker exported in its own key names
+    (``save_weights_external``), or ``None`` when the component exports no adapter. The training component makes
+    the values and writes them as the manifest ``MANIFEST`` of a checkpoint directory; the component, the Tinker
+    inference runtime and ``TinkerClient.download`` read them.
+    """
+
     base_model: str
     lora_rank: int
     state_path: str
@@ -35,11 +45,13 @@ class TinkerCheckpoint:
     #: The objective whose state ``algorithm_state`` is; ``None`` exactly when the state is empty. A job of
     #: another objective starts with an empty state.
     objective: str | None = None
+    adapter_path: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
             raise ValueError("invalid Tinker checkpoint version or model configuration")
-        for path in (self.state_path, self.sampler_path):
+        paths = (self.state_path, self.sampler_path) + (() if self.adapter_path is None else (self.adapter_path,))
+        for path in paths:
             if not isinstance(path, str) or not path.startswith("tinker://"):
                 raise ValueError("Tinker checkpoints require remote tinker:// paths")
         if (self.objective is None) != (not self.algorithm_state):
@@ -57,6 +69,8 @@ class TinkerCheckpoint:
         if not self.algorithm_state:
             value.pop("algorithm_state")
             value.pop("objective")
+        if self.adapter_path is None:
+            value.pop("adapter_path")
         return value
 
     def state_for(self, objective: str) -> Mapping[str, Any]:

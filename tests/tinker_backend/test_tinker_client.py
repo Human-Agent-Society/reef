@@ -1,8 +1,7 @@
 """SDK call-order tests without credentials, model downloads, or GPU dependencies."""
 
-import io
 import sys
-import tarfile
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -53,6 +52,10 @@ class Trainer:
         self.events.append(("save_weights_for_sampler", name, ttl_seconds))
         return Future(SimpleNamespace(path="tinker://next/sampler"))
 
+    def save_weights_external(self, name, ttl_seconds):
+        self.events.append(("save_weights_external", name, ttl_seconds))
+        return Future(SimpleNamespace(path="tinker://next/external_weights"))
+
 
 class Sampler:
     def __init__(self, events):
@@ -87,9 +90,9 @@ class Service:
     def get_weights_info_by_tinker_path(self, path):
         return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=32))
 
-    def get_checkpoint_archive_url_from_tinker_path(self, path):
-        self.events.append(("archive", path))
-        return Future(SimpleNamespace(url=self.archive_url))
+    def get_external_weights_urls(self, path):
+        self.events.append(("external_weights_urls", path))
+        return Future(SimpleNamespace(urls=self.adapter_urls))
 
     def create_training_client_from_state_with_optimizer(self, path):
         self.events.append(("restore_with_optimizer", path))
@@ -159,13 +162,11 @@ def sampler(client):
 
 
 def test_download_keeps_tinkers_adapter_beside_its_peft_conversion(client, tmp_path, monkeypatch):
-    archive = tmp_path / "checkpoint.tar"
-    with tarfile.open(archive, "w") as tar:
-        for name, body in (("adapter_config.json", b"{}"), ("adapter_model.safetensors", b"tinker names")):
-            info = tarfile.TarInfo(name)
-            info.size = len(body)
-            tar.addfile(info, io.BytesIO(body))
-    client._service.archive_url = archive.as_uri()
+    exported = tmp_path / "exported"
+    exported.mkdir()
+    (exported / "adapter_config.json").write_bytes(b"{}")
+    (exported / "adapter_model.safetensors").write_bytes(b"tinker names")
+    client._service.adapter_urls = {path.name: path.as_uri() for path in exported.iterdir()}
     conversions = []
 
     def build_lora_adapter(*, base_model, adapter_path, output_path):
@@ -178,15 +179,49 @@ def test_download_keeps_tinkers_adapter_beside_its_peft_conversion(client, tmp_p
     monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
     release = tmp_path / "jobs" / "job" / "4"
     release.mkdir(parents=True)
+    checkpoint = TinkerCheckpoint(
+        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://s/external_weights/a"
+    )
 
-    client.download(TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler"), release)
+    client.download(checkpoint, release)
 
-    assert ("archive", "tinker://s/sampler") in client._sdk.events
+    assert ("external_weights_urls", "tinker://s/external_weights/a") in client._sdk.events
     assert conversions == [("Qwen/Qwen3-8B", b"tinker names")]
     assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"model names"
     assert (release / TINKER_ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"tinker names"
     assert (release / TINKER_ADAPTER_DIR / "adapter_config.json").read_bytes() == b"{}"
     assert sorted(path.name for path in release.parent.iterdir()) == ["4"]
+
+
+def test_download_refuses_a_checkpoint_without_an_exported_adapter_or_a_file_outside_it(client, tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="without an exported adapter"):
+        client.download(TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler"), tmp_path)
+    cookbook = ModuleType("tinker_cookbook")
+    cookbook.weights = SimpleNamespace(build_lora_adapter=lambda **options: pytest.fail("converted an unsafe adapter"))
+    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
+    client._service.adapter_urls = {"../escape": (tmp_path / "x").as_uri()}
+    checkpoint = TinkerCheckpoint(
+        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://a"
+    )
+    with pytest.raises(ValueError, match="outside its directory"):
+        client.download(checkpoint, tmp_path / "release")
+    assert not (tmp_path / "escape").exists() and not (tmp_path / ".release.download").exists()
+
+
+def test_training_exports_the_adapter_only_with_export_adapter(client):
+    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
+    row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
+    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
+    assert checkpoint.adapter_path is None and "save_weights_external" not in [e[0] for e in client._sdk.events]
+
+    client._config = replace(client._config, export_adapter=True)
+    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
+    saves = [event for event in client._sdk.events if event[0].startswith("save_")]
+    assert [event[0] for event in saves[-3:]] == ["save_state", "save_weights_for_sampler", "save_weights_external"]
+    assert saves[-1][1] == saves[-2][1] and saves[-1][2] is None
+    assert checkpoint.adapter_path == "tinker://next/external_weights"
+    assert TinkerCheckpoint.from_dict(checkpoint.to_dict()) == checkpoint
+    assert "adapter_path" not in base.to_dict()
 
 
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
@@ -353,11 +388,13 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
         (tinker.ServiceClient.create_training_client_from_state_with_optimizer, ("tinker://base/state",), {}),
         (tinker.ServiceClient.create_sampling_client, (), {"model_path": "tinker://base/sampler"}),
         (RestClient.get_weights_info_by_tinker_path, ("tinker://base/state",), {}),
+        (RestClient.get_external_weights_urls, ("tinker://next/external_weights/checkpoint",), {}),
         (tinker.TrainingClient.forward_backward, ([],), {"loss_fn": "importance_sampling"}),
         (tinker.TrainingClient.forward_backward_custom, ([],), {"loss_fn": lambda data, logprobs: (None, {})}),
         (tinker.TrainingClient.optim_step, (tinker.AdamParams(learning_rate=1e-4),), {}),
         (tinker.TrainingClient.save_state, ("checkpoint",), {"ttl_seconds": None}),
         (tinker.TrainingClient.save_weights_for_sampler, ("checkpoint",), {"ttl_seconds": None}),
+        (tinker.TrainingClient.save_weights_external, ("checkpoint",), {"ttl_seconds": None}),
         (tinker.SamplingClient.get_base_model, (), {}),
         (tinker.SamplingClient.get_tokenizer, (), {}),
         (tinker.SamplingClient.compute_logprobs, (tinker.ModelInput.from_ints([10, 11]),), {}),

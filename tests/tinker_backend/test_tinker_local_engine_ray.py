@@ -40,8 +40,8 @@ SCENARIO = "erdos"
 
 FAKE_SDK = textwrap.dedent(
     '''
-    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, archives as local tar files."""
-    import io, json, os, tarfile, uuid
+    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, exported adapter files as local files."""
+    import json, os, uuid
     from types import SimpleNamespace
 
     # Settings live beside the module: Ray workers share the import path, not the driver's environment.
@@ -76,6 +76,7 @@ FAKE_SDK = textwrap.dedent(
             return _Future(SimpleNamespace(path=path))
         def save_state(self, name, ttl_seconds=None): return self._save(name, "weights")
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
+        def save_weights_external(self, name, ttl_seconds=None): return self._save(name, "external_weights")
 
     class _Tokenizer:
         # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
@@ -90,13 +91,16 @@ FAKE_SDK = textwrap.dedent(
     class _Rest:
         def get_weights_info_by_tinker_path(self, path):
             return _Future(SimpleNamespace(base_model=MODEL, is_lora=True, lora_rank=32))
-        def get_checkpoint_archive_url_from_tinker_path(self, path):
-            archive = os.path.join(ROOT, uuid.uuid4().hex + ".tar")
-            with tarfile.open(archive, "w") as tar:
-                for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
-                                   ("adapter_model.safetensors", path.encode())):
-                    info = tarfile.TarInfo(name); info.size = len(body); tar.addfile(info, io.BytesIO(body))
-            return _Future(SimpleNamespace(url="file://" + archive))
+        def get_external_weights_urls(self, path):
+            directory = os.path.join(ROOT, uuid.uuid4().hex)
+            os.makedirs(directory)
+            urls = {}
+            for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
+                               ("adapter_model.safetensors", path.encode())):
+                with open(os.path.join(directory, name), "wb") as file:
+                    file.write(body)
+                urls[name] = "file://" + os.path.join(directory, name)
+            return _Future(SimpleNamespace(urls=urls))
 
     class ServiceClient:
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})

@@ -131,11 +131,12 @@ Jobs, checkpoints, and recovery
 
 A job trains the optimizer steps of its data from the job's start checkpoint. It
 restores the saved weights **and optimizer state** in a new Tinker training
-session. It then exports both ``save_state`` and
-``save_weights_for_sampler`` with explicit unique names and no expiration, and
-the session closes. The job parameter ``save_interval``, which a recipe's job
-plan can set, gives the optimizer
-steps between two saved checkpoints. Without it, a job saves one checkpoint
+session. It then saves the state (``save_state``) and the sampler weights
+(``save_weights_for_sampler``). With ``export-adapter``, it also saves the
+adapter in Tinker's key names (``save_weights_external``). Each save has one
+explicit unique name and no expiration. Then the session closes. The job
+parameter ``save_interval``, which a recipe's job plan can set, gives the
+optimizer steps between two saved checkpoints. Without it, a job saves one checkpoint
 when it ends. Each saved checkpoint is a candidate. Candidate evaluation
 decides whether Reef publishes it; a rejected candidate changes no served
 sampler. The next job starts from the last saved checkpoint, whether or not
@@ -214,7 +215,7 @@ engine serving when it starts, because the releases hold no adapter.
 
 Each scenario trains its own adapter. A job runs the optimizer steps of its data
 on Tinker from the scenario's last saved checkpoint. At each save, it downloads
-the result into the ``tinker-adapter/`` directory of the checkpoint and
+the exported adapter into the ``tinker-adapter/`` directory of the checkpoint and
 converts it with ``tinker-cookbook`` into a PEFT adapter in its ``adapter/``
 directory. The engines load ``adapter/``. A merge into full weights, such as
 ``tinker_cookbook.weights.build_hf_model``, reads ``tinker-adapter/``: the PEFT
