@@ -230,7 +230,52 @@ def test_critic_metric_hook_reports_masked_explained_variance(monkeypatch: pytes
     )
 
     assert value.item() == 2.0
-    assert metrics["explained_variance"].item() == pytest.approx(0.75)
+    reduced = worker_hooks.finalize_critic_metrics({key: value.item() for key, value in metrics.items()})
+    assert reduced["explained_variance"] == pytest.approx(0.75)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("factor", [1.0, 0.5, 0.125])
+def test_global_ev_from_constant_return_microbatches(factor: float) -> None:
+    # Returns [0, 0] and [1, 1] each have zero local variance. Together,
+    # errors [0, .2, -.2, 0] have variance .02 and returns have variance .25.
+    moments = {
+        "count": 4,
+        "return_sum": 2,
+        "return_square_sum": 2,
+        "error_sum": 0,
+        "error_square_sum": 0.08,
+    }
+    metrics = {f"train/critic-ev_{key}": value * factor for key, value in moments.items()}
+    result = worker_hooks.finalize_critic_metrics(metrics)
+    assert result["train/critic-explained_variance"] == pytest.approx(0.92)
+    assert result["train/critic-explained_variance_valid"] == 1
+    assert not any("ev_" in key for key in result)
+
+
+@pytest.mark.unit
+def test_constant_returns_are_explicitly_undefined() -> None:
+    result = worker_hooks.finalize_critic_metrics(
+        {
+            "ev_count": 2,
+            "ev_return_sum": 2,
+            "ev_return_square_sum": 2,
+            "ev_error_sum": 1,
+            "ev_error_square_sum": 1,
+        }
+    )
+    assert result["explained_variance_valid"] == 0
+    assert "explained_variance" not in result
+
+
+@pytest.mark.unit
+def test_undefined_ev_does_not_reuse_the_previous_step_value() -> None:
+    worker_hooks.drain_worker_metrics()
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance": 0.8})
+    worker_hooks.record_worker_metrics({"train/critic-explained_variance_valid": 0.0})
+    metrics = worker_hooks.drain_worker_metrics()
+    assert "train/critic-explained_variance" not in metrics
+    assert metrics["train/critic-explained_variance_valid"] == 0
 
 
 @pytest.mark.unit
