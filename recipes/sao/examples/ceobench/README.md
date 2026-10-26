@@ -213,13 +213,13 @@ lands in `work/lab` and the trial's run directory under the trial's
 This is test-time training. The policy adapts inside the episode it is
 scored on, and the number to compare is that episode's final cash against
 the same seed played by the untrained model. The value model need not start
-cold. `serve.yaml` points `--critic-init` at `$RUN_DIR/critic-init`, and a
-copy of an earlier run's latest critic checkpoint placed there
-(`checkpoints/megatron-critic/iter_N` together with its
-`latest_checkpointed_iteration.txt`) is loaded with its weights and
-optimizer at the first start. The critic then trains on its own for two
+cold. To reuse an earlier critic, copy its `checkpoints/megatron-critic/iter_N`
+and `latest_checkpointed_iteration.txt` into `$RUN_DIR/critic-init`.
+Then uncomment `critic-init` in `serve.yaml`. Both weights and optimizer
+load at the first start. The critic then trains on its own for two
 commits before the actor's first update (`num-critic-only-steps`). An empty
-directory leaves it cold. Replicates are independent runs from the base
+directory now fails startup when `critic-init` is set. Leave the option
+commented out for a cold start. Replicates are independent runs from the base
 model with one stack each, so run `docker compose down` between them or use
 a fresh `RUN_DIR`. A Reef process trains one scenario for its lifetime, and
 a second seed on the same stack would start from the first seed's adapter.

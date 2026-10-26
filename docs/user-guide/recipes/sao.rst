@@ -63,7 +63,10 @@ The value model carries the paper's cold-start mitigations: it trains at its
 own, higher learning rate (``--critic-lr``) and the first
 ``--num-critic-only-steps`` optimizer steps fit the zero-initialized value head
 before any policy update. Warmup steps still commit one training release per
-step; the policy's weights first move after the warmup.
+step; the policy's weights first move after the warmup. An MoE value model
+trains its experts, layer norms, and value head while its self-attention stays
+frozen (paper Section 4). A dense value model trains every parameter unless
+``--sao-freeze-critic-attention`` applies the same freeze to it.
 
 Configuration
 -------------
