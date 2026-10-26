@@ -101,7 +101,7 @@ No task spans a weight update. Test tasks use the final published actor and neve
 Keep `save-interval: "1"` so each completed batch publishes weights.
 A training timeout or service error aborts the run.
 
-`SAO_BATCH=8` and `SAO_BATCH=1 SAO_WARMUP=10` are independent configuration values.
+`SAO_BATCH=8` and `SAO_WARMUP=10` are independent configuration values.
 Together, they use the first 80 serving tasks for 20 critic updates and no actor updates.
 The actor starts on batch 11. This warmup is an implementation choice, not value pretraining.
 
