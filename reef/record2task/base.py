@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.job_data import TrainDataItem
+from reef.core.job_data import TrainDataItem, TrajectoryItem
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, TaskStatus
@@ -58,6 +58,17 @@ class Record2Task(ABC, Plugin):
     config. The class parses the config into its settings dataclass and builds
     the stage in ``from_config``.
     """
+
+    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+        """The training sample of an uploaded ATIF trajectory; the default is the trajectory as it was uploaded.
+
+        A stage of a recipe whose task-to-job stage accepts uploaded trajectories overrides it to render the
+        trajectory as its backend trains it. The pipeline calls it at upload, from a request thread, to refuse a
+        trajectory that cannot train, and again when it reads the upload. It must be pure: the same trajectory
+        gives the same sample, and the stage's state does not change. A trajectory that cannot become a sample
+        raises ``ValueError`` with the reason.
+        """
+        return trajectory
 
     @classmethod
     def from_config(

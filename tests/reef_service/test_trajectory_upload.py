@@ -15,6 +15,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
+from reef.record2task import NoTasks
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.task2job import Task2Job
@@ -77,16 +78,28 @@ class RecordOnlyJobData(UploadJobData):
     accepts_trajectories = False
 
 
+class RenderingTasks(NoTasks):
+    """Renders an uploaded trajectory by marking it, and refuses one whose session is ``bad``."""
+
+    def uploaded_sample(self, trajectory):
+        if trajectory.trajectory["session_id"] == "bad":
+            raise ValueError("it has no agent step")
+        return trajectory.with_training(tokens=[1, 2], loss_mask=[1], rollout_log_probs=[])
+
+
 @dataclass(frozen=True, kw_only=True)
 class UploadRecipe(Recipe):
     batch_stage: type[Task2Job] = UploadJobData
+    task_stage: type[NoTasks] = NoTasks
     batches: list[JobData] = field(default_factory=list)
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: TrainingPipeline(context, task2job=self.batch_stage(context, None, None)),
+            pipeline_factory=lambda context: TrainingPipeline(
+                context, record2task=self.task_stage(), task2job=self.batch_stage(context, None, None)
+            ),
             candidate_backend=CountingBackend(self.batches),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
@@ -216,3 +229,27 @@ def test_the_record_import_does_not_take_a_trajectory(tmp_path, route):
         asyncio.run(run())
     finally:
         dispatcher.close()
+
+
+def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered_samples(tmp_path):
+    recipe = UploadRecipe(task_stage=RenderingTasks)
+    dispatcher = dispatcher_for(tmp_path, recipe)
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("good", "bad"))
+            assert response.status == 400
+            assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
+            assert dispatcher.get_or_create_scenario("s").store.trajectories.count() == 0, "nothing of it is saved"
+            response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1", "t2"))
+            assert response.status == 200, await response.text()
+            await wait_for_batches(recipe, 1)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+    (batch,) = recipe.batches
+    assert [item.training for item in batch.items] == [
+        {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": []}
+    ] * 2

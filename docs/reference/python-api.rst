@@ -949,6 +949,10 @@ record2task=..., task2job=...)``):
   (``pull``). Most stages inherit ``ImmediateRecord2Task`` and implement
   ``make_tasks``; a stage with slow work returns a result later (see `slow
   record-to-task work <../developer-guide/processors.rst#slow-record-to-task-work>`__).
+  ``uploaded_sample(trajectory) -> TrajectoryItem`` turns an uploaded ATIF
+  trajectory into its training sample. It must be pure, and it raises
+  ``ValueError`` to refuse the upload (see `Uploaded trajectories
+  <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``task2job``: the task-to-job stage (``reef.task2job.Task2Job``).
   Its ``make_job_data(tasks, data_id)`` shapes the tasks of the selected
   sets into one job's data with the ID ``data_id``. The pipeline assigns the

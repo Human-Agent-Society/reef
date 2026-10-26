@@ -133,7 +133,20 @@ def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, Trajec
 
     An uploaded trajectory trains only through a recipe that accepts uploaded
     trajectories. Otherwise every trainer would skip it, so admission refuses it.
+    Each accepting trainer renders each trajectory once here; one that cannot
+    become a sample refuses the whole upload with its ID and the reason.
     """
-    if not any(component_trainer.trainer.pipeline.accepts_trajectories for component_trainer in current.trainers):
+    pipelines = [
+        component_trainer.trainer.pipeline
+        for component_trainer in current.trainers
+        if component_trainer.trainer.pipeline.accepts_trajectories
+    ]
+    if not pipelines:
         raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
+    for trajectory_id, trajectory in trajectories:
+        for pipeline in pipelines:
+            try:
+                pipeline.uploaded_sample(trajectory)
+            except ValueError as exc:
+                raise ValueError(f"trajectory {trajectory_id!r} cannot train: {exc}") from exc
     return current.store.trajectories.add(trajectories)

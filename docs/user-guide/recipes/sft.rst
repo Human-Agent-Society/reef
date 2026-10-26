@@ -53,8 +53,9 @@ SFT has three pipeline stages
   version sampled. Thus the stage takes no ``max_staleness`` and refuses the key.
 - ``SFTTasks`` makes one ``TrajectoryItem`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.
-- ``DistillJobData`` puts the tasks into job data in arrival order. One job's
-  data holds ``pipeline.task2job.config.job_samples`` samples.
+- ``SFTJobData`` puts the tasks into job data in arrival order. One job's
+  data holds ``pipeline.task2job.config.job_samples`` samples. It also takes
+  uploaded ATIF trajectories (see `Train on whole conversations`_).
 
 The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
@@ -103,6 +104,31 @@ reports of a dataset wait until that number of reports is available. Reef
 reads the imported reports only as fast as jobs train, so a large import
 waits in the record store, not in the buffer. Reef does not repeat a dataset. To train on the data again, import it again
 with new record IDs.
+
+Train on whole conversations
+----------------------------
+
+A complete conversation, such as an agent episode with tool calls, can train
+every agent turn at once. Upload it as an ATIF trajectory
+(`Upload trajectories <../../reference/http-api.rst#upload-trajectories>`__).
+``SFTTasks`` renders each uploaded trajectory into one sample:
+
+- The steps become chat messages: an ``agent`` step is an assistant turn with
+  its tool calls, and each observation result is a tool message.
+- The tokens are the conversation, rendered with the chat template, up to the
+  last agent turn. Steps after the last agent turn are left out.
+- The loss mask selects the tokens of every agent turn. System, user and tool
+  tokens get no loss.
+
+Reef renders each trajectory when it accepts the upload. It refuses the whole
+upload with 400, naming the trajectory, when one cannot train:
+
+- it has no agent step, or an agent step is its first step;
+- the chat template does not render each turn as a prefix of the whole
+  conversation. A template that removes the reasoning of earlier turns, for
+  example, does not; set ``chat_template_kwargs`` so that it keeps them, or
+  upload each turn as its own report;
+- the sample is longer than ``max_tokens``.
 
 Configuration
 -------------
@@ -238,7 +264,10 @@ Limitations
 
 - A report must reference exactly one recorded request. A report that
   references more than one request raises an error. To train each turn of an
-  agent episode, report each request separately.
+  agent episode, report each request separately, or upload the episode as an
+  ATIF trajectory (`Train on whole conversations`_).
+- An uploaded trajectory renders no tool definitions; only its messages and
+  tool calls reach the chat template.
 - The recipe does not filter reports by score. To train only on accepted
   responses, report only those responses.
 

@@ -339,7 +339,11 @@ of them in one transaction, or none. The request body can be at most 10 MiB:
 The response is ``{"scenario": "my-agent", "trajectory_ids":
 ["trajectory-0001"]}``. An identical retry returns the same receipt, also
 after training. The same ID with a different trajectory returns 409. An
-invalid upload returns 400 and saves nothing.
+invalid upload returns 400 and saves nothing. The recipe also checks each
+trajectory: a trajectory that it cannot turn into a training sample refuses
+the upload with 400, and the message names the trajectory. The SFT recipe
+renders each upload with every agent turn trained (`SFT
+<../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
 
 Each uploaded trajectory counts as one sample toward the pipeline's
 ``job_samples``. It does not count toward the pipeline's ``buffer_size``, so Reef never

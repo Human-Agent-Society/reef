@@ -263,9 +263,20 @@ A recipe takes uploads when its ``Task2Job`` sets ``accepts_trajectories``
 to True. The default is False. Admission refuses an upload with 400 when no
 trainer of the scenario accepts uploaded trajectories.
 
-An uploaded trajectory does not go to the record stage or the record-to-task
-stage. The pipeline holds it as a ``TrajectoryItem`` of the uploaded document
-until job data takes it. Job data takes uploaded trajectories first, in upload
+The record-to-task stage turns each upload into its training sample with
+``Record2Task.uploaded_sample(trajectory)``. The default returns the trajectory
+as uploaded. A stage whose backend trains token-level data overrides it:
+``SFTTasks`` renders the conversation with the chat template and trains every
+agent turn. The method must be pure. Admission calls it from the request
+thread for each trajectory and each trainer that accepts uploads; a
+``ValueError`` refuses the whole upload with 400, and the message names the
+trajectory. The pipeline calls it again when it reads the upload. A
+trajectory that admission accepted but that no longer renders, for example
+after ``max_tokens`` was lowered, is skipped with a warning and stays
+unconsumed.
+
+An uploaded trajectory does not go to the record stage. The pipeline holds
+its sample until job data takes it. Job data takes uploaded trajectories first, in upload
 order, and then record set units. Each uploaded trajectory is one unit
 and counts as one sample. It does not count toward ``buffer_size``. In ``manual`` mode, an instruction's data takes no units. In a scenario
 of several components, each trainer that accepts uploaded trajectories trains
@@ -273,8 +284,9 @@ on them. Acknowledgement consumes all units of the job data. The commit lists
 each uploaded trajectory as ``trajectory:<trajectory_id>``. Thus a rebuilt
 trainer does not read it again.
 
-An uploaded trajectory has no captured rollout tensors. Thus a backend that
-needs these tensors cannot train on it.
+An uploaded trajectory has no captured rollout tensors or rollout log
+probabilities. Thus an objective that needs them, such as a policy-gradient
+objective, cannot train on it; an SFT sample needs neither.
 
 The record-to-record stage
 --------------------------

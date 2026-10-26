@@ -478,7 +478,17 @@ class Trainer:
                 self.trajectory_sequence = stored.sequence
                 if consumed_trajectory_id(stored.trajectory_id) in self.consumed_record_ids:
                     continue
-                self._pipeline.push_trajectory(stored.trajectory_id, stored.trajectory)
+                try:
+                    self._pipeline.push_trajectory(stored.trajectory_id, stored.trajectory)
+                except ValueError:
+                    # Admission rendered it; a config that changed since, such as a lower max_tokens, can refuse it.
+                    logger.warning(
+                        "uploaded trajectory %s of scenario %s cannot train and is skipped",
+                        stored.trajectory_id,
+                        self.scenario,
+                        exc_info=True,
+                    )
+                    continue
                 if self.pipeline_ready():
                     return
         while True:

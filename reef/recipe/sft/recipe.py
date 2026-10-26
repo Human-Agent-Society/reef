@@ -9,8 +9,7 @@ from typing import Any
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.sft.processor import SFTRecord2Record, SFTTasks
-from reef.task2job import DistillJobData
+from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTTasks
 from reef.train.pipeline import PipelineSpec
 
 
@@ -24,7 +23,8 @@ class SFTRecipe(WeightTrainingRecipe):
     two methods can train on the same reports.
 
     The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
-    ``DistillJobData``. The ``pipeline`` section of the deployment configures
+    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTTasks``
+    renders each one with every agent turn trained. The ``pipeline`` section of the deployment configures
     the stages:
 
     * ``pipeline.record2task.config``: ``tokenizer_path`` (required),
@@ -55,7 +55,7 @@ class SFTRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=DistillJobData)
+        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=SFTJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

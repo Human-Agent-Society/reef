@@ -394,12 +394,17 @@ class TrainingPipeline:
         self.record2record.push(item)
         self.move_record_sets()
 
-    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
-        """Read one uploaded trajectory. It waits here for job data."""
+    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+        """The training sample of an uploaded trajectory (``Record2Task.uploaded_sample``); ``ValueError`` when the
+        recipe does not accept uploads or the trajectory cannot become a sample. Pure: admission calls it too."""
         if not self.accepts_trajectories:
             raise ValueError(f"{type(self.task2job).__name__} does not accept uploaded trajectories")
+        return self.record2task.uploaded_sample(trajectory)
+
+    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
+        """Read one uploaded trajectory as its training sample. It waits here for job data."""
         if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
-            self.uploaded_trajectories.setdefault(trajectory_id, trajectory)
+            self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))
 
     def job_ended(self, outcome: Mapping[str, Any]) -> None:
         """Give the task-to-job stage the outcome of a job whose end the trainer committed (``JobLoopState.last_job``)."""

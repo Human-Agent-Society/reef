@@ -16,11 +16,12 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import TrajectoryItem
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.recipe.sft import SftObjective, SFTRecipe, SFTRecord2Record, SFTSettings, SFTTasks
+from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTRecord2Record, SFTSettings, SFTTasks
 from reef.runtime.interfaces import TrainingMethod
 from reef.task2job import DistillJobData
 from reef.train import PipelineContext
@@ -360,3 +361,106 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     family = resolve_loss_family("sft")
     assert isinstance(family, SftAlgorithm)
     assert (family.loss_type, family.requires_rollout_logprobs) == ("sft_loss", False)
+
+
+# --- uploaded trajectories ----------------------------------------------------
+
+
+def _uploaded(*steps: Mapping[str, Any]) -> TrajectoryItem:
+    return TrajectoryItem(
+        {"schema_version": "ATIF-v1.4", "session_id": "u", "agent": {"name": "a"}, "steps": list(steps)}
+    )
+
+
+ASK = {"step_id": 1, "source": "user", "message": "Boil?"}
+CALL = {
+    "step_id": 2,
+    "source": "agent",
+    "message": "Look",
+    "tool_calls": [{"tool_call_id": "c1", "function_name": "search", "arguments": {"q": "boil"}}],
+    "observation": {"results": [{"source_call_id": "c1", "content": "100"}]},
+}
+ANSWER = {"step_id": 3, "source": "agent", "message": "100 C"}
+THANKS = {"step_id": 4, "source": "user", "message": "Thanks"}
+
+
+@pytest.mark.unit
+def test_an_uploaded_trajectory_trains_every_agent_turn_and_masks_the_rest(tokenizer: TurnTokenizer) -> None:
+    tasks = SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH))
+
+    sample = tasks.uploaded_sample(_uploaded(ASK, CALL, ANSWER, THANKS))
+
+    ask, look, observation, answer = (
+        TurnTokenizer.text_ids({"content": "Boil?"}),
+        TurnTokenizer.text_ids({"content": "Look", "tool_calls": [{"function": {"name": "search"}}]}),
+        TurnTokenizer.text_ids({"content": "100"}),
+        TurnTokenizer.text_ids({"content": "100 C"}),
+    )
+    # The step after the last agent turn is left out; the generation prompt of the first agent turn ends the prompt.
+    assert sample.training["tokens"] == [
+        *ask,
+        GENERATION_PROMPT,
+        *look,
+        END_OF_TURN,
+        *observation,
+        GENERATION_PROMPT,
+        *answer,
+        END_OF_TURN,
+    ]
+    assert sample.training["loss_mask"] == [
+        *[1] * (len(look) + 1),
+        *[0] * (len(observation) + 1),
+        *[1] * (len(answer) + 1),
+    ]
+    assert sample.training["rollout_log_probs"] == []
+    assert sample.trajectory["steps"] == [ASK, CALL, ANSWER, THANKS], "the uploaded steps stay as they are"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("steps", "reason"),
+    [
+        ((ASK, THANKS), "needs one or more agent steps"),
+        ((ANSWER, THANKS), "needs a system or user step before its first agent step"),
+        (({"step_id": 1, "message": "no source"},), "string source"),
+        ((ASK, {**CALL, "tool_calls": [{"tool_call_id": "c1"}]}), "tool_calls must be objects"),
+    ],
+)
+def test_an_uploaded_trajectory_that_cannot_train_is_refused(tokenizer: TurnTokenizer, steps, reason) -> None:
+    with pytest.raises(ValueError, match=reason):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)).uploaded_sample(_uploaded(*steps))
+
+
+@pytest.mark.unit
+def test_a_template_that_changes_earlier_turns_or_a_long_sample_refuses_the_upload(
+    tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="more than max_tokens 5"):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH, max_tokens=5)).uploaded_sample(_uploaded(ASK, ANSWER))
+    render = tokenizer.apply_chat_template
+
+    def drops_earlier_turns(conversation, **options):
+        # Like a template that strips earlier turns' reasoning: the whole conversation renders its first turn shorter.
+        ids = render(conversation, **options)
+        return ids[1:] if len(conversation) > 2 else ids
+
+    monkeypatch.setattr(tokenizer, "apply_chat_template", drops_earlier_turns)
+    with pytest.raises(ValueError, match="does not render each turn as a prefix"):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)).uploaded_sample(_uploaded(ASK, CALL, ANSWER))
+
+
+@pytest.mark.unit
+def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenizer: TurnTokenizer) -> None:
+    assert SFTRecipe.pipeline_spec().task2job is SFTJobData and SFTJobData.accepts_trajectories
+    context = PipelineContext("science", TeacherContextReport)
+    pipeline = TrainingPipeline(
+        context,
+        record2record=SFTRecord2Record(context),
+        record2task=SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)),
+        task2job=SFTJobData(context, None, 1),
+    )
+    pipeline.push_trajectory("t1", _uploaded(ASK, ANSWER))
+    data = pipeline.build_job_data(1)
+    (item,) = data.items
+    assert item.training["loss_mask"] == [1] * (len(TurnTokenizer.text_ids({"content": "100 C"})) + 1)
+    assert pipeline.acknowledge(data.data_id) == {"trajectory:t1"}
