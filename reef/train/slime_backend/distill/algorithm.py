@@ -68,7 +68,13 @@ class DistillSettings:
     the sampled token) or with a ``tail`` bucket for the rest of the
     vocabulary. ``importance_sampling_level`` averages the truncated
     importance weight over the response (``sequence``) or applies it at each
-    token (``token``).
+    token (``token``). ``normalize_advantages`` is a family default, not a
+    flag. When it is set, the sampled reverse-KL gradient uses normalized
+    advantages. Each advantage is the teacher-minus-rollout log-prob
+    difference, centered and scaled to unit standard deviation over the
+    trained tokens of the training job. ``advantage_clip`` applies after the
+    normalization. The setting has no effect on the other divergences,
+    because they have no per-token advantage.
     """
 
     teacher: str = "self"
@@ -84,6 +90,7 @@ class DistillSettings:
     importance_sampling_cap: float = 2.0
     importance_sampling_level: str = "sequence"
     advantage_clip: float = 0.0
+    normalize_advantages: bool = False
     skip_response_tokens: int = 0
     jsd_beta: float = 0.5
 
@@ -108,6 +115,8 @@ class DistillSettings:
             raise ValueError(
                 "distill advantage_clip requires sampled reverse KL with top_k > 0 and renormalized support"
             )
+        if not isinstance(self.normalize_advantages, bool):
+            raise ValueError("distill normalize_advantages must be a boolean")
         if not _is_finite(self.teacher_update_rate) or not 0 <= self.teacher_update_rate <= 1:
             raise ValueError("distill teacher_update_rate must be a number in [0, 1]")
         if not isinstance(self.teacher_checkpoint, str):
@@ -148,6 +157,16 @@ class DistillSettings:
     def exact(self) -> bool:
         """Whether the teacher's whole distribution is kept (``top_k == 0``)."""
         return self.top_k == 0
+
+    @property
+    def normalizes_advantages(self) -> bool:
+        """Whether the sampled reverse-KL gradient uses the job-normalized advantages."""
+        return (
+            self.normalize_advantages
+            and not self.exact
+            and self.divergence == "reverse"
+            and self.top_k_distribution == "renormalized"
+        )
 
     @property
     def score_centering_weight(self) -> PolicyGradientWeight:
@@ -241,6 +260,8 @@ TEACHER_BATCH_KEYS = (
     "distill_teacher_topk_log_probs",
     "distill_teacher_sampled_log_probs",
 )
+#: The batch key where the pre-train hook stores the job-normalized sampled reverse-KL advantages.
+ADVANTAGES_KEY = "distill_advantages"
 
 
 class DistillAlgorithm(SlimeAlgorithm):
@@ -269,8 +290,8 @@ class DistillAlgorithm(SlimeAlgorithm):
         "distill_teacher_topk_log_probs": "float32",
         "distill_teacher_sampled_log_probs": "float32",
     }
-    external_batch_keys = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS)
-    rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
+    external_batch_keys = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS, ADVANTAGES_KEY)
+    rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS, ADVANTAGES_KEY)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.
     settings_type: type[DistillSettings] = DistillSettings
@@ -443,6 +464,7 @@ class DistillAlgorithm(SlimeAlgorithm):
         args.distill_importance_sampling_cap = settings.importance_sampling_cap
         args.distill_importance_sampling_level = settings.importance_sampling_level
         args.distill_advantage_clip = settings.advantage_clip
+        args.distill_normalize_advantages = settings.normalize_advantages
         args.distill_skip_response_tokens = settings.skip_response_tokens
         args.distill_jsd_beta = settings.jsd_beta
 
@@ -499,12 +521,14 @@ def settings_from_args(args: Namespace) -> DistillSettings:
         importance_sampling_cap=args.distill_importance_sampling_cap,
         importance_sampling_level=args.distill_importance_sampling_level,
         advantage_clip=args.distill_advantage_clip,
+        normalize_advantages=args.distill_normalize_advantages,
         skip_response_tokens=args.distill_skip_response_tokens,
         jsd_beta=args.distill_jsd_beta,
     )
 
 
 __all__ = [
+    "ADVANTAGES_KEY",
     "DIVERGENCES",
     "TEACHER_BATCH_KEYS",
     "TEACHER_SOURCES",
