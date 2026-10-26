@@ -38,6 +38,7 @@ class SaoSettings:
     length_adaptive_lambda: bool = False
     lambda_alpha: float = DEFAULT_LAMBDA_ALPHA
     critic_lambda: float = DEFAULT_CRITIC_LAMBDA
+    freeze_critic_attention: bool = False
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,12 @@ class SaoAlgorithm(SlimeAlgorithm):
                 f"(arXiv:2607.07508). Default {DEFAULT_CRITIC_LAMBDA}."
             ),
         )
+        parser.add_argument(
+            "--sao-freeze-critic-attention",
+            dest="freeze_critic_attention",
+            action="store_true",
+            help="Freeze critic self-attention, including dense models. MoE critics already freeze it by default.",
+        )
         options, remaining = parser.parse_known_args(list(arguments))
         return SaoSettings(**vars(options)), remaining
 
@@ -305,6 +312,7 @@ class SaoAlgorithm(SlimeAlgorithm):
         args.sao_length_adaptive_lambda = settings.length_adaptive_lambda
         args.sao_lambda_alpha = settings.lambda_alpha
         args.sao_critic_lambda = settings.critic_lambda
+        args.sao_freeze_critic_attention = settings.freeze_critic_attention
 
     # --- stage 2: shape row ---
 
@@ -323,8 +331,9 @@ class SaoAlgorithm(SlimeAlgorithm):
 
         Two things: (1) freeze the attention stack for an MoE value model
         (SAO Section 4) — an MoE critic trains only its experts, layernorms,
-        and value head while attention is held fixed; a dense critic trains
-        everything. (2) Project the critic-role GAE lambda: value targets use
+        and value head while attention is held fixed. Dense critics freeze
+        attention only with --sao-freeze-critic-attention.
+        (2) Project the critic-role GAE lambda: value targets use
         ``lambda_critic`` (default 1, Monte-Carlo returns) while the policy's
         advantages may use the length-adaptive lambda. Both roles run the same
         ``sao_advantages`` hook, so the separation lives entirely
@@ -409,18 +418,21 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     """Freeze the critic's attention stack for an MoE value model (SAO Section 4).
 
     An MoE critic trains only its experts, layernorms, and value head while
-    attention is held fixed. A dense critic is the fallback: no patterns, every
-    parameter trains. The patterns ride the critic's own
+    attention is held fixed. Dense critics can opt into the same freeze;
+    otherwise every parameter trains. The patterns ride the critic's own
     ``freeze_params_name_list`` and never affect the actor.
     """
     is_moe_critic = bool(getattr(critic_args, "num_experts", 0))
-    patterns = [CRITIC_ATTENTION_PARAM_PATTERN] if is_moe_critic else []
+    explicit_freeze = getattr(critic_args, "sao_freeze_critic_attention", False)
+    patterns = [CRITIC_ATTENTION_PARAM_PATTERN] if is_moe_critic or explicit_freeze else []
     if not patterns:
         return
     # The backend forbids setting both freeze and only-train lists; if the run
     # already pins the critic to an only-train list, respect it rather than
     # crash at validation, and say so.
     if getattr(critic_args, "only_train_params_name_list", None):
+        if explicit_freeze:
+            raise ValueError("--sao-freeze-critic-attention conflicts with --only-train-params-name-list")
         _logger.warning(
             "critic has only_train_params_name_list set; skipping SAO attention freeze to avoid conflicting with it"
         )
@@ -430,7 +442,7 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
         if pattern not in existing:
             existing.append(pattern)
     critic_args.freeze_params_name_list = existing
-    _logger.info("SAO: freezing MoE critic attention via patterns %s", patterns)
+    _logger.info("SAO: freezing critic attention via patterns %s", patterns)
 
 
 __all__ = ["SaoAlgorithm", "SaoSchedule", "SaoSettings", "SaoStepPlan", "build_sao_rollout_data", "sao_sample_row"]
