@@ -1,7 +1,7 @@
 """Official Retail environment, scripted inference, and the real SAO assembly.
 
 Install recipes/sao/examples/servelearnbench to run this optional benchmark suite.
-Scripted responses test the adapter contract, not model quality or GPU execution.
+Scripted responses test the harness contract, not model quality or GPU execution.
 """
 
 import copy
@@ -20,7 +20,9 @@ from servelearnbench import agent, llm, protocol
 from servelearnbench.scenarios import get_bundle
 from servelearnbench.scoring import read_rows, setting_scores
 
-from recipes.sao.examples.servelearnbench.harness import adapter
+from recipes.sao.examples.servelearnbench import harness as reef_harness
+from recipes.sao.examples.servelearnbench.harness import agent as reef_agent
+from recipes.sao.examples.servelearnbench.harness import report as reef_report
 from recipes.sao.processor import SAOTasks
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import trajectory_reward
@@ -28,6 +30,17 @@ from reef.record2record import ReportContext
 from reef.record2task.assembly import SampleAssemblySettings
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/sao/examples/servelearnbench"
+
+
+def load_campaign(monkeypatch):
+    """Load run.py as the campaign module, with the example's harness package importable as ``harness``."""
+    monkeypatch.setitem(sys.modules, "harness", reef_harness)
+    monkeypatch.setitem(sys.modules, "harness.agent", reef_agent)
+    monkeypatch.setitem(sys.modules, "harness.report", reef_report)
+    spec = importlib.util.spec_from_file_location("retail_campaign", EXAMPLE / "run.py")
+    campaign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(campaign)
+    return campaign
 
 
 @pytest.fixture
@@ -82,7 +95,7 @@ def model_with_responses(responses):
     client = Mock(spec=ReefClient)
     client.service_url = "http://reef.invalid"
     client.inference_with_record.side_effect = [(response, f"receipt-{i}") for i, response in enumerate(responses)]
-    return adapter.ReefLLM(client, "retail-test", llm.ModelConfig(model="reef", max_tokens=512), 42)
+    return reef_agent.ReefLLM(client, "retail-test", llm.ModelConfig(model="reef", max_tokens=512), 42)
 
 
 def test_split_is_fixed_ordered_and_disjoint(bundle):
@@ -100,18 +113,18 @@ def test_configurable_episode_preserves_official_execution_and_scoring(bundle, c
     task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
     responses = ground_truth_responses(task) if correct else [completion("finish", {}, 0)]
     official = agent.run_episode(model_with_responses(copy.deepcopy(responses)), bundle, task)
-    configured = adapter.run_episode(model_with_responses(responses), bundle, task, max_steps=20)
+    configured = reef_agent.run_episode(model_with_responses(responses), bundle, task, max_steps=20)
     assert configured == official
 
 
 def test_configured_turn_cap_keeps_official_reward_and_all_receipts(bundle):
     task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
     model = model_with_responses([completion("finish", {}, i, finish_reason="length") for i in range(20)])
-    reward, trace, usage, _ = adapter.run_episode(model, bundle, task, max_steps=20)
+    reward, trace, usage, _ = reef_agent.run_episode(model, bundle, task, max_steps=20)
     assert reward.reward == 0
     assert usage["calls"] == len(model.receipts) == 20
-    assert adapter.episode_end_reason(trace) == "step_cap"
-    adapter.report_episode(model, "capped-run", task.task_id, reward.reward, "step_cap")
+    assert reef_report.episode_end_reason(trace) == "step_cap"
+    reef_report.report_episode(model, "capped-run", task.task_id, reward.reward, "step_cap")
     assert model.reef.report.call_args.args[1]["references"] == model.receipts
     assert protocol.MAX_STEPS == 100
 
@@ -131,10 +144,10 @@ def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, correct):
     reward, trace, usage, _ = agent.run_episode(model, bundle, task)
     assert reward.reward == float(correct)
     assert trace[0]["invalid_reason"] == "length"
-    assert adapter.episode_end_reason(trace) == "finish"
+    assert reef_report.episode_end_reason(trace) == "finish"
     assert usage["calls"] == len(responses)
     assert usage["output"] == 4 * len(responses)
-    adapter.report_episode(model, "run", task.task_id, reward.reward, "finish")
+    reef_report.report_episode(model, "run", task.task_id, reward.reward, "finish")
     payload = model.reef.report.call_args.args[1]
     assert payload["score"] == reward.reward
     assert payload["feedback"] == protocol.score_line(reward.reward)
@@ -183,7 +196,7 @@ def test_context_overflow_is_scored_but_service_failure_aborts(bundle, status, b
     if scored:
         reward, trace, _, _ = agent.run_episode(model, bundle, task)
         assert reward.reward == 0
-        assert adapter.episode_end_reason(trace) == "context_overflow"
+        assert reef_report.episode_end_reason(trace) == "context_overflow"
     else:
         with pytest.raises(llm.InfraError, match="engine unavailable"):
             agent.run_episode(model, bundle, task)
@@ -191,16 +204,18 @@ def test_context_overflow_is_scored_but_service_failure_aborts(bundle, status, b
 
 
 def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
+    campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
     client.get.return_value = {"releases": [], "error": None}
     clock = iter([0, 0, 2, 2])
-    monkeypatch.setattr(adapter.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(adapter.time, "sleep", lambda _: None)
+    monkeypatch.setattr(campaign.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
     with pytest.raises(TimeoutError, match="did not commit"):
-        adapter.wait_for_training(client, "retail", 1, 1)
+        campaign.wait_for_training(client, "retail", 1, 1)
 
 
 def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeypatch):
+    campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
     newest = {"operation": "training", "release_id": "second", "content_kind": "saved_artifact"}
     older = {"operation": "training", "release_id": "first", "content_kind": "saved_artifact"}
@@ -222,17 +237,18 @@ def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeyp
         }
 
     client.get.side_effect = get
-    monkeypatch.setattr(adapter.time, "sleep", lambda _: None)
-    assert adapter.training_releases(client, "retail") == [older, newest]
-    release = adapter.wait_for_training(client, "retail", 2, 10)
+    monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
+    assert campaign.training_releases(client, "retail") == [older, newest]
+    release = campaign.wait_for_training(client, "retail", 2, 10)
     assert release == {**newest, "runtime_load_id": "v2"}
 
 
-def test_training_failure_does_not_wait_for_timeout():
+def test_training_failure_does_not_wait_for_timeout(monkeypatch):
+    campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
     client.get.side_effect = [{"releases": []}, {"error": "optimizer failed"}]
     with pytest.raises(RuntimeError, match="optimizer failed"):
-        adapter.wait_for_training(client, "retail", 1, 10)
+        campaign.wait_for_training(client, "retail", 1, 10)
 
 
 def test_mixed_weight_versions_fail_before_reporting():
@@ -240,7 +256,7 @@ def test_mixed_weight_versions_fail_before_reporting():
     model.receipts = ["a", "b"]
     model.reef.get.side_effect = [{"payload": {"runtime_load_id": version}} for version in ("v0", "v1")]
     with pytest.raises(RuntimeError, match="exactly one"):
-        adapter.episode_runtime_load_id(model)
+        reef_report.episode_runtime_load_id(model)
     model.reef.report.assert_not_called()
 
 
@@ -248,10 +264,7 @@ def test_mixed_weight_versions_fail_before_reporting():
 @pytest.mark.parametrize("batch_size,smoke", [(1, True), (8, True), (8, False)])
 def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, batch_size, smoke):
     monkeypatch.delenv("SAO_BATCH", raising=False)
-    monkeypatch.setitem(sys.modules, "harness.adapter", adapter)
-    spec = importlib.util.spec_from_file_location("retail_campaign", EXAMPLE / "run.py")
-    campaign = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(campaign)
+    campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
     client.service_url, client.token = "http://reef.invalid", None
     monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)

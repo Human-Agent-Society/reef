@@ -1,16 +1,18 @@
-"""Preserve official environment semantics while recording Reef inference receipts."""
+"""ServeLearnBench's agent loop over the Reef protocol client.
 
-import time
-import urllib.error
+The benchmark's own environment, tools, budgets, and verifier run unchanged;
+only the model transport goes through Reef, and every call's inference
+receipt is kept for the episode's report.
+"""
+
 import uuid
 from types import SimpleNamespace
-from urllib.parse import quote
 
 import httpx
 from openai import APIStatusError
 from openai.types import CompletionUsage
 from reef_client import ReefClient, ReefClientError
-from servelearnbench import agent, llm, protocol
+from servelearnbench import agent, llm
 from servelearnbench.engine.types import FINISH_ACTION_NAME, Action, RewardResult, Task
 
 
@@ -132,93 +134,3 @@ class ReefLLM(llm.LLM):
             tool_calls=calls,
             finish_reason=finish_reason,
         )
-
-
-def training_releases(client: ReefClient, scenario: str) -> list[dict]:
-    """Return committed training releases oldest first; an uncreated scenario has none."""
-    try:
-        response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
-    except ReefClientError as error:
-        if error.status == 404:
-            return []
-        raise
-    return [
-        release
-        for release in reversed(response["releases"])
-        if release["operation"] == "training" and not release.get("pending", False)
-    ]
-
-
-def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_seconds: float) -> dict:
-    """Wait for exactly expected commits, including serving-weight publication."""
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        try:
-            releases = training_releases(client, scenario)
-            status = client.get("/reef/status")
-        except TimeoutError:
-            continue  # Registry reads can wait behind an in-flight update.
-        except urllib.error.URLError as error:
-            if isinstance(error.reason, TimeoutError):
-                continue
-            raise
-        if status["error"]:
-            raise RuntimeError(f"Training failed: {status['error']}")
-        if len(releases) > expected:
-            raise RuntimeError("Unexpected training release; use a dedicated scenario for this run")
-        if len(releases) == expected:
-            current = status["scenarios"][scenario]
-            version = current["current_runtime_load_id"]
-            # Saved-artifact release rows do not carry runtime_load_id.
-            # Read the published version only after admission reopens.
-            if current["inference_admission"]["open"] and isinstance(version, str) and version:
-                return {**releases[-1], "runtime_load_id": version}
-        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-    raise TimeoutError(f"Training did not commit release {expected} within {timeout_seconds}s")
-
-
-def episode_end_reason(trace: list[dict]) -> str:
-    """Return the official terminal event, independently of per-turn finish_reason."""
-    if not trace:
-        raise ValueError("An episode must contain a trace event")
-    last = trace[-1]
-    if last["kind"] == "finish":
-        return "finish"
-    if last["name"] in ("(step_cap)", "(token_cap)", "(context_overflow)"):
-        return last["name"][1:-1]
-    raise ValueError(f"Unrecognized official episode ending: {last['kind']}/{last['name']}")
-
-
-def episode_runtime_load_id(model: ReefLLM) -> str:
-    """Require one engine weight version across all recorded turns of a task."""
-    versions: set[str] = set()
-    for receipt in model.receipts:
-        record = model.reef.get(f"/reef/scenarios/{quote(model.scenario, safe='')}/records/{quote(receipt, safe='')}")
-        version = record["payload"].get("runtime_load_id")
-        if not isinstance(version, str) or not version:
-            raise RuntimeError(f"Receipt {receipt} has no single producing weight version")
-        versions.add(version)
-    if len(versions) != 1:
-        raise RuntimeError("An episode must use exactly one producing weight version")
-    return versions.pop()
-
-
-def report_episode(model: ReefLLM, run_id: str, task_id: str, reward: float, end_reason: str) -> dict:
-    """Submit one scalar outcome against all ordered inference receipts.
-
-    This function accepts serving episodes only through the campaign driver.
-    The report excludes hidden rules, verifier details, and category labels.
-    """
-    if not model.receipts or not 0.0 <= reward <= 1.0:
-        raise ValueError("A report requires inference receipts and a reward in [0, 1]")
-    report_id = uuid.uuid5(uuid.NAMESPACE_URL, f"servelearnbench:{run_id}:{task_id}").hex
-    return model.reef.report(
-        model.scenario,
-        {
-            "agent_record_id": report_id,
-            "score": reward,
-            "feedback": protocol.score_line(reward),
-            "references": list(model.receipts),
-            "metadata": {"task": {"name": task_id}, "end_reason": end_reason},
-        },
-    )

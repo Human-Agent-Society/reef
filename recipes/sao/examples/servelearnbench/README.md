@@ -7,8 +7,21 @@ It does not implement the complete benchmark or its OPD comparison.
 
 The benchmark dependency is pinned in `pyproject.toml`.
 Its official agent loop owns environment resets, tools, budgets, termination, and verification.
-The adapter connects model transport and sends the official scalar reward to Reef.
+The harness connects the model transport to Reef and reports the official scalar reward.
 Hidden rules, ground-truth actions, and verifier details never enter SAO feedback.
+
+## Layout
+
+```text
+servelearnbench/
+  run.sh          prepares the 128k model view, starts reef serve, then runs the campaign
+  run.py          the campaign: the fixed split, batches of eight, the training barrier, results.jsonl
+  prepare.py      writes the 128k YaRN configuration view of a Qwen3 checkpoint
+  serve.yaml      the Reef stack: Qwen3-8B actor and critic, SAO, exact-token episodes
+  harness/
+    agent.py      the benchmark's LLM interface over reef_client and its episode loop with a turn limit
+    report.py     the score report against an episode's inference receipts
+```
 
 ## Experiment settings
 
@@ -39,12 +52,10 @@ Task-level budget exhaustion and context overflow retain the official reward and
 The driver neither drops these trajectories by length nor adds value bootstrapping.
 An unassemblable training trajectory fails explicitly.
 
-The example's inference handler retains exact sampled token IDs across turns.
-It appends only new observations and turn delimiters as masked context.
-This avoids Qwen3 history re-rendering, which can otherwise remove earlier actions from the training mask.
-Blind, Oracle, and SAO use this same history policy.
-It retains prior reasoning instead of applying the tokenizer's usual history cleanup.
-The handler accepts one serial campaign and nonstreaming requests only.
+Reef's chat handler serves each episode from its exact sampled token IDs (`inference.handler-config.episode_continuation`).
+A later call appends only the new observations and turn delimiters as masked context.
+This avoids Qwen3 history re-rendering, which otherwise removes earlier reasoning from the training mask.
+Blind, Oracle, and SAO use the same setting.
 
 ## Install and run
 
@@ -70,11 +81,10 @@ bash recipes/sao/examples/servelearnbench/run.sh
 The default is a launch configuration, not a measured minimum GPU requirement.
 Allocate the GPUs before running the script. Do not run the service on a login node.
 
-The launcher prepares a separate model view under `CHECKPOINT_DIR/model-128k`.
+`prepare.py` writes a separate model view under `CHECKPOINT_DIR/model-128k`.
 It links the original weights and writes a Qwen3 configuration with YaRN factor four and original context 32,768.
-The source checkpoint stays unchanged. SGLang reads this configuration; the example provider installs matching YaRN in both training roles.
-The provider also sets the attention magnitude and disables incompatible fused RoPE.
-All published HF checkpoints must retain this model configuration.
+The source checkpoint stays unchanged. SGLang reads this configuration, and Reef's Megatron model provider installs the same YaRN rotary embedding for the actor and the critic.
+Published HF checkpoints keep this configuration.
 
 The defaults are 100 model calls and at most 16,384 output tokens per call.
 Thinking and the visible reply share the output budget; the cumulative context limit is 131,072 tokens.
@@ -111,20 +121,17 @@ The summary records trained task counts and ending reasons, including budget and
 First run the CPU tests from the repository root:
 
 ```bash
-python -m pytest tests/recipes/sao tests/slime_backend/test_critic_metrics.py \
-  tests/slime_backend/test_worker_hooks.py
+python -m pytest tests/recipes/sao/test_servelearnbench.py tests/recipes/sao/test_servelearnbench_prepare.py
 ```
 
-These tests include official Retail verification with scripted inference and real SAO sample assembly.
-The CP test uses two CPU/Gloo ranks. They do not establish GPU training or benchmark performance.
+These tests run the official Retail verification with scripted inference and the real SAO sample assembly.
+They need the benchmark installed and do not establish GPU training or benchmark performance.
 
-For the history check, point the test at a downloaded Qwen3 tokenizer:
+For the exact-token history check, point Reef's handler test at a downloaded Qwen3 tokenizer:
 
 ```bash
-REEF_TEST_QWEN_TOKENIZER="$MODEL_DIR" python -m pytest tests/recipes/sao/test_retail_inference.py
+REEF_TEST_QWEN_TOKENIZER="$MODEL_DIR" python -m pytest tests/inference/test_chat_episode_continuation.py
 ```
-
-This checks that tool serialization and length-limited turns retain every sampled action token.
 
 For a GPU wiring check, use one GPU, Qwen3-0.6B, and fresh directories.
 Use a short allocation, including a preemptable allocation when available:

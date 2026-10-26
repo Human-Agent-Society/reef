@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from recipes.sao.examples.servelearnbench.long_context import prepare_model
+from recipes.sao.examples.servelearnbench.prepare import prepare_model
 
 
 def test_model_view_preserves_source_and_links_weights(tmp_path):

@@ -1,1 +1,1 @@
-"""ServeLearnBench's official agent loop through the Reef protocol client."""
+"""ServeLearnBench's official agent loop and scoring through the Reef protocol client."""

@@ -23,7 +23,6 @@ from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND as DEFAULT_EXECUTOR_BACKEND,
 )
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
-from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
 from reef.train.slime_backend.reef_adapters.worker_hooks import configure_critic_objective
 
 logger = logging.getLogger(__name__)

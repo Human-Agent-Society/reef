@@ -8,9 +8,11 @@ reef:
   run-dir: ${REEF_WORK}/stack
   ready-timeout: 1800
 inference:
-  handler-factory: recipes.sao.examples.servelearnbench.inference.RetailInferenceHandler
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen25
+    # Each episode continues from its exact sampled tokens (the OpenAI user field names it).
+    episode_continuation: true
     chat_template_kwargs:
       enable_thinking: true
   num-gpus: ${SAO_GPUS}
@@ -67,8 +69,6 @@ training:
     seq-length: "131072"
     rollout-max-response-len: "131072"
     padded-vocab-size: "151936"
-    # The example provider installs matching YaRN for both training roles.
-    custom-model-provider-path: recipes.sao.examples.servelearnbench.long_context.provide_model
     position-embedding-type: rope
     swiglu: true
     disable-bias-linear: true

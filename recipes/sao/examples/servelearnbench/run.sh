@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-reef_source_root="$(cd ../../../.. && pwd)"
-export PYTHONPATH="$reef_source_root${PYTHONPATH:+:$PYTHONPATH}"
 
 : "${MODEL_DIR:?Set MODEL_DIR to a Qwen3 checkpoint}"
 : "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to a fresh scratch directory}"
@@ -40,7 +38,7 @@ mkdir -p "$MEGATRON_CONFIG_LOCK_DIR"
 export REEF_TOKEN=${REEF_TOKEN:-$("$python" -c 'import secrets; print(secrets.token_hex(24))')}
 source_model="$MODEL_DIR"
 export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$source_model")}
-"$python" "$PWD/long_context.py" "$source_model" "$CHECKPOINT_DIR/model-128k"
+"$python" "$PWD/prepare.py" "$source_model" "$CHECKPOINT_DIR/model-128k"
 export MODEL_DIR="$CHECKPOINT_DIR/model-128k"
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send

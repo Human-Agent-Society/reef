@@ -4,25 +4,63 @@ import argparse
 import json
 import os
 import time
+import urllib.error
 from pathlib import Path
+from urllib.parse import quote
 
-from reef_client import ReefClient
+from reef_client import ReefClient, ReefClientError
 from servelearnbench import llm, protocol
 from servelearnbench.methods.baselines import Oracle
 from servelearnbench.scenarios import get_bundle
 from servelearnbench.scoring import category
 
-from harness.adapter import (
-    ReefLLM,
-    episode_end_reason,
-    episode_runtime_load_id,
-    report_episode,
-    run_episode,
-    training_releases,
-    wait_for_training,
-)
+from harness.agent import ReefLLM, run_episode
+from harness.report import episode_end_reason, episode_runtime_load_id, report_episode
 
 BENCHMARK_REVISION = "57aa919b5ae71d60c38a7ed559262447406f1e8b"
+
+
+def training_releases(client: ReefClient, scenario: str) -> list[dict]:
+    """Return committed training releases oldest first; an uncreated scenario has none."""
+    try:
+        response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
+    except ReefClientError as error:
+        if error.status == 404:
+            return []
+        raise
+    return [
+        release
+        for release in reversed(response["releases"])
+        if release["operation"] == "training" and not release.get("pending", False)
+    ]
+
+
+def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_seconds: float) -> dict:
+    """Wait for exactly expected commits, including serving-weight publication."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            releases = training_releases(client, scenario)
+            status = client.get("/reef/status")
+        except TimeoutError:
+            continue  # Registry reads can wait behind an in-flight update.
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                continue
+            raise
+        if status["error"]:
+            raise RuntimeError(f"Training failed: {status['error']}")
+        if len(releases) > expected:
+            raise RuntimeError("Unexpected training release; use a dedicated scenario for this run")
+        if len(releases) == expected:
+            current = status["scenarios"][scenario]
+            version = current["current_runtime_load_id"]
+            # Saved-artifact release rows do not carry runtime_load_id.
+            # Read the published version only after admission reopens.
+            if current["inference_admission"]["open"] and isinstance(version, str) and version:
+                return {**releases[-1], "runtime_load_id": version}
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+    raise TimeoutError(f"Training did not commit release {expected} within {timeout_seconds}s")
 
 
 def main() -> None:
