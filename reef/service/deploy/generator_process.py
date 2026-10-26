@@ -51,17 +51,18 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         token=token,
         agent=generator.agent,
         agent_host=generator.agent_host,
+        environment=generator.environment,
         concurrency=generator.concurrency,
     )
     runs = HarborRuns()
     return GeneratorService(
         tasks_root=tasks_root,
         designer=designer,
-        checks=HarborChecks(harbor=generator.harbor, runs=runs),
+        checks=HarborChecks(harbor=generator.harbor, environment=generator.environment, runs=runs),
         episodes=episodes,
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
-        probes=readiness_probes(harbor=generator.harbor),
+        probes=readiness_probes(harbor=generator.harbor, environment=generator.environment),
         jobs=JobRunner(runs),
     )
 

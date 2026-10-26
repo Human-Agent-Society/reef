@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import Settings, config_metadata, config_option
+from reef.record2task.generator.service import HARBOR_ENVIRONMENTS
 from reef.runtime.deployment import http_readiness_command
 from reef.service.deploy.config_utils import DeployConfigError
 
@@ -30,7 +31,17 @@ DEFAULT_READY_TIMEOUT = 60
 
 @dataclass(frozen=True)
 class GeneratorSettings(Settings):
-    """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section."""
+    """The generator service's own settings; the Reef address, token and served model come from the ``reef`` section.
+
+    Values: ``tasks_root`` is a directory path that is not blank. ``port`` is an int in 1..65535. ``concurrency``
+    is an int of at least 1. ``designer_timeout_s`` and ``ready_timeout`` are positive. ``designer_api`` is None,
+    ``openai`` or ``responses``. ``agent`` is None or a Harbor agent config with a ``name`` or an ``import_path``.
+    ``environment`` is a name in ``HARBOR_ENVIRONMENTS``, the Harbor environment of every check and episode.
+    ``host`` is a bind address; ``work_dir``, ``agent_host``, ``harbor``, ``designer_url``, ``designer_token`` and
+    ``designer_model`` are strings or None, and ``designer_options`` is a mapping or None.
+    Purpose: ``generator_service`` reads the deployment's ``generator`` section into it to start the process;
+    ``reef.service.deploy.generator_process`` reads it again to build the service.
+    """
 
     tasks_root: str = config_option(help="The directory generated tasks and Harbor job files live under.")
     host: str = config_option("127.0.0.1", help="The generator's bind address.")
@@ -50,6 +61,10 @@ class GeneratorSettings(Settings):
     )
     harbor: str | None = config_option(
         None, help="The harbor command line for the oracle check; found on PATH by default."
+    )
+    environment: str = config_option(
+        "docker",
+        help="The Harbor environment of the checks and episodes: docker, or e2b on a host without Docker.",
     )
     concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Episodes in flight across all episode requests.")
     designer_url: str | None = config_option(
@@ -91,6 +106,8 @@ class GeneratorSettings(Settings):
             raise ValueError("generator.designer-timeout-s must be positive")
         if self.designer_api not in (None, "openai", "responses"):
             raise ValueError("generator.designer-api must be openai or responses")
+        if self.environment not in HARBOR_ENVIRONMENTS:
+            raise ValueError(f"generator.environment must be {' or '.join(HARBOR_ENVIRONMENTS)}")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):

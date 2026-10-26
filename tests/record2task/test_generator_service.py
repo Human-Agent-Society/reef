@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -48,7 +49,13 @@ from reef.record2task.generator import (
     readiness_probes,
 )
 from reef.record2task.generator.inputs import TaskGenerationRequest
-from reef.record2task.generator.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
+from reef.record2task.generator.service import (
+    CLOSE_GRACE_S,
+    DockerProbe,
+    EnvironmentVariableProbe,
+    HarborProbe,
+    ModuleProbe,
+)
 from reef.record2task.generator.wire import (
     WireError,
     designer_request_document,
@@ -498,6 +505,52 @@ def test_the_task_episodes_keep_at_most_concurrency_episodes_of_all_requests_in_
     assert most_in_flight == 2
 
 
+def test_the_checks_and_the_episodes_run_in_the_harbor_environment_they_are_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments_path = tmp_path / "arguments.json"
+    harbor = tmp_path / "harbor"
+    harbor.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"open({str(arguments_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(2)\n"
+    )
+    harbor.chmod(0o755)
+    with pytest.raises(OracleUnavailable, match="harbor run -a oracle exited 2"):
+        HarborChecks(harbor=str(harbor), environment="e2b").oracle(tmp_path / "tasks" / "t")
+    harbor_arguments = json.loads(arguments_path.read_text())
+    assert harbor_arguments[harbor_arguments.index("-e") + 1] == "e2b"
+    assert HarborChecks().environment == "docker"
+    environments: list[str] = []
+
+    async def episode(self: TaskEpisodeRunner, task_path: Path) -> TaskEpisode:
+        environments.append(self.environment)
+        return TaskEpisode(task_path, task_path.name, "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+
+    monkeypatch.setattr(TaskEpisodeRunner, "run_async", episode)
+    episode_arguments = {
+        "scenario": "s",
+        "model": "m",
+        "arm": "plain",
+        "count": 2,
+        "extra_instruction_paths": (),
+        "tags": {},
+    }
+    for task_episodes in (
+        ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path),
+        ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b"),
+    ):
+        asyncio.run(task_episodes.run_episodes(tmp_path / "t", **episode_arguments))  # type: ignore[arg-type]
+    assert environments == ["docker", "docker", "e2b", "e2b"]
+    with pytest.raises(ValueError, match="environment must name a Harbor environment"):
+        HarborChecks(environment="")
+    for fields, message in (
+        ({"environment": ""}, "environment must name a Harbor environment"),
+        ({"concurrency": 0}, "concurrency must be a positive int"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            ReefTaskEpisodes(reef_url="http://127.0.0.1:9", work_dir=tmp_path, **fields)  # type: ignore[arg-type]
+
+
 def test_an_episode_job_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path: Path) -> None:
     built, _, _, episodes = service(tmp_path)
 
@@ -663,6 +716,63 @@ def test_the_stack_probes_look_for_reef_eval_harbor_and_docker(
     )
 
 
+KEY_REASON = "E2B_API_KEY is not set in the generator's environment; set it where reef serve starts the generator"
+
+
+def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probes = readiness_probes(harbor="/opt/harbor", environment="e2b")
+    assert [probe.name for probe in probes] == ["reef_eval", "harbor", "E2B_API_KEY", "e2b"]
+    assert not any(isinstance(probe, DockerProbe) for probe in probes)
+    key, package = probes[2], probes[3]
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    assert key.missing() == KEY_REASON
+    monkeypatch.setenv("E2B_API_KEY", "")
+    assert key.missing() == KEY_REASON, "an empty key is no key"
+    monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    assert key.missing() == ""
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name, package=None: None if name == "e2b" else find_spec(name, package)
+    )
+    reason = package.missing()
+    assert reason.startswith(f"e2b does not import under {sys.executable}") and "install reef-infra[e2b]" in reason
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
+        readiness_probes(environment="modal")
+    with pytest.raises(ValueError, match="non-empty environment variable name"):
+        EnvironmentVariableProbe("")
+
+
+def test_healthz_under_e2b_names_the_missing_key_and_is_ok_once_it_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The test environment may lack reef-eval and the e2b extra; a stand in spec makes both import.
+    find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, package=None: find_spec("json" if name in ("reef_eval", "e2b") else name, package),
+    )
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    built, _, _, _ = service(tmp_path, probes=readiness_probes(harbor=sys.executable, environment="e2b"))
+
+    async def body(generator: HttpGenerator) -> object:
+        return await generator.request("GET", "/healthz")
+
+    assert run_with(built, body) == (
+        503,
+        {
+            "ok": False,
+            "missing": ["E2B_API_KEY"],
+            "reasons": {"E2B_API_KEY": KEY_REASON},
+            "tasks_root": str(tmp_path / "tasks"),
+        },
+    )
+    monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    assert run_with(built, body) == (200, {"ok": True, "tasks_root": str(tmp_path / "tasks")})
+
+
 def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     task = HarborTask(
         name="t",
@@ -698,6 +808,11 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         {"tasks-root": "/tmp/t", "designer-timeout-s": 60, "agent": {"name": "terminus-2"}}, setting="generator"
     )
     assert settings.tasks_root == "/tmp/t" and settings.designer_timeout_s == 60.0 and settings.port == 8910
+    assert settings.environment == "docker", "a deployment that names no environment runs in Docker as before"
+    assert (
+        GeneratorSettings.from_config({"tasks-root": "/tmp/t", "environment": "e2b"}, setting="generator").environment
+        == "e2b"
+    )
     assert GeneratorSettings.from_config({"tasks_root": "/tmp/t"}, setting="generator").tasks_root == "/tmp/t"
     for section, message in (
         ({}, "tasks_root is required"),
@@ -707,6 +822,8 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
         ({"tasks-root": "/tmp/t", "designer-api": "anthropic"}, "designer-api must be openai or responses"),
+        ({"tasks-root": "/tmp/t", "environment": "modal"}, r"generator\.environment must be docker or e2b"),
+        ({"tasks-root": "/tmp/t", "environment": "Docker"}, r"generator\.environment must be docker or e2b"),
     ):
         with pytest.raises(ValueError, match=message):
             GeneratorSettings.from_config(section, setting="generator")

@@ -1342,9 +1342,13 @@ Absent by default. When present, ``reef serve`` starts the generator service
 it, and publishes its address as ``${endpoints.generator}`` for the
 generated-task stages to consume. The generator writes and checks Harbor tasks and runs their episodes for the
 generated-task recipe and for a task generator such as SPADE, under the same
-interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
-``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
-place it on the host that has Docker. The generator runs its proposals, checks and episodes at the same time.
+interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs the ``harbor``
+command line and the Harbor environment that ``generator.environment`` selects; the Reef service itself needs
+neither. The default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task in an E2B cloud
+sandbox, so a host without Docker, such as a cluster node with only Apptainer, uses it; it needs
+``E2B_API_KEY`` in the generator's environment and ``reef-infra[e2b]``. ``execution.generator`` selects the
+generator's executor, so a deployment can place it on another host. The generator runs its proposals, checks and
+episodes at the same time.
 ``generator.concurrency`` limits only the episodes in flight, so a proposal or a check never waits behind episodes.
 
 .. config::
@@ -1356,6 +1360,7 @@ place it on the host that has Docker. The generator runs its proposals, checks a
    generator.agent | terminus-2 | the Harbor agent each episode runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
+   generator.environment | docker | the Harbor environment of the oracle and nop checks and of the episodes: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
    generator.concurrency | 2 | episodes in flight across all episode requests of the generator service
    generator.designer-url | a Reef service the designer calls go to instead of this deployment's
    generator.designer-token | the token for ``designer-url``

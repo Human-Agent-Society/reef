@@ -15,8 +15,9 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 - ``POST /episodes``: an agent runs rollout episodes of a written task (a job). Reef keeps no record of
   their model calls; each episode comes back with its reward and its answered calls (``turns``).
 - ``GET /jobs/{id}``: a job's state and result.
-- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
-  then 503 naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run episodes.
+- ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and the Harbor environment can
+  run tasks (Docker answers, or for ``e2b`` the E2B key is set and the e2b package imports); until then 503
+  naming what is missing, so ``reef serve`` waits on a generator that cannot check tasks or run episodes.
 
 Jobs run at the same time on one job worker; an episode job waits only for the service's episode slots, so a
 proposal or a check never waits behind episodes. Closing the service stops the harbor runs a job has in flight, so
@@ -31,6 +32,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -80,6 +82,8 @@ from reef.record2task.generator.wire import (
 logger = logging.getLogger(__name__)
 
 DOCKER_PROBE_TIMEOUT_S = 5.0
+#: The Harbor environments the generator runs its checks and episodes in: local Docker, or E2B cloud sandboxes.
+HARBOR_ENVIRONMENTS = ("docker", "e2b")
 
 
 # ------------------------------------------------------------- the readiness
@@ -147,13 +151,48 @@ class DockerProbe(ReadinessProbe):
         return ""
 
 
-def readiness_probes(*, harbor: str | None = None) -> tuple[ReadinessProbe, ...]:
-    """What checking a task and running its episodes takes: reef-eval, the harbor command line and Docker."""
-    return (
+class EnvironmentVariableProbe(ReadinessProbe):
+    """A variable of this process's environment is set and not empty.
+
+    Values: ``variable`` is a non-empty variable name, and ``name`` is the same name. ``missing`` names the
+    variable and never its value, since the value can be a secret.
+    Purpose: ``readiness_probes`` makes one for ``E2B_API_KEY`` when the Harbor environment is ``e2b``; the
+    ``/healthz`` handler reads ``missing``.
+    """
+
+    def __init__(self, variable: str, *, hint: str = "") -> None:
+        if not isinstance(variable, str) or not variable:
+            raise ValueError("variable must be a non-empty environment variable name")
+        self.name = variable
+        self.variable = variable
+        self.hint = hint
+
+    def missing(self) -> str:
+        if os.environ.get(self.variable):
+            return ""
+        reason = f"{self.variable} is not set in the generator's environment"
+        return f"{reason}; {self.hint}" if self.hint else reason
+
+
+def readiness_probes(*, harbor: str | None = None, environment: str = "docker") -> tuple[ReadinessProbe, ...]:
+    """What checking a task and running its episodes takes: reef-eval, the harbor command line, and ``environment``.
+
+    ``docker`` needs a Docker daemon that answers. ``e2b`` needs ``E2B_API_KEY`` and the e2b package, which Harbor's
+    e2b environment imports. Raise ``ValueError`` for a name outside ``HARBOR_ENVIRONMENTS``.
+    """
+    stack = (
         ModuleProbe("reef_eval", hint="a dependency of reef-infra; reinstall reef-infra"),
         HarborProbe(harbor=harbor),
-        DockerProbe(),
     )
+    if environment == "docker":
+        return (*stack, DockerProbe())
+    if environment == "e2b":
+        return (
+            *stack,
+            EnvironmentVariableProbe("E2B_API_KEY", hint="set it where reef serve starts the generator"),
+            ModuleProbe("e2b", hint="Harbor's e2b environment needs it; install reef-infra[e2b]"),
+        )
+    raise ValueError(f"the Harbor environment must be {' or '.join(HARBOR_ENVIRONMENTS)}, not {environment!r}")
 
 
 # reef serve kills the generator 30 s after its term; the harbor grace and the worker's close must both fit in that
@@ -174,14 +213,26 @@ class TaskChecks(ABC):
 
 
 class HarborChecks(TaskChecks):
-    """The checks through the harbor command line; ``runs`` shared with the job runner so closing it stops a check."""
+    """The checks through the harbor command line, in one Harbor environment.
 
-    def __init__(self, *, harbor: str | None = None, runs: HarborRuns | None = None) -> None:
+    Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is a non-empty
+    Harbor environment name, such as ``docker`` or ``e2b``. ``runs`` is the registry of harbor children, or None for
+    a registry per check.
+    Purpose: the generator process makes it with the ``runs`` of its job runner, so closing the runner stops a
+    check; ``CheckJob`` calls ``oracle``, which runs both of a task's harbor runs in ``environment``.
+    """
+
+    def __init__(
+        self, *, harbor: str | None = None, environment: str = "docker", runs: HarborRuns | None = None
+    ) -> None:
+        if not isinstance(environment, str) or not environment:
+            raise ValueError("environment must name a Harbor environment, such as docker or e2b")
         self.harbor = harbor
+        self.environment = environment
         self.runs = runs
 
     def oracle(self, task_path: Path) -> OracleResult:
-        return oracle_check(task_path, harbor=self.harbor, runs=self.runs)
+        return oracle_check(task_path, harbor=self.harbor, environment=self.environment, runs=self.runs)
 
 
 class TaskEpisodes(ABC):
@@ -204,7 +255,13 @@ class TaskEpisodes(ABC):
 class ReefTaskEpisodes(TaskEpisodes):
     """An episode runner per call, its episodes tagged with the arm; at most ``concurrency`` episodes of all calls in flight.
 
-    The service's job worker runs every episode on its one event loop, so all calls share the episode slots.
+    Values: ``reef_url`` is the Reef service the agent's calls go to, with ``token`` as its bearer or None.
+    ``work_dir`` is where the runners keep trials. ``agent`` is a Harbor agent config or None for Terminus 2, and
+    ``agent_host`` an address of this host the task's sandbox reaches, or None. ``environment`` is a non-empty
+    Harbor environment name, such as ``docker`` or ``e2b``, for every episode. ``concurrency`` is a positive int,
+    the number of episode slots.
+    Purpose: the generator process makes it; ``EpisodeJob`` calls ``run_episodes``. The service's job worker runs
+    every episode on its one event loop, so all calls share the episode slots.
     """
 
     def __init__(
@@ -215,13 +272,19 @@ class ReefTaskEpisodes(TaskEpisodes):
         token: str | None = None,
         agent: Mapping[str, object] | None = None,
         agent_host: str | None = None,
+        environment: str = "docker",
         concurrency: int = 2,
     ) -> None:
+        if not isinstance(environment, str) or not environment:
+            raise ValueError("environment must name a Harbor environment, such as docker or e2b")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError("concurrency must be a positive int")
         self.reef_url = reef_url
         self.work_dir = Path(work_dir)
         self.token = token
         self.agent = agent
         self.agent_host = agent_host
+        self.environment = environment
         self.episode_slots = asyncio.Semaphore(concurrency)
 
     async def run_episodes(
@@ -245,6 +308,7 @@ class ReefTaskEpisodes(TaskEpisodes):
             token=self.token,
             agent=self.agent,
             agent_host=self.agent_host,
+            environment=self.environment,
             labels={**tags, "arm": arm},
             extra_instruction_paths=extra_instruction_paths,
             is_reporting=False,

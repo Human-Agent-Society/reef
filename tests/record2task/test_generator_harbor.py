@@ -68,6 +68,10 @@ arguments = sys.argv[1:]
 agent = arguments[arguments.index("-a") + 1]
 jobs = Path(arguments[arguments.index("-o") + 1])
 script = json.loads(Path(__file__).with_suffix(".json").read_text())
+if script.get("record_path"):
+    import os
+    with open(script["record_path"], "a") as record:
+        record.write(json.dumps({{"arguments": arguments, "e2b_api_key": os.environ.get("E2B_API_KEY")}}) + "\\n")
 exit_code = script.get("exits", {{}}).get(agent)
 if exit_code is not None:
     sys.stderr.write("docker daemon is not running")
@@ -322,6 +326,48 @@ def test_a_task_the_oracle_solves_and_the_nop_agent_does_not_is_solvable(tmp_pat
     result = oracle_check(root, harbor=fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}))
     assert result.is_solvable and (result.oracle_reward, result.nop_reward) == (1.0, 0.0)
     assert sorted(p.name for p in (tmp_path / "tasks" / ".harbor-jobs" / root.name).iterdir()) == ["nop", "oracle"]
+
+
+def harbor_runs(record_path: Path) -> list[dict[str, object]]:
+    """What each fake harbor run saw: its arguments and its E2B key, in run order."""
+    return [json.loads(line) for line in record_path.read_text().splitlines()]
+
+
+def test_a_check_runs_both_agents_in_docker_by_default_with_the_same_command_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("E2B_API_KEY", raising=False)
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    record_path = tmp_path / "runs.jsonl"
+    harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, record_path=str(record_path))
+    assert oracle_check(root, harbor=harbor).is_solvable
+    jobs = tmp_path / "tasks" / ".harbor-jobs" / root.name
+    assert harbor_runs(record_path) == [
+        {
+            "arguments": ["run", "-p", str(root), "-a", agent, "-e", "docker", "-o", str(jobs / agent), "-n", "1"],
+            "e2b_api_key": None,
+        }
+        for agent in ("oracle", "nop")
+    ]
+
+
+def test_an_e2b_check_runs_both_agents_in_e2b_and_harbor_sees_the_e2b_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("E2B_API_KEY", "e2b-test-key")
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    record_path = tmp_path / "runs.jsonl"
+    harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, record_path=str(record_path))
+    assert oracle_check(root, harbor=harbor, environment="e2b").is_solvable
+    jobs = tmp_path / "tasks" / ".harbor-jobs" / root.name
+    # The harbor child inherits the generator's environment, so Harbor's E2B environment finds the key.
+    assert harbor_runs(record_path) == [
+        {
+            "arguments": ["run", "-p", str(root), "-a", agent, "-e", "e2b", "-o", str(jobs / agent), "-n", "1"],
+            "e2b_api_key": "e2b-test-key",
+        }
+        for agent in ("oracle", "nop")
+    ]
 
 
 @pytest.mark.parametrize(
