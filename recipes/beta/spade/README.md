@@ -50,7 +50,7 @@ The generator's `config` keys:
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. With the defaults, 0.0 and 0, all tasks train. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
-The generated-task recipe uses the `task_group` objective. It centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend. Selecting Slime fails because it has no loss family with that name.
+The generated-task recipe uses the `task_group` objective. It centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. The `importance_sampling` loss applies that advantage to every response token that the loss mask selects. Tinker has this loss built in, and Slime has a built-in loss family of the same name, so the recipe also trains on the `slime` backend; [the configuration reference](../../../docs/reference/configuration.rst) lists the Slime options it needs. This example uses `tinker`.
 
 ## Run it
 

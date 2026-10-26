@@ -62,6 +62,12 @@ objective; the driver checks it at start and refuses a mismatch.
 | ``sdft``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
 +---------------------+-----------------------------+----------------------------+
 
+The backend's own ``importance_sampling`` family
+(``reef/train/slime_backend/importance_sampling/``) is Tinker's built-in loss
+of that name. It needs ``--loss-type custom_loss`` and
+``--use-rollout-logprobs``, and refuses a nonzero ``--kl-coef`` and
+``--use-kl-loss``. TTTD's Slime loss is this loss on TTTD's own advantages.
+
 The spec
 --------
 

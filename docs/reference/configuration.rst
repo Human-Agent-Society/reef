@@ -1244,11 +1244,18 @@ Generated tasks
 
 The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
-objective on Tinker's ``importance_sampling`` loss, so it requires the
-``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
+objective on the ``importance_sampling`` loss. Tinker has this loss built in,
+and Slime has a built-in loss family of the same name, so the recipe trains on
+either training backend. Its stages are ``GeneratedTaskRecord2Record``,
 ``GeneratedTaskTasks``, and ``GeneratedTaskBatches``. Without
 ``pipeline.record2task.config.rounds`` no round runs, no task rolls out, and
 nothing trains.
+
+On Slime, set ``loss-type: custom_loss``, ``use-rollout-logprobs: true``, and
+``disable-compute-advantages-and-returns: true`` in ``training.options``. Keep
+``kl-coef`` at 0 and leave ``use-kl-loss`` off: the loss has no KL term, and
+the Slime driver refuses one. See `Loss families
+<../developer-guide/loss-families.rst>`__.
 
 .. code:: yaml
 
