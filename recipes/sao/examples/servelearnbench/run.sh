@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 export MODEL_DIR CHECKPOINT_DIR REEF_WORK
 export REEF_PORT=${REEF_PORT:-8900}
 export REEF_SERVICE_URL="http://127.0.0.1:${REEF_PORT}"
-export REEF_SCENARIO=${REEF_SCENARIO:-retail-l1-w1}
+export REEF_SCENARIO=${REEF_SCENARIO:-retail-l1}
 export SAO_GPUS=${SAO_GPUS:-4}
 export SAO_BATCH=${SAO_BATCH:-8}
 export SAO_WARMUP=${SAO_WARMUP:-10}

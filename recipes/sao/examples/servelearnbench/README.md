@@ -1,9 +1,9 @@
-# ServeLearnBench Retail L1/W1 with SAO
+# ServeLearnBench Retail L1 with SAO
 
-This pilot trains on 140 Retail L1/W1 serving tasks, then evaluates on 64 held-out test tasks.
-W1 is the second, zero-based window. The driver preserves task order and excludes all other windows.
-It implements the Retail pilot from [issue #893](https://github.com/Human-Agent-Society/reef/issues/893).
-It does not implement the complete benchmark or its OPD comparison.
+This example runs the Retail L1 scenario of ServeLearnBench through Reef the way the benchmark's own runner does.
+Every window runs in order: a window's serving tasks are trained on in batches, then its held-out test tasks run against the frozen weights, and the weights carry into the next window.
+The summary's test score is the mean reward over all test tasks times 100, the benchmark's setting score for the scenario.
+It implements the Retail part of [issue #893](https://github.com/Human-Agent-Society/reef/issues/893); the other scenarios and the OPD comparison are outside this example.
 
 The benchmark dependency is pinned in `pyproject.toml`.
 Its official agent loop owns environment resets, tools, budgets, termination, and verification.
@@ -33,7 +33,7 @@ servelearnbench/
 | Critic cadence | Two critic updates per batch, including warmup |
 | Actor cadence | One update per batch after warmup |
 | Learning rates | Actor `1e-6`; critic `5e-6` |
-| Evaluation | Frozen final actor, no test reports or updates |
+| Evaluation | Each window's tests against the frozen weights at that window's end; no test reports or updates |
 | Context / per-call output | 40,960 / 16,384 tokens, the model's native context |
 | Episode budgets | Official 100 turns, 50 world-tool calls, 256,000 output tokens |
 
@@ -102,13 +102,13 @@ Keep `save-interval: "1"` so each completed batch publishes weights.
 A training timeout or service error aborts the run.
 
 `SAO_BATCH=8` and `SAO_WARMUP=10` are independent configuration values.
-Together, they use the first 80 serving tasks for 20 critic updates and no actor updates.
-The actor starts on batch 11. This warmup is an implementation choice, not value pretraining.
+The warmup counts optimizer steps across the whole stream, so the first ten batches of the first window update only the critic.
+This warmup is an implementation choice, not value pretraining.
 
-The fixed split contains 140 serving tasks. Seventeen complete batches train on 136 tasks.
-The final four tasks are still served and scored but are not reported for training.
-Their `untrained_tail` rows make this remainder policy explicit; no samples are duplicated or borrowed from test.
-The summary records trained task counts and ending reasons, including budget and context endings.
+A batch never spans two windows. A window's serving tasks that do not fill a batch are served and scored but not reported for training; their `untrained_tail` rows make that explicit.
+Retail L1 has six windows with 79, 140, 140, 120, 120 and 121 serving tasks and 384 test tasks in all; at `SAO_BATCH=8`, 16 serving tasks fall into tails.
+`--windows 1,2` runs a subset of the windows, in that order.
+The summary records per-window test scores, trained task counts and ending reasons, including budget and context endings.
 
 ## Low-cost smoke checks
 
@@ -137,7 +137,7 @@ export SAO_BATCH=1 SAO_WARMUP=1
 bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64
 ```
 
-This runs two serving tasks and two test tasks.
+This runs the first window only: two serving tasks and two test tasks.
 Each task has at most 20 model calls, with at most 64 output tokens per call.
 The first serving task warms up the critic; the second also updates the actor.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
@@ -145,9 +145,9 @@ Restore `SAO_BATCH=8 SAO_WARMUP=10` and the 8B model for the pilot.
 
 ## Results and recovery limits
 
-`REEF_WORK/results.jsonl` contains configuration, scored episodes, committed training releases, and a final test score.
+`REEF_WORK/results.jsonl` contains configuration, scored episodes, committed training releases, and a summary.
 Episode rows include traces, token usage, inference receipts, ending reasons, and producing weight versions.
-The test score is the arithmetic mean of the 64 official rewards, multiplied by 100.
+The summary's `test_score` is the arithmetic mean of every test reward across the windows run, multiplied by 100; `window_scores` holds the same per window.
 `REEF_WORK/reef.log` contains service and training diagnostics.
 
 Every update saves actor and critic checkpoints, including optimizer state.

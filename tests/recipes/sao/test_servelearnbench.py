@@ -17,7 +17,7 @@ pytest.importorskip("servelearnbench")
 
 from reef_client import ReefClient, ReefClientError
 from servelearnbench import agent, llm, protocol
-from servelearnbench.scenarios import get_bundle
+from servelearnbench.scenarios import get_bundle, n_windows
 from servelearnbench.scoring import read_rows, setting_scores
 
 from recipes.sao.examples.servelearnbench import harness as reef_harness
@@ -261,8 +261,10 @@ def test_mixed_weight_versions_fail_before_reporting():
 
 
 @pytest.mark.parametrize("method", ["blind", "oracle", "sao"])
-@pytest.mark.parametrize("batch_size,smoke", [(1, True), (8, True), (8, False)])
-def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, batch_size, smoke):
+@pytest.mark.parametrize(
+    "batch_size,smoke,windows_arg", [(1, True, ""), (8, True, ""), (8, False, ""), (8, True, "1")]
+)
+def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, batch_size, smoke, windows_arg):
     monkeypatch.delenv("SAO_BATCH", raising=False)
     campaign = load_campaign(monkeypatch)
     client = Mock(spec=ReefClient)
@@ -311,30 +313,52 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
             "--output",
             str(path),
             *(["--smoke"] if smoke else []),
+            *(["--windows", windows_arg] if windows_arg else []),
         ],
     )
     campaign.main()
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     episodes = [row for row in rows if row.get("type") == "episode"]
-    serving_count = 2 * batch_size if smoke else 140
-    test_count = 2 if smoke else 64
-    expected = serving_count // batch_size * batch_size if method == "sao" else 0
-    assert len(reports) == expected
+    # The stream the driver must have run: every window in order (or the
+    # requested ones), the first window only under --smoke.
+    windows = [int(w) for w in windows_arg.split(",") if w] or list(range(n_windows(bundle)))
+    if smoke:
+        windows = windows[:1]
+    plan = []
+    for window in windows:
+        serving = [t for t in bundle["serving"] if t.z["window"] == window]
+        tests = bundle["test_set"](window)
+        if smoke:
+            serving, tests = serving[: 2 * batch_size], tests[:2]
+        plan.append((window, len(serving), len(tests)))
+    serving_count = sum(n for _, n, _ in plan)
+    test_count = sum(m for _, _, m in plan)
+    trained = sum(n // batch_size * batch_size for _, n, _ in plan) if method == "sao" else 0
+    assert len(reports) == trained
     assert set(reports).isdisjoint(row["task_id"] for row in episodes if row["phase"] == "test")
-    expected_versions = (
-        ([i // batch_size for i in range(serving_count)] + [expected // batch_size] * test_count)
-        if method == "sao"
-        else [0] * (serving_count + test_count)
-    )
+    # Each episode sees the releases committed so far; a batch completes a
+    # release only within its window, and tests see the window's final count.
+    expected_versions: list[int] = []
+    released = 0
+    for _window, n, m in plan:
+        for i in range(n):
+            expected_versions.append(released)
+            if method == "sao" and i < n // batch_size * batch_size and (i + 1) % batch_size == 0:
+                released += 1
+        expected_versions += [released] * m
     assert [row["training_releases_before"] for row in episodes] == expected_versions
+    assert [row["window"] for row in episodes] == [w for w, n, m in plan for _ in range(n + m)]
     tails = [row for row in rows if row.get("type") == "untrained_tail"]
-    assert len(tails) == (serving_count % batch_size if method == "sao" else 0)
-    assert rows[-1]["training_releases"] == expected // batch_size
-    assert rows[-1]["trained_tasks"] == expected
+    assert len(tails) == (sum(n % batch_size for _, n, _ in plan) if method == "sao" else 0)
+    assert rows[-1]["training_releases"] == released
+    assert rows[-1]["trained_tasks"] == trained
+    assert rows[-1]["windows"] == windows
+    assert rows[-1]["window_scores"] == {str(w): 100.0 for w in windows}
     assert rows[-1]["ending_counts"] == {"serving": {"finish": serving_count}, "test": {"finish": test_count}}
     assert all(oracle == (method == "oracle") for _, oracle, _ in phases)
     assert rows[-1]["test_score"] == 100
     config, official_rows = read_rows(str(path))
     assert config["method"] == method
     assert config["max_steps"] == 20
+    assert config["windows"] == windows
     assert setting_scores(official_rows)["n_test"] == test_count
