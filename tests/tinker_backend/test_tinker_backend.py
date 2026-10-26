@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -354,6 +355,20 @@ def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, c
         restarted.close()
 
 
+def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(config, client, tmp_path):
+    TinkerTrainingComponent(MODEL, config, client).close()
+    spindle = replace(config, base_url="https://spindle.example")
+    with pytest.raises(ValueError, match="held by hosted Tinker, not by the configured service https://spindle"):
+        TinkerTrainingComponent(MODEL, spindle, client)
+
+    held = TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler", service="https://spindle.example")
+    assert TinkerCheckpoint.from_dict(held.to_dict()) == held
+    assert "service" not in TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler").to_dict()
+    held.validate_model(MODEL, 32, "https://spindle.example")
+    with pytest.raises(ValueError, match="not by the configured service hosted Tinker"):
+        held.validate_model(MODEL, 32, None)
+
+
 def test_import_start_copies_a_release_manifest_and_takes_the_base_tree_as_the_base(component, objective, tmp_path):
     status = train(component, batch(), objective.name)
     release = tmp_path / "release"
@@ -679,7 +694,15 @@ def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize(
-    "options", [{"max_staleness": 1}, {"lora_rank": 0}, {"learning_rate": 0}, {"kl_coef": -1}, {"unknown": True}]
+    "options",
+    [
+        {"max_staleness": 1},
+        {"lora_rank": 0},
+        {"learning_rate": 0},
+        {"kl_coef": -1},
+        {"base_url": "spindle.example"},
+        {"unknown": True},
+    ],
 )
 def test_bad_runtime_configuration_fails_without_api_key(tmp_path, options):
     with pytest.raises(RuntimeConfigError):
@@ -690,12 +713,19 @@ def test_bad_runtime_configuration_fails_without_api_key(tmp_path, options):
 
 
 def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_them():
-    options = {"state-dir": "state", "batch-size": "4", "inference-timeout-s": "30", "project-id": "p"}
+    options = {
+        "state-dir": "state",
+        "batch-size": "4",
+        "inference-timeout-s": "30",
+        "project-id": "p",
+        "base-url": "https://spindle.example",
+    }
     assert TinkerDeployment.default_serving == "trainer"
     assert TinkerDeployment().trainer_serving_config({"training_backend_options": options}) == {
         "type": "tinker",
         "api_key_env": "TINKER_API_KEY",
         "project_id": "p",
+        "base_url": "https://spindle.example",
         "timeout_s": 30.0,
     }
 

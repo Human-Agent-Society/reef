@@ -55,30 +55,48 @@ class TinkerSDKSampler(TinkerSampler):
     _model: str
     _timeout_s: float
     _service: Any
-    _base_sampler: Any
-    _tokenizer: Any
+    #: The base model's sampling client and its tokenizer, made at the first use.
+    base_client: Any | None
+    tokenizer: Any | None
 
     def __init__(
-        self, base_model: str, *, api_key: str, project_id: str | None = None, timeout_s: float = 300.0
+        self,
+        base_model: str,
+        *,
+        api_key: str,
+        project_id: str | None = None,
+        base_url: str | None = None,
+        timeout_s: float = 300.0,
     ) -> None:
+        """Sample ``base_model`` on the Tinker-compatible service at ``base_url`` (``None``: hosted Tinker)."""
         try:
             self._sdk = importlib.import_module("tinker")
         except ImportError as exc:
             raise RuntimeError("install Tinker support with uv pip install 'reef-infra[tinker]'") from exc
         self._model = base_model
         self._timeout_s = timeout_s
-        self._service = self._sdk.ServiceClient(api_key=api_key, project_id=project_id)
-        try:
-            self._base_sampler = self._service.create_sampling_client(base_model=base_model)
-            self._tokenizer = self._base_sampler.get_tokenizer()
-        except BaseException:
-            self._service.close("errored").result(timeout=timeout_s)
-            raise
+        self._service = self._sdk.ServiceClient(api_key=api_key, project_id=project_id, base_url=base_url)
+        # On a service such as Spindle, a sampling client starts a sampler pool, which a component that only
+        # trains never needs.
+        self.base_client = None
+        self.tokenizer = None
+
+    def base_sampler(self) -> Any:
+        """The base model's sampling client, made at the first call."""
+        if self.base_client is None:
+            self.base_client = self._service.create_sampling_client(base_model=self._model)
+        return self.base_client
+
+    def base_tokenizer(self) -> Any:
+        """The base model's tokenizer, from its sampling client at the first call."""
+        if self.tokenizer is None:
+            self.tokenizer = self.base_sampler().get_tokenizer()
+        return self.tokenizer
 
     def render(self, messages: list[dict[str, str]], *, template_kwargs: Mapping[str, Any]) -> list[int]:
         prefill = messages[-1]["role"] == "assistant"
         return list(
-            self._tokenizer.apply_chat_template(
+            self.base_tokenizer().apply_chat_template(
                 messages,
                 tokenize=True,
                 return_dict=False,
@@ -89,11 +107,11 @@ class TinkerSDKSampler(TinkerSampler):
         )
 
     def decode(self, tokens: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(tokens), skip_special_tokens=True))
+        return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=True))
 
     def sample(self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any]) -> SampleResult:
         if sampler_path is None:
-            sampler = self._base_sampler
+            sampler = self.base_sampler()
         else:
             sampler = self._service.create_sampling_client(model_path=sampler_path)
             if sampler.get_base_model() != self._model:

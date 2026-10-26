@@ -19,6 +19,13 @@ class TinkerConfig:
     )
     seed: int = config_option(0, help="Initial adapter seed.")
     api_key_env: str = config_option("TINKER_API_KEY", help="Environment variable containing the Tinker API key.")
+    base_url: str | None = config_option(
+        None,
+        help=(
+            "Base URL of the Tinker-compatible service that trains and holds the checkpoints, such as a Spindle "
+            "deployment; unset is Thinking Machines' hosted Tinker."
+        ),
+    )
     export_adapter: bool = config_option(
         False,
         help=(
@@ -34,6 +41,8 @@ class TinkerConfig:
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():
             raise ValueError("Tinker requires non-empty state_dir and api_key_env")
+        if self.base_url is not None and not self.base_url.startswith(("https://", "http://")):
+            raise ValueError("Tinker base_url must be an http(s) URL")
         if self.lora_rank <= 0 or self.batch_size <= 0:
             raise ValueError("Tinker lora_rank and batch_size must be positive")
         if not math.isfinite(self.learning_rate) or self.learning_rate <= 0:

@@ -54,6 +54,7 @@ class TinkerDeployment(InProcessTrainingDeployment):
             "type": "tinker",
             "api_key_env": tinker.api_key_env,
             "project_id": tinker.project_id,
+            "base_url": tinker.base_url,
             "timeout_s": tinker.inference_timeout_s,
         }
 
@@ -82,7 +83,11 @@ class TinkerRuntimeFactory(RuntimeFactory):
         try:
             # The sampler of the component's own rollouts, for task jobs.
             sampler = TinkerSDKSampler(
-                model_path, api_key=key, project_id=settings.project_id, timeout_s=settings.inference_timeout_s
+                model_path,
+                api_key=key,
+                project_id=settings.project_id,
+                base_url=settings.base_url,
+                timeout_s=settings.inference_timeout_s,
             )
             return TinkerTrainingComponent(model_path, settings, client, sampler=sampler)
         except BaseException:

@@ -23,6 +23,18 @@ when the selected runtime starts; neither resolved configuration nor checkpoint
 manifests contain the key. ``training.options.api-key-env`` selects a different
 environment variable. An optional ``project-id`` selects the Tinker project.
 
+``training.options.base-url`` selects another Tinker-compatible service, such
+as a `Spindle <https://modal.com/docs/guide/spindle>`__ deployment on Modal.
+Unset, Reef uses Thinking Machines' hosted Tinker. The trainer, its sampler and
+``inference.serving: trainer`` all use that service. A checkpoint path such as
+``tinker://<run>/weights/<name>`` resolves only on the service that made it, so
+each checkpoint manifest records the service, and the component refuses a
+checkpoint that another service holds. A service may lack some calls; Spindle,
+for example, has no ``save_weights_external``, so ``export-adapter`` needs
+hosted Tinker. Reef makes a base-model sampling client only at its first use
+(a KL term, a task rollout or a request); on Spindle such a client starts a
+sampler pool.
+
 The `four-rollout smoke <../../tutorials/tinker/README.md>`__ includes a complete
 config and runner. It creates one adapter, generates four short responses, and
 performs one optimizer step with synthetic rewards. Running it uses Tinker

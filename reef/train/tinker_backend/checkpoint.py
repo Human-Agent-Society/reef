@@ -28,9 +28,11 @@ class TinkerCheckpoint:
     Values: ``base_model`` is non-empty and ``lora_rank`` positive. ``state_path`` (the weights and optimizer state
     that a later job restores) and ``sampler_path`` (the weights that Tinker's sampler serves) are ``tinker://``
     paths. ``adapter_path`` is the ``tinker://`` path of the adapter that Tinker exported in its own key names
-    (``save_weights_external``), or ``None`` when the component exports no adapter. The training component makes
-    the values and writes them as the manifest ``MANIFEST`` of a checkpoint directory; the component, the Tinker
-    inference runtime and ``TinkerClient.download`` read them.
+    (``save_weights_external``), or ``None`` when the component exports no adapter. ``service`` is the base URL of
+    the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
+    Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
+    writes them as the manifest ``MANIFEST`` of a checkpoint directory; the component, the Tinker inference
+    runtime, ``TinkerClient.download`` and a serving runtime that resolves the weights itself read them.
     """
 
     base_model: str
@@ -46,6 +48,7 @@ class TinkerCheckpoint:
     #: another objective starts with an empty state.
     objective: str | None = None
     adapter_path: str | None = None
+    service: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
@@ -57,9 +60,15 @@ class TinkerCheckpoint:
         if (self.objective is None) != (not self.algorithm_state):
             raise ValueError("a Tinker checkpoint names the objective of a non-empty state, and only of one")
 
-    def validate_model(self, base_model: str, lora_rank: int) -> None:
+    def validate_model(self, base_model: str, lora_rank: int, service: str | None) -> None:
+        """Raise ``ValueError`` unless the checkpoint is of ``base_model`` and ``lora_rank`` and held by ``service``."""
         if (self.base_model, self.lora_rank) != (base_model, lora_rank):
             raise ValueError("Tinker checkpoint model/rank does not match the runtime")
+        if self.service != service:
+            raise ValueError(
+                f"the Tinker checkpoint is held by {self.service or 'hosted Tinker'}, "
+                f"not by the configured service {service or 'hosted Tinker'}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -71,6 +80,8 @@ class TinkerCheckpoint:
             value.pop("objective")
         if self.adapter_path is None:
             value.pop("adapter_path")
+        if self.service is None:
+            value.pop("service")
         return value
 
     def state_for(self, objective: str) -> Mapping[str, Any]:

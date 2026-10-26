@@ -98,7 +98,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             else:
                 self._base = client.initialize()
                 self._base.write(base)
-            self._base.validate_model(base_model, config.lora_rank)
+            self._base.validate_model(base_model, config.lora_rank, config.base_url)
         except BaseException:
             self._state_lock.close()
             raise
@@ -120,7 +120,7 @@ class TinkerTrainingComponent(LocalJobComponent):
         return self._root
 
     def _validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
-        checkpoint.validate_model(self._model, self._config.lora_rank)
+        checkpoint.validate_model(self._model, self._config.lora_rank, self._config.base_url)
         return checkpoint
 
     @property

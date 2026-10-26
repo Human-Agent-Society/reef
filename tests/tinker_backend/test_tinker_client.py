@@ -102,8 +102,8 @@ class Service:
         self.events.append(("initialize", base_model, rank, seed))
         return Trainer(self.events)
 
-    def create_sampling_client(self, *, model_path):
-        self.events.append(("sampler", model_path))
+    def create_sampling_client(self, *, model_path=None, base_model=None):
+        self.events.append(("sampler", model_path) if base_model is None else ("base_sampler", base_model))
         return self.sampler
 
     def close(self, status):
@@ -146,7 +146,7 @@ def client(tmp_path):
     value._config = TinkerConfig(state_dir=str(tmp_path), train_timeout_s=10)
     value._api_key = "test-only"
     value._service = Service(value._sdk.events)
-    value._base_sampler = Sampler(value._sdk.events)
+    value.base_client = Sampler(value._sdk.events)
     return value
 
 
@@ -157,7 +157,8 @@ def sampler(client):
     value._model = client._model
     value._timeout_s = 10
     value._service = client._service
-    value._base_sampler = client._base_sampler
+    value.base_client = client.base_client
+    value.tokenizer = None
     return value
 
 
@@ -315,16 +316,34 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, samp
     assert client._sdk.events[-1] == ("close", "success")
 
 
+def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):
+    # On Spindle a sampling client starts a sampler pool, which a component that only trains never needs.
+    client.base_client = None
+    sampler.base_client = None
+    row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
+    client.train(
+        TinkerCheckpoint(client._model, 32, "tinker://b/state", "tinker://b/sampler"),
+        [[row]],
+        ImportanceSamplingLoss(),
+        [1e-4],
+    )
+    assert not any(event[0] == "base_sampler" for event in client._sdk.events)
+
+    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    assert [event for event in client._sdk.events if event[0] == "base_sampler"] == [("base_sampler", "Qwen/Qwen3-8B")]
+
+
 def test_a_refused_sample_is_the_callers_400_and_an_overflow_names_the_context_length(sampler):
     # Tinker's message for a Qwen3.5-4B episode whose history outgrew the 64K window.
-    sampler._base_sampler.refusal = BadRequestError(
+    sampler.base_client.refusal = BadRequestError(
         "Error code: 400 - Prompt length plus max_tokens exceeds the model's context window: "
         "65614 prompt tokens + 4096 max_tokens > 65536"
     )
     with pytest.raises(UpstreamStatusError, match=r"maximum context length.*65614 prompt tokens") as overflow:
         sampler.sample(None, [10, 11], {"max_tokens": 2})
     assert overflow.value.status == 400 and str(overflow.value).startswith("context_length_exceeded")
-    sampler._base_sampler.refusal = BadRequestError("Error code: 400 - invalid sampling params")
+    sampler.base_client.refusal = BadRequestError("Error code: 400 - invalid sampling params")
     with pytest.raises(UpstreamStatusError, match=r"^Error code: 400 - invalid sampling params$"):
         sampler.sample(None, [10, 11], {"max_tokens": 2})
 
@@ -360,7 +379,7 @@ def test_real_chat_template_returns_token_ids_without_model_download(sampler):
 
     tokenizer = Tokenizer(models.WordLevel({"[UNK]": 0, "hello": 1, "world": 2, "assistant": 3}, unk_token="[UNK]"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    client._tokenizer = transformers.PreTrainedTokenizerFast(
+    client.tokenizer = transformers.PreTrainedTokenizerFast(
         tokenizer_object=tokenizer,
         unk_token="[UNK]",
         chat_template=(

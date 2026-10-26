@@ -116,6 +116,7 @@ def test_trainer_and_none_serving_build_the_backends_own_and_the_null_runtime():
         "type": "tinker",
         "api_key_env": "TINKER_API_KEY",
         "project_id": None,
+        "base_url": None,
         "timeout_s": 300.0,
     }
     assert serving_runtime_config(

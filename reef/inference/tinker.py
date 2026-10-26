@@ -201,6 +201,9 @@ class TinkerInferenceConfig:
     api_key: str | None = config_option(None, help="Tinker API key; prefer api_key_env.")
     api_key_env: str | None = config_option("TINKER_API_KEY", help="Environment variable holding the Tinker API key.")
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
+    base_url: str | None = config_option(
+        None, help="Base URL of the Tinker-compatible service; unset is Thinking Machines' hosted Tinker."
+    )
     timeout_s: float = config_option(300.0, help="Sampling request timeout in seconds.")
 
     def __post_init__(self) -> None:
@@ -227,7 +230,11 @@ class TinkerInferenceRuntimeFactory(RuntimeFactory):
         if not key:
             raise ValueError(f"Tinker requires the environment variable {config.get('api_key_env')}")
         sampler = TinkerSDKSampler(
-            model_path, api_key=key, project_id=config.get("project_id"), timeout_s=config["timeout_s"]
+            model_path,
+            api_key=key,
+            project_id=config.get("project_id"),
+            base_url=config.get("base_url"),
+            timeout_s=config["timeout_s"],
         )
         try:
             return TinkerInferenceRuntime(sampler, base_model=model_path, inference_timeout_s=config["timeout_s"])

@@ -60,7 +60,8 @@ class TinkerSDKClient(TinkerClient):
     _config: TinkerConfig
     _api_key: str
     _service: Any
-    _base_sampler: Any
+    #: The frozen base model's sampling client, made at the first KL term.
+    base_client: Any | None
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
         try:
@@ -71,15 +72,16 @@ class TinkerSDKClient(TinkerClient):
         self._config = config
         self._api_key = api_key
         self._service = self._new_service()
-        try:
-            # The frozen base scores KL terms; sampling for requests is the inference runtime's.
-            self._base_sampler = self._service.create_sampling_client(base_model=base_model)
-        except BaseException:
-            self._service.close("errored").result(timeout=self._config.train_timeout_s)
-            raise
+        # On a service such as Spindle, a sampling client starts a sampler pool, so the frozen base's client is
+        # made at the first KL term. Sampling for requests is the inference runtime's.
+        self.base_client = None
 
     def _new_service(self) -> Any:
-        options: dict[str, Any] = {"api_key": self._api_key, "project_id": self._config.project_id}
+        options: dict[str, Any] = {
+            "api_key": self._api_key,
+            "project_id": self._config.project_id,
+            "base_url": self._config.base_url,
+        }
         if self._config.train_timeout_s is not None:
             options["timeout"] = self._config.train_timeout_s
         return self._sdk.ServiceClient(**options)
@@ -101,6 +103,7 @@ class TinkerSDKClient(TinkerClient):
             state.path,
             sampler.path,
             adapter_path=None if adapter is None else adapter.path,
+            service=self._config.base_url,
         )
 
     def initialize(self) -> TinkerCheckpoint:
@@ -170,9 +173,11 @@ class TinkerSDKClient(TinkerClient):
             service.close(status).result(timeout=self._config.train_timeout_s)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
+        if self.base_client is None:
+            self.base_client = self._service.create_sampling_client(base_model=self._model)
         result = []
         for row in rows:
-            values = self._base_sampler.compute_logprobs(self._sdk.ModelInput.from_ints(list(row.tokens))).result(
+            values = self.base_client.compute_logprobs(self._sdk.ModelInput.from_ints(list(row.tokens))).result(
                 timeout=self._config.train_timeout_s
             )
             if len(values) != len(row.tokens):
