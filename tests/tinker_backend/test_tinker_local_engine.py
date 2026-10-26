@@ -26,6 +26,7 @@ from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.types import JobData, TrajectoryItem
@@ -53,11 +54,12 @@ class RemoteClient:
             checkpoint.base_model, 16, f"tinker://update-{number}/state", f"tinker://update-{number}/sampler"
         ), {"loss": -1.0}
 
-    def download(self, checkpoint, directory):
+    def download(self, checkpoint, release):
         self.downloads.append(checkpoint)
-        directory.mkdir(parents=True)
-        (directory / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 16}))
-        (directory / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
+        for name in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
+            (release / name).mkdir(parents=True)
+            (release / name / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 16}))
+            (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def close(self):
         self.closed = True

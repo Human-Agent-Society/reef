@@ -1805,7 +1805,8 @@ is both the start of a later job and the release Reef publishes.
 (runtime kind ``tinker``), which reads each release's
 ``tinker-checkpoint.json`` manifest and samples from the immutable sampler it
 names. With ``TinkerConfig.export_adapter``, the component also exports each
-checkpoint's PEFT adapter into ``adapter/``, and its ``release_format`` is
+checkpoint's PEFT adapter into ``adapter/``, and Tinker's adapter as Tinker
+saved it into ``tinker-adapter/`` (``TinkerClient.download``); its ``release_format`` is
 ``ReleaseFormat("adapter", lora_rank, ("all",))``; without it, the release
 format is ``None``. Reef's engines can then serve the adapters
 (``inference.serving: engines``). Rollback works: the component imports the

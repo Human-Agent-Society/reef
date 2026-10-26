@@ -13,9 +13,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from reef.runtime.serving import ADAPTER_DIR
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
+
+#: The directory of a release that holds Tinker's adapter as Tinker saved it, in Tinker's key names. The cookbook's
+#: merge into full weights (``tinker_cookbook.weights.build_hf_model``) reads this form, not the PEFT conversion.
+TINKER_ADAPTER_DIR = "tinker-adapter"
 
 
 class TinkerClient(ABC):
@@ -35,8 +40,13 @@ class TinkerClient(ABC):
         """Train one optimizer step per batch from ``checkpoint``, step ``i`` at ``learning_rates[i]``."""
 
     @abstractmethod
-    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Materialize the checkpoint's sampler weights as a PEFT adapter directory."""
+    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
+        """Write the checkpoint's sampler adapter into the release directory ``release``.
+
+        ``release / TINKER_ADAPTER_DIR`` gets the adapter as Tinker saved it, and ``release / ADAPTER_DIR`` its
+        conversion into a PEFT adapter in the base model's parameter names, which inference engines load. Neither
+        directory exists before the call.
+        """
 
     @abstractmethod
     def close(self) -> None: ...
@@ -173,12 +183,15 @@ class TinkerSDKClient(TinkerClient):
             result.append([float(value) for value in response])
         return result
 
-    def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Fetch the sampler archive, then convert it with the cookbook into PEFT layout.
+    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
+        """Fetch the sampler archive into ``TINKER_ADAPTER_DIR``, then convert it with the cookbook into ``ADAPTER_DIR``.
 
         Tinker's archive holds the adapter in its own key naming; the
         cookbook's converter renames tensors to the base model's parameter
-        names, which is what SGLang and vLLM load.
+        names, which is what SGLang and vLLM load. It keeps projections
+        that the engines fuse at load time, such as Qwen3.5's
+        ``in_proj_q/k/v``, apart, so a merge into full weights reads the
+        archive instead.
         """
         try:
             from tinker_cookbook import weights
@@ -192,7 +205,7 @@ class TinkerSDKClient(TinkerClient):
             .get_checkpoint_archive_url_from_tinker_path(checkpoint.sampler_path)
             .result(timeout=self._config.train_timeout_s)
         )
-        staging = directory.parent / f".{directory.name}.download"
+        staging = release.parent / f".{release.name}.download"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True)
         try:
@@ -200,7 +213,10 @@ class TinkerSDKClient(TinkerClient):
             urllib.request.urlretrieve(response.url, archive)
             raw = staging / "tinker"
             _extract_archive(archive, raw)
-            weights.build_lora_adapter(base_model=self._model, adapter_path=str(raw), output_path=str(directory))
+            weights.build_lora_adapter(
+                base_model=self._model, adapter_path=str(raw), output_path=str(release / ADAPTER_DIR)
+            )
+            shutil.move(raw, release / TINKER_ADAPTER_DIR)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 

@@ -27,6 +27,7 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
 )
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
+from reef.runtime.serving import ADAPTER_DIR
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
@@ -38,7 +39,7 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoopState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
-from reef.train.tinker_backend.client import TinkerClient
+from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
@@ -85,11 +86,12 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
 
-    def download(self, checkpoint, directory):
-        self.downloads.append((checkpoint, directory))
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
-        (directory / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
+    def download(self, checkpoint, release):
+        self.downloads.append((checkpoint, release))
+        for name in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
+            (release / name).mkdir(parents=True)
+            (release / name / "adapter_config.json").write_text(json.dumps({"peft_type": "LORA", "r": 32}))
+            (release / name / "adapter_model.safetensors").write_bytes(checkpoint.sampler_path.encode())
 
     def close(self):
         self.closed = True

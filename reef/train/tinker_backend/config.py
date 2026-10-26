@@ -22,7 +22,8 @@ class TinkerConfig:
     export_adapter: bool = config_option(
         False,
         help=(
-            "Save each checkpoint's PEFT adapter in its release, so inference engines can serve it. "
+            "Save each checkpoint's PEFT adapter in its release, so inference engines can serve it, and Tinker's "
+            "adapter as Tinker saved it, which tinker-cookbook merges into full weights. "
             "Without it, a release holds only the manifest that Tinker's sampler serves."
         ),
     )

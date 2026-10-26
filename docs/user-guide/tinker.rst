@@ -214,9 +214,13 @@ engine serving when it starts, because the releases hold no adapter.
 
 Each scenario trains its own adapter. A job runs the optimizer steps of its data
 on Tinker from the scenario's last saved checkpoint. At each save, it downloads
-the result and converts it with ``tinker-cookbook`` into a PEFT adapter in the
-``adapter/`` directory of the checkpoint. When Reef selects the
-candidate, the control plane loads that directory into every engine under a
+the result into the ``tinker-adapter/`` directory of the checkpoint and
+converts it with ``tinker-cookbook`` into a PEFT adapter in its ``adapter/``
+directory. The engines load ``adapter/``. A merge into full weights, such as
+``tinker_cookbook.weights.build_hf_model``, reads ``tinker-adapter/``: the PEFT
+adapter keeps apart the projections that the engines fuse when they load it,
+such as Qwen3.5's ``in_proj_q/k/v``. When Reef selects the
+candidate, the control plane loads its ``adapter/`` into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
 weight surface. The engines capture the sampled tokens and log probabilities
 as they do for Slime. A rejected candidate loads nothing. A restart starts the

@@ -34,7 +34,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
-from reef.train.tinker_backend.client import TinkerClient
+from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
 from reef.train.tinker_backend.preparation import prepare_tinker_job
@@ -70,7 +70,8 @@ class TinkerTrainingComponent(LocalJobComponent):
     ``imported/<digest>/`` (starts taken from releases) and ``jobs/`` (see
     ``LocalJobComponent``); a saved checkpoint is ``jobs/<job_id>/<step>/``,
     with its manifest and, with ``config.export_adapter``, its PEFT adapter in
-    ``adapter/``. A checkpoint directory is both the start of a later job and
+    ``adapter/`` and Tinker's adapter as Tinker saved it in ``tinker-adapter/``
+    (``TinkerClient.download``). A checkpoint directory is both the start of a later job and
     the release Reef publishes.
     """
 
@@ -268,8 +269,9 @@ class TinkerTrainingComponent(LocalJobComponent):
             target = directory / str(last)
             if self._config.export_adapter:
                 # An earlier attempt may have left part of the adapter.
-                shutil.rmtree(target / ADAPTER_DIR, ignore_errors=True)
-                self._client.download(current, target / ADAPTER_DIR)
+                for adapter in (ADAPTER_DIR, TINKER_ADAPTER_DIR):
+                    shutil.rmtree(target / adapter, ignore_errors=True)
+                self._client.download(current, target)
             current.write(target)
             self.save_checkpoint(
                 directory,

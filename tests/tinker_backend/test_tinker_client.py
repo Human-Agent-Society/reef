@@ -1,13 +1,18 @@
 """SDK call-order tests without credentials, model downloads, or GPU dependencies."""
 
-from types import SimpleNamespace
+import io
+import sys
+import tarfile
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from reef.runtime.interfaces import UpstreamStatusError
+from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.sampling import TinkerSDKSampler
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
-from reef.train.tinker_backend.client import TinkerSDKClient
+from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
 
@@ -82,6 +87,10 @@ class Service:
     def get_weights_info_by_tinker_path(self, path):
         return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=32))
 
+    def get_checkpoint_archive_url_from_tinker_path(self, path):
+        self.events.append(("archive", path))
+        return Future(SimpleNamespace(url=self.archive_url))
+
     def create_training_client_from_state_with_optimizer(self, path):
         self.events.append(("restore_with_optimizer", path))
         return Trainer(self.events, fail=self.fail)
@@ -147,6 +156,37 @@ def sampler(client):
     value._service = client._service
     value._base_sampler = client._base_sampler
     return value
+
+
+def test_download_keeps_tinkers_adapter_beside_its_peft_conversion(client, tmp_path, monkeypatch):
+    archive = tmp_path / "checkpoint.tar"
+    with tarfile.open(archive, "w") as tar:
+        for name, body in (("adapter_config.json", b"{}"), ("adapter_model.safetensors", b"tinker names")):
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    client._service.archive_url = archive.as_uri()
+    conversions = []
+
+    def build_lora_adapter(*, base_model, adapter_path, output_path):
+        conversions.append((base_model, (Path(adapter_path) / "adapter_model.safetensors").read_bytes()))
+        Path(output_path).mkdir(parents=True)
+        (Path(output_path) / "adapter_model.safetensors").write_bytes(b"model names")
+
+    cookbook = ModuleType("tinker_cookbook")
+    cookbook.weights = SimpleNamespace(build_lora_adapter=build_lora_adapter)
+    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
+    release = tmp_path / "jobs" / "job" / "4"
+    release.mkdir(parents=True)
+
+    client.download(TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler"), release)
+
+    assert ("archive", "tinker://s/sampler") in client._sdk.events
+    assert conversions == [("Qwen/Qwen3-8B", b"tinker names")]
+    assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"model names"
+    assert (release / TINKER_ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"tinker names"
+    assert (release / TINKER_ADAPTER_DIR / "adapter_config.json").read_bytes() == b"{}"
+    assert sorted(path.name for path in release.parent.iterdir()) == ["4"]
 
 
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
