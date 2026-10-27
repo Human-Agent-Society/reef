@@ -142,7 +142,11 @@ after the step as the step record.
 ``material/`` holds these files:
 
 - ``traces/<n>/trace.json`` and ``traces/<n>/trajectory.json``: one trace per
-  sample of the step's job data, and the trace's ATIF trajectory.
+  traffic sample of the step's job data, and the trace's ATIF trajectory.
+  After them, an offline step has one ``trace.json`` per train task it rolled
+  out on the head tree (see `Offline runs on uploaded tasks
+  <../user-guide/evolve-your-harness.rst#offline-runs-on-uploaded-tasks>`__).
+  The history keeps the files of such an episode.
 - ``request.json``: the training request the step answers. Only a request
   step has it.
 - ``evaluation.json``: the step's evaluation tasks and the episodes per task
@@ -198,26 +202,36 @@ A ``Trace`` has these fields:
 
    * - Field
      - Value
+   * - ``source``
+     - ``traffic`` for a client's request, ``rollout`` for an episode that an
+       offline step ran on a train task
    * - ``task``
      - the last user prompt of the request, ``None`` for a request without
-       a user prompt
+       a user prompt; for a rollout, the instruction of the task the episode
+       played (the history's episode names the task directory)
    * - ``reply``
      - the final assistant text, ``None`` when there is none. With the
        inference stages (``InferenceRecord2Record`` and ``InferenceSamples``),
        every model call is a trace, and only the call that ends a run has a
        reply: a call that ends on a tool call has none
    * - ``score``
-     - the reported score, ``None`` for unscored traffic
+     - the reported score, ``None`` for unscored traffic; for a rollout, the
+       scorer's score, ``None`` for an episode that could not run
    * - ``feedback``
      - the reported feedback as text (structured feedback as JSON text),
-       ``None`` when there is none
+       ``None`` when there is none and for a rollout
+   * - ``failure``
+     - why the rollout's episode failed, ``None`` when it did not fail and
+       for traffic
    * - ``record``
-     - the agent record id of the request
+     - the agent record id of the request; for a rollout, the history's
+       episode id, whose files ``history.episode_dir(record)`` holds
    * - ``client``
      - the client's ``x-reef-tag-client`` tag, else its session tag, else
-       ``untagged``
+       ``untagged``; ``untagged`` for a rollout
    * - ``directory``
-     - the trace's directory; ``trajectory()`` reads its ATIF trajectory
+     - the trace's directory; ``trajectory()`` reads the ATIF trajectory of
+       a traffic trace, and returns ``None`` for a rollout
 
 Material is client data. Wrap its text with ``reef.core.prompts.untrusted_text``
 before the text enters a model prompt (see `Untrusted input`_).

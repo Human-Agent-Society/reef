@@ -1081,6 +1081,19 @@ requests with unscored samples, set
 Reef refuses ``batch_size`` and ``batch_policy`` directly under
 ``recipe.config``.
 
+To evolve offline, on the train split of the scenario's ``imported-tasks``
+store instead of on traffic, set
+``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskRollouts``. Each
+step then rolls out the next train tasks on the head tree as the method's
+traces. Startup refuses it without an adapter that plays task directories
+(``terminus``) and ``evolution.evaluation.scorer``:
+
+.. config::
+
+   pipeline.sample2job.config.tasks_per_step | 8 | the most train tasks one offline step rolls out on the head tree
+   pipeline.sample2job.config.epochs | 1 | how many times the run goes through the train split; the run stops after the last epoch
+   pipeline.sample2job.config.shuffle_seed | 0 | the seed of each epoch's task order
+
 .. config::
 
    evolution.method | required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
@@ -1123,7 +1136,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
    evolution.evaluation.tasks | the evaluation tasks: episode prompts, or task directories for an adapter whose prompt is a task directory (``terminus``)
    evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Only with an adapter whose prompt is a task directory (``terminus``); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
-   evolution.evaluation.task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. The same adapter limit as ``task_manifest``
+   evolution.evaluation.task_store | a task store of the scenario, such as ``imported-tasks``; each step evaluates on the task directories of its eval split as the step reads them, so tasks that the store gets later join the next step. With ``imported-tasks``, the scenario takes task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter limit as ``task_manifest``
    evolution.evaluation.scorer | an ``EpisodeScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory episode by its Harbor verifier's reward
    evolution.evaluation.policy | compare | the publication policy: ``compare`` scores the candidate and the current tree on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every episode scores at least ``floor_score``; ``none`` runs no episode and publishes every candidate that passes validation
    evolution.evaluation.statistic | wins | what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``, an episode that could not run ranking below every score. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``, an episode that could not run counting as 0

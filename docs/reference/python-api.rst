@@ -592,6 +592,13 @@ components never share a store, except ``imported-tasks``
 (``reef.storage.tasks.IMPORTED_TASK_STORE``): the scenario's imported tasks,
 which every component opens by that name and only the service writes.
 
+The service takes a task upload (``POST /reef/scenarios/{scenario}/tasks``)
+only when a trainer of the scenario reads imported tasks
+(``Trainer.accepts_imported_tasks``). A sample-to-job stage that reads them
+sets the class attribute ``accepts_imported_tasks``. A recipe whose trainer
+reads them outside its pipeline, as a harness evaluation on their eval split
+does, passes ``reads_imported_tasks=True`` to ``Trainer.build``.
+
 A store holds generations. A generation holds its source record ids and its
 candidates. ``save_candidates`` saves a copy of each candidate task directory
 in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
@@ -1456,9 +1463,11 @@ dataclass, which refuses an unknown key.
        text; ``ValueError`` past 16 MiB or for a file that is not UTF-8
        text)
    * - ``Trace``
-     - ``directory``, ``task``, ``reply``, ``score``, ``feedback``,
-       ``record`` and ``client``; ``trajectory()`` reads the ATIF
-       trajectory
+     - ``directory``, ``source`` (``traffic`` or ``rollout``), ``task``,
+       ``reply``, ``score``, ``feedback``, ``failure``, ``record`` and
+       ``client``; ``trajectory()`` reads the ATIF trajectory of a traffic
+       trace, and returns ``None`` for a rollout, whose episode files the
+       history keeps
    * - ``Tools.models``
      - a ``ModelBindings``: ``served`` and every ``evolution.models`` entry;
        ``chat(messages, *, timeout_s=None, **params)`` returns the assistant

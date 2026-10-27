@@ -365,9 +365,12 @@ Use this route to give a scenario your own Harbor tasks, for training or as
 held-out tasks. It adds the tasks to the scenario's task store
 ``imported-tasks``, the same store that the `task-import section
 <../user-guide/operate.rst#import-harbor-tasks>`__ fills. The scenario's recipe
-must read imported tasks, such as the SFT-then-RL recipe (`SFT then RL
-<configuration.rst#sft-then-rl>`__). If it does not, Reef refuses the upload
-with 400.
+must read imported tasks. The SFT-then-RL recipe reads them (`SFT then RL
+<configuration.rst#sft-then-rl>`__). Harness evolution reads them when its
+evaluation reads ``imported-tasks`` or when it runs offline (`Offline runs on
+uploaded tasks
+<../user-guide/evolve-your-harness.rst#offline-runs-on-uploaded-tasks>`__).
+Otherwise Reef refuses the upload with 400.
 
 The body is a gzip-compressed tar archive with ``Content-Type:
 application/gzip``. The archive and the files it unpacks to are each at most

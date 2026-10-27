@@ -116,8 +116,9 @@ Other setups change one part of the example:
 - **Screening.** The paper keeps every item. Here an item with a credential-shaped literal or an instruction
   override stays out of the bank.
 - **Inputs.** The judge and the extractor read one JSON view of the run: the task, the transcript without the
-  system prompt, the final reply, the feedback and the failure. Past 30,000 characters, the view loses the middle
-  of its transcript. The paper's judge for web tasks also reads the final page state.
+  system prompt, the final reply, the feedback and the failure. The run of an offline step (a rollout) has no
+  transcript in its trace. Past 30,000 characters, the view loses the middle of its transcript. The paper's judge
+  for web tasks also reads the final page state.
 - **Prompts.** The prompts are Reef's own and ask for JSON. Reef sends no sampling parameters, and the paper
   samples the judge at temperature 0 and the extractor at temperature 1.
 - **Scaling.** Memory-aware test-time scaling (MaTTS), which spends more runs on each task to give the extractor

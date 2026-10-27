@@ -60,8 +60,9 @@ call that ends on a tool call, in the middle of a run; the trace of the call tha
 whole run, so the step skips the middle one. For each run, in order, and at most `max_traces_per_step` runs:
 
 1. The Reflector reads the playbook and the trace. The trace shows the messages, the tool calls and their
-   results without the system prompt, and the score and the feedback when the trace has them. A trace
-   longer than 30,000 characters keeps its start and its end.
+   results without the system prompt, and the score, the feedback and the failure when the trace has them.
+   The trace of a rollout (an episode of an offline step) has no trajectory, so it shows its task and its
+   reply instead. A trace longer than 30,000 characters keeps its start and its end.
 2. Each tag adds 1 to the `helpful` or the `harmful` count of its bullet. A tag for an id that is not in the
    playbook has no effect.
 3. The Curator reads the sections, the playbook, the reflection and the trace's task, and returns `ADD`

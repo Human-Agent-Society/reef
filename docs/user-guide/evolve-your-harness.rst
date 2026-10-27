@@ -216,7 +216,9 @@ decides which of the two a deployment accepts.
   between those requests.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the three.
+between the three. An offline deployment also starts steps from its uploaded
+train tasks, in ``auto`` and ``hybrid`` mode (see `Offline runs on uploaded
+tasks`_).
 
 Trigger of step
 ~~~~~~~~~~~~~~~
@@ -292,6 +294,56 @@ receives the training request and the traces that automatic job data would
 take next. It gets up to ``job_samples`` traces, or none, and uses both
 to make its change.
 
+Offline runs on uploaded tasks
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A deployment that has tasks instead of users runs offline. The sample-to-job
+stage ``reef.sample2job.traces:TrainTaskRollouts`` makes each step from the
+train split of the scenario's ``imported-tasks`` store. The step rolls out the
+next ``tasks_per_step`` train tasks on the head tree, and the method reads
+those episodes as its traces, each with ``source: rollout`` and the task's
+instruction as its ``task``. The run goes
+through the train split ``epochs`` times, in an order shuffled for each epoch,
+and then stops. The eval split stays the evaluation's task source, so a method
+such as GEPA or Meta-Harness can evaluate as many trees as it needs on the
+same tasks.
+
+.. code-block:: yaml
+
+   recipe:
+     config:
+       evolution:
+         adapter: terminus
+         method: recipes.gepa:GEPA
+         evaluation:
+           task_store: imported-tasks
+           scorer: reef.evaluation.harness:VerifierRewardScorer
+           policy: compare
+           statistic: mean
+   pipeline:
+     sample2job:
+       module: reef.sample2job.traces:TrainTaskRollouts
+       config: {tasks_per_step: 8, epochs: 2}
+
+Upload the tasks while the service runs, with
+``POST /reef/scenarios/{scenario}/tasks?split=train`` and ``?split=eval`` (see
+`Upload Harbor tasks <../reference/http-api.rst#upload-harbor-tasks>`__), or
+import them with the deployment's ``task-import`` section. The first train
+task starts the run: an offline step needs no traffic and no request. The stage
+runs in ``auto`` and ``hybrid`` training mode; a ``manual`` scenario, which
+steps only on a request, refuses it. Recorded traffic and training requests
+still start steps as the training mode decides, and they go first.
+
+An offline step always runs the method: a recheck and a client's proposal wait
+for a step without rollouts. A rollout goes through the score cache, as an
+evaluation does (see `Evaluation: the publication policy`_). So a later epoch
+on an unchanged head tree reads the same episodes again. The stage saves its
+place once a step's commit is durable. After a restart the run continues after
+the last durable step, and a step whose commit did not become durable rolls
+its tasks out again. A task uploaded during an epoch joins the next epoch. The
+rollouts need an adapter that plays task directories (``terminus``) and a
+scorer; startup refuses the stage without them.
+
 The method: a candidate tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -323,9 +375,11 @@ becomes the next head.
   ``evolution.evaluation.tasks_root`` (the eval split of a task manifest), or
   ``evolution.evaluation.task_store`` (the eval split of a task store, such
   as ``imported-tasks``). A manifest or a store holds task directories. Task
-  directories need an adapter that plays them, such as ``terminus``.
-  Promotion can add prompts to the tasks (see `Promotion: growing evaluation
-  suite`_).
+  directories need an adapter that plays them, such as ``terminus``. A
+  scenario whose evaluation reads ``imported-tasks`` takes task uploads
+  (``POST /reef/scenarios/{scenario}/tasks?split=eval``). Until the eval split
+  holds a task, ``compare`` and ``floor`` reject every candidate. Promotion
+  can add prompts to the tasks (see `Promotion: growing evaluation suite`_).
 - ``evolution.evaluation.scorer`` names the ``EpisodeScorer`` that scores
   each episode.
 - ``evolution.evaluation.policy`` is one of three policies:
