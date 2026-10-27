@@ -1,6 +1,6 @@
-"""How an episode's process runs, behind an interface.
+"""How a rollout's process runs, behind an interface.
 
-``run_episode`` owns the executor-agnostic work: it prepares the episode root,
+``run_rollout`` owns the executor-agnostic work: it prepares the rollout root,
 writes the rendered composition, builds the environment, reads the trajectory,
 and collects residue. Only the launch of the harness process differs between a
 development run and a hosted one, so that step is the seam:
@@ -9,7 +9,7 @@ development run and a hosted one, so that step is the seam:
   session, exactly as before. It is the default, used for development and the
   hermetic tests.
 * :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
-  fresh non-root namespace, a read-only base filesystem with only the episode
+  fresh non-root namespace, a read-only base filesystem with only the rollout
   root exposed (its workspace and declared runtime state writable, rendered
   inputs read-only), only explicitly forwarded deployment environment, resource limits,
   network disabled unless an egress allowlist is configured, and death with
@@ -17,7 +17,7 @@ development run and a hosted one, so that step is the seam:
 
 A deployment selects the executor by config; a hosted deployment that requires
 the sandbox refuses to start when the sandbox runtime is unavailable, through
-:meth:`EpisodeExecutor.preflight`.
+:meth:`ProgramExecutor.preflight`.
 """
 
 from __future__ import annotations
@@ -38,9 +38,9 @@ from pathlib import Path
 
 from reef.core.errors import ReefError
 
-ISOLATION_ENV = "REEF_EPISODE_ISOLATION"
+ISOLATION_ENV = "REEF_SANDBOX_ISOLATION"
 
-EPISODE_OWNER_LEASE: ContextVar[bool] = ContextVar("episode_owner_lease", default=False)
+ROLLOUT_OWNER_LEASE: ContextVar[bool] = ContextVar("rollout_owner_lease", default=False)
 
 
 class ProcessOwner:
@@ -56,7 +56,7 @@ class ProcessOwner:
             if self.stopped:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(process_group, signal.SIGKILL)
-                raise EpisodeLaunchError("the execution environment was stopped")
+                raise RolloutLaunchError("the execution environment was stopped")
             self.process_groups.add(process_group)
 
     def release(self, process_group: int) -> None:
@@ -80,19 +80,19 @@ class SandboxUnavailable(ReefError):
 
 @dataclass(frozen=True)
 class ProcessOutcome:
-    """What a launched episode process produced."""
+    """What a launched rollout process produced."""
 
     exit_code: int
     stdout: str
     stderr: str
 
 
-class EpisodeTimeout(Exception):
-    """The process exceeded its wall-clock budget; raised for run_episode to map."""
+class RolloutTimeout(Exception):
+    """The process exceeded its wall-clock budget; raised for run_rollout to map."""
 
 
-class EpisodeLaunchError(Exception):
-    """The process could not be launched; raised for run_episode to map."""
+class RolloutLaunchError(Exception):
+    """The process could not be launched; raised for run_rollout to map."""
 
 
 class SandboxProgram(ABC):
@@ -124,14 +124,14 @@ class SandboxProgram(ABC):
         """The directory a Reef-installed binary needs bound into a jail, else ``None``."""
 
 
-class EpisodeExecutor(ABC):
+class ProgramExecutor(ABC):
     """Synchronous launch interface adapted by ``ExecutorEnvironment``.
 
-    ``run_episode`` prepares ``root`` (with ``workspace`` inside it) and the
+    ``run_rollout`` prepares ``root`` (with ``workspace`` inside it) and the
     ``env`` overlay; an executor decides how the process sees them. It must
-    kill the whole process tree on timeout and raise :class:`EpisodeTimeout`
-    or :class:`EpisodeLaunchError` so ``run_episode`` maps them to the public
-    ``EpisodeError`` uniformly.
+    kill the whole process tree on timeout and raise :class:`RolloutTimeout`
+    or :class:`RolloutLaunchError` so ``run_rollout`` maps them to the public
+    ``RolloutError`` uniformly.
 
     Callers do not need to know which executor they hold. :meth:`for_program`
     binds the executor to the program it runs and resolves that program's
@@ -147,7 +147,7 @@ class EpisodeExecutor(ABC):
     def preflight(self) -> None:
         """Raise if this executor cannot establish its isolation on this host."""
 
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         """This executor bound to run ``program``, and the binary its processes launch.
 
         ``binary`` overrides the resolved binary. By default the program's binary is resolved on the Reef host and
@@ -155,7 +155,7 @@ class EpisodeExecutor(ABC):
         """
         return self, binary if binary is not None else program.host_binary()
 
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
         """An executor for one run of several processes, which lasts at most ``timeout_s``.
 
         The processes reach the Reef host's loopback ``forward_ports`` in addition to this executor's own. Call
@@ -211,13 +211,13 @@ def run_process(
     process group with ``new_session=False``."""
     read_fd = write_fd = None
     command = list(popen_argv)
-    if EPISODE_OWNER_LEASE.get() and new_session:
+    if ROLLOUT_OWNER_LEASE.get() and new_session:
         # Detect missing executables before the guard changes their exit status.
         executable = command[0]
         if "/" in executable and not os.path.isabs(executable):
             executable = str(cwd / executable)
         if shutil.which(executable, path=env.get("PATH", "")) is None:
-            raise EpisodeLaunchError(f"harness binary {command[0]!r} not found or not executable")
+            raise RolloutLaunchError(f"harness binary {command[0]!r} not found or not executable")
         read_fd, write_fd = os.pipe()
         command = [sys.executable, str(Path(__file__).with_name("lease.py")), str(read_fd), *command]
     try:
@@ -236,7 +236,7 @@ def run_process(
     except FileNotFoundError as exc:
         if write_fd is not None:
             os.close(write_fd)
-        raise EpisodeLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
+        raise RolloutLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
     except BaseException:
         if write_fd is not None:
             os.close(write_fd)
@@ -256,9 +256,9 @@ def run_process(
             else:
                 process.kill()
         process.wait()
-        raise EpisodeTimeout(f"episode timed out after {timeout}s: {list(popen_argv)}") from exc
+        raise RolloutTimeout(f"rollout timed out after {timeout}s: {list(popen_argv)}") from exc
     except BaseException:
-        # A local worker can be terminated while an episode is in flight.
+        # A local worker can be terminated while a rollout is in flight.
         # Do not leave the harness's separate process group behind.
         with contextlib.suppress(ProcessLookupError):
             if new_session:
@@ -276,7 +276,7 @@ def run_process(
 
 
 def inherited_environment() -> dict[str, str]:
-    """The minimal parent environment an episode keeps: how to find binaries.
+    """The minimal parent environment a rollout keeps: how to find binaries.
 
     The running interpreter's scripts directory comes last on PATH, so a
     runner that ships with reef (reef-terminus, reef-native) is found when
@@ -295,7 +295,7 @@ def inherited_environment() -> dict[str, str]:
 
 
 @dataclass(frozen=True)
-class LocalExecutor(EpisodeExecutor):
+class LocalExecutor(ProgramExecutor):
     """Run the binary as a plain subprocess with the caller's privileges.
 
     A minimal environment and separate process group support cleanup.
@@ -321,7 +321,7 @@ class LocalExecutor(EpisodeExecutor):
         return run_process(argv, cwd=workspace, env={**inherited_environment(), **env}, timeout=timeout)
 
 
-#: What every jail unshares and mounts before its binds; the episode jail and the nesting probe share it.
+#: What every jail unshares and mounts before its binds; the rollout jail and the nesting probe share it.
 ISOLATION: tuple[str, ...] = (
     "--unshare-user",
     "--unshare-ipc",
@@ -340,7 +340,7 @@ ISOLATION: tuple[str, ...] = (
 )
 
 
-#: Resource limits every sandboxed episode gets unless the config overrides one.
+#: Resource limits every sandboxed rollout gets unless the config overrides one.
 @dataclass(frozen=True)
 class SandboxLimits:
     cpu_seconds: int = 0  # 0 disables; else RLIMIT_CPU
@@ -361,14 +361,14 @@ class SandboxLimits:
 
 
 @dataclass(frozen=True)
-class SandboxExecutor(EpisodeExecutor):
+class SandboxExecutor(ProgramExecutor):
     """Run the binary inside a bubblewrap jail.
 
     bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a
     new mount/pid/user namespace, binds a read-only base filesystem, exposes
-    only the episode root (workspace writable), clears the environment, and
+    only the rollout root (workspace writable), clears the environment, and
     dies with its parent. Network is unshared (no egress) unless
-    ``egress_hosts`` lists the model endpoint the episode must reach, in which
+    ``egress_hosts`` lists the model endpoint the rollout must reach, in which
     case the network namespace is shared so the endpoint is reachable; a
     single-host firewall is the follow-up (issue #18). The jail also carries
     ``REEF_NATIVE_ENFORCE=bwrap``, so the native loop runs each tool call in
@@ -398,7 +398,7 @@ class SandboxExecutor(EpisodeExecutor):
             raise SandboxUnavailable(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
         if self.network == "isolated":
             self.preflight_pasta()
-        # The native loop nests one jail per tool call inside the episode's, so a host that refuses a user namespace
+        # The native loop nests one jail per tool call inside the rollout's, so a host that refuses a user namespace
         # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
         try:
             done = subprocess.run(
@@ -419,7 +419,7 @@ class SandboxExecutor(EpisodeExecutor):
                 f"tool call needs: {done.stderr.strip()[-600:]}"
             )
 
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[EpisodeExecutor, str]:
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         """Bind the whole install of a binary Reef installed: npm launchers are symlinks into packages, and git
         installs need both their editable source and their venv."""
         if binary is not None:
@@ -430,7 +430,7 @@ class SandboxExecutor(EpisodeExecutor):
             return self, resolved
         return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
 
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> EpisodeExecutor:
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
         """An isolated network forwards the run's ports; the default network already reaches the host."""
         ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
         if self.network != "isolated" or ports == self.forward_ports:
@@ -473,12 +473,12 @@ class SandboxExecutor(EpisodeExecutor):
             )
 
     def nested_probe_argv(self) -> list[str]:
-        """An episode jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
+        """A rollout jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
         bwrap = shutil.which("bwrap") or "bwrap"
         binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
-        episode = [bwrap, *ISOLATION, "--unshare-net", *binds]
+        rollout = [bwrap, *ISOLATION, "--unshare-net", *binds]
         tool = [bwrap, *TOOL_ISOLATION, "--unshare-net", *binds]
-        return [*episode, "--", *tool, "--", "/bin/true"]
+        return [*rollout, "--", *tool, "--", "/bin/true"]
 
     def bwrap_argv(
         self,
@@ -558,7 +558,7 @@ class SandboxExecutor(EpisodeExecutor):
         )
 
 
-#: Nested tool jails bind the episode's proc filesystem instead of mounting another one.
+#: Nested tool jails bind the rollout's proc filesystem instead of mounting another one.
 TOOL_ISOLATION: tuple[str, ...] = (
     "--unshare-user",
     "--unshare-ipc",

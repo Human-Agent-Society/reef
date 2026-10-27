@@ -51,7 +51,7 @@ SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
-# A local model reads the API skill and writes the change, then six pi episodes score it.
+# A local model reads the API skill and writes the change, then six pi rollouts score it.
 STEP_TIMEOUT_S = 1800.0
 POLL_S = 5.0
 
@@ -208,7 +208,7 @@ def tally_parts(metrics):
     candidate, current = scored.get("candidate_scores"), scored.get("current_scores")
     if not isinstance(candidate, list) or not isinstance(current, list) or len(candidate) != len(current):
         return None
-    # An episode that failed scores None, which the score comparison ranks below every number.
+    # A rollout that failed scores None, which the score comparison ranks below every number.
     ranked = [
         (-float("inf") if c is None else c, -float("inf") if k is None else k)
         for c, k in zip(candidate, current, strict=True)

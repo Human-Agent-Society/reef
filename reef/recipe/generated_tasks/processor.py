@@ -6,11 +6,11 @@ generation job:
 
 1. Asks the generator for tasks, with the round's source sessions when the record stage gave any.
 2. Saves the candidates in the scenario's task store, and validates each task with the generator.
-3. Publishes each valid task with its train/eval split. Eval tasks run no episodes.
+3. Publishes each valid task with its train/eval split. Eval tasks run no rollouts.
 
 The round's train tasks wait in the task pool of ``GeneratedTaskJobData``. The pipeline takes up to
 ``tasks_per_step`` of them as one task job's data. The training component rolls the tasks out on its own
-sampler and trains on their episodes; Reef runs no episode of them. When the job's end commits, each task's
+sampler and trains on their rollouts; Reef runs no rollout of them. When the job's end commits, each task's
 first rollout saves its result from the job's metrics; when every train task of a generation has a result,
 the next job sends the generation's results to the generator.
 
@@ -377,7 +377,7 @@ def inference_tags(record: AgentRecord) -> Mapping[str, object]:
 class SourceSessionGrouping(ReportGrouping):
     """No report trains; a source session carries ``source_tag``.
 
-    The generated-task recipe trains on its rollout episodes, which are not records. A report is either a
+    The generated-task recipe trains on its rollouts, which are not records. A report is either a
     source session for the rounds, whose inference records all carry ``source_tag``, or released.
     """
 
@@ -467,7 +467,7 @@ class RoundSettings(PluginSettings):
 class TaskJobSettings(PluginSettings):
     """The config of ``GeneratedTaskJobData``: ``tasks_per_step``, a positive int, the saved tasks of one task job.
 
-    The rollout of the tasks is the training component's: its ``rollout`` job parameter sets the episodes of
+    The rollout of the tasks is the training component's: its ``rollout`` job parameter sets the rollouts of
     each task and the agent that runs them.
     """
 
@@ -484,7 +484,7 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
     Config: ``jobs_per_round``, ``source_records_per_round`` (the source sessions that each request takes, at most), ``source_tag``
     (``name=value``; required when ``source_records_per_round`` is above 0), ``refill_tasks``, and
     ``max_staleness``. A terminal report owns its sources. No report trains: the training component trains on
-    the episodes of the task jobs, which are not records.
+    the rollouts of the task jobs, which are not records.
 
     The stage starts no round until ``resume_rounds`` gives it the record-to-sample stage that runs the rounds,
     the next round number, the complete generations of the task store, and the round limit. The limit counts
@@ -637,13 +637,13 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
 
 
 class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
-    """The record-to-sample stage of generated tasks: the runner of the generations, and of each task's episodes.
+    """The record-to-sample stage of generated tasks: the runner of the generations, and of each task's rollouts.
 
     The record stage forms no record set, so the stage makes no sample from records.
 
     The record stage starts a round when it is due (``start_round``). The stage runs the round's generation
     on its worker: it generates tasks from the round's description and source sessions, validates them and
-    saves them in the task store ``generated-tasks`` of the scenario session; it runs no episodes. A generator or
+    saves them in the task store ``generated-tasks`` of the scenario session; it runs no rollouts. A generator or
     check that fails to run is retried up to ``generation_attempts`` times within
     ``generation_deadline_seconds``. ``finished_rounds`` hands back each round with its saved train tasks.
 
@@ -976,7 +976,7 @@ class GeneratedTaskJobData(Sample2Job):
     The stage owns the task pool: the record stage adds each round's train tasks to it, and a restart puts the
     train tasks that did not train back in it. On each ``advance`` with no tasks handed out, the stage takes up
     to ``tasks_per_step`` of them as the next job's data: the ``TaskSample`` values themselves. The training
-    component rolls them out on its own sampler and trains on their episodes (a task job; see the Tinker
+    component rolls them out on its own sampler and trains on their rollouts (a task job; see the Tinker
     component's ``rollout`` job parameter). When the trainer commits the job's submission, the commit lists
     ``rollout:<task use>``; the store marks the tasks trained once that commit is durable. The tasks stay
     taken in the pool until the job ends.
@@ -1075,11 +1075,11 @@ class GeneratedTaskJobData(Sample2Job):
 
     def job_ended(self, outcome: JobOutcome) -> None:
         """Save a result for each trained task without one: its rewards in the job's ``rollout_rewards``, or why
-        no episode ran."""
+        no rollout ran."""
         rewards = outcome.metrics.get("rollout_rewards", {})
         if not isinstance(rewards, Mapping):
             raise TypeError("a task job's rollout_rewards metric must map task names to rewards")
-        error = outcome.error or "no episode of the task ran"
+        error = outcome.error or "no rollout of the task ran"
         store = self.record2sample.task_store
         if store is not None:
             trained = store.trained_task_names()

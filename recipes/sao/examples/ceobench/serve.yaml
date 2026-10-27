@@ -168,9 +168,9 @@ training:
     critic-steps-per-actor: "2"
     critic-lr: "5e-5"
     # Two commits of critic-only training, not the paper's ten: the value
-    # model starts from --critic-init (an earlier episode's critic, see
+    # model starts from --critic-init (an earlier rollout's critic, see
     # run.sh) and ten warm-up commits would spend the growth weeks of a
-    # single-episode run on the critic alone.
+    # single-rollout run on the critic alone.
     num-critic-only-steps: "2"
     # Uncomment only after placing a valid checkpoint in this directory.
     # An explicitly configured but missing checkpoint fails startup.

@@ -16,11 +16,11 @@ from tests.reef_service.test_harness_recipe import (
     make_binary,
     runtime,
 )
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.rollouts.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.interfaces import InferenceHandler
@@ -57,7 +57,7 @@ def _recipe(
 ) -> CordisRecipe:
     return CordisRecipe(
         resolve_proposer(propose),
-        resolve_episode_scorer(evaluate),
+        resolve_rollout_scorer(evaluate),
         ("task one",),
         binary=str(make_binary(tmp_path)),
         seed=seed,

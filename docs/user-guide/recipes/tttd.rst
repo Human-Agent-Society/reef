@@ -178,7 +178,7 @@ following commands from the repository root:
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
-starts the stack, and runs one episode of ``harbor/erdos_min_overlap`` on the
+starts the stack, and runs one rollout of ``harbor/erdos_min_overlap`` on the
 paper grid: eight groups of 64 rollouts, one optimizer step, thinking enabled,
 four GPUs. Two GPUs train the actor and two serve the policy; training and
 serving never share a GPU.

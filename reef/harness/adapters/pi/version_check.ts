@@ -3,7 +3,7 @@
 // Kept annotation-free on purpose: plain JavaScript in a .ts file, so plain
 // node can parse-check it in CI and pi's TS loader accepts it unchanged.
 // Interactive sessions offer to run the update or skip before accepting input.
-// Headless sessions print the instructions instead. Hermetic episodes
+// Headless sessions print the instructions instead. Hermetic rollouts
 // set PI_OFFLINE and this extension then makes no network calls at all.
 // While the head requires setup not checked off, an interactive session offers to set it up here through the
 // reef-pi wrapper (each item asked once, the answer stored by the wrapper), then offers the update; without a
@@ -144,7 +144,7 @@ export default function versionCheck(pi) {
   let checked = false;
 
   pi.on("session_start", async (_event, ctx) => {
-    if (checked || process.env.PI_OFFLINE) return; // hermetic episodes stay silent
+    if (checked || process.env.PI_OFFLINE) return; // hermetic rollouts stay silent
     checked = true;
     const agentDir = process.env.PI_CODING_AGENT_DIR;
     const serviceUrl = process.env.REEF_SERVICE_URL;

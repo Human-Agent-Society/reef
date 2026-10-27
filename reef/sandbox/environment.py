@@ -17,11 +17,11 @@ from harbor.models.trial.paths import TrialPaths
 
 from reef.sandbox.process import (
     PROCESS_OWNER,
-    EpisodeExecutor,
-    EpisodeLaunchError,
-    EpisodeTimeout,
     ProcessOutcome,
     ProcessOwner,
+    ProgramExecutor,
+    RolloutLaunchError,
+    RolloutTimeout,
 )
 
 ResultType = TypeVar("ResultType")
@@ -45,7 +45,7 @@ class ExecutorEnvironment(BaseEnvironment):
     Paths refer to the caller's staged root, including for cloud execution.
     File transfers preserve the remote root mapping. The caller owns the staged
     root; stopping this environment never deletes caller-owned local files.
-    Starting opens the executor's session (:meth:`EpisodeExecutor.open_session`).
+    Starting opens the executor's session (:meth:`ProgramExecutor.open_session`).
     When that opens a new one, such as an E2B VM, the environment owns it and
     stopping closes it. An executor that is already a session, such as an open
     E2B session, is borrowed, so stopping this view leaves it running.
@@ -55,7 +55,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
     def __init__(
         self,
-        executor: EpisodeExecutor,
+        executor: ProgramExecutor,
         *,
         root: Path,
         workspace: Path,
@@ -100,7 +100,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool) -> None:
         if self.closed:
-            raise EpisodeLaunchError("the execution environment was stopped")
+            raise RolloutLaunchError("the execution environment was stopped")
         if self.started:
             return
         if force_build:
@@ -155,7 +155,7 @@ class ExecutorEnvironment(BaseEnvironment):
     ) -> ExecResult:
         """Preserve argv semantics for existing synchronous executor callers."""
         if not self.started or self.closed:
-            raise EpisodeLaunchError("the execution environment is not running")
+            raise RolloutLaunchError("the execution environment is not running")
         if not argv:
             raise ValueError("the execution command must contain a binary")
         timeout = self.timeout_seconds if timeout_sec is None else float(timeout_sec)
@@ -184,7 +184,7 @@ class ExecutorEnvironment(BaseEnvironment):
                 try:
                     await asyncio.to_thread(self.executor.close)
                 finally:
-                    with contextlib.suppress(EpisodeLaunchError, EpisodeTimeout):
+                    with contextlib.suppress(RolloutLaunchError, RolloutTimeout):
                         await asyncio.shield(pending)
                 raise
         finally:
@@ -193,7 +193,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
     def staged_path(self, path: str) -> Path:
         if self.closed:
-            raise EpisodeLaunchError("the execution environment was stopped")
+            raise RolloutLaunchError("the execution environment was stopped")
         target = Path(path)
         if not target.is_absolute():
             target = self.workspace / target
@@ -227,7 +227,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
 
 def execute(
-    executor: EpisodeExecutor,
+    executor: ProgramExecutor,
     argv: Sequence[str],
     *,
     root: Path,
@@ -237,7 +237,7 @@ def execute(
     writable_paths: Sequence[Path] = (),
     readonly_paths: Sequence[Path] = (),
 ) -> ProcessOutcome:
-    """Run an existing episode caller through Harbor's environment interface."""
+    """Run an existing rollout caller through Harbor's environment interface."""
     environment = ExecutorEnvironment(
         executor,
         root=root,
@@ -259,7 +259,7 @@ def execute(
     return run_sync(_execute())
 
 
-def download_directory(executor: EpisodeExecutor, root: Path, relative: str) -> None:
+def download_directory(executor: ProgramExecutor, root: Path, relative: str) -> None:
     """Refresh a running executor's staged directory through Harbor's API."""
     environment: BaseEnvironment = ExecutorEnvironment(executor, root=root, workspace=root)
     target = root / relative

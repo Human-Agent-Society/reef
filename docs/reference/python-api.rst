@@ -32,7 +32,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| propose a harness edit and grade an episode | `Harness method <#harness-method>`__             | harness-evolution methods    |
+| propose a harness edit and grade a rollout  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -146,7 +146,7 @@ for every scenario in a deployment.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── CordisRecipe             harness tree + episodes  reef.recipe.cordis
+   └── CordisRecipe             harness tree + rollouts  reef.recipe.cordis
        └── SkillClawRecipe                                recipes.skillclaw.recipe
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
@@ -611,7 +611,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        record ids returns the checkpoint.
    * - ``save_candidates(generation=..., directories=...)``
      - Save a copy of each candidate task directory once, before validation or
-       episodes. The name of a candidate is the name of its directory.
+       rollouts. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
@@ -631,7 +631,7 @@ images, and then records its publication. A ``StoredTask`` holds the task
        return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskEpisodeRunner.run``. Do not
+       for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
        change it.
    * - ``mark_trained(task_names=...)``, ``trained_task_names()``
      - Mark published train tasks as trained, or return the trained ones. The
@@ -1396,20 +1396,20 @@ Harness method
 --------------
 
 A harness-evolution method fills three slots with plugin classes. Reef runs
-the loop around them: snapshot, apply, run the paired episodes, record,
+the loop around them: snapshot, apply, run the paired rollouts, record,
 publish or revert.
 
 .. code:: python
 
    from reef.evaluation import SelectionPlugin
-   from reef.evaluation.harness import EpisodeScorer
+   from reef.evaluation.harness import RolloutScorer
    from reef.train.cordis_backend import Proposer
 
    class MyProposer(Proposer):
        def propose(self, nodes, samples, models, *, manifest=None, rejected=(), sources=(),
                    requests=(), entries=(), agent_host=None) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
 
-   class MyScorer(EpisodeScorer):
+   class MyScorer(RolloutScorer):
        def score(self, task, result) -> float: ...
 
    class MySelection(SelectionPlugin):  # optional
@@ -1420,7 +1420,7 @@ publish or revert.
 
 A deployment names each class as ``package.module:ClassName``, or as a mapping
 with ``module`` and ``config``. Reef builds it with the class method
-``from_config``. ``Proposer``, ``EpisodeScorer`` and ``Promoter`` inherit
+``from_config``. ``Proposer``, ``RolloutScorer`` and ``Promoter`` inherit
 ``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
 builds the class with no arguments and refuses a non-empty ``config``.
 
@@ -1436,7 +1436,7 @@ builds the class with no arguments and refuses a non-empty ``config``.
 |                        | ``evolution.models``                                     |
 +------------------------+----------------------------------------------------------+
 | ``manifest``           | keyword-only: the previous step's ``FailureManifest``,   |
-|                        | the per-task record of which episodes failed and how;    |
+|                        | the per-task record of which rollouts failed and how;    |
 |                        | ``None`` before the first settled step                   |
 +------------------------+----------------------------------------------------------+
 | ``reads_requests``     | property, ``False`` by default: ``True`` when the        |
@@ -1456,7 +1456,7 @@ builds the class with no arguments and refuses a non-empty ``config``.
 |                        | records under ``proposal_notes`` and never reads; empty  |
 |                        | mutations skip the step                                  |
 +------------------------+----------------------------------------------------------+
-| ``result``             | one finished episode: exit code, stdout, stderr, and the |
+| ``result``             | one finished rollout: exit code, stdout, stderr, and the |
 |                        | parsed ``trajectory``                                    |
 +------------------------+----------------------------------------------------------+
 | ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
@@ -1471,9 +1471,9 @@ on every call.
 Migration:
 
 - Wrap a plain ``propose`` or ``evaluate`` function in a ``Proposer`` or
-  ``EpisodeScorer`` subclass. Its ``propose`` or ``score`` method calls the
+  ``RolloutScorer`` subclass. Its ``propose`` or ``score`` method calls the
   function. Name the class in the deployment file.
-- Rename ``__call__`` on a ``Proposer``, ``EpisodeScorer`` or ``Promoter``
+- Rename ``__call__`` on a ``Proposer``, ``RolloutScorer`` or ``Promoter``
   subclass to ``propose``, ``score`` or ``promote``.
 - A proposer that named the ``requests`` or ``agent_host`` keyword overrides
   ``reads_requests`` or ``runs_agent``.
@@ -1802,7 +1802,7 @@ that ended, before any other call to a new stage. The stage takes it as the
 end of the last job that it may have handed out.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
-reports ``rollout_rewards``, the rewards of each task's episodes, by task
+reports ``rollout_rewards``, the rewards of each task's rollouts, by task
 name. A component that cannot roll out tasks refuses such a job in
 ``check_job``; Slime does.
 
@@ -1823,7 +1823,7 @@ the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and
 ``learning_rate`` overrides, and ``save_interval``, the optimizer steps between saved
 checkpoints (by default, one checkpoint when the job ends). A saved checkpoint
 is both the start of a later job and the release Reef publishes. A job of
-Harbor tasks also takes ``rollout``, the episodes of each task, and
+Harbor tasks also takes ``rollout``, the rollouts of each task, and
 ``evaluation_of``, a non-empty name: such an evaluation job rolls its tasks out
 from its start, saves no checkpoint, and reports ``evaluation_of``,
 ``evaluation_scores`` (``RolloutScores`` in JSON) and ``evaluation_mean_score``

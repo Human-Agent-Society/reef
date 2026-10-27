@@ -266,7 +266,7 @@ class Archive:
         self._write()
 
     def charge(self, calls: int) -> None:
-        """Spend ``calls`` of the metric-call budget: one per scored episode."""
+        """Spend ``calls`` of the metric-call budget: one per scored rollout."""
         self.metric_calls += calls
         self._write()
 

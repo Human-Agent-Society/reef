@@ -31,16 +31,16 @@ from tests.harness.test_native_serve import (
     _wait,
 )
 from tests.reef_service.test_harness_recipe import MODEL, batch, run_backend_step
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.core.evaluation import RolloutScore
-from reef.evaluation.harness import EpisodeEvaluationWorker
+from reef.evaluation.harness import RolloutEvaluationWorker
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
 from reef.harness.compose.loader import Loader
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import EpisodeResult
-from reef.harness.episodes.trajectory import stage_path
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.run import RolloutResult
+from reef.harness.rollouts.trajectory import stage_path
 from reef.harness.runners.native import LoadError, LoopModule, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
@@ -101,7 +101,7 @@ def _error(loader: Loader, id_: str) -> str:
 
 
 def _write_root(tmp_path: Path, entries: list[dict]) -> Path:
-    """A rendered native root with its entries list, as the episode engine lays one out."""
+    """A rendered native root with its entries list, as the rollout engine lays one out."""
     descriptor = get_adapter("native")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
     nodes = [(entry["name"], entry["config"]) for entry in entries]
@@ -526,7 +526,7 @@ def _backend(tmp_path: Path, propose, score=_score, **options) -> CordisBackend:
     return CordisBackend(
         descriptor=get_adapter("native"),
         propose=resolve_proposer(propose),
-        score_episode=resolve_episode_scorer(score),
+        score_rollout=resolve_rollout_scorer(score),
         tasks=("task one",),
         models=MODEL,
         binary=str(binary),
@@ -1204,9 +1204,9 @@ def _loop_error_trajectory(loop: str | None) -> tuple[dict[str, Any], ...]:
 
 
 def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
-    worker = EpisodeEvaluationWorker(
+    worker = RolloutEvaluationWorker(
         descriptor=get_adapter("native"),
-        scorer=resolve_episode_scorer(_score),
+        scorer=resolve_rollout_scorer(_score),
         binary=None,
         timeout=10,
         executor=LocalExecutor(),
@@ -1214,7 +1214,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     )
     observed = {}
     for loop in ("main", None):
-        result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
+        result = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
         scored = worker._score_result(result, "task one")
         assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)

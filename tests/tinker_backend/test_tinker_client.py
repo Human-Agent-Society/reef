@@ -369,7 +369,7 @@ def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):
 
 
 def test_a_refused_sample_is_the_callers_400_and_an_overflow_names_the_context_length(sampler):
-    # Tinker's message for a Qwen3.5-4B episode whose history outgrew the 64K window.
+    # Tinker's message for a Qwen3.5-4B rollout whose history outgrew the 64K window.
     sampler.base_client.refusal = BadRequestError(
         "Error code: 400 - Prompt length plus max_tokens exceeds the model's context window: "
         "65614 prompt tokens + 4096 max_tokens > 65536"

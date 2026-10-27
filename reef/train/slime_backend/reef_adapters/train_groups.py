@@ -237,7 +237,7 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
     if (Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt").is_file():
         load, reason = critic_save, "resumes from its own checkpoint root"
     elif critic_init and (Path(critic_init).expanduser() / "latest_checkpointed_iteration.txt").is_file():
-        # A value model trained on earlier episodes: its weights and optimizer
+        # A value model trained on earlier rollouts: its weights and optimizer
         # come from --critic-init once, and every later start resumes from
         # what this run has saved since. The learning-rate schedule is this
         # run's, not the checkpoint's: the earlier run may have used another

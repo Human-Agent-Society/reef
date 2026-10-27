@@ -11,12 +11,12 @@ reef:
   ready-timeout: 600
 inference:
   model-path: Qwen/Qwen3-8B
-  # An agent's episode is many turns; a Designer call is one long reply.
+  # An agent's rollout is many turns; a Designer call is one long reply.
   timeout-s: 1800
 # The generator service: writes and checks the Designer's tasks and plays their hint arms, on the host that has Docker and harbor.
 generator:
   tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
-  # The agent of the generator service's own episodes, thinking off.
+  # The agent of the generator service's own rollouts, thinking off.
   agent:
     name: terminus-2
     model_name: openai/{model}
@@ -31,15 +31,15 @@ recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
   config:
     job_parameters:
-      # Tinker's own rollout of each task job: the episodes run on Tinker's sampler at the job's start weights.
+      # Tinker's own rollout of each task job: the rollouts run on Tinker's sampler at the job's start weights.
       rollout:
-        # The training episodes of each task form one group.
-        episodes_per_task: 4
+        # The training rollouts of each task form one group.
+        rollouts_per_task: 4
         concurrency: 2
         environment: docker
         # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
         scaffold_tolerance: 8
-        # The Reasoning Agent, thinking off: a thinking model's episode never assembles into one sample.
+        # The Reasoning Agent, thinking off: a thinking model's rollout never assembles into one sample.
         agent:
           name: terminus-2
           model_name: openai/{model}
@@ -81,7 +81,7 @@ training:
   timeout-s: 1800
   options:
     state-dir: ${REEF_SPADE_STATE_DIR}/tinker
-    # Episodes in one optimizer step: two complete task groups of episodes_per_task episodes.
+    # Rollouts in one optimizer step: two complete task groups of rollouts_per_task rollouts.
     batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004

@@ -178,7 +178,7 @@ class SlimeStart:
 
 
 @dataclass(frozen=True)
-class SlimeRollout:
+class SlimeRound:
     """One rollout of a job: the run of optimizer steps that the workers train and save as one checkpoint.
 
     ``rollout_id`` is the non-negative id that names the rollout's Megatron
@@ -205,16 +205,16 @@ class SlimeRollout:
 
     def __post_init__(self) -> None:
         if isinstance(self.rollout_id, bool) or not isinstance(self.rollout_id, int) or self.rollout_id < 0:
-            raise ValueError("SlimeRollout.rollout_id must be a non-negative int")
+            raise ValueError("SlimeRound.rollout_id must be a non-negative int")
         if isinstance(self.step, bool) or not isinstance(self.step, int) or self.step <= 0:
-            raise ValueError("SlimeRollout.step must be a positive int")
-        check_schedule_state(self.schedule_state, "SlimeRollout.schedule_state")
-        check_schedule_state(self.next_schedule, "SlimeRollout.next_schedule")
+            raise ValueError("SlimeRound.step must be a positive int")
+        check_schedule_state(self.schedule_state, "SlimeRound.schedule_state")
+        check_schedule_state(self.next_schedule, "SlimeRound.next_schedule")
         if (self.schedule_state is None) != (self.next_schedule is None):
-            raise ValueError("SlimeRollout has a schedule before and after the rollout, or neither")
+            raise ValueError("SlimeRound has a schedule before and after the rollout, or neither")
         if not isinstance(self.fresh, bool):
-            raise TypeError("SlimeRollout.fresh must be a bool")
-        check_objective_state(self.objective, self.algorithm_state, "SlimeRollout")
+            raise TypeError("SlimeRound.fresh must be a bool")
+        check_objective_state(self.objective, self.algorithm_state, "SlimeRound")
 
 
 class SlimeTrainingComponent(LocalJobComponent):
@@ -431,7 +431,7 @@ class SlimeTrainingComponent(LocalJobComponent):
             # Optimizer steps advance only a recipe-selected schedule.
             next_schedule = None if schedule_state is None else schedule_state.advanced(last - first)
             training = (algorithm, slime_payload_steps(payload, first, last))
-            rollout = SlimeRollout(self.next_rollout_id, last, schedule_state, next_schedule, fresh, objective, state)
+            rollout = SlimeRound(self.next_rollout_id, last, schedule_state, next_schedule, fresh, objective, state)
             started = read_json(directory / ROLLOUT_FILE)
             if started is not None and started["step"] == last and started["rollout_id"] < self.next_rollout_id:
                 # A restart stopped the job after Megatron saved this rollout, which the workers loaded again.
@@ -453,7 +453,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         self,
         job: TrainingJob,
         directory: Path,
-        rollout: SlimeRollout,
+        rollout: SlimeRound,
         training: tuple[SlimeAlgorithm, Mapping[str, Any]],
     ) -> LearningRateScheduleState | None:
         """Train ``rollout``, save its checkpoint pair and record it as the job's checkpoint and the next start.
@@ -531,7 +531,7 @@ class SlimeTrainingComponent(LocalJobComponent):
     def record_rollout(
         self,
         directory: Path,
-        rollout: SlimeRollout,
+        rollout: SlimeRound,
         schedule_state: LearningRateScheduleState | None,
         metrics: Mapping[str, Any],
     ) -> None:

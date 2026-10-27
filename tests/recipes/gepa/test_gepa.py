@@ -1,5 +1,5 @@
 """Guarantees of the recipes/gepa method package, hermetic: no reflection
-model is ever reached, the proposer's episodes run through an injected fake
+model is ever reached, the proposer's rollouts run through an injected fake
 runner, and the one end-to-end step drives a fake pi binary through the real
 adapter, backend, and commit path."""
 
@@ -12,13 +12,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
 from recipes.gepa.backend import ARCHIVE_STATE_KEY
-from recipes.gepa.method import EpisodeRunner, Feedback, GEPAPlugin, GEPAProposer, ScoreFeedback
+from recipes.gepa.method import Feedback, GEPAPlugin, GEPAProposer, GepaRolloutRunner, ScoreFeedback
 from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -26,8 +26,8 @@ from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeError, EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutError, RolloutResult
 from reef.harness.tree.mutations import Mutation
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -94,14 +94,14 @@ def test_recorded_traffic_reads_buffered_and_streamed_replies() -> None:
     assert [texts for _, texts in _traffic((SAMPLE, STREAMED_SAMPLE))] == [(TASK, "4"), (TASK, "4")]
 
 
-def score_rules(task: str, result: EpisodeResult) -> float:
+def score_rules(task: str, result: RolloutResult) -> float:
     """1.0 when the composition that ran carried the marker instruction."""
     last = result.trajectory[-1] if result.trajectory else {}
     return 1.0 if MARKER in str(last.get("content", last.get("rules", ""))) else 0.0
 
 
-class FakeEpisodes(EpisodeRunner):
-    """An episode runner that answers with the rules text it was rendered."""
+class FakeRollouts(GepaRolloutRunner):
+    """A rollout runner that answers with the rules text it was rendered."""
 
     def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
         self.prompts: list[str] = []
@@ -119,7 +119,7 @@ class FakeEpisodes(EpisodeRunner):
         self.rules.append(text)
         if self.failure is not None:
             raise self.failure
-        return EpisodeResult(
+        return RolloutResult(
             exit_code=0,
             stdout="",
             stderr="",
@@ -152,7 +152,7 @@ class FakeChat:
 class ServedModel(ModelBinding):
     """The model under test: a real binding whose ``chat`` is canned.
 
-    Episodes render this binding into the tree, so it has to be a genuine
+    Rollouts render this binding into the tree, so it has to be a genuine
     ``ModelBinding``; the canned ``chat`` is what the reflection fallback
     reaches when no ``evolution.models.reflection`` is declared.
     """
@@ -189,7 +189,7 @@ def make_binary(tmp_path: Path) -> Path:
 
 def proposer(
     archive: Archive,
-    episodes: FakeEpisodes,
+    rollouts: FakeRollouts,
     **overrides: Any,
 ) -> GEPAProposer:
     settings: dict[str, Any] = {
@@ -206,9 +206,9 @@ def proposer(
         archive=archive,
         descriptor=get_adapter("pi"),
         binary=None,
-        score_episode=resolve_episode_scorer(score_rules),
+        score_rollout=resolve_rollout_scorer(score_rules),
         feedback=ScoreFeedback(),
-        episode_runner=episodes,
+        rollout_runner=rollouts,
         **settings,
     )
 
@@ -379,17 +379,17 @@ def test_a_reef_bound_archive_imports_only_a_matching_external_plan(tmp_path: Pa
 # -- proposer: minibatch, reflection, acceptance ----------------------------
 
 
-def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_episodes(tmp_path: Path) -> None:
+def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_rollouts(tmp_path: Path) -> None:
     """The served composition's minibatch is free: the mechanism already
-    batched its real traffic, so only the child costs episodes."""
+    batched its real traffic, so only the child costs rollouts."""
     archive = Archive(tmp_path / "archive.json")
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, reflector = bindings()
 
-    proposal = proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
+    proposal = proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
 
     assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
-    assert episodes.prompts == [TASK]  # the child only
+    assert rollouts.prompts == [TASK]  # the child only
     # GEPA's count: the seed's validation (2 tasks), the served parent's
     # minibatch (1, from traffic), and the child's minibatch (1).
     assert archive.metric_calls == 4
@@ -406,20 +406,20 @@ def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_episodes(tmp_p
 
 def test_a_parent_that_never_served_is_re_run_on_the_minibatch(tmp_path: Path) -> None:
     """No traffic was ever served from an archive candidate, so its minibatch
-    scores and its outputs have to be produced by episodes."""
+    scores and its outputs have to be produced by rollouts."""
     archive = Archive(tmp_path / "archive.json")
     archive.seed({"rules": SEED_TEXT})
     archive.add({"rules": "Parent rules."}, 0, [1.0])
     archive.record_validation(0, [0.0, 0.0])
     archive.record_validation(1, [1.0, 1.0])  # dominates, so it is always the parent
     archive.clear_pending()
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, reflector = bindings()
 
-    proposal = proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
+    proposal = proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
 
     assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
-    assert episodes.prompts == [TASK, TASK]  # parent then child
+    assert rollouts.prompts == [TASK, TASK]  # parent then child
     assert archive.metric_calls == 2
     assert archive.candidates[2].parent == 1
     (prompt,) = reflector.prompts
@@ -428,52 +428,52 @@ def test_a_parent_that_never_served_is_re_run_on_the_minibatch(tmp_path: Path) -
 
 def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, _ = bindings("```\nNo marker here.\n```")
 
-    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is None
+    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is None
     assert (archive.rejections, archive.steps, archive.pending) == (1, 1, None)
     assert len(archive.candidates) == 1
 
 
-def test_an_episode_that_cannot_run_scores_zero_and_reports_its_error(tmp_path: Path) -> None:
+def test_a_rollout_that_cannot_run_scores_zero_and_reports_its_error(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
     archive.seed({"rules": SEED_TEXT})
     archive.add({"rules": "Parent rules."}, 0, [1.0])
     archive.record_validation(0, [0.0])
     archive.record_validation(1, [1.0])
     archive.clear_pending()
-    episodes = FakeEpisodes(failure=EpisodeError("harness binary 'pi' not found"))
+    rollouts = FakeRollouts(failure=RolloutError("harness binary 'pi' not found"))
     models, reflector = bindings()
 
-    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
+    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
     (prompt,) = reflector.prompts
     assert "## Feedback\nharness binary 'pi' not found" in prompt
 
 
-def test_proposer_episodes_use_the_configured_execution_policy(tmp_path: Path) -> None:
+def test_proposer_rollouts_use_the_configured_execution_policy(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, _ = bindings()
     executor = LocalExecutor()
 
     proposal = proposer(
         archive,
-        episodes,
+        rollouts,
         executor=executor,
-        episode_timeout_s=12.5,
+        rollout_timeout_s=12.5,
     ).propose(NODES, (SAMPLE,), models)
 
     assert proposal is not None
-    assert episodes.executors == [executor]
-    assert episodes.timeouts == [12.5]
+    assert rollouts.executors == [executor]
+    assert rollouts.timeouts == [12.5]
 
 
 def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> None:
     models, _ = bindings()
     dirty = proposer(
         Archive(tmp_path / "dirty.json"),
-        FakeEpisodes(residue=("unexpected.txt",)),
+        FakeRollouts(residue=("unexpected.txt",)),
         forbid_residue=True,
     )
     score, output, error = dirty._score(NODES, {"rules": REFLECTED}, TASK, models)
@@ -484,7 +484,7 @@ def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> No
         archive=Archive(tmp_path / "nonfinite.json"),
         descriptor=get_adapter("pi"),
         binary=None,
-        score_episode=resolve_episode_scorer(lambda task, result: float("nan")),
+        score_rollout=resolve_rollout_scorer(lambda task, result: float("nan")),
         feedback=ScoreFeedback(),
         minibatch_size=1,
         rng_seed=0,
@@ -493,7 +493,7 @@ def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> No
         max_metric_calls=None,
         kinds=("rules",),
         valset_size=1,
-        episode_runner=FakeEpisodes(),
+        rollout_runner=FakeRollouts(),
     )
     with pytest.raises(ValueError, match="non-finite score nan"):
         nonfinite._score(NODES, {"rules": REFLECTED}, TASK, models)
@@ -502,32 +502,32 @@ def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> No
 def test_the_budget_short_circuits_before_any_model_call(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
     archive.charge(150)
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, reflector = bindings()
 
-    assert proposer(archive, episodes, max_metric_calls=150).propose(NODES, (SAMPLE,), models) is None
-    assert (episodes.prompts, reflector.prompts) == ([], [])
+    assert proposer(archive, rollouts, max_metric_calls=150).propose(NODES, (SAMPLE,), models) is None
+    assert (rollouts.prompts, reflector.prompts) == ([], [])
 
 
 def test_a_perfect_minibatch_short_circuits_before_any_model_call(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, reflector = bindings()
     solved = recorded_trajectory("a1", dict(recorded_payload(SAMPLE)), 1.0)
 
-    assert proposer(archive, episodes).propose(NODES, (solved,), models) is None
-    assert (episodes.prompts, reflector.prompts) == ([], [])
+    assert proposer(archive, rollouts).propose(NODES, (solved,), models) is None
+    assert (rollouts.prompts, reflector.prompts) == ([], [])
     # The same minibatch is worth reflecting on once the bar is above it.
-    proposer(archive, episodes, perfect_score=2.0).propose(NODES, (solved,), models)
+    proposer(archive, rollouts, perfect_score=2.0).propose(NODES, (solved,), models)
     assert len(reflector.prompts) == 1
 
 
 def test_reflection_falls_back_to_the_model_under_test(tmp_path: Path) -> None:
     archive = Archive(tmp_path / "archive.json")
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, served = bindings(declared=False)
 
-    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is not None
+    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is not None
     assert len(served.prompts) == 1
 
 
@@ -535,10 +535,10 @@ def test_a_tree_the_archive_does_not_recognise_is_reseeded(tmp_path: Path) -> No
     """An operator edit or a rollback is a new root, never a descendant."""
     archive = Archive(tmp_path / "archive.json")
     archive.seed({"rules": "something else"})
-    episodes = FakeEpisodes()
+    rollouts = FakeRollouts()
     models, _ = bindings()
 
-    proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
+    proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
 
     assert archive.served == 1
     assert archive.candidates[1].texts == {"rules": SEED_TEXT}
@@ -557,7 +557,7 @@ def rollout_scores(values: tuple) -> list[dict[str, object]]:
 
 def evaluation(candidate: tuple, current: tuple) -> EvaluationResult:
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
         metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
     )
@@ -585,7 +585,7 @@ def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_pat
 
     assert decision.selected
     assert decision.policy == "gepa"
-    assert archive.candidates[1].val_scores == [1.0, 0.0]  # a failed episode is a zero, not a gap
+    assert archive.candidates[1].val_scores == [1.0, 0.0]  # a failed rollout is a zero, not a gap
     assert archive.candidates[0].val_scores == [0.0, 0.0]  # the seed's own first validation
     # The candidate's validation (2); the seed's was charged when it was seeded.
     assert (archive.served, archive.pending, archive.metric_calls) == (1, None, 2)
@@ -650,7 +650,7 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
         "evolution": {
             "adapter": "pi",
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(score_rules),
+            "evaluate": resolve_rollout_scorer(score_rules),
             "feedback": feedback_hook,
             "tasks": ["check one", "check two"],
             "seed": list(SEED),
@@ -864,7 +864,7 @@ def test_every_reflection_is_logged_with_its_prompt_reply_and_verdict(tmp_path: 
     archive = Archive(tmp_path / "archive.json")
     models, reflector = bindings()
 
-    proposer(archive, FakeEpisodes()).propose(NODES, (SAMPLE,), models)
+    proposer(archive, FakeRollouts()).propose(NODES, (SAMPLE,), models)
 
     (row,) = archive.proposals
     assert (row["parent"], row["component"], row["accepted"], row["candidate"]) == (0, "rules", True, 1)

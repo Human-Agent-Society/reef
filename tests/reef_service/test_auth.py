@@ -53,7 +53,7 @@ def test_scheme_is_case_insensitive() -> None:
 
 
 def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
-    """An evaluation episode or proposer bound through the Anthropic dialect sends x-api-key, not Bearer."""
+    """An evaluation rollout or proposer bound through the Anthropic dialect sends x-api-key, not Bearer."""
 
     async def run() -> None:
         client = _make_client("secret")
@@ -74,16 +74,16 @@ def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
     evaluation routes, in either header, and every other route refuses it."""
 
     async def run() -> None:
-        client = _make_client("secret", evaluation_tokens="episode")
+        client = _make_client("secret", evaluation_tokens="rollout")
         async with client:
             for path in (
                 "/reef/scenarios/agent/evaluation/v1/chat/completions",
                 "/reef/scenarios/team%2Fagent/evaluation/v1/messages",
                 "/reef/scenarios/agent/components/harness/evaluation/v1/responses",
             ):
-                resp = await client.post(path, headers={"Authorization": "Bearer episode"})
+                resp = await client.post(path, headers={"Authorization": "Bearer rollout"})
                 assert resp.status == 200, path
-                resp = await client.post(path, headers={"x-api-key": "episode"})
+                resp = await client.post(path, headers={"x-api-key": "rollout"})
                 assert resp.status == 200, path
                 resp = await client.post(path, headers={"Authorization": "Bearer secret"})
                 assert resp.status == 200, path
@@ -93,7 +93,7 @@ def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
                 ("POST", "/v1/chat/completions"),
                 ("POST", "/reef/scenarios/agent/rollback"),
             ):
-                resp = await client.request(method, path, headers={"Authorization": "Bearer episode"})
+                resp = await client.request(method, path, headers={"Authorization": "Bearer rollout"})
                 assert resp.status == 401, (method, path)
 
     asyncio.run(run())

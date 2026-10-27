@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 from tests.support._strategies import resolve_proposer
 
-from reef.evaluation.harness import EpisodeScorer, EvaluationWorkerPool, evaluation_selection
+from reef.evaluation.harness import EvaluationWorkerPool, RolloutScorer, evaluation_selection
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
@@ -33,7 +33,7 @@ class StatefulWorker:
         return os.getpid(), self.calls, value
 
 
-class Scorer(EpisodeScorer):
+class Scorer(RolloutScorer):
     def score(self, task, result):
         return 1.0
 
@@ -88,20 +88,20 @@ def test_unused_pool_close_does_not_launch_workers():
         pool.evaluate([("never",)])
 
 
-class IsolationScorer(EpisodeScorer):
+class IsolationScorer(RolloutScorer):
     def __init__(self):
         self.calls = 0
 
     def score(self, task, result):
         row = result.trajectory[-1]
         if Path(row["workspace"]).exists() or row["rules"] != task:
-            raise ValueError("episode files leaked or were not cleaned")
+            raise ValueError("rollout files leaked or were not cleaned")
         self.calls += 1
         return float(self.calls)
 
 
 @pytest.mark.parametrize("executor_backend, workers", [("uni", 1), ("mp", 2)])
-def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, executor_backend, workers):
+def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, executor_backend, workers):
     binary = tmp_path / "fake-pi"
     roots = tmp_path / "roots"
     binary.write_text(
@@ -117,7 +117,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     backend = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda *args: None),
-        score_episode=IsolationScorer(),
+        score_rollout=IsolationScorer(),
         tasks=("one",),
         binary=str(binary),
         models=ModelBinding(base_url="http://unused", model="unused", api_key="dummy"),
@@ -135,7 +135,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     try:
         for cycle in range(2):
             pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate", None), ({}, "", None)]
-            scores = backend._episode_evaluator.run_episodes(pairings)
+            scores = backend._rollout_evaluator.run_rollouts(pairings)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
             assert [row.score.value for row in scores] == expected
         paths = roots.read_text().splitlines()
@@ -145,6 +145,6 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         trainer.close()
         records.close()
     trainer.close()
-    assert backend._episode_evaluator._worker_pool._closed
+    assert backend._rollout_evaluator._worker_pool._closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend._episode_evaluator.run_episodes([({}, "", None)])
+        backend._rollout_evaluator.run_rollouts([({}, "", None)])

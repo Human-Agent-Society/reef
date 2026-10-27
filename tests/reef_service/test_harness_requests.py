@@ -23,7 +23,7 @@ from tests.reef_service.test_harness_recipe import (
     runtime,
 )
 from tests.reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.train.test_harness_evolve_processor import harness_stages
 from tests.train.test_reef_trainer_contracts import ExampleBackend
 
@@ -143,7 +143,7 @@ def _growing_recipe(tmp_path: Path, propose, **options) -> CordisRecipe:
 
     return CordisRecipe(
         resolve_proposer(propose),
-        resolve_episode_scorer(longer),
+        resolve_rollout_scorer(longer),
         ("task one",),
         binary=str(make_binary(tmp_path)),
         seed=(SEED_MODELS, SEED_SETTINGS),

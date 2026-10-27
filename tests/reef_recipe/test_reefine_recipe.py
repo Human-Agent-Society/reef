@@ -13,8 +13,8 @@ import pytest
 from reef.core.config import config_arguments
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.requests import REQUESTS_ENTRY_ID
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.runners.terminus.runner import trial_record
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe
@@ -149,15 +149,15 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
     pi = ReefineRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}})
     assert isinstance(pi, ReefineRecipe) and pi.tasks[0].startswith("[health] ")
 
-    def ran(rewards: dict[str, float], error: str = "") -> EpisodeResult:
+    def ran(rewards: dict[str, float], error: str = "") -> RolloutResult:
         row = trial_record(HEALTH_TASK_DIRECTORY, rewards, tmp_path, error)
         events = ({"type": "verifier", **{key: value for key, value in row.items() if key != "steps"}},)
-        return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
+        return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
 
     assert evaluate(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
     assert evaluate(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
     assert evaluate(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
-    # The reply's last line is not the score of a task directory: a Harbor episode has no assistant reply.
+    # The reply's last line is not the score of a task directory: a Harbor rollout has no assistant reply.
     assert evaluate("[health] x", ran({"reward": 1.0})) == 0.0
 
 

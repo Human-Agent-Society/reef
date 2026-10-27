@@ -150,8 +150,8 @@ next week's dashboard appears, the finished week's decision turns (the tool
 calls that changed the company) are reported with the week's credit, its
 change in company value (cash plus the engine's subscription run-rate over
 the weeks left) and the discounted changes of the weeks after it, scaled
-against the weeks before, so the recipe trains while the episode runs. The
-example's README records the reward-shaping choices and the recorded episodes.
+against the weeks before, so the recipe trains while the rollout runs. The
+example's README records the reward-shaping choices and the recorded rollouts.
 
 .. code:: bash
 

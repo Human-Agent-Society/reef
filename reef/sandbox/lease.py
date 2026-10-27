@@ -1,4 +1,4 @@
-"""Keep an episode's process group tied to its worker, including SIGKILL loss.
+"""Keep a rollout's process group tied to its worker, including SIGKILL loss.
 
 Run as a session leader. The command must remain in this process group; this
 lease is lifecycle protection, not a substitute for a sandbox/container.

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer
+from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
@@ -21,8 +21,8 @@ from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeResult
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutResult
 from reef.harness.tree.mutations import Mutation
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -103,7 +103,7 @@ def rollout_scores(values: tuple) -> list[dict[str, object]]:
 
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
     return EvaluationResult(
-        evaluator="harness_episode_pairs",
+        evaluator="harness_rollout_pairs",
         evaluator_version="1",
         metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
     )
@@ -118,13 +118,13 @@ def runtime(api: str = "openai") -> InferenceProxyRuntime:
     )
 
 
-def score_rules(task: str, result: EpisodeResult) -> float:
+def score_rules(task: str, result: RolloutResult) -> float:
     del task
     last = result.trajectory[-1] if result.trajectory else {}
     return 1.0 if MARKER in str(last.get("rules", "")) else 0.0
 
 
-def non_finite_score(task: str, result: EpisodeResult) -> float:
+def non_finite_score(task: str, result: RolloutResult) -> float:
     del task, result
     return float("nan")
 
@@ -145,7 +145,7 @@ def sections(tmp_path: Path, *, scorer=score_rules, adapter: str = "pi", **metho
         "evolution": {
             "adapter": adapter,
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_episode_scorer(scorer),
+            "evaluate": resolve_rollout_scorer(scorer),
             "tasks": [TASK],
             "seed": list(SEED),
             "meta_harness": block,
@@ -264,7 +264,7 @@ def test_full_history_proposer_can_branch_from_a_retained_candidate(tmp_path: Pa
         store=store,
         descriptor=get_adapter("pi"),
         tasks=(TASK,),
-        episode_repeats=1,
+        rollout_repeats=1,
     )
 
     mutations = proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat}))
@@ -290,7 +290,7 @@ def test_an_undeclared_proposer_model_is_refused_rather_than_silently_served(tmp
         store=store,
         descriptor=get_adapter("pi"),
         tasks=(TASK,),
-        episode_repeats=1,
+        rollout_repeats=1,
         model="typo",
     )
 
@@ -311,7 +311,7 @@ def test_incumbent_only_mode_rejects_a_historical_parent_without_losing_the_atte
         store=store,
         descriptor=get_adapter("pi"),
         tasks=(TASK,),
-        episode_repeats=1,
+        rollout_repeats=1,
         mode="incumbent_only",
     )
 
@@ -339,7 +339,7 @@ def test_component_scope_keeps_non_evolvable_parent_nodes_fixed(tmp_path: Path) 
         store=store,
         descriptor=get_adapter("pi"),
         tasks=(TASK,),
-        episode_repeats=1,
+        rollout_repeats=1,
         kinds=("rules",),
     )
 
@@ -348,7 +348,7 @@ def test_component_scope_keeps_non_evolvable_parent_nodes_fixed(tmp_path: Path) 
     assert "may change only configured components" in store.active.attempts[-1]["error"]
 
 
-def test_candidate_and_episode_budgets_stop_before_another_model_call(tmp_path: Path) -> None:
+def test_candidate_and_rollout_budgets_stop_before_another_model_call(tmp_path: Path) -> None:
     store = PopulationStore(tmp_path / "mirror.json")
     population = Population()
     genesis = population.sync_served(SEED, step=0)
@@ -362,7 +362,7 @@ def test_candidate_and_episode_budgets_stop_before_another_model_call(tmp_path: 
         store=store,
         descriptor=get_adapter("pi"),
         tasks=(TASK,),
-        episode_repeats=1,
+        rollout_repeats=1,
         max_candidates=1,
     )
 
@@ -398,7 +398,7 @@ def test_selector_judges_against_the_frontier_the_incumbent_was_admitted_on(tmp_
     # The frontier does not drift down to this batch's measurement.
     assert store.active.by_id(genesis.candidate_id).scores == (0.8,)
     assert store.active.by_id(proposed.candidate_id).outcome == "retained"
-    assert store.active.episode_calls == 2
+    assert store.active.rollout_calls == 2
 
 
 def test_selector_retains_a_non_winner_as_a_future_parent(tmp_path: Path) -> None:
@@ -506,11 +506,11 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
 
     assert json.loads(mirror.read_text()) == committed
     assert committed["pending_id"] is None
-    assert committed["episode_calls"] == 2
+    assert committed["rollout_calls"] == 2
     assert [row["outcome"] for row in committed["candidates"]] == ["selected", "selected"]
 
 
-def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tmp_path, monkeypatch) -> None:
+def test_terminus_extension_uses_shared_recipe_rollout_runner_and_publication(tmp_path, monkeypatch) -> None:
     # Replace only process launch and the remote trial. Rendering, model
     # binding, Harbor's agent contract, scoring, selection and commit are real.
     pytest.importorskip("reef_eval")
@@ -567,7 +567,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     config["evolution"].pop("binary")
     config["evolution"].update(
         executor="sandbox",
-        episode_timeout_s=17,
+        rollout_timeout_s=17,
         forbid_residue=True,
         tasks=["test/hello-world"],
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},

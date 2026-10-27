@@ -154,7 +154,7 @@ class ServiceConfig:
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
-    #: evaluation episodes from it. ``upstream_model`` is a provider model
+    #: evaluation rollouts from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
     upstream_url: str | None = config_option(
         None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."

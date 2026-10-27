@@ -345,11 +345,11 @@ def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatc
 def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypatch, tmp_path) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.evaluation.harness import RolloutScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(EpisodeScorer):\n"
+        "class Evaluate(RolloutScorer):\n"
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -485,7 +485,7 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
         recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, agent_record_dir=str(tmp_path / "ar")
     )
     # The recipe trains task jobs, so its jobs carry the training component's rollout settings.
-    recipe_settings = {"job_parameters": {"rollout": {"episodes_per_task": 2}}}
+    recipe_settings = {"job_parameters": {"rollout": {"rollouts_per_task": 2}}}
     dispatcher = deploy.build_dispatcher(dataclasses.replace(settings, recipe_settings=recipe_settings))
 
     stages = dispatcher.recipe.pipeline_stages

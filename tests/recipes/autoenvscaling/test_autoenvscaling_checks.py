@@ -69,7 +69,7 @@ def validated(generator: AutoEnvScalingGenerator) -> tuple[HarborTask, tuple[str
 
 
 def closed_with(generator: AutoEnvScalingGenerator, task: HarborTask, errors: tuple[str, ...]) -> dict[str, Any]:
-    """Close the generation as the recipe would after its episodes, and read its report."""
+    """Close the generation as the recipe would after its rollouts, and read its report."""
     if errors:
         result = RejectedTask(task, "; ".join(errors))
     else:

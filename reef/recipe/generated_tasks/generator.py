@@ -79,7 +79,7 @@ class RejectedTask:
 
 @dataclass(frozen=True)
 class HeldOutTask:
-    """A task published to the eval split: it runs no episodes and gives no training feedback.
+    """A task published to the eval split: it runs no rollouts and gives no training feedback.
 
     Values: ``task``, a ``HarborTask``.
     Purpose: the recipe sends it for a candidate published to ``eval``. A
@@ -95,12 +95,12 @@ class HeldOutTask:
 
 @dataclass(frozen=True)
 class RolledOutTask:
-    """A train task whose first rollout ran: the verifier rewards of its training episodes.
+    """A train task whose first rollout ran: the verifier rewards of its training rollouts.
 
     Values: ``(task, rollout_rewards)`` with ``task`` a ``HarborTask`` and
     ``rollout_rewards`` a non-empty tuple of finite numbers, one for each
-    training episode of the first rollout that ran, in episode order, as the
-    rollout's policy scored them before it trained on them. An episode that ran
+    training rollout of the first rollout that ran, in rollout order, as the
+    rollout's policy scored them before it trained on them. A rollout that ran
     and returned no reward counts as 0.
     Purpose: the recipe sends it for a train task whose first rollout ran.
     """
@@ -116,7 +116,7 @@ class RolledOutTask:
 
 @dataclass(frozen=True)
 class FailedTask:
-    """A train task whose first rollout ran no episode.
+    """A train task whose first rollout ran no rollout.
 
     Values: ``(task, error, infrastructure_failure)`` with ``task`` a
     ``HarborTask``, ``error`` a non-empty text and ``infrastructure_failure`` a
@@ -125,7 +125,7 @@ class FailedTask:
     failure of the solver. It is false when the generator service refused the
     task.
     Purpose: the recipe sends it for a train task whose first rollout ran no
-    episode.
+    rollout.
     """
 
     task: HarborTask
@@ -175,7 +175,7 @@ class TaskGenerator(Plugin, ABC):
 
     @abstractmethod
     async def validate(self, task: HarborTask) -> TaskValidationResult:
-        """Check one generated task before the recipe runs its episodes.
+        """Check one generated task before the recipe runs its rollouts.
 
         Return task defects as validation errors. Raise when the checks cannot
         run; the exception stops the round. The task is a value: a validation

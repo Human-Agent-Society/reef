@@ -16,7 +16,7 @@ from reef.record2sample.generator.service import (
     GeneratorService,
     HarborChecks,
     JobRunner,
-    ReefTaskEpisodes,
+    ReefGeneratorRollouts,
     readiness_probes,
 )
 from reef.service.deploy.config_utils import DeployConfigError, load_config
@@ -26,11 +26,11 @@ from reef.service.deploy.service_config import ServiceConfig, service_config_fro
 
 
 def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> GeneratorService:
-    """The service the deployment describes: the designer through Reef, Harbor's checks, the episode runner."""
+    """The service the deployment describes: the designer through Reef, Harbor's checks, the rollout runner."""
     reef_url = local_service_url(settings)
     token = settings.tokens[0] if settings.tokens else None
     tasks_root = Path(generator.tasks_root).expanduser()
-    work_dir = Path(generator.work_dir).expanduser() if generator.work_dir else tasks_root / ".episodes"
+    work_dir = Path(generator.work_dir).expanduser() if generator.work_dir else tasks_root / ".rollouts"
     if generator.designer_api is not None:
         designer_api = generator.designer_api
     elif settings.upstream_api == "responses" and not generator.designer_url:
@@ -45,7 +45,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         timeout_s=generator.designer_timeout_s,
         api=designer_api,
     )
-    episodes = ReefTaskEpisodes(
+    rollouts = ReefGeneratorRollouts(
         reef_url=reef_url,
         work_dir=work_dir,
         token=token,
@@ -58,7 +58,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
         tasks_root=tasks_root,
         designer=designer,
         checks=HarborChecks(harbor=generator.harbor, runs=runs),
-        episodes=episodes,
+        rollouts=rollouts,
         default_model=settings.upstream_model or settings.model_path,
         designer_model=generator.designer_model,
         probes=readiness_probes(harbor=generator.harbor),
@@ -69,7 +69,7 @@ def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m reef.service.deploy.generator_process",
-        description="The generator service: writes and checks Harbor tasks and runs their episodes for a task generating processor.",
+        description="The generator service: writes and checks Harbor tasks and runs their rollouts for a task generating processor.",
     )
     parser.add_argument(
         "-c",

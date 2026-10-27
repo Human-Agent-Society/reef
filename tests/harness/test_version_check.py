@@ -18,11 +18,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_episode_scorer, resolve_proposer
+from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
+from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.rollouts.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
@@ -35,7 +35,7 @@ def _config(**evolution: object) -> dict[str, object]:
     return {
         "evolution": {
             "propose": resolve_proposer(lambda nodes, samples, model: None),
-            "evaluate": resolve_episode_scorer(lambda task, result: 0.0),
+            "evaluate": resolve_rollout_scorer(lambda task, result: 0.0),
             "tasks": ["probe"],
             **evolution,
         }
@@ -55,7 +55,7 @@ def test_version_check_entry_passes_the_backends_seed_validation() -> None:
     CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, model: None),
-        score_episode=resolve_episode_scorer(lambda task, result: 0.0),
+        score_rollout=resolve_rollout_scorer(lambda task, result: 0.0),
         tasks=("probe",),
         models=ModelBinding(base_url="http://localhost:8000", model="demo-model"),
         seed=(version_check_entry("pi"),),

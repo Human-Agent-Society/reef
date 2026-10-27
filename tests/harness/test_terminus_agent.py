@@ -24,7 +24,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.matchers import Each, IsIn, Key
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
 from reef.harness.tree.render import render_composition

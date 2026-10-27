@@ -1,4 +1,4 @@
-"""The JSON forms the generator service and its client exchange: tasks, oracle results and episodes."""
+"""The JSON forms the generator service and its client exchange: tasks, oracle results and rollouts."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.harness.client.tasks import EpisodeTurn, TaskEpisode
+from reef.harness.client.tasks import RolloutTurn, TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
 from reef.record2sample.generator.harbor import OracleResult
 from reef.record2sample.generator.inputs import record_document
@@ -170,37 +170,37 @@ def checked_reward_map(value: Mapping[object, object], label: str) -> dict[str, 
     return result
 
 
-def episode_document(episode: TaskEpisode) -> dict[str, object]:
-    """One episode as JSON: what the verifier said and what reached Reef."""
+def rollout_document(rollout: TaskRollout) -> dict[str, object]:
+    """One rollout as JSON: what the verifier said and what reached Reef."""
     return {
-        "task_path": str(episode.task_path),
-        "name": episode.name,
-        "episode_id": episode.episode_id,
-        "reward": episode.reward,
-        "rewards": dict(episode.rewards),
-        "error": episode.error,
-        "receipts": list(episode.receipts),
-        "failed_calls": episode.failed_calls,
-        "report_agent_record_ids": list(episode.report_agent_record_ids),
-        "trial_uri": episode.trial_uri,
-        "turns": [{"request": dict(turn.request), "response": dict(turn.response)} for turn in episode.turns],
+        "task_path": str(rollout.task_path),
+        "name": rollout.name,
+        "rollout_id": rollout.rollout_id,
+        "reward": rollout.reward,
+        "rewards": dict(rollout.rewards),
+        "error": rollout.error,
+        "receipts": list(rollout.receipts),
+        "failed_calls": rollout.failed_calls,
+        "report_agent_record_ids": list(rollout.report_agent_record_ids),
+        "trial_uri": rollout.trial_uri,
+        "turns": [{"request": dict(turn.request), "response": dict(turn.response)} for turn in rollout.turns],
     }
 
 
-def episode_from_document(document: object) -> TaskEpisode:
-    fields = checked_object(document, "an episode")
+def rollout_from_document(document: object) -> TaskRollout:
+    fields = checked_object(document, "a rollout")
     rewards = fields.get("rewards", {})
     if not isinstance(rewards, Mapping):
-        raise WireError("an episode's rewards must be an object")
-    receipts = checked_string_list(fields, "receipts", label="an episode")
-    reports = checked_string_list(fields, "report_agent_record_ids", label="an episode")
+        raise WireError("a rollout's rewards must be an object")
+    receipts = checked_string_list(fields, "receipts", label="a rollout")
+    reports = checked_string_list(fields, "report_agent_record_ids", label="a rollout")
     failed_calls = fields.get("failed_calls", 0)
     if isinstance(failed_calls, bool) or not isinstance(failed_calls, int):
-        raise WireError("an episode's failed_calls must be an integer")
+        raise WireError("a rollout's failed_calls must be an integer")
     trial_uri = fields.get("trial_uri")
     error = fields.get("error", "")
     if (trial_uri is not None and not isinstance(trial_uri, str)) or not isinstance(error, str):
-        raise WireError("an episode's trial_uri and error must be text")
+        raise WireError("a rollout's trial_uri and error must be text")
     turns = fields.get("turns", [])
     if not isinstance(turns, list) or any(
         not isinstance(turn, Mapping)
@@ -208,17 +208,17 @@ def episode_from_document(document: object) -> TaskEpisode:
         or not isinstance(turn.get("response"), Mapping)
         for turn in turns
     ):
-        raise WireError("an episode's turns must be objects with a request and a response")
-    return TaskEpisode(
-        task_path=Path(checked_string(fields, "task_path", label="an episode")),
-        name=checked_string(fields, "name", label="an episode"),
-        episode_id=checked_string(fields, "episode_id", label="an episode"),
+        raise WireError("a rollout's turns must be objects with a request and a response")
+    return TaskRollout(
+        task_path=Path(checked_string(fields, "task_path", label="a rollout")),
+        name=checked_string(fields, "name", label="a rollout"),
+        rollout_id=checked_string(fields, "rollout_id", label="a rollout"),
         reward=checked_optional_number(fields.get("reward"), "reward"),
-        rewards=checked_reward_map(rewards, "an episode's rewards"),
+        rewards=checked_reward_map(rewards, "a rollout's rewards"),
         error=error,
         receipts=tuple(receipts),
         failed_calls=failed_calls,
         report_agent_record_ids=tuple(reports),
         trial_uri=trial_uri,
-        turns=tuple(EpisodeTurn(turn["request"], turn["response"]) for turn in turns),
+        turns=tuple(RolloutTurn(turn["request"], turn["response"]) for turn in turns),
     )

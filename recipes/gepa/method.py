@@ -11,7 +11,7 @@ called, so the per-task scores in its evaluation are exactly GEPA's valset
 evaluation, and recording them is what updates the fronts and moves the
 served composition.
 
-The parent's minibatch costs no episodes when the parent is the served
+The parent's minibatch costs no rollouts when the parent is the served
 composition: the mechanism already batched that composition's real recorded
 traffic, scores included. Any other parent has to be re-run, because no
 traffic was ever served from it. The archive's metric-call count follows
@@ -41,14 +41,14 @@ from reef.core.evaluation import (
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.evaluation.evaluators import BackendEvaluateMixin
-from reef.evaluation.harness import EpisodeScorer
+from reef.evaluation.harness import RolloutScorer
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.rollouts.run import RolloutError, RolloutResult, run_rollout
+from reef.harness.rollouts.trajectory import TrajectoryError
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
-from reef.sandbox.process import EpisodeExecutor
+from reef.sandbox.process import ProgramExecutor
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.types import TrajectorySample
@@ -56,9 +56,9 @@ from reef.train.types import TrajectorySample
 from . import components, reflection
 from .archive import Archive
 
-#: The episode budget the evolution backend uses for its own scoring runs;
-#: the proposer's episodes are the same work and get the same ceiling.
-EPISODE_TIMEOUT_S = 600.0
+#: The rollout budget the evolution backend uses for its own scoring runs;
+#: the proposer's rollouts are the same work and get the same ceiling.
+ROLLOUT_TIMEOUT_S = 600.0
 
 #: GEPA's reflective dataset keys. The names are load bearing: they are what
 #: the copied prompt tells the reflection model to read.
@@ -74,8 +74,8 @@ class Feedback(ConfiguredPlugin, ABC):
     def feedback(self, task: str, output: str, score: float) -> str: ...
 
 
-class EpisodeRunner(ABC):
-    """``reef.harness.episodes.run.run_episode``, as an injectable interface."""
+class GepaRolloutRunner(ABC):
+    """``reef.harness.rollouts.run.run_rollout``, as an injectable interface."""
 
     @abstractmethod
     def run(
@@ -85,13 +85,13 @@ class EpisodeRunner(ABC):
         prompt: str,
         *,
         binary: str | None = None,
-        timeout: float = EPISODE_TIMEOUT_S,
-        executor: EpisodeExecutor | None = None,
-    ) -> EpisodeResult: ...
+        timeout: float = ROLLOUT_TIMEOUT_S,
+        executor: ProgramExecutor | None = None,
+    ) -> RolloutResult: ...
 
 
-class HarnessEpisodeRunner(EpisodeRunner):
-    """Execute episodes through Reef's harness runner."""
+class HarnessRolloutRunner(GepaRolloutRunner):
+    """Execute rollouts through Reef's harness runner."""
 
     def run(
         self,
@@ -100,10 +100,10 @@ class HarnessEpisodeRunner(EpisodeRunner):
         prompt: str,
         *,
         binary: str | None = None,
-        timeout: float = EPISODE_TIMEOUT_S,
-        executor: EpisodeExecutor | None = None,
-    ) -> EpisodeResult:
-        return run_episode(descriptor, files, prompt, binary=binary, timeout=timeout, executor=executor)
+        timeout: float = ROLLOUT_TIMEOUT_S,
+        executor: ProgramExecutor | None = None,
+    ) -> RolloutResult:
+        return run_rollout(descriptor, files, prompt, binary=binary, timeout=timeout, executor=executor)
 
 
 class ScoreFeedback(Feedback):
@@ -130,7 +130,7 @@ class _Example:
     task: str
     output: str
     score: float
-    #: Set when the episode never produced a trajectory; it replaces the
+    #: Set when the rollout never produced a trajectory; it replaces the
     #: feedback hook, because the failure is the only feedback there is.
     error: str = ""
 
@@ -144,10 +144,10 @@ class GEPAProposer(Proposer):
         archive: Archive,
         descriptor: AdapterDescriptor,
         binary: str | None,
-        executor: EpisodeExecutor | None = None,
-        episode_timeout_s: float = EPISODE_TIMEOUT_S,
+        executor: ProgramExecutor | None = None,
+        rollout_timeout_s: float = ROLLOUT_TIMEOUT_S,
         forbid_residue: bool = False,
-        score_episode: EpisodeScorer,
+        score_rollout: RolloutScorer,
         feedback: Feedback,
         minibatch_size: int,
         rng_seed: int,
@@ -157,23 +157,23 @@ class GEPAProposer(Proposer):
         kinds: Sequence[str],
         valset_size: int,
         reflection_model: str = "reflection",
-        episode_runner: EpisodeRunner | None = None,
+        rollout_runner: GepaRolloutRunner | None = None,
     ) -> None:
         self._archive = archive
         self._descriptor = descriptor
         self._binary = binary
         self._executor = executor
         if (
-            isinstance(episode_timeout_s, bool)
-            or not isinstance(episode_timeout_s, (int, float))
-            or episode_timeout_s <= 0
+            isinstance(rollout_timeout_s, bool)
+            or not isinstance(rollout_timeout_s, (int, float))
+            or rollout_timeout_s <= 0
         ):
-            raise ValueError("episode_timeout_s must be a positive number")
+            raise ValueError("rollout_timeout_s must be a positive number")
         if not isinstance(forbid_residue, bool):
             raise ValueError("forbid_residue must be a boolean")
-        self._episode_timeout_s = float(episode_timeout_s)
+        self._rollout_timeout_s = float(rollout_timeout_s)
         self._forbid_residue = forbid_residue
-        self._score_episode = score_episode
+        self._score_rollout = score_rollout
         if not isinstance(feedback, Feedback):
             raise TypeError("GEPA feedback must inherit Feedback")
         self._feedback = feedback
@@ -185,9 +185,9 @@ class GEPAProposer(Proposer):
         self._max_metric_calls = max_metric_calls
         self._kinds = tuple(kinds)
         self._reflection_model = reflection_model
-        self._episode_runner = HarnessEpisodeRunner() if episode_runner is None else episode_runner
-        if not isinstance(self._episode_runner, EpisodeRunner):
-            raise TypeError("GEPA episode_runner must inherit EpisodeRunner")
+        self._rollout_runner = HarnessRolloutRunner() if rollout_runner is None else rollout_runner
+        if not isinstance(self._rollout_runner, GepaRolloutRunner):
+            raise TypeError("GEPA rollout_runner must inherit GepaRolloutRunner")
 
     def propose(
         self,
@@ -298,7 +298,7 @@ class GEPAProposer(Proposer):
         """The parent's minibatch: free from traffic, or re-run on the parent."""
         batch = _traffic(samples)[: self._minibatch_size]
         if parent == self._archive.served:
-            # Free of episodes, but not of budget: upstream evaluates the
+            # Free of rollouts, but not of budget: upstream evaluates the
             # parent on the minibatch and counts it, so the traffic that
             # stands in for that evaluation counts the same.
             self._archive.charge(len(batch))
@@ -323,23 +323,23 @@ class GEPAProposer(Proposer):
         )
         self._archive.charge(1)
         try:
-            result = self._episode_runner.run(
+            result = self._rollout_runner.run(
                 self._descriptor,
                 files,
                 task,
                 binary=self._binary,
-                timeout=self._episode_timeout_s,
+                timeout=self._rollout_timeout_s,
                 executor=self._executor,
             )
-        except (EpisodeError, TrajectoryError) as error:
+        except (RolloutError, TrajectoryError) as error:
             return 0.0, "", str(error)
         if result.residue and self._forbid_residue:
             cause = f"{len(result.residue)} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return 0.0, "", cause
-        score = float(self._score_episode.score(task, result))
+        score = float(self._score_rollout.score(task, result))
         if not math.isfinite(score):
-            raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
-        return score, _episode_output(result), ""
+            raise ValueError(f"rollout scorer returned a non-finite score {score!r} for task {task!r}")
+        return score, _rollout_output(result), ""
 
     def _records(self, minibatch: Sequence[_Example]) -> list[dict[str, Any]]:
         """The reflective dataset: one record per minibatch example."""
@@ -491,7 +491,7 @@ def _text(content: Any) -> str:
     return ""
 
 
-def _episode_output(result: EpisodeResult) -> str:
+def _rollout_output(result: RolloutResult) -> str:
     """The last assistant text in a trajectory, across both event shapes.
 
     Harnesses log either a bare chat message or one wrapped in a typed
@@ -514,7 +514,7 @@ def _substituted(
     """The served tree with the candidate's texts swapped into its nodes.
 
     Only the evolvable nodes change: a composition is more than its
-    instructions, and the config and extension nodes that make episodes
+    instructions, and the config and extension nodes that make rollouts
     reach a model have to travel with every candidate the proposer runs.
     """
     rendered: list[tuple[str, Any]] = []

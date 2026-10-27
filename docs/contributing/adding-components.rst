@@ -247,7 +247,7 @@ under ``recipes/<name>/examples/`` or in the external harness.
   ``reef.harness_adapters`` entry-point group that resolves to an
   ``AdapterDescriptor`` or a zero-argument descriptor factory.
 - Add descriptor and golden-render coverage in
-  ``tests/harness/test_harness_render.py``. Add episode, cleanup, install,
+  ``tests/harness/test_harness_render.py``. Add rollout, cleanup, install,
   and trajectory tests for the capabilities the descriptor declares.
 - Put golden trees under ``tests/harness/data/harness_goldens/`` and a
   real-binary smoke test under ``tests/smoke/`` when CI can install the pinned
