@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.runtime.interfaces import UpstreamStatusError
-from reef.tinker.service import close_service, open_service, tinker_sdk
+from reef.tinker.service import close_service, tinker_sdk
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,8 @@ class TinkerSDKSampler(TinkerSampler):
         self._sdk = tinker_sdk()
         self._model = base_model
         self._timeout_s = timeout_s
-        self._service = open_service(self._sdk, api_key=api_key, project_id=project_id, base_url=base_url)
+        # The SDK takes no client-wide timeout: each call is bounded with .result(timeout=...).
+        self._service = self._sdk.ServiceClient(api_key=api_key, project_id=project_id, base_url=base_url)
         # On a service such as Spindle, a sampling client starts a sampler pool, which a component that only
         # trains never needs; and a rollout samples one checkpoint many times, so each client is kept.
         self.base_client = None

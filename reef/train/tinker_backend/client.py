@@ -13,7 +13,7 @@ from typing import Any
 
 from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import TinkerCheckpoint
-from reef.tinker.service import close_service, open_service, tinker_sdk
+from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
 
@@ -80,11 +80,9 @@ class TinkerSDKClient(TinkerClient):
         self.base_client = None
 
     def _new_service(self) -> Any:
-        return open_service(
-            self._sdk,
-            api_key=self._api_key,
-            project_id=self._config.project_id,
-            base_url=self._config.base_url,
+        # The SDK takes no client-wide timeout: each call is bounded with .result(timeout=train_timeout_s).
+        return self._sdk.ServiceClient(
+            api_key=self._api_key, project_id=self._config.project_id, base_url=self._config.base_url
         )
 
     def _save(self, trainer: Any, *, export_adapter: bool) -> TinkerCheckpoint:
