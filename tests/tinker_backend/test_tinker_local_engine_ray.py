@@ -227,7 +227,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {
             "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
-            "task2job": {"config": {"job_samples": 4}},
+            "sample2job": {"config": {"job_samples": 4}},
         },
         "inference": {
             "model-path": MODEL,

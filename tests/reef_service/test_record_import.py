@@ -15,12 +15,12 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
+from reef.record2sample import ReportSamples
 from reef.runtime.interfaces import InferenceHandler
+from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2job import Task2Job
 from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskItem
@@ -45,22 +45,22 @@ def imported(record_id, payload=None, request_type="inference"):
     }
 
 
-class FeedbackTasks(ReportTasks):
+class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
         return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
 
-class FeedbackJobData(Task2Job):
-    def make_job_data(self, tasks, data_id):
-        return JobData(data_id, tasks)
+class FeedbackJobData(Sample2Job):
+    def make_job_data(self, samples, data_id):
+        return JobData(data_id, samples)
 
 
 def feedback_pipeline(context):
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2task=FeedbackTasks(),
-        task2job=FeedbackJobData(context, None, None),
+        record2sample=FeedbackSamples(),
+        sample2job=FeedbackJobData(context, None, None),
     )
 
 

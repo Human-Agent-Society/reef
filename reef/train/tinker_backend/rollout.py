@@ -24,7 +24,7 @@ from typing import Any
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import TaskItem, TrajectoryItem
 from reef.harness.client.tasks import TaskEpisode, TaskEpisodeRunner, TaskLab
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.runtime.interfaces import UpstreamStatusError, inference_aborted
 from reef.tinker.sampling import TinkerSampler, sample_chat
 

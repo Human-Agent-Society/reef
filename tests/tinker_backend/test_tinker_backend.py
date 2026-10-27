@@ -747,7 +747,7 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
 def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
-    from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
+    from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
     from tests.support.runtime_stubs import job_sized_stages
 
     from reef.artifact import InMemoryRepositoryBackend
@@ -767,7 +767,7 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
         @classmethod
         def pipeline_spec(cls):
             return PipelineSpec(
-                record2record=ReportRecord2Record, record2task=ThresholdTasks, task2job=ThresholdJobData
+                record2record=ReportRecord2Record, record2sample=ThresholdSamples, sample2job=ThresholdJobData
             )
 
     initial = tmp_path / "initial"
@@ -875,7 +875,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     step_grid = PipelineConfig.from_setting(
         {
             "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
-            "task2job": {"config": {"job_samples": 4}},
+            "sample2job": {"config": {"job_samples": 4}},
         },
         spec=TTTDRecipe.pipeline_spec(),
         environ={},

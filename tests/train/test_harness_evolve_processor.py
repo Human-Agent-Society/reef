@@ -16,7 +16,7 @@ from reef.core.trajectories import recorded_payload, recorded_payloads, source_r
 from reef.pipeline_context import PipelineContext
 from reef.recipe.cordis import CordisRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
-from reef.train.cordis_backend.processor import InferenceTasks, TraceJobData, TraceTasks
+from reef.train.cordis_backend.processor import InferenceSamples, TraceJobData, TraceSamples
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -45,7 +45,7 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
     "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
-    "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
+    "record2sample": {"module": "reef.train.cordis_backend.processor:InferenceSamples"},
 }
 
 
@@ -53,7 +53,7 @@ def harness_stages(*, inference: bool = False, buffer_size: int | None = None) -
     """The harness evolution stages as a deployment's ``pipeline`` section configures them."""
     section: dict = dict(INFERENCE_STAGES) if inference else {}
     if buffer_size is not None:
-        section["task2job"] = {"config": {"buffer_size": buffer_size}}
+        section["sample2job"] = {"config": {"buffer_size": buffer_size}}
     return PipelineConfig.from_setting(section, spec=CordisRecipe.pipeline_spec(), environ={})
 
 
@@ -62,8 +62,8 @@ def reports_pipeline(context: PipelineContext, buffer_size: int | None = None) -
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2task=TraceTasks(),
-        task2job=TraceJobData(context, buffer_size, None),
+        record2sample=TraceSamples(),
+        sample2job=TraceJobData(context, buffer_size, None),
     )
 
 
@@ -72,8 +72,8 @@ def records_pipeline(context: PipelineContext, buffer_size: int | None = None) -
     return TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=InferenceTasks(),
-        task2job=TraceJobData(context, buffer_size, None),
+        record2sample=InferenceSamples(),
+        sample2job=TraceJobData(context, buffer_size, None),
     )
 
 
@@ -83,16 +83,16 @@ def _processor() -> TrainingPipeline:
 
 def test_the_default_stages_train_reports_and_the_inference_stages_train_records() -> None:
     reported = harness_stages(buffer_size=6).build(PipelineContext("s", default_job_samples=2))
-    assert (type(reported.record2record), type(reported.record2task), type(reported.task2job)) == (
+    assert (type(reported.record2record), type(reported.record2sample), type(reported.sample2job)) == (
         ReportRecord2Record,
-        TraceTasks,
+        TraceSamples,
         TraceJobData,
     )
     assert reported.buffer_size == 6
     recorded = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
-    assert (type(recorded.record2record), type(recorded.record2task), type(recorded.task2job)) == (
+    assert (type(recorded.record2record), type(recorded.record2sample), type(recorded.sample2job)) == (
         InferenceRecord2Record,
-        InferenceTasks,
+        InferenceSamples,
         TraceJobData,
     )
     assert recorded.buffer_size == 8
@@ -181,12 +181,12 @@ def test_trace_processor_rejects_a_report_without_references() -> None:
 
 
 def test_trace_processor_has_no_judge_hook() -> None:
-    for stage in (TrainingPipeline, TraceTasks, TraceJobData):
+    for stage in (TrainingPipeline, TraceSamples, TraceJobData):
         assert not hasattr(stage, "judge")
 
 
 def test_trace_processor_has_no_training_preparation_hook() -> None:
-    for stage in (TrainingPipeline, TraceTasks, TraceJobData):
+    for stage in (TrainingPipeline, TraceSamples, TraceJobData):
         assert not hasattr(stage, "prepare_training_step")
         assert not hasattr(stage, "prepare")
 

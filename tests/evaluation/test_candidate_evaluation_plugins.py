@@ -43,7 +43,7 @@ def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
 def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
     config = SAORecipe.service_config({}, model_path="/models/student")
     config["evaluation"] = evaluation_config()
-    config["pipeline"] = {"task2job": {"config": {"job_samples": 1}}}
+    config["pipeline"] = {"sample2job": {"config": {"job_samples": 1}}}
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config=config,

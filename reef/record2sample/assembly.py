@@ -2,7 +2,7 @@
 
 The record-to-record stage (:class:`~reef.record2record.ReportRecord2Record`) forms a
 set for each valid report that trains, and a recipe's
-:class:`~reef.record2task.ReportTasks` turns it into a task. ``SampleAssembly``
+:class:`~reef.record2sample.ReportSamples` turns it into a sample. ``SampleAssembly``
 is the shared assembly that those recipes use in ``make_sample``.
 """
 
@@ -18,7 +18,7 @@ from reef.core.job_data import TrajectoryItem
 from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
 from reef.record2record import ReportContext
-from reef.record2task.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
+from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def reported_task(metadata: object) -> dict[str, Any] | None:
 
 @dataclass(frozen=True)
 class SampleAssemblySettings(PluginSettings):
-    """The sample-assembly keys of a record-to-task stage's config. A stage's settings extend this class."""
+    """The sample-assembly keys of a record-to-sample stage's config. A stage's settings extend this class."""
 
     accept_multi_turn_policy_samples: bool = config_option(
         False, help="Train on a report that references several model calls as one multi-turn sample."

@@ -36,7 +36,7 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.recipe.reefine.agent import launch_pi, rendered_files
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
-from reef.record2task.generator.designer import (
+from reef.record2sample.generator.designer import (
     HARBOR_OUTPUT_TEXT,
     SYSTEM_PROMPT,
     DesignerAnswer,
@@ -626,7 +626,7 @@ class ModelReplies:
     """One-reply model calls through the Reef at ``reef_url``, each recorded under a scenario.
 
     ``api`` is the dialect: ``openai`` (Chat Completions) goes through the generator service's
-    :class:`~reef.record2task.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses API.
+    :class:`~reef.record2sample.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses API.
     """
 
     def __init__(self, *, reef_url: str, token: str | None, api: str) -> None:

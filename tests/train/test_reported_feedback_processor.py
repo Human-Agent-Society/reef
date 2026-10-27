@@ -12,8 +12,8 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
-from reef.task2job import Task2Job
+from reef.record2sample import ReportSamples
+from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, TaskItem, TrainDataItem
 
@@ -45,7 +45,7 @@ def exclusive_stage(
     )
 
 
-class SampleTasks(ReportTasks):
+class NamedReportSamples(ReportSamples):
     """Each report becomes a task named after it. ``fail_assembly`` breaks the training contract."""
 
     def __init__(self) -> None:
@@ -60,13 +60,13 @@ class SampleTasks(ReportTasks):
         return TaskItem(Path(context.report.agent_record_id))
 
 
-class SampleJobData(Task2Job):
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+class SampleJobData(Sample2Job):
+    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class SamplePipeline(TrainingPipeline):
-    """A reported-feedback pipeline over an exclusive report stage, with ``SampleTasks`` and ``batches``."""
+    """A reported-feedback pipeline over an exclusive report stage, with ``NamedReportSamples`` and ``batches``."""
 
     def __init__(
         self,
@@ -74,16 +74,16 @@ class SamplePipeline(TrainingPipeline):
         grouping: ReportGrouping | None = None,
         ordered_groups: bool = False,
         report_type: type[ReportBase] | None = None,
-        tasks: SampleTasks | None = None,
+        tasks: NamedReportSamples | None = None,
         batches: type[SampleJobData] = SampleJobData,
     ) -> None:
         context = PipelineContext("math", report_type)
-        self.sample_tasks = SampleTasks() if tasks is None else tasks
+        self.sample_tasks = NamedReportSamples() if tasks is None else tasks
         super().__init__(
             context,
             record2record=exclusive_stage(context, grouping, ordered_groups=ordered_groups),
-            record2task=self.sample_tasks,
-            task2job=batches(context, None, None),
+            record2sample=self.sample_tasks,
+            sample2job=batches(context, None, None),
         )
 
     @property
@@ -178,8 +178,8 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
 
 def test_processor_requires_sample_assembly_instead_of_judge() -> None:
     with pytest.raises(TypeError, match="abstract"):
-        ReportTasks()
-    assert not hasattr(ReportTasks, "judge")
+        ReportSamples()
+    assert not hasattr(ReportSamples, "judge")
 
 
 def test_operational_backlog_excludes_reserved_reports() -> None:
@@ -370,9 +370,9 @@ def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
 
 def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> None:
     class SelectedJobData(SampleJobData):
-        def make_job_data(self, tasks, data_id):
-            assert [task.source_agent_record_ids for task in tasks] == [("i1", "r1"), ("i2", "r2")]
-            return super().make_job_data(tasks[:1], data_id)
+        def make_job_data(self, samples, data_id):
+            assert [task.source_agent_record_ids for task in samples] == [("i1", "r1"), ("i2", "r2")]
+            return super().make_job_data(samples[:1], data_id)
 
     processor = GroupPipeline(batches=SelectedJobData)
     for index in (1, 2):
@@ -385,7 +385,7 @@ def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> N
 
 
 def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
-    class BrokenTasks(SampleTasks):
+    class BrokenTasks(NamedReportSamples):
         def make_sample(self, context):
             return object() if self.fail_assembly else super().make_sample(context)
 

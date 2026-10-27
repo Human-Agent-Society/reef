@@ -23,9 +23,9 @@ from reef.record2record import (
     ReportRecord2Record,
     UnitDropReason,
 )
-from reef.record2task import ImmediateRecord2Task, Record2Task, ReportTasks, SkippedReport, TaskResult
+from reef.record2sample import ImmediateRecord2Sample, Record2Sample, ReportSamples, SampleResult, SkippedReport
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2job import Task2Job, Task2JobSettings
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
@@ -64,19 +64,19 @@ class WithholdingRecord2Record(InferenceRecord2Record):
         self.closed = True
 
 
-class RecordingTasks(ImmediateRecord2Task):
+class RecordingSamples(ImmediateRecord2Sample):
     """Keeps the record IDs of every set that it sees, and skips the set."""
 
     def __init__(self) -> None:
         super().__init__()
         self.assembled: list[str] = []
 
-    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
         self.assembled.extend(record_set.record_ids())
-        return TaskResult.skipped()
+        return SampleResult.skipped()
 
 
-class RecordingJobData(Task2Job):
+class RecordingJobData(Sample2Job):
     """Takes instructions in every mode."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
@@ -84,46 +84,46 @@ class RecordingJobData(Task2Job):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class RecordingPipeline(TrainingPipeline):
-    """Sends records through ``WithholdingRecord2Record``, ``RecordingTasks``, and ``RecordingJobData``. It never becomes ready."""
+    """Sends records through ``WithholdingRecord2Record``, ``RecordingSamples``, and ``RecordingJobData``. It never becomes ready."""
 
     def __init__(self, context: PipelineContext) -> None:
         self.stage = WithholdingRecord2Record()
-        self.recording = RecordingTasks()
+        self.recording = RecordingSamples()
         self.batches = RecordingJobData(context)
-        super().__init__(context, record2record=self.stage, record2task=self.recording, task2job=self.batches)
+        super().__init__(context, record2record=self.stage, record2sample=self.recording, sample2job=self.batches)
 
 
-class LaterTasks(Record2Task):
+class LaterSamples(Record2Sample):
     """Returns no result when a set arrives; ``finish`` queues a result that ``pull`` returns."""
 
     def __init__(self) -> None:
-        self.finished: list[tuple[Hashable, TaskResult]] = []
+        self.finished: list[tuple[Hashable, SampleResult]] = []
 
     def push(self, record_set: RecordSet) -> None:
         return
 
-    def finish(self, set_id: Hashable, result: TaskResult) -> None:
+    def finish(self, set_id: Hashable, result: SampleResult) -> None:
         self.finished.append((set_id, result))
 
-    def pull(self) -> tuple[tuple[Hashable, TaskResult], ...]:
+    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         finished, self.finished = tuple(self.finished), []
         return finished
 
 
 class WaitingPipeline(TrainingPipeline):
-    """Holds each inference record as one set whose tasks ``LaterTasks`` makes later."""
+    """Holds each inference record as one set whose tasks ``LaterSamples`` makes later."""
 
     def __init__(self, context: PipelineContext | None = None) -> None:
         context = PipelineContext("s") if context is None else context
-        self.later_tasks = LaterTasks()
+        self.later_tasks = LaterSamples()
         self.batches = RecordingJobData(context)
         super().__init__(
-            context, record2record=InferenceRecord2Record(), record2task=self.later_tasks, task2job=self.batches
+            context, record2record=InferenceRecord2Record(), record2sample=self.later_tasks, sample2job=self.batches
         )
 
 
@@ -152,7 +152,7 @@ class PairGrouping(ReportGrouping):
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
 
 
-class PairTasks(ReportTasks):
+class PairSamples(ReportSamples):
     """Each report becomes a task named after it. Reports whose ID starts with ``skip`` cannot train."""
 
     def __init__(self) -> None:
@@ -167,9 +167,9 @@ class PairTasks(ReportTasks):
         return TaskItem(Path(context.report.agent_record_id))
 
 
-class PairJobData(Task2Job):
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+class PairJobData(Sample2Job):
+    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 class PairPipeline(TrainingPipeline):
@@ -177,12 +177,12 @@ class PairPipeline(TrainingPipeline):
 
     def __init__(self) -> None:
         context = PipelineContext("s")
-        self.pair_tasks = PairTasks()
+        self.pair_tasks = PairSamples()
         super().__init__(
             context,
             record2record=ReportRecord2Record(context, PairGrouping(), exclusive_sources=True),
-            record2task=self.pair_tasks,
-            task2job=PairJobData(context, None, None),
+            record2sample=self.pair_tasks,
+            sample2job=PairJobData(context, None, None),
         )
 
 
@@ -272,7 +272,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.items] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
-    assert "r2" not in processor.tasks
+    assert "r2" not in processor.samples
 
 
 @pytest.mark.unit
@@ -309,7 +309,7 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
     assert processor.acknowledge(batch.data_id) == {"i1", "i2", "r1", "r2"}
-    assert not processor.tasks
+    assert not processor.samples
 
 
 @pytest.mark.unit
@@ -325,7 +325,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
-    assert "r1" not in processor.tasks
+    assert "r1" not in processor.samples
 
 
 @pytest.mark.unit
@@ -344,9 +344,9 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
     processor.push(inference("i1"))
     processor.push(inference("i2"))
     assert not processor.ready(1) and processor.background_jobs_running()
-    processor.later_tasks.finish("i2", TaskResult.skipped())
+    processor.later_tasks.finish("i2", SampleResult.skipped())
     assert not processor.ready(1) and processor.releasable_record_ids() == {"i2"}
-    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    processor.later_tasks.finish("i1", SampleResult.ready((TaskItem(Path("t1")),)))
     assert processor.ready(1), "the result alone makes a batch, without another record"
     assert not processor.background_jobs_running()
     assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["t1"]
@@ -356,7 +356,7 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
 def test_a_second_result_for_a_settled_set_is_refused() -> None:
     processor = WaitingPipeline()
     processor.push(inference("i1"))
-    result = TaskResult.ready((TaskItem(Path("t1")),))
+    result = SampleResult.ready((TaskItem(Path("t1")),))
     processor.later_tasks.finish("i1", result)
     assert processor.ready(1)
     processor.later_tasks.finish("i1", result)
@@ -375,18 +375,18 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
     assert isinstance(processor, WaitingPipeline)
-    processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
+    processor.later_tasks.finish("i1", SampleResult.ready((TaskItem(Path("t1")),)))
     assert trainer.run_once() is not None
     batch = trainer.pending_job_data
     assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
 
 
-class InferenceTasks(ImmediateRecord2Task):
+class InferenceSamples(ImmediateRecord2Sample):
     """Each inference set becomes one task named after its record."""
 
-    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
         record_ids = record_set.record_ids()
-        return TaskResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
+        return SampleResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
 
 
 class UploadJobData(PairJobData):
@@ -402,8 +402,8 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     processor = TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=InferenceTasks(),
-        task2job=UploadJobData(context, None, None),
+        record2sample=InferenceSamples(),
+        sample2job=UploadJobData(context, None, None),
     )
     processor.push(inference("i1"))
     assert not processor.ready(2)
@@ -433,13 +433,13 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
 @pytest.mark.unit
 def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
     context = PipelineContext("s")
-    processor = TrainingPipeline(context, task2job=PairJobData(context, None, None))
+    processor = TrainingPipeline(context, sample2job=PairJobData(context, None, None))
     with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
         processor.push_trajectory("t1", TRAJECTORY)
 
 
-def ready_tasks(*names: str) -> TaskResult:
-    return TaskResult.ready(tuple(TaskItem(Path(name)) for name in names))
+def ready_tasks(*names: str) -> SampleResult:
+    return SampleResult.ready(tuple(TaskItem(Path(name)) for name in names))
 
 
 class DropRecordingRecords(InferenceRecord2Record):
@@ -482,17 +482,17 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
 def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -> None:
     context = PipelineContext("s")
     records = DropRecordingRecords()
-    later_tasks = LaterTasks()
+    later_tasks = LaterSamples()
     processor = TrainingPipeline(
         context,
         record2record=records,
-        record2task=later_tasks,
-        task2job=UploadJobData(context, 1, None),
+        record2sample=later_tasks,
+        sample2job=UploadJobData(context, 1, None),
     )
     processor.push(inference("i1"))
     processor.push(inference("i2"))
-    later_tasks.finish("i1", TaskResult.ready((TRAJECTORY,)))
-    later_tasks.finish("i2", TaskResult.ready((TRAJECTORY,)))
+    later_tasks.finish("i1", SampleResult.ready((TRAJECTORY,)))
+    later_tasks.finish("i2", SampleResult.ready((TRAJECTORY,)))
     processor.advance()
     assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT)]
     # Trajectories without a producing version become stale once the serving version is known.
@@ -509,7 +509,7 @@ def test_the_pipeline_is_ready_when_its_held_units_hold_the_asked_sample_count()
     for record_id in ("i1", "i2", "i3"):
         processor.push(inference(record_id))
     processor.later_tasks.finish("i1", ready_tasks("a", "b"))
-    processor.later_tasks.finish("i2", TaskResult.skipped())
+    processor.later_tasks.finish("i2", SampleResult.skipped())
     assert not processor.ready(3), "one unit of two tasks and one skipped set hold two samples"
     assert processor.status()["ready_samples"] == 2
     processor.later_tasks.finish("i3", ready_tasks("c"))
@@ -538,8 +538,8 @@ def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size()
     processor = TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=InferenceTasks(),
-        task2job=UploadJobData(context, 2, None),
+        record2sample=InferenceSamples(),
+        sample2job=UploadJobData(context, 2, None),
     )
     processor.push(inference("i1"))
     reserved = processor.build_job_data(1)
@@ -558,12 +558,12 @@ def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size()
 @pytest.mark.unit
 def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffer_size() -> None:
     context = PipelineContext("s")
-    later_tasks = LaterTasks()
+    later_tasks = LaterSamples()
     processor = TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=later_tasks,
-        task2job=UploadJobData(context, 2, None),
+        record2sample=later_tasks,
+        sample2job=UploadJobData(context, 2, None),
     )
     processor.push(inference("i1"))
     later_tasks.finish("i1", ready_tasks("a", "b", "c"))
@@ -583,7 +583,7 @@ def test_the_stage_sizes_are_its_own_or_else_follow_the_context_default() -> Non
     with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
         PairJobData(PipelineContext("s"), None, 0)
     with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
-        Task2JobSettings(job_samples=0)
+        Sample2JobSettings(job_samples=0)
 
 
 class OwnJobData(RecordingJobData):
@@ -612,7 +612,7 @@ def test_the_task_to_job_stage_own_job_data_trains_alone_and_its_ids_release_aft
     context = PipelineContext("s")
     batches = OwnJobData(context)
     processor = TrainingPipeline(
-        context, record2record=InferenceRecord2Record(), record2task=RecordingTasks(), task2job=batches
+        context, record2record=InferenceRecord2Record(), record2sample=RecordingSamples(), sample2job=batches
     )
     assert not processor.ready(4)
     batches.samples = (TaskItem(Path("a")),)

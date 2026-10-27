@@ -54,8 +54,9 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
 )
-from reef.record2task import JudgedTasks
+from reef.record2sample import JudgedSamples
 from reef.runtime.jobs import JobStatus, TrainingJob
+from reef.sample2job import Sample2Job
 from reef.scenario import Scenario
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.app import create_app
@@ -69,7 +70,6 @@ from reef.storage.commits import (
 )
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.task2job import Task2Job
 from reef.train import ComponentTrainer, Trainer, TrainStepResult
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import TrainingPipeline
@@ -838,7 +838,7 @@ class _RetiringRetriesJudging(RecordJudging):
         return job
 
 
-class _RetiringRetriesTasks(JudgedTasks):
+class _RetiringRetriesSamples(JudgedSamples):
     """One-token stub samples for every judged turn."""
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
@@ -852,11 +852,11 @@ class _RetiringRetriesTasks(JudgedTasks):
         )
 
 
-class RetiringRetriesJobData(Task2Job):
+class RetiringRetriesJobData(Sample2Job):
     """Batches the judged turns of ``_RetiringRetriesJudging``."""
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 @dataclass(frozen=True)
@@ -869,8 +869,8 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             return TrainingPipeline(
                 context,
                 record2record=JudgingRecord2Record(_RetiringRetriesJudging(), JudgedAtOnce()),
-                record2task=_RetiringRetriesTasks(),
-                task2job=RetiringRetriesJobData(context, None, None),
+                record2sample=_RetiringRetriesSamples(),
+                sample2job=RetiringRetriesJobData(context, None, None),
             )
         return threshold_pipeline(context)
 
@@ -1578,7 +1578,7 @@ class _InstructedRecipe(_TwoTrainerRecipe):
     """The two trainer recipe whose trainers take training instructions."""
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, task2job=InstructedJobData(context, None, None))
+        return threshold_pipeline(context, sample2job=InstructedJobData(context, None, None))
 
 
 @pytest.mark.unit

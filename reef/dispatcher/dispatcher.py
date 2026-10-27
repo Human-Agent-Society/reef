@@ -327,8 +327,8 @@ class Dispatcher(ScenarioLifecycle):
             pipeline = current.trainer.pipeline
             return {
                 "scenario": scenario,
-                # The key keeps its name for callers; the value names the recipe's task-to-job stage.
-                "processor": type(pipeline.task2job).__name__,
+                # The key keeps its name for callers; the value names the recipe's sample-to-job stage.
+                "processor": type(pipeline.sample2job).__name__,
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),

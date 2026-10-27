@@ -6,7 +6,7 @@ other agent error skips it, so the episode has no reward and the episode runner 
 agent left it: the agent filled its context window, or a send-keys to its tmux pane failed. Every other error
 still fails the trial.
 
-A deployment selects it with ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of
+A deployment selects it with ``import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`` in place of
 ``name: terminus-2``. Nothing else in Reef imports this module, so Reef never needs harbor to load.
 """
 

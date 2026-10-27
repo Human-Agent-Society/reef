@@ -228,10 +228,10 @@ Trigger of step
 
 In ``auto`` mode, two settings decide when Reef starts a step:
 
-- ``pipeline.task2job.config.job_samples``: when this number of traces is
+- ``pipeline.sample2job.config.job_samples``: when this number of traces is
   collected, Reef starts a step. Without the key, it is
   ``recipe.config.evolution.batch_size`` (default 1).
-- The ``pipeline.record2record`` and ``pipeline.record2task`` stages decide
+- The ``pipeline.record2record`` and ``pipeline.record2sample`` stages decide
   what counts as one trace toward ``job_samples``.
 
 The recipe's default stages count reports. Every valid scored report with
@@ -256,11 +256,11 @@ traffic alone trains, unscored, for methods that judge for themselves.
    pipeline:
      record2record:
        module: reef.record2record:InferenceRecord2Record
-     record2task:
-       module: reef.train.cordis_backend.processor:InferenceTasks
+     record2sample:
+       module: reef.train.cordis_backend.processor:InferenceSamples
 
 Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.task2job.config.buffer_size`` traces (default four times
+most ``pipeline.sample2job.config.buffer_size`` traces (default four times
 ``job_samples``). When more traces arrive, Reef releases the oldest ones. This
 limit applies in every mode.
 

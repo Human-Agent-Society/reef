@@ -3,7 +3,7 @@
 A task store holds published tasks, each in the train or eval split. A task
 gets into a store in one of two ways:
 
-- A record-to-task stage generates it. The stage saves each generation job in
+- A record-to-sample stage generates it. The stage saves each generation job in
   the store before any rollout. A generation holds its source record ids and
   the directories of its candidate tasks. Each candidate then gets one
   outcome: the stage publishes it to a split, or rejects it with a reason.
@@ -75,7 +75,7 @@ class TaskCandidate:
     ``error``, the reason. A pending candidate has neither.
 
     Purpose: ``TaskStore`` makes it in ``GenerationState.candidates``. The
-    record-to-task stage reads the task directory (``TaskStore.path``) and the
+    record-to-sample stage reads the task directory (``TaskStore.path``) and the
     outcome, to validate, publish or run the candidate, also after a restart.
     """
 
@@ -162,7 +162,7 @@ class TaskStore(ABC):
     trained. ``D : K ⇀ Str`` maps non-empty keys to documents, each key written
     once. Nothing is removed from ``G``, ``P``, ``T`` or ``D``.
 
-    Purpose: a record-to-task stage writes its generations and publishes their
+    Purpose: a record-to-sample stage writes its generations and publishes their
     candidates. A caller adds task directories (``add_task``). Readers take the
     published tasks of a split (``tasks``) and their directories (``path``).
     The rollout of a task pool marks the tasks that trained (``mark_trained``),

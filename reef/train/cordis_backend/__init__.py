@@ -27,14 +27,14 @@ from reef.harness.tree.mutations import Mutation, MutationError
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.contracts import StepProgress
 from reef.train.cordis_backend.manifest import FailureManifest, FailureRecord
-from reef.train.cordis_backend.processor import InferenceTasks, TraceJobData, TraceTasks
+from reef.train.cordis_backend.processor import InferenceSamples, TraceJobData, TraceSamples
 from reef.train.cordis_backend.strategies import Promoter, Proposer, StepProposal
 
 __all__ = [
     "CordisBackend",
     "FailureManifest",
     "FailureRecord",
-    "InferenceTasks",
+    "InferenceSamples",
     "Mutation",
     "MutationError",
     "Promoter",
@@ -42,5 +42,5 @@ __all__ = [
     "StepProgress",
     "StepProposal",
     "TraceJobData",
-    "TraceTasks",
+    "TraceSamples",
 ]

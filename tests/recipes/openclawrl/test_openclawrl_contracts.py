@@ -18,7 +18,7 @@ from recipes.openclawrl.prm import (
     collect_hint_candidates,
     parse_hint_judgment,
 )
-from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLTasks
+from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.turns import TurnJob
 from reef.core.trajectories import source_record_id
 from reef.runtime.interfaces import TrainingMethod
@@ -478,8 +478,8 @@ def _judge_one_turn(judge, teacher):
     processor = TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     job = TurnJob(
         receipt="r1",
@@ -590,8 +590,8 @@ def test_processor_attaches_topk_and_candidates() -> None:
     processor = TrainingPipeline(
         context,
         record2record=stage,
-        record2task=OpenClawRLTasks(),
-        task2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
+        record2sample=OpenClawRLSamples(),
+        sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two sessions with distinct prefixes; each first turn gets a successor.
     for index, opening in enumerate(["q-alpha", "q-beta"]):

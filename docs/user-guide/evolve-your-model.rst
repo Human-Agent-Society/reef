@@ -90,7 +90,7 @@ What to review
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
    reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   pipeline.task2job.config.job_samples | the fewest samples of one job; required for a weight recipe
+   pipeline.sample2job.config.job_samples | the fewest samples of one job; required for a weight recipe
    training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
    training.options | GPU layout, optimizer, sequence length, loss settings
@@ -99,7 +99,7 @@ Three things to get right:
 
 1. **Set the job size and the batch size.** ``training.config.global_batch_size``
    is Slime's ``--global-batch-size``, the samples of one optimizer step.
-   ``pipeline.task2job.config.job_samples`` is the samples of one job: Reef
+   ``pipeline.sample2job.config.job_samples`` is the samples of one job: Reef
    submits a job when it holds this many samples, and Slime cuts the job's
    data into optimizer steps of the batch size. Set ``job_samples:
    ${training.config.global_batch_size}``, so that one job is one optimizer

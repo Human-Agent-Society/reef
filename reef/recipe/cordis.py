@@ -50,7 +50,7 @@ from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
-from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
+from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
@@ -320,7 +320,7 @@ class CordisRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
+        return PipelineSpec(record2record=ReportRecord2Record, record2sample=TraceSamples, sample2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:

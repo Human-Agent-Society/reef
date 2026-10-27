@@ -1,6 +1,6 @@
 """The CORAL weight-training recipe: what a deployment names in ``serve.yaml``.
 
-Binds the CORAL stages (``CoralRecord2Record`` here, and ``CoralTasks`` and
+Binds the CORAL stages (``CoralRecord2Record`` here, and ``CoralSamples`` and
 ``CoralJobData`` in :mod:`recipes.beta.coral.processor`) to the grouped
 relative-reward training machinery. CORAL sibling groups have the same shape
 as TTT-Discover steps — comparison sets of scored rollouts from one shared
@@ -24,7 +24,7 @@ from typing import Any, Self
 # The tttd training objective and loss-family reference live in the repository
 # cookbook; importing them is what registers both names this recipe binds.
 import recipes.tttd  # noqa: F401  (registration side effect)
-from recipes.beta.coral.processor import CoralJobData, CoralTasks, attempt_release_ids, sibling_group
+from recipes.beta.coral.processor import CoralJobData, CoralSamples, attempt_release_ids, sibling_group
 from reef.core.config import config_option
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
@@ -120,7 +120,7 @@ class CoralRecord2Record(ReportRecord2Record):
 class CoralRecipe(WeightTrainingRecipe):
     """Train on CORAL sibling groups with the ``tttd`` objective.
 
-    The stages are ``CoralRecord2Record``, ``CoralTasks``, and ``CoralJobData``.
+    The stages are ``CoralRecord2Record``, ``CoralSamples``, and ``CoralJobData``.
     """
 
     name: str = "coral"
@@ -131,4 +131,4 @@ class CoralRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=CoralRecord2Record, record2task=CoralTasks, task2job=CoralJobData)
+        return PipelineSpec(record2record=CoralRecord2Record, record2sample=CoralSamples, sample2job=CoralJobData)

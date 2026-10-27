@@ -9,7 +9,7 @@ from typing import Any
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.sft.processor import SFTRecord2Record, SFTTasks
+from reef.recipe.sft.processor import SFTRecord2Record, SFTSamples
 from reef.recipe.sft.recipe import SFTRecipe
 from reef.recipe.sft_then_rl.processor import ImportedTaskEvaluation, SFTThenRLJobData, SFTThenRLJobPlan
 from reef.runtime.interfaces import TrainingMethod
@@ -29,7 +29,7 @@ class SFTThenRLRecipe(SFTRecipe):
       ``recipe.config.job_parameters``.
     * RL task jobs on the train tasks of the scenario's ``imported-tasks`` store
       (``POST /reef/scenarios/{scenario}/tasks``, or the deployment's ``task-import`` section), up to
-      ``pipeline.task2job.config.tasks_per_job`` tasks in one job, with the objective ``task_group`` (group
+      ``pipeline.sample2job.config.tasks_per_job`` tasks in one job, with the objective ``task_group`` (group
       relative advantages per task) and ``recipe.config.task_job_parameters``. The training component rolls
       the tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
 
@@ -63,7 +63,7 @@ class SFTThenRLRecipe(SFTRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=SFTThenRLJobData)
+        return PipelineSpec(record2record=SFTRecord2Record, record2sample=SFTSamples, sample2job=SFTThenRLJobData)
 
     def artifact_evaluation(self, task_storage: TaskStorage | None) -> ArtifactEvaluation | None:
         rl = {**(self.task_job_parameters or {}), "method": TrainingMethod(TaskGroupObjective.name).to_dict()}

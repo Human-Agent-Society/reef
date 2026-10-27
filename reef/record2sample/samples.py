@@ -1,4 +1,4 @@
-"""Readers of recorded inferences, and the sample builders that record-to-task stages use.
+"""Readers of recorded inferences, and the sample builders that record-to-sample stages use.
 
 The report reader ``report_score`` lives in ``reef.record2record.reports``.
 ``recorded_request`` and ``recorded_response`` read the messages, tools and

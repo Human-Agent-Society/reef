@@ -2,7 +2,7 @@
 
 The distilling recipes make a teacher score the student's own sample. What
 the teacher reads beyond the student's request is the recipe's policy
-(:meth:`DistillTasks.teacher_request`: a demonstration, environment feedback,
+(:meth:`DistillSamples.teacher_request`: a demonstration, environment feedback,
 nothing); rendering it with the served model's chat template and shipping it
 as ``teacher_tokens`` beside the student's policy tensors is the mechanism
 they share, :func:`recorded_sample` and :meth:`TeacherRenderer.teacher_tokens`.
@@ -24,9 +24,9 @@ from reef.core.job_data import TrajectoryItem
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
-from reef.record2task import ReportTasks, SkippedReport
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.samples import flatten_content, recorded_request, recorded_response
+from reef.record2sample import ReportSamples, SkippedReport
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.samples import flatten_content, recorded_request, recorded_response
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class DistillSettings(SampleAssemblySettings):
-    """The config of ``DistillTasks``: the teacher's tokenizer and window, and the sample assembly."""
+    """The config of ``DistillSamples``: the teacher's tokenizer and window, and the sample assembly."""
 
     tokenizer_path: str = config_option("", help="The served model's tokenizer, which renders the teacher prompt.")
     max_teacher_tokens: int = config_option(
@@ -160,8 +160,8 @@ def teacher_overflow(context: ReportContext, teacher_tokens: Sequence[int], max_
     return True
 
 
-class DistillTasks(ReportTasks):
-    """One report, one distillation task: the student's policy tensors plus its teacher sequence.
+class DistillSamples(ReportSamples):
+    """One report, one distillation sample: the student's policy tensors plus its teacher sequence.
 
     A report references one recorded request and carries the teacher's
     ``teacher_context``. ``teacher_tokens`` is the teacher's request
@@ -226,8 +226,8 @@ class DistillTasks(ReportTasks):
 
 
 __all__ = [
+    "DistillSamples",
     "DistillSettings",
-    "DistillTasks",
     "TeacherRenderer",
     "normalize_messages_for_template",
     "normalize_tool_call",

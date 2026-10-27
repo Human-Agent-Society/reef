@@ -24,7 +24,7 @@ class TrajectoryItem:
     Values: ``trajectory`` is a mapping with an ``ATIF-v`` ``schema_version``,
     an ``agent`` object and a non-empty ``steps`` list. ``group_id`` is None or
     a string. ``source_agent_record_ids`` is a tuple of the non-empty IDs of
-    the agent records the trajectory came from. Purpose: the record-to-task
+    the agent records the trajectory came from. Purpose: the record-to-sample
     stage makes the value, and the training component reads it.
 
     The document is the single source of trajectory data. Reef-specific feedback,
@@ -88,7 +88,7 @@ class TaskItem:
 
     Values: ``task_path`` is a ``Path``, ``source_agent_record_ids`` a tuple of
     the non-empty IDs of the agent records the task came from, and
-    ``metadata`` a mapping. Purpose: the record-to-task stage makes the value,
+    ``metadata`` a mapping. Purpose: the record-to-sample stage makes the value,
     and a training component that runs task jobs reads it.
 
     The path is resolved in the consuming algorithm's execution environment;
@@ -125,10 +125,10 @@ class JobData:
     ``<scenario>:data:<number>`` for automatic data and
     ``<scenario>:instruction:<request id>`` for an instruction's data.
     ``items`` is a tuple of ``TrajectoryItem`` and ``TaskItem`` values in the
-    order of the task-to-job stage; it can be empty, for a harness step that
+    order of the sample-to-job stage; it can be empty, for a harness step that
     runs an instruction alone. ``request`` is the training instruction that the
     data carries, or None. The constructor refuses other item types.
-    Purpose: ``Task2Job.make_job_data`` makes it, and the training component
+    Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming
     algorithm decides which item kinds it supports and refuses the others
     explicitly.
@@ -248,7 +248,7 @@ class JobOutcome:
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
     loop makes it when it commits a job's end and keeps the last one in its state; the recipe's job plan
-    (``JobPlanContext.last_job``) and the task-to-job stage (``Task2Job.job_ended``) read it.
+    (``JobPlanContext.last_job``) and the sample-to-job stage (``Sample2Job.job_ended``) read it.
     """
 
     job_id: str

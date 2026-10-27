@@ -15,7 +15,7 @@ from reef.artifact import Artifact
 from reef.core import AgentRecord, RequestType
 from reef.inference import chat as chat_module
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.record2task.samples import make_multi_turn_policy_trajectory
+from reef.record2sample.samples import make_multi_turn_policy_trajectory
 from reef.service.streaming import stream_record
 
 IM_START, IM_END, NEWLINE = 998, 999, ord("\n")

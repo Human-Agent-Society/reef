@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from reef.core.tasks import read_harbor_task, write_harbor_task
-from reef.record2task.generator import GeneratedHarborTask, HarborReply, OracleUnavailable, harbor_task, oracle_check
-from reef.record2task.generator.harbor import (
+from reef.record2sample.generator import GeneratedHarborTask, HarborReply, OracleUnavailable, harbor_task, oracle_check
+from reef.record2sample.generator.harbor import (
     HarborRuns,
     content_hash,
     dockerfile_logical_lines,

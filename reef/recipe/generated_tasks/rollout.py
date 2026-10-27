@@ -4,7 +4,7 @@ The training component rolls the tasks of a task job out itself; Reef runs no ep
 tasks are handed out at a time:
 
 1. When no tasks are handed out, ``GeneratedTaskJobData`` takes up to ``tasks_per_step`` tasks from its
-   ``TaskPool`` as the next job's data (``Task2Job.own_job_data``). Each task gets a task use ``u``, distinct
+   ``TaskPool`` as the next job's data (``Sample2Job.own_job_data``). Each task gets a task use ``u``, distinct
    within the hand-out.
 2. When the trainer commits the job's submission, the commit lists ``rollout:<task use>``; each task is
    marked trained once that ID is released after the commit is durable.
@@ -35,7 +35,7 @@ class PooledTask:
     Values: ``task_id`` identifies the task in its pool. ``arrival_index``
     orders the tasks of a pool. ``group_key`` names what the task came from,
     such as its generation. ``item`` is the task that the job rolls out.
-    Purpose: a ``TaskPool`` holds it; the task-to-job stage takes it from the
+    Purpose: a ``TaskPool`` holds it; the sample-to-job stage takes it from the
     pool for a task job, and drops it when the job ends.
     """
 
@@ -52,7 +52,7 @@ class TaskPool:
     ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` made.
     ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop`` removes taken tasks;
     ``add`` gives a new task a new index.
-    Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the task-to-job
+    Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the sample-to-job
     stage takes a job's tasks from it, and drops them when the job ends.
     """
 

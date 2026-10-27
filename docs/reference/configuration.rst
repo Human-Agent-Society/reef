@@ -470,7 +470,7 @@ but does not extend it is refused.
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
 that renders its own samples, such as SFT's
-``pipeline.record2task.config.chat_template_kwargs``, must use the same value. A positive
+``pipeline.record2sample.config.chat_template_kwargs``, must use the same value. A positive
 ``capture_topk`` also records the sampler's top-K ids and log-probs for every
 response token. Score centering (``training.options.score-centering``) needs
 at least ``score-centering-top-k`` of them (see the loss families guide). A vLLM engine
@@ -845,7 +845,7 @@ policy.
 The training pipeline receives ``PipelineContext.training_mode`` as its
 initial training mode. The modes share record push and retention. In ``manual``
 an instruction's data has no record set units; in ``hybrid`` it takes the units that
-automatic job data would. A recipe's ``Task2Job`` declares
+automatic job data would. A recipe's ``Sample2Job`` declares
 ``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that
 explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
@@ -864,7 +864,7 @@ at runtime. This changes subsequent job data; reserved job data completes under
 its original mode. Mode changes are not persisted: a service restart uses the
 recipe's configured mode again, while a scenario reload after a failed step
 keeps the selected mode. In every mode the held record sets keep at most
-``pipeline.task2job.config.buffer_size`` samples. As records arrive, the
+``pipeline.sample2job.config.buffer_size`` samples. As records arrive, the
 pipeline releases the oldest sets beyond that limit and logs one warning.
 
 .. config::
@@ -1002,7 +1002,7 @@ component that trains weights goes under its ``config.pipeline``:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2job: {config: {job_samples: 8, buffer_size: 32}}}
+             pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:
@@ -1070,13 +1070,13 @@ These keys go under ``recipe.config.evolution``. `Evolve your harness
 
 .. config::
 
-   evolution.batch_size | 1 | the default ``pipeline.task2job.config.job_samples``: the fewest traces of one evolve step; a step starts when this many traces are held
+   evolution.batch_size | 1 | the default ``pipeline.sample2job.config.job_samples``: the fewest traces of one evolve step; a step starts when this many traces are held
 
 The default stages train on every valid scored report as a trace, including
 successful outcomes. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
 ``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
-``pipeline.record2task.module: reef.train.cordis_backend.processor:InferenceTasks``.
+``pipeline.record2sample.module: reef.train.cordis_backend.processor:InferenceSamples``.
 Reef refuses ``batch_size`` and ``batch_policy`` directly under
 ``recipe.config``.
 
@@ -1169,7 +1169,7 @@ Read by the weight-training stack. See `Evolve your model
    training.colocate | false | must stay false: training and serving use separate GPUs, and Slime and Tinker refuse ``true``
    training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
-   training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.task2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
+   training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.sample2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy. When storage cannot hold the next checkpoint, the Slime job fails. A failed job ends, and the records of its data do not train again, because Reef consumed them when it submitted the job.
@@ -1232,8 +1232,8 @@ class for a stage. Every stage reads only its own ``config``; the recipe's
 .. config::
 
    pipeline.record2record | the record-to-record stage: ``config``, and optionally ``module``, a ``Record2Record`` subclass
-   pipeline.record2task | the record-to-task stage: ``config``, and optionally ``module``, a ``Record2Task`` subclass
-   pipeline.task2job | the task-to-job stage: ``config``, and optionally ``module``, a ``Task2Job`` subclass
+   pipeline.record2sample | the record-to-sample stage: ``config``, and optionally ``module``, a ``Record2Sample`` subclass
+   pipeline.sample2job | the sample-to-job stage: ``config``, and optionally ``module``, a ``Sample2Job`` subclass
 
 .. code:: yaml
 
@@ -1275,7 +1275,7 @@ framework's own off-policy limit goes in that backend's
 Reef submits one training job for each job's data. ``job_samples`` is the
 fewest samples that one job trains. A weight recipe requires it: a
 deployment without it fails the recipe build with a ``RecipeConfigError``
-that names ``pipeline.task2job.config.job_samples``. Harness evolution uses
+that names ``pipeline.sample2job.config.job_samples``. Harness evolution uses
 ``evolution.batch_size`` when the key is absent.
 
 The training component cuts each job's data into optimizer batches by its own
@@ -1287,7 +1287,7 @@ job is one optimizer step:
 .. code:: yaml
 
    pipeline:
-     task2job:
+     sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
 
@@ -1300,13 +1300,13 @@ parameter decides what happens to a shorter last step; by default, the
 component trains it as a smaller step. See `Job size
 <../developer-guide/processors.rst#job-size>`__.
 
-Every built-in task-to-job stage that trains on records reads ``job_samples``
+Every built-in sample-to-job stage that trains on records reads ``job_samples``
 and ``buffer_size``. A recipe's page lists the other keys of its stage.
 
 .. config::
 
-   pipeline.task2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
-   pipeline.task2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+   pipeline.sample2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
+   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1328,8 +1328,8 @@ The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
-``GeneratedTaskTasks``, and ``GeneratedTaskJobData``. Without
-``pipeline.record2task.config.rounds`` no round runs and nothing trains. Each
+``GeneratedTaskSamples``, and ``GeneratedTaskJobData``. Without
+``pipeline.record2sample.config.rounds`` no round runs and nothing trains. Each
 job is a task job: the training component rolls the job's tasks out on its own
 sampler and trains on their episodes, as
 ``recipe.config.job_parameters.rollout`` says. The recipe requires that
@@ -1348,7 +1348,7 @@ parameter.
      record2record:
        config:
          jobs_per_round: 2
-     record2task:
+     record2sample:
        config:
          generator_url: ${endpoints.generator}
          rounds: 20
@@ -1359,7 +1359,7 @@ parameter.
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
              state_dir: ${REEF_STATE_DIR}/generations
-     task2job:
+     sample2job:
        config:
          tasks_per_step: 2
 
@@ -1374,19 +1374,19 @@ training component runs, which are not records.
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
    pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
 
-``GeneratedTaskTasks`` runs the generations and sends their results to the
+``GeneratedTaskSamples`` runs the generations and sends their results to the
 generator:
 
 .. config::
 
-   pipeline.record2task.config.rounds | 0 | rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
-   pipeline.record2task.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
-   pipeline.record2task.config.description | what the tasks are about; every generation request carries it. Required with rounds.
-   pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
-   pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
-   pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
-   pipeline.record2task.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
-   pipeline.record2task.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
+   pipeline.record2sample.config.rounds | 0 | rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
+   pipeline.record2sample.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
+   pipeline.record2sample.config.description | what the tasks are about; every generation request carries it. Required with rounds.
+   pipeline.record2sample.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
+   pipeline.record2sample.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
+   pipeline.record2sample.config.split_seed | 0 | fixed seed for the task store's train/eval split
+   pipeline.record2sample.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
+   pipeline.record2sample.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
 
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no episodes; the saved train tasks run later, and their results are kept in the store.
@@ -1407,7 +1407,7 @@ so the stage has no ``buffer_size`` and no ``job_samples``:
 
 .. config::
 
-   pipeline.task2job.config.tasks_per_step | 4 | saved tasks of one task job
+   pipeline.sample2job.config.tasks_per_step | 4 | saved tasks of one task job
 
 The Tinker component runs a task job's episodes on Tinker's sampler at the
 job's start weights. The ``rollout`` job parameter configures them:
@@ -1476,10 +1476,10 @@ section decides which release serves.
            episodes_per_task: 4
            environment: e2b
    pipeline:
-     record2task:
+     record2sample:
        config:
          tokenizer_path: Qwen/Qwen3-8B
-     task2job:
+     sample2job:
        config:
          job_samples: 64
          tasks_per_job: 8
@@ -1488,8 +1488,8 @@ section decides which release serves.
 
    recipe.config.job_parameters | none | parameters of every SFT job beside ``method``, such as ``save_interval``
    recipe.config.task_job_parameters | required | parameters of every RL task job beside ``method``: ``rollout``, as for the generated-task recipe above, and the component's own parameters, such as ``learning_rate``
-   pipeline.task2job.config.job_samples | required | the fewest SFT samples of one SFT job
-   pipeline.task2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
+   pipeline.sample2job.config.job_samples | required | the fewest SFT samples of one SFT job
+   pipeline.sample2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
 
 The ``generator`` section
 -------------------------
@@ -1510,7 +1510,7 @@ place it on the host that has Docker. The generator runs its proposals, checks a
    generator.host | 127.0.0.1 | bind address
    generator.port | 8910 | bind port
    generator.work-dir | ``<tasks-root>/.episodes`` | where the episode runner keeps trials
-   generator.agent | terminus-2 | the Harbor agent each episode runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2task.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
+   generator.agent | terminus-2 | the Harbor agent each episode runs, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. ``import_path: reef.record2sample.generator.terminus:VerifiedTerminus2`` in place of ``name: terminus-2`` also scores an episode whose agent filled its context or lost its terminal, which Terminus 2 leaves without a reward
    generator.agent-host | an address of the host the task container can reach, for an agent that runs inside the container
    generator.harbor | ``harbor`` on PATH | the harbor command line for the oracle check
    generator.concurrency | 2 | episodes in flight across all episode requests of the generator service
@@ -1529,7 +1529,7 @@ place it on the host that has Docker. The generator runs its proposals, checks a
    execution:
      generator: auto
    pipeline:
-     record2task:
+     record2sample:
        config:
          generator_url: ${endpoints.generator}
 

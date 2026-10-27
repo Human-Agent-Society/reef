@@ -10,13 +10,13 @@ from typing import Any
 
 import pytest
 
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
@@ -253,8 +253,8 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
     processor = TrainingPipeline(
         context,
         record2record=record2record,
-        record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2job=TTTDJobData(context, record2record, None, None),
+        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
+        sample2job=TTTDJobData(context, record2record, None, None),
     )
     processor.push(
         AgentRecord.create(

@@ -21,7 +21,7 @@ uses the deployment's model:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2job: {config: {job_samples: 8, buffer_size: 32}}}
+             pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:

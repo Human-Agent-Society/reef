@@ -3,7 +3,7 @@
 A client can upload an ATIF trajectory to train on directly. An uploaded
 trajectory is not a record. The trajectory store keeps the uploaded trajectories
 of one scenario in upload order. A trainer reads them after its cursor and gives
-them to the task-to-job stage. A commit lists the uploaded trajectories that
+them to the sample-to-job stage. A commit lists the uploaded trajectories that
 its job data consumed, by :func:`consumed_trajectory_id`, so a rebuilt trainer
 skips them. Archiving the scenario retires its uploaded trajectories with its
 records. Record retention does not delete them.

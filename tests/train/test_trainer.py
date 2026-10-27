@@ -10,9 +10,9 @@ from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
-import reef.record2task.assembly as reported_module
-from recipes.sao import SAOJobData, SAOTasks
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
+import reef.record2sample.assembly as reported_module
+from recipes.sao import SAOJobData, SAOSamples
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -29,7 +29,7 @@ from reef.evaluation import (
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
@@ -47,8 +47,8 @@ def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2job=SAOJobData(context, None, None),
+        record2sample=SAOSamples(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        sample2job=SAOJobData(context, None, None),
     )
 
 
@@ -269,16 +269,16 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
         processor = TrainingPipeline(
             context,
             record2record=tttd_record2record,
-            record2task=TTTDTasks(SampleAssemblySettings(), tttd_record2record),
-            task2job=TTTDJobData(context, tttd_record2record, None, None),
+            record2sample=TTTDSamples(SampleAssemblySettings(), tttd_record2record),
+            sample2job=TTTDJobData(context, tttd_record2record, None, None),
         )
     else:
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
             record2record=ExclusiveReportRecord2Record(context),
-            record2task=SAOTasks(SampleAssemblySettings()),
-            task2job=SAOJobData(context, None, None),
+            record2sample=SAOSamples(SampleAssemblySettings()),
+            sample2job=SAOJobData(context, None, None),
         )
     processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
     multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)
@@ -465,7 +465,7 @@ def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -
 def test_the_stage_config_sets_job_samples_over_the_default() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         return PipelineConfig.from_setting(
-            {"task2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(task2job=ThresholdJobData), environ={}
+            {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 
     trainer = Trainer.build(
@@ -480,7 +480,7 @@ def test_the_stage_config_sets_job_samples_over_the_default() -> None:
 
 @pytest.mark.unit
 def test_a_training_trainer_without_job_samples_is_refused() -> None:
-    with pytest.raises(PluginConfigError, match=r"set pipeline\.task2job\.config\.job_samples"):
+    with pytest.raises(PluginConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
         Trainer.build(
             "math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline, candidate_backend=_PreparingBackend()
         )
@@ -499,7 +499,7 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
 ) -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         stage = ThresholdJobData(context, buffer_size, None, max_job_samples=max_job_samples)
-        return threshold_pipeline(context, task2job=stage)
+        return threshold_pipeline(context, sample2job=stage)
 
     with pytest.raises(PluginConfigError, match=message):
         Trainer.build(

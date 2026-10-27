@@ -19,7 +19,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOTasks
+from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -30,7 +30,7 @@ from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.deploy.config_utils import interpolate_config_values
@@ -51,8 +51,8 @@ def sao_processor(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=SAOTasks(SampleAssemblySettings()),
-        task2job=SAOJobData(context, None, None),
+        record2sample=SAOSamples(SampleAssemblySettings()),
+        sample2job=SAOJobData(context, None, None),
     )
 
 
@@ -122,9 +122,9 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only its stages.
     stages = recipe.stages()
-    assert (stages.record2record.plugin_class, stages.record2task.plugin_class, stages.task2job.plugin_class) == (
+    assert (stages.record2record.plugin_class, stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (
         ExclusiveReportRecord2Record,
-        SAOTasks,
+        SAOSamples,
         SAOJobData,
     )
     # Without a configured buffer_size the buffer holds the data of four jobs.
@@ -136,13 +136,13 @@ def test_sao_recipe_reads_reef_side_config() -> None:
     recipe = SAORecipe.from_environment(
         {},
         config={
-            "pipeline": {"task2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
+            "pipeline": {"sample2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
         },
         **runtime_bindings(),
     )
 
-    task2job = recipe.build_pipeline(PipelineContext("math")).task2job
-    assert (task2job.job_samples, task2job.buffer_size) == (2, 16)
+    sample2job = recipe.build_pipeline(PipelineContext("math")).sample2job
+    assert (sample2job.job_samples, sample2job.buffer_size) == (2, 16)
 
 
 @pytest.mark.unit
@@ -154,14 +154,14 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     # One job is one optimizer step: job_samples names Slime's global batch size.
     global_batch_size = deployment["training"]["config"]["global_batch_size"]
     assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
-    assert deployment["pipeline"]["task2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
+    assert deployment["pipeline"]["sample2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
 
     pipeline = recipe.build_pipeline(PipelineContext("math"))
-    assert pipeline.task2job.job_samples == global_batch_size
+    assert pipeline.sample2job.job_samples == global_batch_size
 
     assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
-    assert isinstance(pipeline.record2task, SAOTasks)
-    assert isinstance(pipeline.task2job, SAOJobData)
+    assert isinstance(pipeline.record2sample, SAOSamples)
+    assert isinstance(pipeline.sample2job, SAOJobData)
     assert pipeline.buffer_size is not None and pipeline.buffer_size >= global_batch_size
 
 
@@ -176,9 +176,9 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"task2job": {"config": {"batch_size": 8}}}, "SAOJobData: unknown config fields: batch_size"),
-        ({"task2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
-        ({"task2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"sample2job": {"config": {"batch_size": 8}}}, "SAOJobData: unknown config fields: batch_size"),
+        ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
+        ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         (
             {"record2record": {"config": {"batch_size": 2}}},
             "ExclusiveReportRecord2Record: unknown config fields: batch_size",
@@ -514,7 +514,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
-            "pipeline": {"task2job": {"config": {"job_samples": 1}}},
+            "pipeline": {"sample2job": {"config": {"job_samples": 1}}},
             "evaluation": {
                 "module": "tests.support._candidate_evaluation_plugin:CheckpointEvaluator",
                 "config": {

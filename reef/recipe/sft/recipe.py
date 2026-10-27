@@ -9,7 +9,7 @@ from typing import Any
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTTasks
+from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTSamples
 from reef.train.pipeline import PipelineSpec
 
 
@@ -22,17 +22,17 @@ class SFTRecipe(WeightTrainingRecipe):
     an imported dataset example. SDFT uses the same report contract. Thus the
     two methods can train on the same reports.
 
-    The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
-    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTTasks``
+    The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTSamples``, and
+    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTSamples``
     renders each one with every agent turn trained, except ``is_copied_context`` steps. The ``pipeline`` section of the deployment configures
     the stages:
 
-    * ``pipeline.record2task.config``: ``tokenizer_path`` (required),
+    * ``pipeline.record2sample.config``: ``tokenizer_path`` (required),
       ``target``, and ``max_tokens``.
-    * ``pipeline.task2job.config.job_samples`` (required): the fewest
+    * ``pipeline.sample2job.config.job_samples`` (required): the fewest
       samples of one job. Slime cuts a job's data into optimizer steps of
       ``--global-batch-size`` samples.
-    * ``pipeline.task2job.config.buffer_size``: the most samples that wait
+    * ``pipeline.sample2job.config.buffer_size``: the most samples that wait
       for a job.
     * ``recipe.config.job_parameters``: the parameters of every job, for
       example ``scheduling.packing_length`` to count steps in packs of tokens.
@@ -55,7 +55,7 @@ class SFTRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=SFTJobData)
+        return PipelineSpec(record2record=SFTRecord2Record, record2sample=SFTSamples, sample2job=SFTJobData)
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

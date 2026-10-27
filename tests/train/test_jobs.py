@@ -488,7 +488,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         stages.append(EndedJobs(context))
-        return threshold_pipeline(context, task2job=stages[-1])
+        return threshold_pipeline(context, sample2job=stages[-1])
 
     trainer = Trainer.build(
         "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1

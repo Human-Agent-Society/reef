@@ -19,9 +19,9 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2task.distill import DistillSettings, DistillTasks, TeacherRenderer
-from reef.record2task.samples import recorded_response
-from reef.task2job import DistillJobData
+from reef.record2sample.distill import DistillSamples, DistillSettings, TeacherRenderer
+from reef.record2sample.samples import recorded_response
+from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData
@@ -73,7 +73,7 @@ def tokenizer(monkeypatch: pytest.MonkeyPatch) -> CountingTokenizer:
     return fake
 
 
-class FeedbackTasks(DistillTasks):
+class FeedbackSamples(DistillSamples):
     """A recipe's composition: the student's own answer and the teacher context as a system message, no tools."""
 
     def teacher_request(
@@ -120,8 +120,8 @@ def _processor(**config: Any) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=DistillTasks(settings),
-        task2job=DistillJobData(context, 1, None),
+        record2sample=DistillSamples(settings),
+        sample2job=DistillJobData(context, 1, None),
     )
 
 
@@ -154,8 +154,8 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     processor = TrainingPipeline(
         context,
         record2record=ExclusiveReportRecord2Record(context),
-        record2task=FeedbackTasks(DistillSettings(tokenizer_path="/models/science")),
-        task2job=DistillJobData(context, 1, None),
+        record2sample=FeedbackSamples(DistillSettings(tokenizer_path="/models/science")),
+        sample2job=DistillJobData(context, 1, None),
     )
     processor.push(_inference("i1"))
     processor.push(_report("r1", ("i1",), teacher_context="Too low."))

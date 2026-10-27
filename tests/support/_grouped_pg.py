@@ -23,9 +23,9 @@ from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
 from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2job import Task2Job
+from reef.record2sample import ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.pipeline import TrainingPipeline
@@ -67,7 +67,7 @@ class ComparisonSetGrouping(ReportGrouping):
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
 
 
-class ComparisonSetTasks(ReportTasks):
+class ComparisonSetSamples(ReportSamples):
     """One report as one sample in its comparison set."""
 
     def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
@@ -81,9 +81,9 @@ class ComparisonSetTasks(ReportTasks):
         return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
 
 
-class GroupedPolicyJobData(Task2Job):
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+class GroupedPolicyJobData(Sample2Job):
+    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
@@ -91,6 +91,6 @@ def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = 
     return TrainingPipeline(
         context,
         record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
-        record2task=ComparisonSetTasks(),
-        task2job=GroupedPolicyJobData(context, buffer_size, None),
+        record2sample=ComparisonSetSamples(),
+        sample2job=GroupedPolicyJobData(context, buffer_size, None),
     )

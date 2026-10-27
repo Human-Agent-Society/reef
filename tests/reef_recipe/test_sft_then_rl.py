@@ -24,7 +24,7 @@ from reef.recipe.sft_then_rl import (
     SFTThenRLJobSettings,
     SFTThenRLRecipe,
 )
-from reef.record2task import NoTasks
+from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
@@ -47,7 +47,7 @@ def atif(session: str) -> TrajectoryItem:
     )
 
 
-class RenderingTasks(NoTasks):
+class RenderingSamples(NoSamples):
     """Renders an uploaded trajectory as it is, so the test needs no tokenizer."""
 
     def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
@@ -67,8 +67,8 @@ def pipeline_for(storage: TaskStorage, *, tasks_per_job: int = 2, job_samples: i
     return TrainingPipeline(
         context,
         record2record=SFTRecord2Record(context),
-        record2task=RenderingTasks(),
-        task2job=SFTThenRLJobData(context, settings),
+        record2sample=RenderingSamples(),
+        sample2job=SFTThenRLJobData(context, settings),
     )
 
 
@@ -149,7 +149,7 @@ def test_the_recipe_trains_sft_jobs_with_sft_and_task_jobs_with_task_group() -> 
         "rollout": ROLLOUT,
         "method": {"objective": "task_group", "learning_rate_schedule": None},
     }
-    assert built.pipeline_spec().task2job is SFTThenRLJobData and SFTThenRLJobData.accepts_imported_tasks
+    assert built.pipeline_spec().sample2job is SFTThenRLJobData and SFTThenRLJobData.accepts_imported_tasks
 
 
 @pytest.mark.parametrize(

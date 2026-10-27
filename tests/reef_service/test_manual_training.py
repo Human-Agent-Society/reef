@@ -26,11 +26,11 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import WeightTrainingRecipe
 from reef.record2record import InferenceRecord2Record
+from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.task2job import Task2Job
 from reef.train.backend import PreparedStep
-from reef.train.cordis_backend.processor import InferenceTasks
+from reef.train.cordis_backend.processor import InferenceSamples
 from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -254,16 +254,16 @@ def test_auto_rejects_manual_requests(tmp_path):
 
 
 def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
-    class InstructionJobData(Task2Job):
+    class InstructionJobData(Sample2Job):
         supported_training_modes = frozenset({"manual"})
         required_request_types = frozenset(RequestType)
         output_schema = ExampleJobData
 
-        def make_job_data(self, tasks, data_id):
-            return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in tasks))
+        def make_job_data(self, samples, data_id):
+            return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in samples))
 
     def instruction_pipeline(context):
-        return TrainingPipeline(context, task2job=InstructionJobData(context, None, None))
+        return TrainingPipeline(context, sample2job=InstructionJobData(context, None, None))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         instruction_pipeline(PipelineContext("s"))
@@ -291,31 +291,31 @@ def test_pipeline_context_keeps_mode_when_recipe_takes_instructions():
 
 
 def test_missing_mode_implementation_fails_at_processor_initialization():
-    class AutoOnlyJobData(Task2Job):
-        def make_job_data(self, tasks, data_id):
-            return JobData(data_id, tasks)
+    class AutoOnlyJobData(Sample2Job):
+        def make_job_data(self, samples, data_id):
+            return JobData(data_id, samples)
 
     for mode in ("manual", "hybrid"):
         context = PipelineContext("s", training_mode=mode)
         with pytest.raises(NotImplementedError, match=rf"AutoOnlyJobData.*{mode}"):
-            TrainingPipeline(context, task2job=AutoOnlyJobData(context, None, None))
+            TrainingPipeline(context, sample2job=AutoOnlyJobData(context, None, None))
     with pytest.raises(ValueError, match="training_mode"):
         PipelineContext("s", training_mode="invalid")
 
 
 def test_manual_instruction_batch_never_falls_back_to_auto():
-    class TraceOnlyJobData(Task2Job):
+    class TraceOnlyJobData(Sample2Job):
         supported_training_modes = frozenset({"auto", "manual"})
 
-        def make_job_data(self, tasks, data_id):
-            return JobData(data_id, tasks)
+        def make_job_data(self, samples, data_id):
+            return JobData(data_id, samples)
 
     context = PipelineContext("s", training_mode="manual")
     pipeline = TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=InferenceTasks(),
-        task2job=TraceOnlyJobData(context, None, None),
+        record2sample=InferenceSamples(),
+        sample2job=TraceOnlyJobData(context, None, None),
     )
     pipeline.push(inference("held"))
     assert not pipeline.ready(1)
@@ -338,16 +338,16 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     training that is merely slow.
     """
 
-    class CountedJobData(Task2Job):
-        def make_job_data(self, tasks, data_id):
-            return JobData(data_id, tasks)
+    class CountedJobData(Sample2Job):
+        def make_job_data(self, samples, data_id):
+            return JobData(data_id, samples)
 
     context = PipelineContext("s", training_mode="auto")
     pipeline = TrainingPipeline(
         context,
         record2record=InferenceRecord2Record(),
-        record2task=InferenceTasks(),
-        task2job=CountedJobData(context, 6, None),
+        record2sample=InferenceSamples(),
+        sample2job=CountedJobData(context, 6, None),
     )
     assert pipeline.status() == {"ready_samples": 0, "buffer_size": 6}
     for index in range(3):
@@ -361,15 +361,15 @@ def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
 
 
 def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_hybrid_only():
-    class HybridOnlyJobData(Task2Job):
+    class HybridOnlyJobData(Sample2Job):
         supported_training_modes = frozenset({"auto", "hybrid"})
         required_request_types = frozenset(RequestType)
 
-        def make_job_data(self, tasks, data_id):
-            return JobData(data_id, tasks)
+        def make_job_data(self, samples, data_id):
+            return JobData(data_id, samples)
 
     context = PipelineContext("s", training_mode="hybrid")
-    pipeline = TrainingPipeline(context, task2job=HybridOnlyJobData(context, None, None))
+    pipeline = TrainingPipeline(context, sample2job=HybridOnlyJobData(context, None, None))
     pipeline.push(instruction("one"))
     assert pipeline.status()["buffered_requests"] == 1
     pipeline.close()
@@ -381,20 +381,20 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
 
 @pytest.mark.parametrize("mode", ["auto", "manual", "hybrid"])
 def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
-    class TrajectoryJobData(Task2Job):
+    class TrajectoryJobData(Sample2Job):
         supported_training_modes = frozenset({"auto", "manual", "hybrid"})
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
         output_schema = ExampleJobData
 
-        def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> ExampleJobData:
-            return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in tasks))
+        def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> ExampleJobData:
+            return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in samples))
 
     def trajectory_pipeline(context):
         return TrainingPipeline(
             context,
             record2record=InferenceRecord2Record(),
-            record2task=InferenceTasks(),
-            task2job=TrajectoryJobData(context, None, None),
+            record2sample=InferenceSamples(),
+            sample2job=TrajectoryJobData(context, None, None),
         )
 
     records, backend = SQLiteRecordStore(), CaptureBackend()
@@ -1008,7 +1008,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             scenario,
             records,
             pipeline_factory=lambda context: threshold_pipeline(
-                context, task2job=_InstructionThresholdJobData(context, None, None)
+                context, sample2job=_InstructionThresholdJobData(context, None, None)
             ),
             job_loop=JobLoop(
                 component,

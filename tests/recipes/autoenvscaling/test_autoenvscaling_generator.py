@@ -54,13 +54,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
+from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
-from reef.record2task.generator import DuplicateTask, GeneratorError, WrittenTask
-from reef.record2task.generator.harbor import ORACLE_TIMEOUT_S
-from reef.record2task.generator.inputs import TaskGenerationRequest
+from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
+from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
+from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -583,7 +583,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
     context = PipelineContext("autoenvscaling", task_storage=session.tasks)
-    generation = GeneratedTaskTasks(
+    generation = GeneratedTaskSamples(
         context,
         RoundSettings(rounds=1, description=DESCRIPTION),
         GeneratedTaskRecord2Record(context, TaskGroupSettings()),
@@ -621,7 +621,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
     settings = service_config_from_mapping(resolved)
     assert settings.recipe == "reef.recipe.generated_tasks:GeneratedTaskRecipe"
-    section = settings.pipeline_settings["record2task"]["config"]["generator"]
+    section = settings.pipeline_settings["record2sample"]["config"]["generator"]
     assert section["module"] == "recipes.beta.autoenvscaling:AutoEnvScalingGenerator"
     # reef serve publishes the generator's endpoint when it starts the services.
     config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}

@@ -38,21 +38,21 @@ from reef.recipe.generated_tasks.rollout import (
 )
 from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
-from reef.record2task import Record2Task
+from reef.record2sample import Record2Sample
+from reef.sample2job import Sample2JobSettings
 from reef.storage.tasks import IMPORTED_TASK_STORE, StoredTask, TaskStorage, TaskStore
-from reef.task2job import Task2JobSettings
 from reef.train.jobs import ArtifactEvaluation, EvaluationJob, JobPlan, JobPlanContext, JobRequest
 
-#: The imported train tasks of one task job when ``pipeline.task2job.config.tasks_per_job`` is not set.
+#: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
 DEFAULT_TASKS_PER_JOB = 8
 
 
 @dataclass(frozen=True)
-class SFTThenRLJobSettings(Task2JobSettings):
-    """The config of ``SFTThenRLJobData``: the sample buffer of ``Task2JobSettings``, and ``tasks_per_job``.
+class SFTThenRLJobSettings(Sample2JobSettings):
+    """The config of ``SFTThenRLJobData``: the sample buffer of ``Sample2JobSettings``, and ``tasks_per_job``.
 
     Values: ``tasks_per_job`` is a positive int, the most imported train tasks of one task job. Purpose:
-    ``SFTThenRLJobData.from_config`` parses it from ``pipeline.task2job.config``.
+    ``SFTThenRLJobData.from_config`` parses it from ``pipeline.sample2job.config``.
     """
 
     tasks_per_job: int = config_option(DEFAULT_TASKS_PER_JOB, help="The most imported train tasks of one task job.")
@@ -85,7 +85,7 @@ class SFTThenRLJobData(SFTJobData):
     trained in the store once one of those IDs is durable. ``job_ended`` drops the ended job's tasks from the
     pool. A restart rebuilds the pool from the store, so a task whose submission did not commit trains again.
 
-    Purpose: the SFT-then-RL recipe's task-to-job stage (``pipeline.task2job``).
+    Purpose: the SFT-then-RL recipe's sample-to-job stage (``pipeline.sample2job``).
     """
 
     accepts_imported_tasks = True
@@ -97,7 +97,7 @@ class SFTThenRLJobData(SFTJobData):
         *,
         context: PipelineContext,
         record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         return cls(context, SFTThenRLJobSettings.parse(config, plugin_class=cls))
