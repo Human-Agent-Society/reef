@@ -1,4 +1,4 @@
-"""The shipped gate scorer for task directory episodes: the Harbor verifier's reward from the terminus row."""
+"""The shipped scorer for task directory episodes: the Harbor verifier's reward from the terminus row."""
 
 from __future__ import annotations
 
@@ -74,7 +74,9 @@ def test_an_older_row_without_the_rewards_mapping_still_scores() -> None:
 
 
 def test_the_scorer_resolves_from_its_class_reference() -> None:
-    scorer = EpisodeScorer.from_setting("reef.evaluation.harness:VerifierRewardScorer", setting="evolution.evaluate")
+    scorer = EpisodeScorer.from_setting(
+        "reef.evaluation.harness:VerifierRewardScorer", setting="evolution.evaluation.scorer"
+    )
     assert isinstance(scorer, VerifierRewardScorer)
     assert scorer.score(TASK, episode(verifier({"reward": 0.5}))) == 0.5
 

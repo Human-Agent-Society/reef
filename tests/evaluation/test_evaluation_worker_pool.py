@@ -3,13 +3,13 @@ from __future__ import annotations
 import multiprocessing
 import os
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
 from reef.evaluation.harness import EpisodeScorer, EvaluationWorkerPool, evaluation_selection
+from reef.evaluation.harness.runner import EpisodeRun
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
@@ -19,10 +19,13 @@ from reef.train.trainer import Trainer
 
 
 class StatefulWorker:
+    """Counts its calls; each episode is a ``(value, delay)`` pair, and the models are not read."""
+
     def __init__(self):
         self.calls = 0
 
-    def run(self, value, delay=0):
+    def run(self, episode, models):
+        value, delay = episode
         time.sleep(delay)
         self.calls += 1
         if value == "bad":
@@ -45,15 +48,15 @@ def make_pool(backend):
 @pytest.mark.parametrize("backend", ["mp", "auto"])
 def test_pool_reuses_workers_preserves_order_and_drains_business_failures(backend):
     pool = make_pool(backend)
-    assert pool._executor is None
+    assert pool.executor is None
     try:
-        first = pool.evaluate([("first",), ("second",)])
-        executor = pool._executor
+        first = pool.run([("first", 0), ("second", 0)], None)
+        executor = pool.executor
         assert [row[1:] for row in first] == [(1, "first"), (1, "second")]
         with pytest.raises(ValueError, match="scorer rejected"):
-            pool.evaluate([("bad",), ("drained", 0.2), ("also drained",)])
-        second = pool.evaluate([("again",), ("again",)])
-        assert pool._executor is executor
+            pool.run([("bad", 0), ("drained", 0.2), ("also drained", 0)], None)
+        second = pool.run([("again", 0), ("again", 0)], None)
+        assert pool.executor is executor
         assert executor.failure is None
         assert [row[0] for row in second] == [row[0] for row in first]
         assert [row[1] for row in second] == [4, 3]
@@ -61,20 +64,20 @@ def test_pool_reuses_workers_preserves_order_and_drains_business_failures(backen
         pool.close()
     pool.close()
     with pytest.raises(RuntimeError, match="closed"):
-        pool.evaluate([("new",)])
+        pool.run([("new", 0)], None)
     assert not {row[0] for row in first} & {child.pid for child in multiprocessing.active_children()}
 
 
 def test_pool_failure_is_not_restarted_or_replayed():
     pool = make_pool("mp")
     try:
-        pool.evaluate([("one",)])
-        executor = pool._executor
+        pool.run([("one", 0)], None)
+        executor = pool.executor
         with pytest.raises(ExecutorFailedError):
-            pool.evaluate([("crash",), ("blocked", 120)])
+            pool.run([("crash", 0), ("blocked", 120)], None)
         with pytest.raises(ExecutorFailedError):
-            pool.evaluate([("not replayed",)])
-        assert pool._executor is executor
+            pool.run([("not replayed", 0)], None)
+        assert pool.executor is executor
     finally:
         pool.close()
 
@@ -82,9 +85,9 @@ def test_pool_failure_is_not_restarted_or_replayed():
 def test_unused_pool_close_does_not_launch_workers():
     pool = make_pool("mp")
     pool.close()
-    assert pool._executor is None
+    assert pool.executor is None
     with pytest.raises(RuntimeError, match="closed"):
-        pool.evaluate([("never",)])
+        pool.run([("never", 0)], None)
 
 
 class IsolationScorer(EpisodeScorer):
@@ -115,13 +118,14 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     binary.chmod(0o755)
     recipe = harness_recipe(
         tmp_path,
-        lambda context: None,
+        lambda workspace, tools: None,
         score=IsolationScorer(),
         tasks=("one",),
         worker_executor=ExecutorSettings(executor_backend, workers=workers),
+        binary=str(binary),
     )
-    recipe = replace(recipe, binary=str(binary))
     backend = recipe.build_backend("test", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    pool, models = backend.evaluator.worker_pool, backend.evaluator.models
     records = SQLiteRecordStore()
     trainer = Trainer(
         scenario="test",
@@ -133,8 +137,11 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     )
     try:
         for cycle in range(2):
-            pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate", None), ({}, "", None)]
-            scores = backend.evaluator.run_episodes(pairings)
+            episodes = [
+                EpisodeRun({"pi-agent/AGENTS.md": "candidate"}, "candidate", tmp_path / "records" / f"{cycle}-0"),
+                EpisodeRun({}, "", tmp_path / "records" / f"{cycle}-1"),
+            ]
+            scores = pool.run(episodes, models)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
             assert [row.score for row in scores] == expected
         paths = roots.read_text().splitlines()
@@ -144,6 +151,6 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         trainer.close()
         records.close()
     trainer.close()
-    assert backend.evaluator._worker_pool._closed
+    assert pool.closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend.evaluator.run_episodes([({}, "", None)])
+        pool.run([EpisodeRun({}, "", tmp_path / "records" / "late")], models)

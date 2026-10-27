@@ -2,11 +2,12 @@
 
 A candidate-evaluation plugin is one class that both measures (``evaluate``)
 and decides (``decide``). The built-in policies are abstract mixins a plugin
-composes at class-definition time — :class:`AlwaysSelectMixin`,
-:class:`RegressionCheckMixin`, cordis's :class:`ScoreComparisonMixin` — paired
-with :class:`BackendEvaluateMixin` when the measurement comes from the training
-backend. Each implements one half of the contract and leaves the other
-abstract, so only the pairing is instantiable.
+composes at class-definition time — :class:`AlwaysSelectMixin` and
+:class:`RegressionCheckMixin` — paired with :class:`BackendEvaluateMixin` when
+the measurement comes from the training backend. Each implements one half of
+the contract and leaves the other abstract, so only the pairing is
+instantiable. The harness publication policies (``compare``, ``floor`` and
+``none``) are whole plugins that measure through a harness evaluator.
 """
 
 from __future__ import annotations
@@ -30,7 +31,14 @@ from reef.evaluation import (
     UpdateCandidate,
 )
 from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin, ManualPromotionPlugin
-from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
+from reef.evaluation.harness import (
+    EVALUATION_SIDES,
+    ComparePolicy,
+    EpisodePolicy,
+    FloorPolicy,
+    HarnessCandidateEvaluator,
+    NoEvaluationPolicy,
+)
 from reef.inference.http import InferenceProxyRuntime
 from reef.train.backend import CandidateBackend
 from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
@@ -77,16 +85,18 @@ def test_evaluation_and_selection_remain_independent_nominal_capabilities() -> N
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:
     assert issubclass(CandidateBackend, CandidateEvaluator)
     # The shipped plugins are whole plugins: they evaluate and decide.
-    for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin, FloorPlugin):
+    for plugin in (BackendAlwaysSelectPlugin, ComparePolicy, FloorPolicy, NoEvaluationPolicy):
         assert issubclass(plugin, CandidateEvaluationPlugin)
         assert callable(plugin.evaluate)
         assert callable(plugin.decide)
     # The policies are mixins: they supply decide() and stay abstract on the half
     # they do not implement, so a mixin cannot stand up as a plugin on its own.
-    for mixin in (AlwaysSelectMixin, RegressionCheckMixin, ScoreComparisonMixin, FloorMixin):
+    for mixin in (AlwaysSelectMixin, RegressionCheckMixin):
         assert callable(mixin.decide)
         assert mixin.__abstractmethods__ == frozenset({"evaluate"})
     assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})
+    # The harness episode policies share their measurement, and each one decides.
+    assert EpisodePolicy.__abstractmethods__ == frozenset({"decide"})
     with pytest.raises(TypeError, match="abstract"):
         AlwaysSelectMixin()  # type: ignore[abstract]
 
@@ -149,21 +159,82 @@ def test_the_backend_always_select_plugin_measures_through_the_backend() -> None
     assert decision.policy == "always"
 
 
-def test_a_policy_mixin_pairs_with_the_backend_evaluate_mixin() -> None:
-    class Backend:
-        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-            return EvaluationResult(
-                evaluator="pairs",
-                evaluator_version="1",
-                metrics={"candidate_scores": (1.0, 1.0), "current_scores": (0.0, 0.0)},
-            )
+class PairedScores(HarnessCandidateEvaluator):
+    """Stands in for the harness evaluator: every evaluation returns the same paired scores."""
 
-    plugin = ScoreComparisonPlugin(Backend())
+    def __init__(self, candidate_scores: tuple[float | None, ...], current_scores: tuple[float | None, ...]) -> None:
+        self.metrics = {"candidate_scores": candidate_scores, "current_scores": current_scores}
+        self.sides: list[tuple[str, ...]] = []
+
+    def evaluate(self, candidate: UpdateCandidate, *, sides=EVALUATION_SIDES) -> EvaluationResult:
+        self.sides.append(tuple(sides))
+        return EvaluationResult(evaluator="pairs", evaluator_version="1", metrics=self.metrics)
+
+
+def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
+    # One win, and one loss to an episode that could not run: no margin in wins, but a higher mean.
+    evaluator = PairedScores((1.0, None), (0.4, 0.4))
     candidate = UpdateCandidate("job-7")
-    decision = plugin.decide(candidate, plugin.evaluate(candidate))
+    wins = ComparePolicy(evaluator)
+    decision = wins.decide(candidate, wins.evaluate(candidate))
+    assert evaluator.sides == [EVALUATION_SIDES]
+    assert (decision.selected, decision.policy) == (False, "compare")
+    assert decision.metrics == {"statistic": "wins", "min_margin": 0.0, "wins": 1, "losses": 1, "ties": 0}
 
+    # The mean counts an episode that could not run as 0.
+    mean = ComparePolicy(evaluator, statistic="mean")
+    decision = mean.decide(candidate, mean.evaluate(candidate))
     assert decision.selected is True
-    assert decision.policy == "score_comparison"
+    assert decision.metrics == {"statistic": "mean", "min_margin": 0.0, "candidate_mean": 0.5, "current_mean": 0.4}
+    assert decision.reason == "candidate scored 0.5000 against 0.4000 over 2 episodes"
+    margin = ComparePolicy(evaluator, statistic="mean", min_margin=0.2)
+    assert margin.decide(candidate, margin.evaluate(candidate)).selected is False
+
+
+def test_the_compare_policy_refuses_unpaired_scores_and_publishes_nothing_unscored() -> None:
+    candidate = UpdateCandidate("job-7")
+    unscored = ComparePolicy(PairedScores((), ()), statistic="mean")
+    decision = unscored.decide(candidate, unscored.evaluate(candidate))
+    assert decision.selected is False and decision.reason == "no evaluation task was scored"
+    unpaired = ComparePolicy(PairedScores((1.0,), ()))
+    with pytest.raises(ValueError, match="one current score per candidate score"):
+        unpaired.decide(candidate, unpaired.evaluate(candidate))
+    with pytest.raises(ValueError, match="statistic must be one of wins, mean"):
+        ComparePolicy(PairedScores((), ()), statistic="median")
+    with pytest.raises(ValueError, match="min_margin must be a finite number of at least 0"):
+        ComparePolicy(PairedScores((), ()), min_margin=-1)
+
+
+def test_the_floor_policy_scores_the_candidate_alone_and_selects_when_every_episode_meets_the_floor() -> None:
+    candidate = UpdateCandidate("job-7")
+
+    def decide(scores: tuple[float | None, ...], floor_score: float = 1.0) -> SelectionDecision:
+        evaluator = PairedScores(scores, ())
+        policy = FloorPolicy(evaluator, floor_score=floor_score)
+        decision = policy.decide(candidate, policy.evaluate(candidate))
+        assert evaluator.sides == [("candidate",)]
+        return decision
+
+    met = decide((1.0, 1.5))
+    assert met.selected and met.policy == "floor"
+    assert met.metrics == {"passed": 2, "failed": 0, "floor_score": 1.0}
+    assert met.reason == "candidate met the floor on all 2 tasks"
+
+    # An episode that could not run has no score and missed the floor.
+    missed = decide((1.0, 0.5, None))
+    assert not missed.selected
+    assert missed.metrics == {"passed": 1, "failed": 2, "floor_score": 1.0}
+    assert missed.reason == "candidate missed the floor on 2 of 3 tasks"
+
+    assert decide((0.5, 0.75), floor_score=0.5).selected
+    assert decide((0.5, 0.25), floor_score=0.5).metrics == {"passed": 1, "failed": 1, "floor_score": 0.5}
+
+    nothing = decide(())
+    assert not nothing.selected and nothing.reason == "no evaluation task was scored"
+
+    for bad in (0, -1.0, True, float("nan")):
+        with pytest.raises(ValueError, match="floor_score must be a positive number"):
+            FloorPolicy(PairedScores((), ()), floor_score=bad)
 
 
 def test_rejected_decision_is_not_selected() -> None:

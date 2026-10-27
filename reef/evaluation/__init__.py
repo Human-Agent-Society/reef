@@ -1,7 +1,7 @@
 """The recipe's candidate evaluation: contracts, built-ins, and plugin loading.
 
 Every :class:`reef.recipe.Recipe` carries a ``candidate_evaluation`` plugin —
-a :class:`SelectionPlugin` that harness recipes build from ``evolution.selection``,
+the publication policy that harness recipes build from ``evolution.evaluation``,
 or a :class:`ConfiguredEvaluationPlugin` that weight recipes build from the
 top-level ``evaluation`` config section — and :class:`reef.train.Trainer` runs it between
 prepare and settle to decide whether a produced candidate is published. The
@@ -11,8 +11,8 @@ evaluators, selectors, and configuration machinery.
 
 ``harness`` measures harness candidates by running evaluation episodes. It
 holds ``HarnessCandidate``, its evaluator ``HarnessEpisodeEvaluator``, the
-``EpisodeScorer`` contract that a method supplies, and the ``score_comparison``
-and ``floor`` selection policies.
+``EpisodeScorer`` contract that a deployment names, the history that is the
+score cache, and the ``compare``, ``floor`` and ``none`` publication policies.
 """
 
 from reef.core.evaluation import (
@@ -34,7 +34,6 @@ from reef.evaluation.evaluators import (
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
     RegressionCheckMixin,
-    SelectionPlugin,
 )
 
 __all__ = [
@@ -50,7 +49,6 @@ __all__ = [
     "EvaluationResult",
     "RegressionCheckMixin",
     "SelectionDecision",
-    "SelectionPlugin",
     "UpdateCandidate",
     "build_candidate_evaluation",
 ]

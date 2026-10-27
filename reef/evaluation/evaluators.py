@@ -1,7 +1,8 @@
-"""Built-in candidate-evaluation mixins, the default plugin, and the selection plugin base.
+"""Built-in candidate-evaluation mixins and the default plugins.
 
-A harness recipe's ``evolution.selection`` names a :class:`SelectionPlugin`
-class, which the recipe builds for each scenario with ``from_config``.
+A harness recipe builds its publication policy from ``evolution.evaluation``
+(``reef.evaluation.harness.policy``); this module serves weight trainers'
+plugins and the trainers' defaults.
 
 A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
@@ -29,33 +30,19 @@ plugin is only concrete once both halves are supplied.
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from collections.abc import Mapping
 from typing import Any, Self
 
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
-    CandidateEvaluator,
     CheckpointCandidate,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.core.plugins import Plugin, PluginConfigError
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.config import ConfiguredEvaluationPlugin
 from reef.runtime.interfaces import InferenceRuntime
-
-
-class SelectionPlugin(CandidateEvaluationPlugin, Plugin):
-    """A candidate evaluation plugin that a harness recipe's ``evolution.selection`` names.
-
-    The recipe builds one for each scenario with ``from_config``, from the
-    setting's configuration and the scenario's candidate backend.
-    """
-
-    @classmethod
-    @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self: ...
 
 
 class AlwaysSelectMixin(CandidateEvaluationPlugin):
@@ -154,23 +141,18 @@ class BackendEvaluateMixin(CandidateEvaluationPlugin):
         return self._candidate_backend.evaluate(candidate)
 
 
-class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, SelectionPlugin):
-    """The default plugin of a harness trainer: evaluate via the candidate backend, publish every candidate.
+class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
+    """The default plugin of a trainer with a candidate backend and no evaluation plugin.
 
-    A harness trainer that configures no evaluation gets it, and a harness
-    recipe's ``always`` selection names it. A weight trainer's default is
-    ``AlwaysSelectCheckpointPlugin``.
+    It evaluates through the candidate backend and publishes every candidate.
+    A harness recipe always names its own publication policy, so a trainer
+    gets this default only when it is built without one, as in tests. A
+    weight trainer's default is ``AlwaysSelectCheckpointPlugin``.
     """
 
     def __init__(self, candidate_backend: Any) -> None:
         super().__init__()
         self._candidate_backend = candidate_backend
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
-        if config:
-            raise PluginConfigError(f"the always selection takes no config, got {', '.join(sorted(map(str, config)))}")
-        return cls(candidate_backend)
 
 
 class AlwaysSelectCheckpointPlugin(AlwaysSelectMixin):
@@ -221,5 +203,4 @@ __all__ = [
     "BackendEvaluateMixin",
     "ManualPromotionPlugin",
     "RegressionCheckMixin",
-    "SelectionPlugin",
 ]
