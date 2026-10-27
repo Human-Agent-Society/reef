@@ -31,12 +31,13 @@ from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from recipes.beta.reefine.agent import launch_pi, rendered_files
-from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
+from recipes.beta.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay
 from reef.core.prompts import untrusted_text
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
+from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
 from reef.record2sample.generator.designer import (
     HARBOR_OUTPUT_TEXT,
     SYSTEM_PROMPT,
@@ -295,7 +296,7 @@ def call_receipt(headers: Mapping[str, str], body: bytes) -> str | None:
     for name, value in headers.items():
         if name.lower() == RECEIPT_HEADER and value:
             return value
-    for event in reversed(reply_events(body.decode("utf-8", errors="replace"))):
+    for event in reversed(response_events(body.decode("utf-8", errors="replace"))):
         if "reef" in event:
             return str(event["reef"]["agent_record_id"])
     return None
@@ -327,7 +328,7 @@ class RecordingGateway(AgentGateway):
         headers = {"Content-Type": "application/json", "Accept-Encoding": "identity", **self.reef_headers}
         if self.upstream.api_key:
             headers["Authorization"] = f"Bearer {self.upstream.api_key}"
-        for name in ("anthropic-version", "anthropic-beta"):
+        for name in ANTHROPIC_CLIENT_HEADERS:
             value = client.headers.get(name)
             if value:
                 headers[name] = value

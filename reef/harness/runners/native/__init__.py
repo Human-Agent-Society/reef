@@ -31,7 +31,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
@@ -42,6 +42,7 @@ from reef.harness.runners.native.enforce import (
 )
 from reef.harness.runners.native.graph import TurnLoop
 from reef.harness.tree.checks import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
+from reef.inference.provider_protocol import usage_of
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12

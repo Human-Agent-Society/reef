@@ -33,7 +33,14 @@ from typing import Any
 
 from recipes.beta.reefine.multimodal import MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
-from reef.harness.episodes.model_binding import ModelBinding, usage_of
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.inference.provider_protocol import (
+    ANTHROPIC_CLIENT_HEADERS,
+    ANTHROPIC_PATHS,
+    provider_headers,
+    response_events,
+    usage_of,
+)
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
 from reef.train.harness_backend.contract import ProposerCalls
 
@@ -44,7 +51,6 @@ MODEL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 MAX_RECORDED_BYTES = 2 * 1024 * 1024
 #: How much of a provider's refusal a trial reports back to the agent.
 MAX_ERROR_CHARS = 600
-ANTHROPIC_VERSION = "2023-06-01"
 
 
 class WorkspaceTools(ABC):
@@ -190,16 +196,17 @@ class AgentGateway:
             return
         # The served model is the only one the agent reaches: a request naming another is sent to it anyway.
         payload = {**payload, "model": self._served.model}
-        headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
-        if route == "/v1/messages":
-            if self._served.api_key:
-                headers["x-api-key"] = self._served.api_key
-            headers["anthropic-version"] = client.headers.get("anthropic-version") or ANTHROPIC_VERSION
-            beta = client.headers.get("anthropic-beta")
-            if beta:
-                headers["anthropic-beta"] = beta
-        elif self._served.api_key:
-            headers["Authorization"] = f"Bearer {self._served.api_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
+            **provider_headers(route, self._served.api_key),
+        }
+        if route in ANTHROPIC_PATHS:
+            # The agent's own API version and beta features win over the default version.
+            for name in ANTHROPIC_CLIENT_HEADERS:
+                value = client.headers.get(name)
+                if value:
+                    headers[name] = value
         url = f"{self._served.base_url.rstrip('/')}{route}"
         started = time.monotonic()
         status, body, _ = relay(client, url, headers, payload, timeout_s=self._served.timeout_s)
@@ -344,35 +351,10 @@ def relay(
     return upstream.status, bytes(kept), upstream_headers
 
 
-def reply_events(text: str) -> list[dict[str, Any]]:
-    """The JSON body, or the JSON payload of every SSE ``data:`` line."""
-    stripped = text.strip()
-    if stripped.startswith("{"):
-        try:
-            value = json.loads(stripped)
-        except json.JSONDecodeError:
-            return []
-        return [value] if isinstance(value, dict) else []
-    events = []
-    for line in text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            continue
-        try:
-            value = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            events.append(value)
-    return events
-
-
 def reply_text(text: str) -> str:
     """The text a model reply carries, whole or streamed, in the chat, Anthropic or Responses dialect."""
     parts: list[str] = []
-    for event in reply_events(text):
+    for event in response_events(text):
         for choice in event.get("choices") or ():
             if isinstance(choice, dict):
                 piece = (choice.get("delta") or choice.get("message") or {}).get("content")
@@ -395,7 +377,7 @@ def reply_tool_calls(text: str) -> list[tuple[str, str]]:
     """The tools a model reply called, whole or streamed, in the chat, Anthropic or Responses dialect: each
     ``(name, arguments as JSON text)``, in order."""
     calls: dict[tuple[str, Any], list[str]] = {}
-    for event in reply_events(text):
+    for event in response_events(text):
         # Chat Completions: tool_calls on the message, or their pieces on each delta, keyed by index.
         for choice in event.get("choices") or ():
             if not isinstance(choice, dict):
@@ -459,7 +441,7 @@ def sse_usage(text: str) -> dict[str, int] | None:
     """Input and output tokens a reply reported, whole or streamed; ``None`` when it reported none."""
     input_tokens = output_tokens = 0
     seen = False
-    for event in reply_events(text):
+    for event in response_events(text):
         for holder in (event, event.get("message") if isinstance(event.get("message"), dict) else None):
             if holder is None or not isinstance(holder.get("usage"), dict):
                 continue

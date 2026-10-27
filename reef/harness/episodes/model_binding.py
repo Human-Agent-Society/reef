@@ -35,6 +35,14 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.inference.provider_protocol import (
+    fold_anthropic_stream,
+    fold_chat_stream,
+    fold_responses_stream,
+    provider_headers,
+    stream_events,
+    usage_of,
+)
 from reef.runtime.interfaces import InferenceRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
@@ -49,7 +57,6 @@ MODEL_APIS = ("openai", "responses", "anthropic")
 #: fails and no gate can publish. Endpoints without auth ignore the value.
 NO_KEY_PLACEHOLDER = "no-key"
 
-ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
 
@@ -60,31 +67,6 @@ class ModelBindingError(ReefError):
         super().__init__(message)
         self.status = status
         self.detail = detail
-
-
-def usage_of(response: Any) -> dict[str, int] | None:
-    """The tokens a response reports, as ``{"input_tokens", "output_tokens"}``
-    whatever the dialect (Chat Completions counts ``prompt_tokens`` /
-    ``completion_tokens``; Messages and Responses count ``input_tokens`` /
-    ``output_tokens``); None when the response carries no usage.
-    """
-
-    usage = response.get("usage") if isinstance(response, Mapping) else None
-    if not isinstance(usage, Mapping):
-        return None
-
-    def count(*keys: str) -> int | None:
-        for key in keys:
-            value = usage.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return int(value)
-        return None
-
-    inputs = count("input_tokens", "prompt_tokens")
-    outputs = count("output_tokens", "completion_tokens")
-    if inputs is None and outputs is None:
-        return None
-    return {"input_tokens": inputs or 0, "output_tokens": outputs or 0}
 
 
 @lru_cache(maxsize=128)
@@ -304,32 +286,29 @@ class ModelBinding:
         object.__setattr__(self, "_last_response", None)
         object.__setattr__(self, "_last_usage", None)
         request_body = {"model": self.model, **body}
-        headers = {"content-type": "application/json"}
         if self.api == "anthropic":
             path = "/v1/messages"
-            headers["anthropic-version"] = ANTHROPIC_VERSION
-            if self.api_key:
-                headers["x-api-key"] = self.api_key
         else:
             path = "/v1/responses" if self.api == "responses" else "/v1/chat/completions"
-            if self.api_key:
-                headers["authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             data=json.dumps(request_body).encode("utf-8"),
-            headers=headers,
+            headers={"content-type": "application/json", **provider_headers(path, self.api_key)},
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout_s or self.timeout_s) as response:
                 if not request_body.get("stream"):
                     result = json.load(response)
-                elif self.api == "anthropic":
-                    result = _fold_anthropic_stream(response)
-                elif self.api == "responses":
-                    result = _fold_responses_stream(response)
                 else:
-                    result = _fold_stream(response)
+                    # Read no further than the event that ends the reply: a proxy may keep the connection open.
+                    events = stream_events(response)
+                    if self.api == "anthropic":
+                        result = fold_anthropic_stream(events)
+                    elif self.api == "responses":
+                        result = fold_responses_stream(events)
+                    else:
+                        result = fold_chat_stream(events)
             # The tokens this call reported, for a wrapper of ``chat`` that never sees the response body.
             object.__setattr__(self, "_last_usage", usage_of(result))
             object.__setattr__(self, "_last_response", result)
@@ -483,170 +462,4 @@ def _substitute(value: Any, values: Mapping[str, Any], models: Sequence[str] = (
     return value
 
 
-def _sse_payloads(response: Any) -> Iterator[Any]:
-    for raw in response:
-        line = raw.decode("utf-8", errors="replace").strip() if isinstance(raw, bytes) else str(raw).strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if payload == "[DONE]":
-            return
-        try:
-            yield json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-
-
-def _merge_reasoning_details(details: list[Any], fragments: Sequence[Any]) -> None:
-    """Join provider detail fragments by index (or id), leaving opaque blocks opaque."""
-    for fragment in fragments:
-        if not isinstance(fragment, Mapping):
-            details.append(fragment)
-            continue
-        key = "index" if fragment.get("index") is not None else "id" if fragment.get("id") is not None else None
-        target = next(
-            (
-                item
-                for item in details
-                if isinstance(item, dict) and key is not None and item.get(key) == fragment[key]
-            ),
-            None,
-        )
-        if target is None:
-            details.append(dict(fragment))
-            continue
-        for name, value in fragment.items():
-            if value is None and target.get(name) is not None:
-                continue
-            if name in ("text", "summary", "signature", "data") and isinstance(value, str):
-                previous = target.get(name)
-                target[name] = (previous if isinstance(previous, str) else "") + value
-            else:
-                target[name] = value
-
-
-def _fold_stream(response: Any) -> dict[str, Any]:
-    """Fold an SSE chat-completions stream into one response object."""
-
-    pieces: list[str] = []
-    role = "assistant"
-    finish_reason = None
-    model = None
-    usage: dict[str, Any] | None = None
-    reasoning: dict[str, Any] = {}
-    for chunk in _sse_payloads(response):
-        model = chunk.get("model", model)
-        if isinstance(chunk.get("usage"), Mapping):
-            usage = dict(chunk["usage"])
-        for choice in chunk.get("choices", ()):
-            delta = choice.get("delta", {})
-            role = delta.get("role", role)
-            content = delta.get("content")
-            if isinstance(content, str):
-                pieces.append(content)
-            for key in ("reasoning", "reasoning_content", "thinking"):
-                if isinstance(delta.get(key), str):
-                    reasoning[key] = reasoning.get(key, "") + delta[key]
-            if isinstance(delta.get("reasoning_details"), list):
-                _merge_reasoning_details(reasoning.setdefault("reasoning_details", []), delta["reasoning_details"])
-            finish_reason = choice.get("finish_reason", finish_reason)
-    folded: dict[str, Any] = {
-        "object": "chat.completion",
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": role, "content": "".join(pieces), **reasoning},
-                "finish_reason": finish_reason,
-            }
-        ],
-    }
-    if usage is not None:
-        folded["usage"] = usage
-    return folded
-
-
-def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
-    """Fold an SSE messages stream into one response object."""
-
-    blocks: dict[int, dict[str, Any]] = {}
-    partial_inputs: dict[int, str] = {}
-    model = None
-    stop_reason = None
-    usage: dict[str, Any] = {}
-    for event in _sse_payloads(response):
-        kind = event.get("type")
-        if kind == "message_start":
-            model = event.get("message", {}).get("model", model)
-            if isinstance(event.get("message", {}).get("usage"), Mapping):
-                usage.update(event["message"]["usage"])
-        elif kind == "content_block_start" and isinstance(event.get("content_block"), Mapping):
-            blocks[event.get("index", 0)] = dict(event["content_block"])
-        elif kind == "content_block_delta":
-            delta = event.get("delta", {})
-            fields = {"text_delta": "text", "thinking_delta": "thinking", "signature_delta": "signature"}
-            field_name = fields.get(delta.get("type"))
-            if field_name is not None and isinstance(delta.get(field_name), str):
-                block = blocks.setdefault(
-                    event.get("index", 0), {"type": "text" if field_name == "text" else "thinking"}
-                )
-                block[field_name] = str(block.get(field_name, "")) + delta[field_name]
-            elif delta.get("type") == "input_json_delta" and isinstance(delta.get("partial_json"), str):
-                index = event.get("index", 0)
-                partial_inputs[index] = partial_inputs.get(index, "") + delta["partial_json"]
-        elif kind == "message_delta":
-            stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
-            if isinstance(event.get("usage"), Mapping):
-                usage.update(event["usage"])
-    for index, partial_json in partial_inputs.items():
-        block = blocks.setdefault(index, {"type": "tool_use"})
-        try:
-            block["input"] = json.loads(partial_json)
-        except json.JSONDecodeError:
-            # Preserve an interrupted tool argument as fragments, never the start block's empty input placeholder.
-            block.pop("input", None)
-            block["partial_json"] = partial_json
-    folded: dict[str, Any] = {
-        "type": "message",
-        "role": "assistant",
-        "model": model,
-        "content": [blocks[index] for index in sorted(blocks)],
-        "stop_reason": stop_reason,
-    }
-    if usage:
-        folded["usage"] = usage
-    return folded
-
-
-def _fold_responses_stream(response: Any) -> dict[str, Any]:
-    """Fold an SSE Responses stream into one response object."""
-
-    pieces: list[str] = []
-    output: dict[int, dict[str, Any]] = {}
-    completed: dict[str, Any] | None = None
-    for event in _sse_payloads(response):
-        if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
-            pieces.append(event["delta"])
-        elif event.get("type") == "response.output_item.done" and isinstance(event.get("item"), dict):
-            output[event.get("output_index", len(output))] = event["item"]
-        elif event.get("type") == "response.completed" and isinstance(event.get("response"), dict):
-            completed = event["response"]
-    if completed is not None:
-        return completed
-    items = [output[index] for index in sorted(output)]
-    if not any(item.get("type") == "message" and item.get("role") == "assistant" for item in items):
-        items.append(
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "".join(pieces)}],
-            }
-        )
-    return {
-        "object": "response",
-        "status": "completed",
-        "output": items,
-    }
-
-
-__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings", "usage_of"]
+__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings"]

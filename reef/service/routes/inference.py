@@ -8,11 +8,11 @@ from typing import Any
 from aiohttp import web
 
 from reef.core.records_types import ROLLOUT_HEADER
+from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.runtime.interfaces import INFERENCE_ABORT_ERROR, MULTIMODAL_ROUTES, InferenceHandler, inference_aborted
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (
-    SSEFrameDecoder,
     chat_completion_chunk_identity,
     frame_for_codex,
     is_terminal_sse_event,

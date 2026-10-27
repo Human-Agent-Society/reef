@@ -15,7 +15,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, usage_of
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.checks import clip_record_text
 from reef.train.harness_backend.contract import ProposerCalls
 from reef.train.harness_backend.records import bounded
@@ -167,7 +167,8 @@ class BudgetedBinding(ModelBinding):
             raise
         entry["response"] = bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
-        usage = usage_of(response)
+        # The wrapped binding's complete records the usage of the response it returned.
+        usage = self.inner.last_usage()
         if usage is not None:
             entry["usage"] = usage
         self.step_calls.record(entry)

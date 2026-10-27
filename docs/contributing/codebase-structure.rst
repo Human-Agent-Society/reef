@@ -165,7 +165,7 @@ package's own submodules and third-party libraries):
    * - ``sandbox``
      - ``core``
    * - ``harness``
-     - ``sandbox``, ``runtime``, ``surface``, ``artifact``, ``core``
+     - ``inference``, ``sandbox``, ``runtime``, ``surface``, ``artifact``, ``core``
    * - ``evaluation``
      - ``harness``, ``sandbox``, ``runtime``, ``core``
    * - ``train``
@@ -237,6 +237,9 @@ runtime factory. No training backend builds serving:
 ``inference`` section and the component's release format.
 
 HTTP provider handling lives in ``inference/http.py``.
+``inference/provider_protocol.py`` holds the provider wire format that the proxy,
+the model clients and the recorders share: authentication headers, Server-Sent
+Events, stream folding and token usage.
 ``inference/chat.py`` holds the engine-neutral OpenAI and Anthropic chat facade
 over a token-native generate route: it renders the prompt, builds the training
 record from a ``CapturedGeneration`` and streams protocol frames. Each engine

@@ -132,11 +132,37 @@ def test_streams_fold_to_one_reply_in_all_dialects(monkeypatch) -> None:
     )
 
 
+def test_a_stream_is_read_no_further_than_its_done_event(monkeypatch) -> None:
+    """A proxy may keep the connection open after ``[DONE]``, so the binding must not read past it."""
+
+    class OpenAfterDone:
+        def __init__(self) -> None:
+            self.lines = iter([b'data: {"choices":[{"delta":{"content":"a"}}]}\n', b"\n", b"data: [DONE]\n", b"\n"])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> bytes:
+            line = next(self.lines, None)
+            if line is None:
+                raise AssertionError("the reply was read past its [DONE] event")
+            return line
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None: OpenAfterDone())
+    assert ModelBinding("http://up", "m").chat([{"role": "user", "content": "u"}], stream=True) == "a"
+
+
 def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monkeypatch) -> None:
     """``usage`` rides the response object and ``last_usage`` keeps it for a
     wrapper of ``chat``, normalised to input/output tokens; a stream folds its
     usage in from the chunk or event that carried it."""
-    from reef.harness.episodes.model_binding import usage_of
+    from reef.inference.provider_protocol import usage_of
 
     binding = ModelBinding("http://up", "m")
     assert binding.last_usage() is None
@@ -361,14 +387,14 @@ def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(mo
 
 
 def test_reasoning_fragments_do_not_merge_unidentified_blocks_or_stringify_null_signatures() -> None:
-    from reef.harness.episodes.model_binding import _merge_reasoning_details
+    from reef.inference.provider_protocol import merge_reasoning_details
 
     details: list[Any] = []
-    _merge_reasoning_details(details, [{"type": "reasoning.text", "index": 0, "text": "step", "signature": None}])
-    _merge_reasoning_details(details, [{"index": 0, "signature": "signed"}])
-    _merge_reasoning_details(details, [{"index": 0, "signature": None, "text": None}])
-    _merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "one"}])
-    _merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "two"}])
+    merge_reasoning_details(details, [{"type": "reasoning.text", "index": 0, "text": "step", "signature": None}])
+    merge_reasoning_details(details, [{"index": 0, "signature": "signed"}])
+    merge_reasoning_details(details, [{"index": 0, "signature": None, "text": None}])
+    merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "one"}])
+    merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "two"}])
     assert details == [
         {"type": "reasoning.text", "index": 0, "text": "step", "signature": "signed"},
         {"type": "reasoning.text", "id": None, "text": "one"},
