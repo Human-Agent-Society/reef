@@ -85,7 +85,6 @@ class TinkerSDKClient(TinkerClient):
             api_key=self._api_key,
             project_id=self._config.project_id,
             base_url=self._config.base_url,
-            timeout_s=self._config.train_timeout_s,
         )
 
     def _save(self, trainer: Any, *, export_adapter: bool) -> TinkerCheckpoint:

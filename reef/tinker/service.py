@@ -18,15 +18,12 @@ def tinker_sdk() -> Any:
         raise RuntimeError("install Tinker support with uv pip install 'reef-infra[tinker]'") from exc
 
 
-def open_service(
-    sdk: Any, *, api_key: str, project_id: str | None, base_url: str | None, timeout_s: float | None
-) -> Any:
-    """A ``ServiceClient`` of the service at ``base_url`` (``None``: hosted Tinker), with ``timeout_s`` on each
-    HTTP request (``None``: the SDK's default)."""
-    options: dict[str, Any] = {"api_key": api_key, "project_id": project_id, "base_url": base_url}
-    if timeout_s is not None:
-        options["timeout"] = timeout_s
-    return sdk.ServiceClient(**options)
+def open_service(sdk: Any, *, api_key: str, project_id: str | None, base_url: str | None) -> Any:
+    """A ``ServiceClient`` of the service at ``base_url`` (``None``: hosted Tinker).
+
+    The SDK takes no client-wide timeout: each caller bounds its own call with ``.result(timeout=...)``.
+    """
+    return sdk.ServiceClient(api_key=api_key, project_id=project_id, base_url=base_url)
 
 
 def close_service(sdk: Any, service: Any, status: str, *, timeout_s: float | None) -> None:
