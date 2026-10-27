@@ -73,7 +73,7 @@ from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import ComponentTrainer, Trainer, TrainStepResult
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 
 class _SlowBackend(_ComponentBackend):
@@ -855,7 +855,7 @@ class _RetiringRetriesSamples(JudgedSamples):
 class RetiringRetriesJobData(Sample2Job):
     """Batches the judged turns of ``_RetiringRetriesJudging``."""
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 

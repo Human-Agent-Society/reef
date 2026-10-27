@@ -32,7 +32,7 @@ from reef.record2record import Record2Record, ReportContext
 from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class CoralJobData(Sample2Job):
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         data = JobData(data_id, items)
         groups: dict[str, list[TrajectoryItem]] = {}
         for sample in trajectories(data):

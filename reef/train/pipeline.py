@@ -60,7 +60,7 @@ from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
 from reef.storage.trajectories import consumed_trajectory_id
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectoryItem
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
 PIPELINE_STAGES = ("record2record", "record2sample", "sample2job")
@@ -219,7 +219,7 @@ class TrainingPipeline:
         self.pending: JobData | None = None
         self.data_number = 0
         #: Samples by the ID of the record set that made them, until the set trains or ends.
-        self.samples: dict[Hashable, tuple[TrainDataItem, ...]] = {}
+        self.samples: dict[Hashable, tuple[Sample, ...]] = {}
         #: Record sets pushed to the record-to-sample stage that have no result yet, by set ID. Their records stay held.
         self.waiting_sets: dict[Hashable, RecordSet] = {}
         #: Uploaded trajectories by trajectory ID, in upload order, until job data consumes them.

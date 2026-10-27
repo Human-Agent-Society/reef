@@ -22,7 +22,7 @@ from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2sample import JudgedSamples
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
@@ -94,7 +94,7 @@ class _ToySamples(JudgedSamples):
 class ToyJobData(Sample2Job):
     """Batches the judged samples in the order that the stage selected them."""
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 

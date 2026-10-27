@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
-from reef.core.job_data import TaskItem, TrainDataItem, TrajectoryItem
+from reef.core.job_data import Sample, TaskItem, TrajectoryItem
 from reef.record2record import RecordSet, ReportCandidate, ReportContext
 from reef.record2sample.base import ImmediateRecord2Sample, SampleResult
 
@@ -30,7 +30,7 @@ class ReportSamples(ImmediateRecord2Sample, ABC):
     """
 
     @abstractmethod
-    def make_sample(self, context: ReportContext) -> TrainDataItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> Sample | SkippedReport:
         """Assemble valid feedback into data; raise on a broken training contract.
 
         Runs on the trainer thread without network or model calls. Return
@@ -47,6 +47,6 @@ class ReportSamples(ImmediateRecord2Sample, ABC):
         if isinstance(sample, SkippedReport):
             return SampleResult.skipped()
         if not isinstance(sample, (TrajectoryItem, TaskItem)):
-            raise TypeError(f"{type(self).__name__}.make_sample must return a TrainDataItem")
+            raise TypeError(f"{type(self).__name__}.make_sample must return a Sample")
         report_id = context.report.agent_record_id
         return SampleResult.ready((replace(sample, source_agent_record_ids=(*context.references, report_id)),))

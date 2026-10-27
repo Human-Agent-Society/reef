@@ -28,7 +28,7 @@ from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TaskItem, TrajectoryItem
 
 
 class WithholdingRecord2Record(InferenceRecord2Record):
@@ -84,7 +84,7 @@ class RecordingJobData(Sample2Job):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 
@@ -159,7 +159,7 @@ class PairSamples(ReportSamples):
         super().__init__()
         self.fail_assembly = False
 
-    def make_sample(self, context: ReportContext) -> TrainDataItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> Sample | SkippedReport:
         if self.fail_assembly:
             raise ValueError("broken training data")
         if context.report.agent_record_id.startswith("skip"):
@@ -168,7 +168,7 @@ class PairSamples(ReportSamples):
 
 
 class PairJobData(Sample2Job):
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 
@@ -591,11 +591,11 @@ class OwnJobData(RecordingJobData):
 
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context)
-        self.samples: tuple[TrainDataItem, ...] | None = None
+        self.samples: tuple[Sample, ...] | None = None
         self.batches_done = 0
         self.released: set[str] = set()
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         return self.samples
 
     def own_job_data_submitted(self) -> frozenset[str]:

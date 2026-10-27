@@ -942,7 +942,7 @@ record2sample=..., sample2job=...)``):
   one, the pipeline forms no record set and nothing trains.
 - ``record2sample``: the record-to-sample stage
   (``reef.record2sample.Record2Sample``). It turns each record set into samples
-  (``TrainDataItem`` values). Reported feedback supplies a ``make_sample`` hook
+  (``Sample`` values). Reported feedback supplies a ``make_sample`` hook
   on ``ReportSamples`` that assembles valid reports; computed feedback supplies
   a ``JudgedSamples`` after an asynchronous ``judge`` derives new feedback.
   The pipeline pushes each record set (``push``) and pulls the results
@@ -1020,7 +1020,7 @@ A reported-feedback recipe implements these hooks:
 
    * - Hook
      - Contract
-   * - ``ReportSamples.make_sample(context) -> TrainDataItem | SkippedReport``
+   * - ``ReportSamples.make_sample(context) -> Sample | SkippedReport``
      - Assemble one valid report and its resolved inferences; raise on data errors. Return
        ``SkippedReport(reason)`` for a valid report that cannot train; the stage releases it.
    * - ``Sample2Job.make_job_data(samples, data_id) -> JobData``
@@ -1182,11 +1182,11 @@ Job data
 
    from pathlib import Path
    from reef.train.types import (
-       TaskItem, TrainDataItem, JobData, TrajectoryItem,
+       TaskItem, Sample, JobData, TrajectoryItem,
        trajectories, trajectory_groups,
    )
 
-``TrainDataItem = TrajectoryItem | TaskItem``. Every processor returns a frozen
+``Sample = TrajectoryItem | TaskItem``. Every processor returns a frozen
 ``JobData(data_id, items, request=None)`` with an ordered tuple of items.
 The same job data may contain both kinds. ``request`` is keyword-only and carries
 an optional explicit training instruction; request-only job data may be empty.

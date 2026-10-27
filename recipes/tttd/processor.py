@@ -29,7 +29,7 @@ from reef.record2record import (
 from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,7 @@ class TTTDJobData(Sample2Job):
             )
         return cls(context, record2record, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         steps = {item.metadata["tttd"]["step"] for item in items}
         if len(steps) != 1:
             raise RuntimeError("TTTDJobData creates exactly one complete step per job")

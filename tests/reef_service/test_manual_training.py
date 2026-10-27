@@ -34,7 +34,7 @@ from reef.train.cordis_backend.processor import InferenceSamples
 from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 
 class CaptureBackend(ExampleBackend):
@@ -386,7 +386,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
         output_schema = ExampleJobData
 
-        def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> ExampleJobData:
+        def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> ExampleJobData:
             return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in samples))
 
     def trajectory_pipeline(context):

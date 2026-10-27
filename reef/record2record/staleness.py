@@ -5,12 +5,12 @@ from __future__ import annotations
 from collections.abc import Hashable, Mapping, Sequence
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.job_data import TrainDataItem, TrajectoryItem
+from reef.core.job_data import Sample, TrajectoryItem
 from reef.record2record.sets import RecordSetUnit
 from reef.runtime.interfaces import RuntimeLoadId
 
 
-def producing_runtime_load_ids(tasks: Sequence[TrainDataItem]) -> frozenset[str | None]:
+def producing_runtime_load_ids(tasks: Sequence[Sample]) -> frozenset[str | None]:
     """Return the runtime load IDs that produced the training data of ``tasks``.
 
     A sample whose tokens came from several versions gives each version of its

@@ -73,7 +73,7 @@ from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2Job
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
 
@@ -1037,7 +1037,7 @@ class GeneratedTaskJobData(Sample2Job):
         #: The tasks of the jobs submitted in this process that did not end; they leave the pool at the end.
         self.submitted_tasks: tuple[PooledTask, ...] = ()
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
     def advance(self) -> None:
@@ -1051,7 +1051,7 @@ class GeneratedTaskJobData(Sample2Job):
         task_uses = tuple(f"{batch}/{task_name_of(task)}" for task in taken)
         self.handed_out = HandedOutTasks(batch, task_uses, taken)
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         if self.handed_out is None:
             return None
         return tuple(task.item for task in self.handed_out.tasks)

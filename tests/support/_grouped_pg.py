@@ -29,7 +29,7 @@ from reef.sample2job import Sample2Job
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectory_groups
+from reef.train.types import JobData, Sample, TrajectoryItem, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 
@@ -82,7 +82,7 @@ class ComparisonSetSamples(ReportSamples):
 
 
 class GroupedPolicyJobData(Sample2Job):
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 

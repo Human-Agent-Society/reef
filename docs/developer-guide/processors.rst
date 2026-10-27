@@ -24,7 +24,7 @@ The three stages
   decides which records train, in which record sets and units, and in
   what order (see `Record sets and their units <#record-sets-and-their-units>`__).
 - The **record-to-sample stage** (``Record2Sample``, ``reef.record2sample``) turns
-  one record set into samples. A sample is a ``TrainDataItem``: a ``TrajectoryItem``
+  one record set into samples. A sample is a ``Sample``: a ``TrajectoryItem``
   that trains directly, or a ``TaskItem`` (a Harbor task) that an algorithm
   rolls out. Job data may mix both.
 - The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
@@ -465,7 +465,7 @@ A reported-feedback recipe writes:
 
 - a ``ReportRecord2Record`` subclass as its record stage, with its
   ``ReportGrouping`` (below);
-- ``make_sample(context) -> TrainDataItem`` on a ``ReportSamples`` subclass,
+- ``make_sample(context) -> Sample`` on a ``ReportSamples`` subclass,
   its record-to-sample stage: assemble an ATIF trajectory or Harbor task
   directly. Use ``context.require_score()`` when the method needs a reward.
   The stage attaches the source and report ids to the returned item.
@@ -697,11 +697,11 @@ A record's path to a job
 .. code:: text
 
    report -> record2record: validate references, filter -> record set
-       -> record2sample: make_sample -> TrainDataItem -> record2record: group -> record set unit
+       -> record2sample: make_sample -> Sample -> record2record: group -> record set unit
        -> sample2job: make_job_data -> job data -> acknowledge
 
    computed record -> record2record: observe/track -> dispatch -> async judge -> judged set
-       -> record2sample: make_sample -> TrainDataItem -> record2record: record set unit
+       -> record2sample: make_sample -> Sample -> record2record: record set unit
        -> sample2job: make_job_data -> job data -> acknowledge
 
    uploaded trajectory -> TrajectoryItem -> sample2job: make_job_data -> job data -> acknowledge
@@ -737,7 +737,7 @@ A recipe's processor class becomes a ``Sample2Job`` with its ``make_job_data``,
 named in the recipe's ``pipeline_spec()``; the trainer drives a
 ``TrainingPipeline`` instead of a ``DataProcessor``. Reported-feedback recipes
 must replace ``judge`` and ``ReportDecision`` with ``make_sample`` returning
-``TrainDataItem`` on a ``ReportSamples`` subclass. Remove ``WAIT``/``NEVER`` branches: invalid
+``Sample`` on a ``ReportSamples`` subclass. Remove ``WAIT``/``NEVER`` branches: invalid
 references fail admission, and training contract failures must raise. Existing
 stored records replay through the new contract; legacy reports with invalid
 references or eligibility flags fail explicitly and need correction before replay.

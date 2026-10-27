@@ -29,7 +29,7 @@ from reef.record2record import Record2Record
 from reef.record2sample import JudgedSamples, Record2Sample
 from reef.record2sample.samples import make_policy_trajectory
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, policy_row_violation
+from reef.train.types import JobData, Sample, TrajectoryItem, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class OpenClawRLJobData(Sample2Job):
             )
         return cls(context, settings, record2record)
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         samples = tuple(task for task in samples if isinstance(task, TrajectoryItem))
         if len(samples) != len(samples):
             raise TypeError("OpenClaw-RL samples must be trajectories")

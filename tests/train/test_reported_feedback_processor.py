@@ -15,7 +15,7 @@ from reef.record2record import GroupDecision, ReportContext, ReportGrouping, Rep
 from reef.record2sample import ReportSamples
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TaskItem, TrainDataItem
+from reef.train.types import JobData, Sample, TaskItem
 
 
 def inference(record_id: str) -> AgentRecord:
@@ -53,7 +53,7 @@ class NamedReportSamples(ReportSamples):
         self.assembled: list[str] = []
         self.fail_assembly = False
 
-    def make_sample(self, context: ReportContext) -> TrainDataItem:
+    def make_sample(self, context: ReportContext) -> Sample:
         if self.fail_assembly:
             raise ValueError("broken training data")
         self.assembled.append(context.report.agent_record_id)
@@ -61,7 +61,7 @@ class NamedReportSamples(ReportSamples):
 
 
 class SampleJobData(Sample2Job):
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 
@@ -392,7 +392,7 @@ def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
     processor = SamplePipeline(tasks=BrokenTasks())
     processor.push(inference("i1"))
     processor.fail_assembly = True
-    with pytest.raises(TypeError, match="TrainDataItem"):
+    with pytest.raises(TypeError, match="Sample"):
         processor.push(report("r1", "i1"))
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     processor.fail_assembly = False

@@ -39,7 +39,7 @@ from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
 from reef.record2sample.samples import recorded_request, recorded_response
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.
 REPROMPT_TEMPLATE = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
@@ -319,7 +319,7 @@ class SDPOJobData(Sample2Job):
             return THINKING_BLOCK.sub("", response) if self.remove_thinking_from_demonstration else response
         return None
 
-    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         job_data = JobData(data_id, items)
         samples = sorted(
             trajectories(job_data), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])

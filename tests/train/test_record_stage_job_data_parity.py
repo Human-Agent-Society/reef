@@ -56,7 +56,7 @@ from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TaskItem, TrajectoryItem
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
 
@@ -101,7 +101,7 @@ def json_value(value: object) -> object:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
 
 
-def describe_item(item: TrainDataItem) -> dict[str, object]:
+def describe_item(item: Sample) -> dict[str, object]:
     """The deterministic parts of one batch item."""
     if isinstance(item, TaskItem):
         return {"task": str(item.task_path), "sources": list(item.source_agent_record_ids)}
@@ -321,7 +321,7 @@ class SlotJobData(Sample2Job):
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 
@@ -457,7 +457,7 @@ class ToyJobData(Sample2Job):
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 

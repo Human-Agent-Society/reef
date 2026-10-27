@@ -132,6 +132,15 @@ inference references; computed feedback derives its signal from traffic.
 Reef's ``TrainingPipeline`` drives the stages and owns job size,
 consumption, and retention.
 
+Sample
+------
+
+One item of job data, a ``Sample`` (``reef.core.job_data``): a
+``TrajectoryItem`` that trains as it is, or a ``TaskItem``, a Harbor task that
+the training component rolls out. The record-to-sample stage makes samples;
+``job_samples`` and the sample buffer count them. A sample is not a sampling
+call to a model.
+
 Training objective
 ------------------
 
@@ -216,8 +225,8 @@ job's data and the parameters, so a retry submits the same job.
 Job data
 --------
 
-The data of one training job: a ``JobData`` value of trajectories and tasks
-that the sample-to-job stage makes. A job's data holds at least
+The data of one training job: a ``JobData`` value of samples that the
+sample-to-job stage makes. A job's data holds at least
 ``pipeline.sample2job.config.job_samples`` samples. The training component cuts
 it into optimizer batches by its own batch size.
 

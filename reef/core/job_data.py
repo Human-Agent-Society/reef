@@ -108,7 +108,10 @@ class TaskItem:
             raise TypeError("task metadata must be a mapping")
 
 
-TrainDataItem = TrajectoryItem | TaskItem
+#: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
+#: out. The record-to-sample stage makes samples, ``job_samples`` and the sample buffer count them, and
+#: ``JobData.items`` holds them.
+Sample = TrajectoryItem | TaskItem
 
 
 def check_record_ids(record_ids: tuple[str, ...]) -> None:
@@ -135,7 +138,7 @@ class JobData:
     """
 
     data_id: str
-    items: tuple[TrainDataItem, ...] = ()
+    items: tuple[Sample, ...] = ()
     request: TrainingRequest | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -189,7 +192,7 @@ class JobData:
         its own checks.
         """
         try:
-            items: list[TrainDataItem] = []
+            items: list[Sample] = []
             for item in value["items"]:
                 if item["kind"] == "trajectory":
                     items.append(

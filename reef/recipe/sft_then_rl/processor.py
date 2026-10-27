@@ -27,7 +27,7 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.evaluation import CheckpointCandidate
-from reef.core.job_data import JobData, JobOutcome, TaskItem, TrainDataItem
+from reef.core.job_data import JobData, JobOutcome, Sample, TaskItem
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.rollout import (
     HandedOutTasks,
@@ -129,7 +129,7 @@ class SFTThenRLJobData(SFTJobData):
         batch = f"{self.scenario}:rollout:{uuid.uuid4().hex[:12]}"
         self.handed_out = HandedOutTasks(batch, tuple(f"{batch}/{task.task_id}" for task in taken), taken)
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         if self.handed_out is None:
             return None
         return tuple(task.item for task in self.handed_out.tasks)

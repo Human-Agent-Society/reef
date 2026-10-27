@@ -1,6 +1,6 @@
 """The record-to-sample contract: each record set from the record-to-record stage becomes samples.
 
-A sample is a ``TrainDataItem``: a ``TrajectoryItem`` that trains directly, or a
+A sample is a ``Sample``: a ``TrajectoryItem`` that trains directly, or a
 ``TaskItem`` that the algorithm rolls out. The training pipeline pushes each
 record set that the record stage forms (``push``) and pulls the sample results
 (``pull``). It gives each result back to the record stage.
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.job_data import TrainDataItem, TrajectoryItem
+from reef.core.job_data import Sample, TrajectoryItem
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, SampleStatus
@@ -28,14 +28,14 @@ class SampleResult:
     """
 
     status: SampleStatus
-    samples: tuple[TrainDataItem, ...] = ()
+    samples: tuple[Sample, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.status is SampleStatus.READY) != bool(self.samples):
             raise ValueError("a READY result holds one or more samples, and a SKIPPED result holds no sample")
 
     @classmethod
-    def ready(cls, samples: tuple[TrainDataItem, ...]) -> SampleResult:
+    def ready(cls, samples: tuple[Sample, ...]) -> SampleResult:
         """The set trains as ``samples``."""
         return cls(SampleStatus.READY, samples)
 

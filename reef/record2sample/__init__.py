@@ -5,7 +5,7 @@ Reef reuses records in a pipeline of three stages::
     record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data
 
 ``reef.record2record`` decides which records Reef uses and forms record sets.
-This package turns each set into samples. A sample is a ``TrainDataItem``: a
+This package turns each set into samples. A sample is a ``Sample``: a
 ``TrajectoryItem`` that trains directly, or a ``TaskItem`` that the algorithm
 rolls out. A recipe's ``Sample2Job`` (``reef.sample2job``) shapes the
 samples into job data, and ``reef.train.pipeline.TrainingPipeline`` drives the

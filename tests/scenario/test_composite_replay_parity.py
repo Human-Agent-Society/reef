@@ -49,7 +49,7 @@ from reef.sample2job import Sample2Job
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem
+from reef.train.types import JobData, Sample
 
 
 class _SessionJudging(RecordJudging):
@@ -96,7 +96,7 @@ class _SessionSamples(JudgedSamples):
 class SessionJobData(Sample2Job):
     """Batches the judged turns of ``_SessionJudging``."""
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 

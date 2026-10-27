@@ -6,7 +6,7 @@ holds the samples of the record sets that wait for a job, at most
 ``job_samples`` samples, the trainer asks the training pipeline
 (:class:`~reef.train.pipeline.TrainingPipeline`) for the next job's data. The
 pipeline selects whole record set units from the record-to-record stage and
-gives their samples to a recipe's ``Sample2Job``. A sample is a ``TrainDataItem``.
+gives their samples to a recipe's ``Sample2Job``. A sample is a ``Sample``.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, JobOutcome, TrainDataItem
+from reef.core.job_data import JobData, JobOutcome, Sample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
@@ -175,7 +175,7 @@ class Sample2Job(ABC, Plugin):
         return self.context.experiment_logger
 
     @abstractmethod
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         """Build one job's data from the samples of the selected record sets, in selection order.
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
@@ -195,7 +195,7 @@ class Sample2Job(ABC, Plugin):
         """Advance the stage's own work on the trainer thread, such as starting the next rollout. The default does nothing."""
         return
 
-    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[Sample, ...] | None:
         """Return samples that the stage made itself and that train now as one job, or None.
 
         While the value is not None, the pipeline is ready and its next job data holds exactly these samples. It
@@ -256,5 +256,5 @@ class NoJobData(Sample2Job):
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
 
-    def make_job_data(self, samples: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         raise RuntimeError(f"scenario {self.scenario!r} trains no weights and never produces job data")
