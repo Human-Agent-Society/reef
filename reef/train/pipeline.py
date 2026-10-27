@@ -60,7 +60,7 @@ from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
 from reef.storage.trajectories import consumed_trajectory_id
-from reef.train.types import JobData, Sample, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
 PIPELINE_STAGES = ("record2record", "record2sample", "sample2job")
@@ -223,7 +223,7 @@ class TrainingPipeline:
         #: Record sets pushed to the record-to-sample stage that have no result yet, by set ID. Their records stay held.
         self.waiting_sets: dict[Hashable, RecordSet] = {}
         #: Uploaded trajectories by trajectory ID, in upload order, until job data consumes them.
-        self.uploaded_trajectories: dict[str, TrajectoryItem] = {}
+        self.uploaded_trajectories: dict[str, TrajectorySample] = {}
         #: The IDs of the uploaded trajectories in the handed out job data.
         self.reserved_trajectory_ids: tuple[str, ...] = ()
         #: The commit IDs of the uploaded trajectories that job data consumed. A second read of one does not queue it.
@@ -409,14 +409,14 @@ class TrainingPipeline:
         self.record2record.push(item)
         self.move_record_sets()
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded trajectory (``Record2Sample.uploaded_sample``); ``ValueError`` when the
         recipe does not accept uploads or the trajectory cannot become a sample. Pure: admission calls it too."""
         if not self.accepts_trajectories:
             raise ValueError(f"{type(self.sample2job).__name__} does not accept uploaded trajectories")
         return self.record2sample.uploaded_sample(trajectory)
 
-    def push_trajectory(self, trajectory_id: str, trajectory: TrajectoryItem) -> None:
+    def push_trajectory(self, trajectory_id: str, trajectory: TrajectorySample) -> None:
         """Read one uploaded trajectory as its training sample. It waits here for job data."""
         if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
             self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))

@@ -28,7 +28,7 @@ from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, Sample, TaskItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 
 class WithholdingRecord2Record(InferenceRecord2Record):
@@ -164,7 +164,7 @@ class PairSamples(ReportSamples):
             raise ValueError("broken training data")
         if context.report.agent_record_id.startswith("skip"):
             return SkippedReport("test")
-        return TaskItem(Path(context.report.agent_record_id))
+        return TaskSample(Path(context.report.agent_record_id))
 
 
 class PairJobData(Sample2Job):
@@ -270,7 +270,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     processor.push(slotted("r2", "i2", "a"))
     processor.push(slotted("r3", "i3", "b"))
     batch = processor.build_job_data(1)
-    assert [str(item.task_path) for item in batch.items] == ["r1", "r3"]
+    assert [str(item.task_path) for item in batch.samples] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
     assert "r2" not in processor.samples
 
@@ -287,7 +287,7 @@ def test_a_failed_assembly_keeps_the_report_and_leaves_its_slot_free() -> None:
     processor.pair_tasks.fail_assembly = False
     processor.push(slotted("r1", "i1", "a"))
     processor.push(slotted("r2", "i2", "b"))
-    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["r1", "r2"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["r1", "r2"]
 
 
 @pytest.mark.unit
@@ -307,7 +307,7 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     processor.push(slotted("r2", "i2", "b"))
     processor.push(slotted("r1", "i1", "a"))
     batch = processor.build_job_data(1)
-    assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
+    assert [str(item.task_path) for item in batch.samples] == ["r2", "r1"]
     assert processor.acknowledge(batch.data_id) == {"i1", "i2", "r1", "r2"}
     assert not processor.samples
 
@@ -322,7 +322,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
     batch = processor.build_job_data(1)
-    assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
+    assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
     assert "r1" not in processor.samples
@@ -346,17 +346,17 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
     assert not processor.ready(1) and processor.background_jobs_running()
     processor.later_tasks.finish("i2", SampleResult.skipped())
     assert not processor.ready(1) and processor.releasable_record_ids() == {"i2"}
-    processor.later_tasks.finish("i1", SampleResult.ready((TaskItem(Path("t1")),)))
+    processor.later_tasks.finish("i1", SampleResult.ready((TaskSample(Path("t1")),)))
     assert processor.ready(1), "the result alone makes a batch, without another record"
     assert not processor.background_jobs_running()
-    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["t1"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["t1"]
 
 
 @pytest.mark.unit
 def test_a_second_result_for_a_settled_set_is_refused() -> None:
     processor = WaitingPipeline()
     processor.push(inference("i1"))
-    result = SampleResult.ready((TaskItem(Path("t1")),))
+    result = SampleResult.ready((TaskSample(Path("t1")),))
     processor.later_tasks.finish("i1", result)
     assert processor.ready(1)
     processor.later_tasks.finish("i1", result)
@@ -375,10 +375,10 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
     assert isinstance(processor, WaitingPipeline)
-    processor.later_tasks.finish("i1", SampleResult.ready((TaskItem(Path("t1")),)))
+    processor.later_tasks.finish("i1", SampleResult.ready((TaskSample(Path("t1")),)))
     assert trainer.run_once() is not None
     batch = trainer.pending_job_data
-    assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
+    assert batch is not None and [str(item.task_path) for item in batch.samples] == ["t1"]
 
 
 class InferenceSamples(ImmediateRecord2Sample):
@@ -386,14 +386,14 @@ class InferenceSamples(ImmediateRecord2Sample):
 
     def make_samples(self, record_set: RecordSet) -> SampleResult:
         record_ids = record_set.record_ids()
-        return SampleResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
+        return SampleResult.ready((TaskSample(Path(record_ids[0]), source_agent_record_ids=record_ids),))
 
 
 class UploadJobData(PairJobData):
     accepts_trajectories = True
 
 
-TRAJECTORY = TrajectoryItem({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
+TRAJECTORY = TrajectorySample({"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1}]})
 
 
 @pytest.mark.unit
@@ -412,17 +412,17 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     assert processor.status()["ready_samples"] == 3
 
     batch = processor.build_job_data(2)
-    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    assert batch.samples == (TRAJECTORY, TRAJECTORY)
     processor.release_job_data(batch.data_id)
     batch = processor.build_job_data(2)
-    assert batch.items == (TRAJECTORY, TRAJECTORY)
+    assert batch.samples == (TRAJECTORY, TRAJECTORY)
     assert processor.acknowledge(batch.data_id) == {"trajectory:t1", "trajectory:t2"}
 
     # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
     processor.push_trajectory("t1", TRAJECTORY)
     processor.push_trajectory("t3", TRAJECTORY)
     batch = processor.build_job_data(2)
-    assert batch.items == (TRAJECTORY, TaskItem(Path("i1"), source_agent_record_ids=("i1",)))
+    assert batch.samples == (TRAJECTORY, TaskSample(Path("i1"), source_agent_record_ids=("i1",)))
     assert processor.acknowledge(batch.data_id) == {"trajectory:t3", "i1"}
     consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
     assert consumed <= processor.releasable_record_ids()
@@ -439,7 +439,7 @@ def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_acc
 
 
 def ready_tasks(*names: str) -> SampleResult:
-    return SampleResult.ready(tuple(TaskItem(Path(name)) for name in names))
+    return SampleResult.ready(tuple(TaskSample(Path(name)) for name in names))
 
 
 class DropRecordingRecords(InferenceRecord2Record):
@@ -475,7 +475,7 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
     assert processor.build_job_data(2) is batch
     assert processor.acknowledge(batch.data_id) == {"i1"}
     assert processor.status()["ready_samples"] == 1
-    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["c"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["c"]
 
 
 @pytest.mark.unit
@@ -527,7 +527,7 @@ def test_a_batch_takes_whole_units_in_selection_order_until_it_holds_the_sample_
     processor.later_tasks.finish("i1", ready_tasks("a1", "a2"))
     batch = processor.build_job_data(3)
     # The second unit passes the sample count; the batch keeps it whole and leaves the third unit held.
-    assert [str(item.task_path) for item in batch.items] == ["a1", "a2", "b1", "b2"]
+    assert [str(item.task_path) for item in batch.samples] == ["a1", "a2", "b1", "b2"]
     assert processor.acknowledge(batch.data_id) == {"i1", "i2"}
     assert processor.status()["ready_samples"] == 1
 
@@ -568,7 +568,7 @@ def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffe
     processor.push(inference("i1"))
     later_tasks.finish("i1", ready_tasks("a", "b", "c"))
     assert processor.ready(1)
-    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["a", "b", "c"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["a", "b", "c"]
 
 
 @pytest.mark.unit
@@ -615,13 +615,13 @@ def test_the_task_to_job_stage_own_job_data_trains_alone_and_its_ids_release_aft
         context, record2record=InferenceRecord2Record(), record2sample=RecordingSamples(), sample2job=batches
     )
     assert not processor.ready(4)
-    batches.samples = (TaskItem(Path("a")),)
+    batches.samples = (TaskSample(Path("a")),)
     assert processor.ready(4), "an own batch is ready whatever its sample count"
     built = processor.build_job_data(4)
     processor.release_job_data(built.data_id)
     assert batches.batches_done == 0 and processor.ready(4), "a released own batch stays the stage's"
     built = processor.build_job_data(4)
-    assert [item.task_path for item in built.items] == [Path("a")]
+    assert [item.task_path for item in built.samples] == [Path("a")]
     assert processor.acknowledge(built.data_id) == {"own:1"}
     assert processor.releasable_record_ids() == {"own:1"}
     processor.release_records(frozenset({"own:1"}))
@@ -667,8 +667,8 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert result is not None
     batch = trainer.pending_job_data
     assert batch is not None
-    assert len(batch.items) == 1
-    assert batch.items[0].source_agent_record_ids == ("valid", "valid-report")
+    assert len(batch.samples) == 1
+    assert batch.samples[0].source_agent_record_ids == ("valid", "valid-report")
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == {"valid", "valid-report", "aborted-report", *references}
     trainer.commit(prepared)

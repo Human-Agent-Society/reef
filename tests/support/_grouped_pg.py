@@ -29,7 +29,7 @@ from reef.sample2job import Sample2Job
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, Sample, TrajectoryItem, trajectory_groups
+from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
 
@@ -74,7 +74,7 @@ class ComparisonSetSamples(ReportSamples):
         super().__init__()
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         set_id = _comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
 from reef.record2record import ReportContext
@@ -75,14 +75,14 @@ class SampleAssembly:
     def __init__(self, settings: SampleAssemblySettings) -> None:
         self.settings = settings
 
-    def assemble(self, inferences: tuple[AgentRecord, ...], score: float, *, source_id: str) -> TrajectoryItem:
+    def assemble(self, inferences: tuple[AgentRecord, ...], score: float, *, source_id: str) -> TrajectorySample:
         """Assemble ordered model calls and their score into one sample, raising if they cannot be used.
 
         ``source_id`` names what the calls came from: a report, or a rollout episode, whose calls are
         in-memory values that Reef never stored.
         """
         if len(inferences) == 1:
-            sample: TrajectoryItem | None = self.single_sample(inferences[0], score)
+            sample: TrajectorySample | None = self.single_sample(inferences[0], score)
         else:
             sample = make_multi_turn_policy_trajectory(
                 inferences,
@@ -97,11 +97,11 @@ class SampleAssembly:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
         return sample
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
         """One model call as one sample: the shared tensor reader."""
         return make_policy_trajectory(record, score)
 
-    def build(self, context: ReportContext, score: float) -> TrajectoryItem:
+    def build(self, context: ReportContext, score: float) -> TrajectorySample:
         """Build training data, raising if the recorded trajectory cannot be used."""
         sample = self.assemble(context.inferences, score, source_id=context.report.agent_record_id)
         fields: dict[str, Any] = {

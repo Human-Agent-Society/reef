@@ -106,8 +106,8 @@ def test_trace_processor_batches_a_failed_trace() -> None:
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
-    assert len(batch.items) == 1
-    sample = batch.items[0]
+    assert len(batch.samples) == 1
+    sample = batch.samples[0]
     assert source_record_id(sample) == "inf-1"
     assert sample.metadata.get("reward") == 0.0
     assert recorded_payload(sample)["messages"][0]["content"] == "skill"
@@ -120,7 +120,7 @@ def test_trace_processor_batches_successful_reports() -> None:
     processor = _processor()
     processor.push(_inference("inf-1", {"messages": []}))
     processor.push(_report("rep-1", 1.0, ["inf-1"]))
-    assert processor.build_job_data(1).items[0].metadata.get("reward") == 1.0
+    assert processor.build_job_data(1).samples[0].metadata.get("reward") == 1.0
 
 
 def test_trace_processor_carries_the_task_a_report_names() -> None:
@@ -135,7 +135,7 @@ def test_trace_processor_carries_the_task_a_report_names() -> None:
         agent_record_id="rep-1",
     )
     processor.push(named)
-    sample = processor.build_job_data(1).items[0]
+    sample = processor.build_job_data(1).samples[0]
     assert sample.metadata["task"] == task and sample.metadata["reward"] == 1.0
 
 
@@ -152,7 +152,7 @@ def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() ->
 
     assert processor.ready(1)
     batch = processor.build_job_data(1)
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert source_record_id(sample) == "inf-2"
     assert recorded_payload(sample) == second
     assert recorded_payloads(sample) == (first, second)
@@ -167,7 +167,7 @@ def test_trace_processor_keeps_single_reference_trajectory_and_carries_feedback(
     processor.push(_report("rep-1", 0.0, ["inf-1"], feedback={"reason": "timeout"}))
 
     batch = processor.build_job_data(1)
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert recorded_payload(sample) == payload
     assert recorded_payloads(sample) == (payload,)
     assert sample.metadata.get("feedback") == {"reason": "timeout"}
@@ -217,9 +217,9 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
 
     batch = processor.build_job_data(2)
     assert isinstance(batch, JobData)
-    assert [source_record_id(s) for s in batch.items] == ["inf-1", "inf-2"]
-    assert [recorded_payload(s) for s in batch.items] == [first, second]
-    assert {s.metadata.get("reward") for s in batch.items} == {None}
+    assert [source_record_id(s) for s in batch.samples] == ["inf-1", "inf-2"]
+    assert [recorded_payload(s) for s in batch.samples] == [first, second]
+    assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
     retention = processor.releasable_record_ids()
     assert retention.isdisjoint(frozenset({"inf-1", "inf-2"}))
@@ -240,7 +240,7 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
 
     processor.push(_inference("inf-1", {"messages": []}))
     batch = processor.build_job_data(1)
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert sample.metadata.get("reward") is None
     assert sample.metadata.get("feedback") is None
 
@@ -250,7 +250,7 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     for index in range(3):
         processor.push(_inference(f"inf-{index}", {"messages": []}))
     batch = processor.build_job_data(2)
-    assert [source_record_id(s) for s in batch.items] == ["inf-0", "inf-1"]
+    assert [source_record_id(s) for s in batch.samples] == ["inf-0", "inf-1"]
     processor.acknowledge(batch.data_id)
     retention = processor.releasable_record_ids()
     assert retention.isdisjoint(frozenset({"inf-2"}))

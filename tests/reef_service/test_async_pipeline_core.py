@@ -308,7 +308,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher, "2", "w1")
     _wait_for_jobs(dispatcher, 2)
 
-    assert [source_record_id(job.data.items[0]) for job in component.calls] == ["inference-1", "inference-2"]
+    assert [source_record_id(job.data.samples[0]) for job in component.calls] == ["inference-1", "inference-2"]
     # Training is linear: the second job starts from the first job's checkpoint.
     assert component.calls[0].start is None
     assert component.calls[1].start == str(component.checkpoint_root / "1")

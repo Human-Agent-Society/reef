@@ -30,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.core.job_data import TaskItem
+from reef.core.job_data import TaskSample
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
 from reef.runtime.interfaces import (
@@ -332,7 +332,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         return str(directory)
 
     def check_job(self, job: TrainingJob) -> None:
-        if any(isinstance(item, TaskItem) for item in job.data.items):
+        if any(isinstance(item, TaskSample) for item in job.data.samples):
             raise ValueError("Slime trains trajectories; it does not roll tasks out (task jobs) yet")
         unknown = set(job.parameters) - {"method", "scheduling", "save_interval"}
         if unknown:

@@ -27,7 +27,7 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.evaluation import CheckpointCandidate
-from reef.core.job_data import JobData, JobOutcome, Sample, TaskItem
+from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.rollout import (
     HandedOutTasks,
@@ -63,9 +63,9 @@ class SFTThenRLJobSettings(Sample2JobSettings):
             raise ValueError("tasks_per_job must be a positive int")
 
 
-def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskItem:
+def imported_task_item(store: TaskStore, stored: StoredTask) -> TaskSample:
     """The task that a task job rolls out for the imported task ``stored``: its directory, named by its task name."""
-    return TaskItem(
+    return TaskSample(
         store.path(stored.files_digest),
         metadata={"task": {"name": stored.name, "files_digest": stored.files_digest, "split": stored.split}},
     )
@@ -170,8 +170,8 @@ class SFTThenRLJobPlan(JobPlan):
     """Give a job of trajectories the ``sft`` request and a task job the ``rl`` request.
 
     Values: ``sft`` and ``rl`` are ``JobRequest`` values. Operation: ``next_job(context)`` is ``rl`` when
-    ``context.data`` holds one or more items and every item is a ``TaskItem``, and ``sft`` when no item is a
-    ``TaskItem``; data that holds both kinds raises ``ValueError``. Purpose: ``SFTThenRLRecipe.job_plan`` makes
+    ``context.data`` holds one or more items and every item is a ``TaskSample``, and ``sft`` when no item is a
+    ``TaskSample``; data that holds both kinds raises ``ValueError``. Purpose: ``SFTThenRLRecipe.job_plan`` makes
     it, and the weight trainer's job loop asks it for each job.
     """
 
@@ -182,10 +182,10 @@ class SFTThenRLJobPlan(JobPlan):
         self.rl = rl
 
     def next_job(self, context: JobPlanContext) -> JobRequest:
-        tasks = sum(isinstance(item, TaskItem) for item in context.data.items)
+        tasks = sum(isinstance(item, TaskSample) for item in context.data.samples)
         if tasks == 0:
             return self.sft
-        if tasks == len(context.data.items):
+        if tasks == len(context.data.samples):
             return self.rl
         raise ValueError(f"job data {context.data.data_id!r} holds both trajectories and tasks")
 

@@ -23,7 +23,7 @@ from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem
+from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -47,7 +47,7 @@ def imported(record_id, payload=None, request_type="inference"):
 
 class FeedbackSamples(ReportSamples):
     def make_sample(self, context):
-        return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
+        return TaskSample(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
 
 class FeedbackJobData(Sample2Job):
@@ -71,7 +71,7 @@ class LearningBackend(ExampleBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.items)})
+        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.samples)})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -230,7 +230,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
             assert handler.calls == 2
             assert scenario.trainer.pipeline is processor
             assert len(scenario.store.history()) == len(recipe.batches) == 4
-            samples = [sample for batch in recipe.batches for sample in batch.items]
+            samples = [sample for batch in recipe.batches for sample in batch.samples]
             assert [sample.metadata["messages"][0]["content"] for sample in samples] == [
                 *(f"offline-{index}" for index in range(6)),
                 "online-0",

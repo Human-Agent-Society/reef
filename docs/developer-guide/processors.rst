@@ -24,8 +24,8 @@ The three stages
   decides which records train, in which record sets and units, and in
   what order (see `Record sets and their units <#record-sets-and-their-units>`__).
 - The **record-to-sample stage** (``Record2Sample``, ``reef.record2sample``) turns
-  one record set into samples. A sample is a ``Sample``: a ``TrajectoryItem``
-  that trains directly, or a ``TaskItem`` (a Harbor task) that an algorithm
+  one record set into samples. A sample is a ``Sample``: a ``TrajectorySample``
+  that trains directly, or a ``TaskSample`` (a Harbor task) that an algorithm
   rolls out. Job data may mix both.
 - The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
   shapes the samples of the selected record set units into one ``JobData``. Grouped
@@ -603,7 +603,7 @@ weights, and trains on their episodes. ``GeneratedTaskJobData`` drives the
 loop through the stage's own-job-data hooks:
 
 1. When no tasks are handed out, the stage takes up to ``tasks_per_step``
-   tasks from its task pool as the next job's data: the ``TaskItem`` values.
+   tasks from its task pool as the next job's data: the ``TaskSample`` values.
 2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
    tells the component how many episodes of each task to run, and with which
    agent and sandbox. The Tinker component runs them, assembles one sample
@@ -704,7 +704,7 @@ A record's path to a job
        -> record2sample: make_sample -> Sample -> record2record: record set unit
        -> sample2job: make_job_data -> job data -> acknowledge
 
-   uploaded trajectory -> TrajectoryItem -> sample2job: make_job_data -> job data -> acknowledge
+   uploaded trajectory -> TrajectorySample -> sample2job: make_job_data -> job data -> acknowledge
 
 Where the stages live
 ---------------------

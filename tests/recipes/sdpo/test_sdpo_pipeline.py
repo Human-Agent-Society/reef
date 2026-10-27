@@ -144,13 +144,13 @@ def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokeni
     batch = target.build_job_data(4)
     assert isinstance(batch, JobData)
     assert batch.data_id == "science:data:1"
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [0.0, 1.0, 0.0, 0.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [0.0, 1.0, 0.0, 0.0]
     # The demonstration is the sibling's recorded response with its thinking block removed.
     assert tokenizer.calls[1][0][-1]["content"].endswith(
         "Correct solution:\n\nAnswer from s0g0r0\n\nCorrectly solve the original question."
     )
     assert "Correct solution" not in tokenizer.calls[0][0][-1]["content"]
-    for sample in batch.items:
+    for sample in batch.samples:
         assert list(sample.training["teacher_tokens"][-3:]) == list(sample.training["tokens"][-3:])
         assert list(sample.training["loss_mask"]) == [1, 1, 1]
 
@@ -161,7 +161,7 @@ def test_a_rollout_reads_its_own_success_only_when_allowed(tokenizer: SDPOTokeni
     push(target, 0, score=1.0)
     push(target, 1, score=0.0)
     batch = target.build_job_data(2)
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [1.0, 1.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [1.0, 1.0]
     assert "Answer from s0g0r0" in tokenizer.calls[0][0][-1]["content"]
 
 
@@ -174,8 +174,8 @@ def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
         target.build_job_data(2)
     push(target, 1, score=0.0)
     batch = target.build_job_data(2)
-    assert len(batch.items) == 2
-    assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.items)
+    assert len(batch.samples) == 2
+    assert all(sample.training["distill_sample_weight"] == 0.0 for sample in batch.samples)
 
 
 @pytest.mark.unit
@@ -206,7 +206,7 @@ def test_environment_feedback_is_opt_in(tokenizer: SDPOTokenizer, include_feedba
     push(target, 0, feedback="The tool call is missing a required argument.")
     push(target, 1)
     batch = target.build_job_data(2)
-    assert [s.training["distill_sample_weight"] for s in batch.items] == [float(include_feedback), 0.0]
+    assert [s.training["distill_sample_weight"] for s in batch.samples] == [float(include_feedback), 0.0]
     assert ("missing a required argument" in tokenizer.calls[0][0][-1]["content"]) == include_feedback
 
 
@@ -222,7 +222,7 @@ def test_solution_can_take_priority_over_feedback_and_prompt_truncates_right(tok
     push(target, 1, feedback="Do not include this feedback when a solution exists.")
     batch = target.build_job_data(2)
     assert "Do not include" not in tokenizer.calls[1][0][-1]["content"]
-    assert list(batch.items[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
+    assert list(batch.samples[1].training["teacher_tokens"]) == [100, 101, 1, 2, 3]
 
 
 @pytest.mark.unit

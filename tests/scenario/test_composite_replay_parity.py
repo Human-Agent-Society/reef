@@ -223,7 +223,7 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data
-    sources = [tuple(item.source_agent_record_ids) for item in batch.items]
+    sources = [tuple(item.source_agent_record_ids) for item in batch.samples]
     scenario.commit(result, component=component)
     return sources
 

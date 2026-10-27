@@ -1,7 +1,7 @@
 """Transport-independent handling of uploaded ATIF trajectories.
 
 An uploaded trajectory is not a record. ``upload_trajectories`` checks an
-upload, makes a ``TrajectoryItem`` of each trajectory, and gives them to the
+upload, makes a ``TrajectorySample`` of each trajectory, and gives them to the
 dispatcher. No aiohttp types appear here. ``reef.service.routes.trajectories``
 adapts it to HTTP.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.dispatcher import Dispatcher
 from reef.service.wire import RELEASE_ID_HEADER, SCENARIO_HEADER, HeaderError
 
@@ -34,7 +34,7 @@ def upload_trajectories(dispatcher: Dispatcher, headers: Mapping[str, str], body
         raise ValueError("body must contain only 'trajectories', an array of trajectory objects")
     if not 1 <= len(entries) <= MAX_TRAJECTORIES_PER_UPLOAD:
         raise ValueError(f"an upload must hold 1 to {MAX_TRAJECTORIES_PER_UPLOAD} trajectories")
-    trajectories: list[tuple[str, TrajectoryItem]] = []
+    trajectories: list[tuple[str, TrajectorySample]] = []
     for entry in entries:
         if not isinstance(entry, Mapping) or entry.keys() != {"trajectory_id", "trajectory"}:
             raise ValueError("each trajectory object must contain only 'trajectory_id' and 'trajectory'")
@@ -43,6 +43,6 @@ def upload_trajectories(dispatcher: Dispatcher, headers: Mapping[str, str], body
             raise ValueError("trajectory_id must be a non-empty string")
         if not isinstance(trajectory, Mapping):
             raise ValueError("trajectory must be an ATIF document")
-        trajectories.append((trajectory_id, TrajectoryItem(trajectory)))
+        trajectories.append((trajectory_id, TrajectorySample(trajectory)))
     dispatcher.accept_trajectories(scenario, tuple(trajectories), release_id=normalized.get(RELEASE_ID_HEADER) or None)
     return {"scenario": scenario, "trajectory_ids": [trajectory_id for trajectory_id, _ in trajectories]}

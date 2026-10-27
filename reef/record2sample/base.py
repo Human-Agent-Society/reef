@@ -1,7 +1,7 @@
 """The record-to-sample contract: each record set from the record-to-record stage becomes samples.
 
-A sample is a ``Sample``: a ``TrajectoryItem`` that trains directly, or a
-``TaskItem`` that the algorithm rolls out. The training pipeline pushes each
+A sample is a ``Sample``: a ``TrajectorySample`` that trains directly, or a
+``TaskSample`` that the algorithm rolls out. The training pipeline pushes each
 record set that the record stage forms (``push``) and pulls the sample results
 (``pull``). It gives each result back to the record stage.
 """
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.job_data import Sample, TrajectoryItem
+from reef.core.job_data import Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, SampleStatus
@@ -59,7 +59,7 @@ class Record2Sample(ABC, Plugin):
     the stage in ``from_config``.
     """
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded ATIF trajectory; the default is the trajectory as it was uploaded.
 
         The default fits a backend that reads ATIF trajectories as they are. A stage whose backend trains

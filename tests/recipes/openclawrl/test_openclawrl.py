@@ -133,8 +133,8 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
-    assert [trajectory_reward(sample) for sample in batch.items] == [1.0]
-    assert source_record_id(batch.items[0]) == "t1"
+    assert [trajectory_reward(sample) for sample in batch.samples] == [1.0]
+    assert source_record_id(batch.samples[0]) == "t1"
     processor.acknowledge(batch.data_id)
     assert not processor.ready(1)
     decision = processor.releasable_record_ids()
@@ -300,7 +300,7 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
         time.sleep(0.01)
     assert processor.ready(1), "worker judgment never landed"
     batch = processor.build_job_data(1)
-    sample = batch.items[0]
+    sample = batch.samples[0]
     assert trajectory_reward(sample) == 1.0
     # The RL-only anchor is the native ids verbatim, built without the
     # teacher (its construction cannot fail), for the Megatron teacher pass.

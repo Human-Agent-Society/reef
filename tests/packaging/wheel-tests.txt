@@ -203,5 +203,5 @@ tests/train/test_reported_feedback_processor.py
 tests/train/test_sample_task_metadata.py
 tests/train/test_step_schedule.py
 tests/train/test_trainer.py
-tests/train/test_training_data_items.py
+tests/train/test_training_data_samples.py
 tests/sandbox/test_environment.py

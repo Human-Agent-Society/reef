@@ -56,7 +56,7 @@ from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData, Sample, TaskItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
 
@@ -103,7 +103,7 @@ def json_value(value: object) -> object:
 
 def describe_item(item: Sample) -> dict[str, object]:
     """The deterministic parts of one batch item."""
-    if isinstance(item, TaskItem):
+    if isinstance(item, TaskSample):
         return {"task": str(item.task_path), "sources": list(item.source_agent_record_ids)}
     training = item.training
     metadata = item.metadata
@@ -188,7 +188,7 @@ class StreamRun:
                 {
                     "data_id": batch.data_id,
                     "request": None if batch.request is None else batch.request.id,
-                    "items": [describe_item(item) for item in batch.items],
+                    "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
                     "released": sorted(prepared.released_ids),
                 }
@@ -303,7 +303,7 @@ class AssembledSamples(ReportSamples):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 
@@ -430,7 +430,7 @@ class ToySamples(JudgedSamples):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectorySample | None:
         if not isinstance(judgment, ToyJudgment) or not judgment.good:
             return None
         return policy_trajectory(

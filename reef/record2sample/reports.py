@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 
-from reef.core.job_data import Sample, TaskItem, TrajectoryItem
+from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.record2record import RecordSet, ReportCandidate, ReportContext
 from reef.record2sample.base import ImmediateRecord2Sample, SampleResult
 
@@ -46,7 +46,7 @@ class ReportSamples(ImmediateRecord2Sample, ABC):
         sample = self.make_sample(context)
         if isinstance(sample, SkippedReport):
             return SampleResult.skipped()
-        if not isinstance(sample, (TrajectoryItem, TaskItem)):
+        if not isinstance(sample, (TrajectorySample, TaskSample)):
             raise TypeError(f"{type(self).__name__}.make_sample must return a Sample")
         report_id = context.report.agent_record_id
         return SampleResult.ready((replace(sample, source_agent_record_ids=(*context.references, report_id)),))

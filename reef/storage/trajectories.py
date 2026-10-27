@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from reef.core.errors import ReefError
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 
 #: Marks the ID of a consumed uploaded trajectory in a commit, so that it cannot be a record ID.
 CONSUMED_TRAJECTORY_PREFIX = "trajectory:"
@@ -36,7 +36,7 @@ class StoredTrajectory:
 
     Values: ``(sequence, trajectory_id, trajectory)`` is a stored trajectory if
     and only if ``sequence`` is a positive integer, ``trajectory_id`` is a
-    non-empty string, and ``trajectory`` is a ``TrajectoryItem``. ``sequence`` is
+    non-empty string, and ``trajectory`` is a ``TrajectorySample``. ``sequence`` is
     the position of the trajectory in upload order. ``trajectory_id`` is the ID
     that the client gave it.
 
@@ -48,7 +48,7 @@ class StoredTrajectory:
 
     sequence: int
     trajectory_id: str
-    trajectory: TrajectoryItem
+    trajectory: TrajectorySample
 
     def __post_init__(self) -> None:
         if self.sequence < 1 or not self.trajectory_id:
@@ -68,7 +68,7 @@ class TrajectoryStore(ABC):
     """
 
     @abstractmethod
-    def add(self, trajectories: tuple[tuple[str, TrajectoryItem], ...]) -> bool:
+    def add(self, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
         """Save each ``(trajectory_id, trajectory)`` pair in one transaction, in order. Return True if one or more is new.
 
         A pair whose ID is stored with the same trajectory changes nothing.

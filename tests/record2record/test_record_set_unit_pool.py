@@ -11,7 +11,7 @@ from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.core.job_data import TaskItem
+from reef.core.job_data import TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.record2record import (
     ArrivalOrder,
@@ -105,7 +105,7 @@ def test_a_stage_puts_a_record_in_one_record_set_only() -> None:
 
 
 def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() -> None:
-    sample = TaskItem(Path("task"))
+    sample = TaskSample(Path("task"))
     assert SampleResult.ready((sample,)).samples == (sample,)
     for status, samples in ((SampleStatus.READY, ()), (SampleStatus.SKIPPED, (sample,))):
         with pytest.raises(ValueError, match="READY result holds one or more samples"):
@@ -192,7 +192,7 @@ def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> N
         policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:3"),
         policy_trajectory("b", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, runtime_load_spans=spans),
         policy_trajectory("c", (1, 2), (1,), (-0.1,), 1.0),
-        TaskItem(Path("task")),
+        TaskSample(Path("task")),
     )
     assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
 

@@ -25,7 +25,7 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData, TrajectoryItem
+from reef.train.types import JobData, TrajectorySample
 
 pytestmark = pytest.mark.unit
 
@@ -79,7 +79,7 @@ def _anchor(tokens: tuple) -> tuple:
     return ({"hint": "", "teacher_tokens": [int(v) for v in tokens]},)
 
 
-def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> TrajectoryItem:
+def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> TrajectorySample:
     tokens = tuple(range(10, 10 + n + 2))
     if cands is None:
         cands = _anchor(tokens)
@@ -611,7 +611,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
     worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
 
     batch = processor.build_job_data(2)
-    by_source = {source_record_id(sample): sample for sample in batch.items}
+    by_source = {source_record_id(sample): sample for sample in batch.samples}
     sample = by_source["i0"]
     assert tuple(tuple(row) for row in sample.training.get("topk_indices", [])) == ((1, 2), (3, 4), (5, 6))
     assert sample.training.get("extras", {})["teacher_cands"] == [{"hint": "h", "teacher_tokens": [99, 2, 3, 4]}]

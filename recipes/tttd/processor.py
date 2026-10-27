@@ -29,7 +29,7 @@ from reef.record2record import (
 from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ class TTTDSamples(ReportSamples):
             )
         return cls(settings, record2record)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed: Any = context.parsed_report
         if parsed is None:
             raise ValueError("TTTD requires the recipe's report schema")
@@ -297,7 +297,7 @@ class TTTDJobData(Sample2Job):
         )
         return replace(
             data,
-            items=tuple(
+            samples=tuple(
                 replace(sample, group_id=str(index)) for index, group in enumerate(training_groups) for sample in group
             ),
         )

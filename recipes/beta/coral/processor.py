@@ -32,7 +32,7 @@ from reef.record2record import Record2Record, ReportContext
 from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ class CoralSamples(ReportSamples):
     ) -> Self:
         return cls(CoralAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         coral = coral_metadata(context)
         if coral is None:
             raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
@@ -136,7 +136,7 @@ class CoralJobData(Sample2Job):
 
     def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         data = JobData(data_id, items)
-        groups: dict[str, list[TrajectoryItem]] = {}
+        groups: dict[str, list[TrajectorySample]] = {}
         for sample in trajectories(data):
             groups.setdefault(str(sample.metadata["coral"]["group"]), []).append(sample)
         for parent, group in groups.items():
@@ -156,5 +156,5 @@ class CoralJobData(Sample2Job):
             )
         return replace(
             data,
-            items=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
+            samples=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
         )

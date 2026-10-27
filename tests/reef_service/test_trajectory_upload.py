@@ -21,7 +21,7 @@ from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
@@ -55,7 +55,7 @@ class CountingBackend(CandidateBackend):
 
     def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
         self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.items)})
+        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.samples)})
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         raise NotImplementedError
@@ -163,8 +163,8 @@ def test_uploaded_trajectories_train_once_also_after_a_restart(tmp_path):
         dispatcher.close()
 
     first, second = recipe.batches
-    assert first.items == (TrajectoryItem(atif("t1")), TrajectoryItem(atif("t2")))
-    assert second.items == (TrajectoryItem(atif("t3")), TrajectoryItem(atif("t4")))
+    assert first.samples == (TrajectorySample(atif("t1")), TrajectorySample(atif("t2")))
+    assert second.samples == (TrajectorySample(atif("t3")), TrajectorySample(atif("t4")))
 
 
 def test_an_upload_needs_a_recipe_that_accepts_uploaded_trajectories(tmp_path):
@@ -250,6 +250,6 @@ def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered
     finally:
         dispatcher.close()
     (batch,) = recipe.batches
-    assert [item.training for item in batch.items] == [
+    assert [item.training for item in batch.samples] == [
         {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": []}
     ] * 2

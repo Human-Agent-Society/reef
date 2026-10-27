@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Self, cast
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import atif_messages, make_trajectory
@@ -160,7 +160,7 @@ class SFTSamples(ReportSamples):
             raise ValueError("the target response renders to no tokens")
         return sequence_ids, len(sequence_ids) - len(prompt_ids)
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """Render an uploaded ATIF conversation with the chat template, with every generated agent turn trained.
 
         An agent step with ``is_copied_context: true`` (ATIF's mark for a step copied from earlier context) is
@@ -208,7 +208,7 @@ class SFTSamples(ReportSamples):
             loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
         return trajectory.with_training(tokens=tokens, loss_mask=loss_mask, rollout_log_probs=[])
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")

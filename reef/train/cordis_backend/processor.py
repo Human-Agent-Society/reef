@@ -13,7 +13,7 @@ from reef.record2record import Record2Record, RecordSet, ReportContext, SingleRe
 from reef.record2sample import ImmediateRecord2Sample, ReportSamples, SampleResult
 from reef.record2sample.assembly import reported_task
 from reef.sample2job import DistillJobData
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 
 class TraceSamples(ReportSamples):
@@ -40,7 +40,7 @@ class TraceSamples(ReportSamples):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
         task = reported_task(context.report.payload.get("metadata"))
         return sample if task is None else sample.with_metadata(task=task)

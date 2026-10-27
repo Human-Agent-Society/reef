@@ -134,7 +134,7 @@ def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: Countin
     batch = processor.build_job_data(1)
 
     assert isinstance(batch, JobData)
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert source_record_id(sample) == "i1"
     assert tokenizer.loaded == [("/models/science", {"trust_remote_code": True})]
     rendered, tools = tokenizer.calls[0]
@@ -166,7 +166,7 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     assert rendered[0] == {"role": "system", "content": "You answered: About 90 degrees.\nVerifier: Too low."}
     assert rendered[1:] == [{"role": "user", "content": QUESTION}]
     assert tools is None
-    assert list(batch.items[0].training["teacher_tokens"]) == [*tokenizer.count_ids(rendered), 1, 2, 3]
+    assert list(batch.samples[0].training["teacher_tokens"]) == [*tokenizer.count_ids(rendered), 1, 2, 3]
     assert batch.data_id == "science:data:1"
 
 
@@ -188,7 +188,7 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     # A later report that fits still trains.
     processor.push(short_request)
     processor.push(_report("r2", ("i2",), teacher_context="ok"))
-    assert len(processor.build_job_data(1).items) == 1
+    assert len(processor.build_job_data(1).samples) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
 
 

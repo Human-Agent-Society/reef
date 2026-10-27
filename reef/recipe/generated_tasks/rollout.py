@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Hashable
 from dataclasses import dataclass
 
-from reef.core.job_data import TaskItem
+from reef.core.job_data import TaskSample
 
 #: The prefix of the ID that a commit lists for a task of a submitted task job.
 CONSUMED_ROLLOUT_PREFIX = "rollout:"
@@ -42,7 +42,7 @@ class PooledTask:
     task_id: Hashable
     arrival_index: int
     group_key: Hashable | None
-    item: TaskItem
+    item: TaskSample
 
 
 class TaskPool:
@@ -70,7 +70,7 @@ class TaskPool:
         """Whether no task waits and no task job holds one."""
         return not self.waiting and not self.taken
 
-    def add(self, task_id: Hashable, item: TaskItem, *, group_key: Hashable | None = None) -> None:
+    def add(self, task_id: Hashable, item: TaskSample, *, group_key: Hashable | None = None) -> None:
         """Add a task after the waiting ones. A task with a waiting ID replaces it; a taken ID is refused."""
         if task_id in self.taken:
             raise ValueError(f"task {task_id!r} is in a task job")

@@ -124,7 +124,7 @@ def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, b
     assert result is not None
     batch = backend.batches[0]
     assert batch.request.text == "request-1"
-    assert batch.items == ()
+    assert batch.samples == ()
     prepared = trainer.prepare_commit(result)
     assert "request-1" in prepared.consumed_ids
     assert not {"other-session", "turn-1", "turn-2"} & prepared.consumed_ids
@@ -145,7 +145,7 @@ def test_auto_keeps_recipe_batching():
     assert trainer.run_once() is None
     records.append(inference("b"))
     assert trainer.run_once() is not None
-    assert [source_record_id(sample) for sample in backend.batches[0].items] == ["a", "b"]
+    assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["a", "b"]
     assert backend.batches[0].request is None
     trainer.close()
     records.close()
@@ -323,7 +323,7 @@ def test_manual_instruction_batch_never_falls_back_to_auto():
     batch = pipeline.build_job_data(1)
     # The instruction runs alone: the held set an automatic batch would take stays held.
     assert batch.request.id == "one"
-    assert batch.items == ()
+    assert batch.samples == ()
     assert pipeline.acknowledge(batch.data_id) == frozenset({"one"})
     assert len(pipeline.record2record.pool) == 1
     pipeline.close()
@@ -522,7 +522,7 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions()
         assert trainer.run_once() is None
         records.append(inference("b"))
         result = trainer.run_once()
-        assert [source_record_id(item) for item in backend.batches[-1].items] == ["a", "b"]
+        assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         assert records.get("s", "change") is not None
@@ -1052,7 +1052,7 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
         assert _wait(lambda: _job_events(dispatcher) == expected), _job_events(dispatcher)
         # Each job trains one instruction alone; the held inference is not part of a manual batch.
         assert [job.data.request.text for job in component.submitted] == ["one", "two"]
-        assert all(job.data.items == () for job in component.submitted)
+        assert all(job.data.samples == () for job in component.submitted)
         releases = dispatcher.get_or_create_scenario("s").releases()
         failed = next(
             row["metrics"]
@@ -1142,7 +1142,7 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(processor):
         assert trainer.run_once() is not None
         assert trainer.pipeline is original
         assert trainer.data_offset == offset
-        assert [source_record_id(sample) for sample in backend.batches[-1].items] == ["a", "b"]
+        assert [source_record_id(sample) for sample in backend.batches[-1].samples] == ["a", "b"]
     finally:
         trainer.close()
         records.close()
@@ -1185,7 +1185,7 @@ def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor
         batch = backend.batches[0]
         assert batch.data_id == "s:instruction:alone"
         assert batch.request.text == "alone"
-        assert batch.items == ()
+        assert batch.samples == ()
         prepared = trainer.prepare_commit(result)
         assert prepared.consumed_ids == frozenset({"alone"})
         assert prepared.metrics["training_request"]["id"] == "alone"
@@ -1209,7 +1209,7 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         result = trainer.run_once()
         batch = backend.batches[0]
         assert batch.request.id == "with-context"
-        assert [source_record_id(sample) for sample in batch.items] == ["a"]
+        assert [source_record_id(sample) for sample in batch.samples] == ["a"]
         prepared = trainer.prepare_commit(result)
         assert {"a", "with-context"} <= prepared.consumed_ids
         trainer.commit(prepared)
@@ -1217,7 +1217,7 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         records.append(instruction("after"))
         assert trainer.run_once() is not None
         assert backend.batches[1].request.id == "after"
-        assert backend.batches[1].items == ()
+        assert backend.batches[1].samples == ()
     finally:
         trainer.close()
         records.close()
@@ -1247,7 +1247,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
     batch = processor.build_job_data(1)
     assert batch.data_id == "s:data:1"
     assert batch.request is None
-    assert [source_record_id(sample) for sample in batch.items] == ["a"]
+    assert [source_record_id(sample) for sample in batch.samples] == ["a"]
     assert processor.acknowledge(batch.data_id) == frozenset({"a", "report-a"})
     processor.close()
 
@@ -1264,7 +1264,7 @@ def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_m
         trainer.commit(prepared)
         batch = backend.batches[-1]
         request = None if batch.request is None else batch.request.id
-        return request, [source_record_id(sample) for sample in batch.items]
+        return request, [source_record_id(sample) for sample in batch.samples]
 
     try:
         failure(records, "a")
@@ -1305,14 +1305,14 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
         failure(records, "b")
         result = trainer.run_once()
         assert backend.batches[-1].request is None
-        assert [source_record_id(sample) for sample in backend.batches[-1].items] == ["a", "b"]
+        assert [source_record_id(sample) for sample in backend.batches[-1].samples] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         assert records.get("s", "later") is not None
         trainer.set_training_mode("hybrid")
         result = trainer.run_once(1)
         assert backend.batches[-1].request.id == "later"
-        assert backend.batches[-1].items == ()
+        assert backend.batches[-1].samples == ()
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
         assert trainer.run_once(2) is None
@@ -1435,7 +1435,7 @@ def test_every_mode_releases_the_oldest_held_units_beyond_the_buffer(caplog, mod
     if mode == "manual":
         processor.push(instruction("do-it"))
         batch = processor.build_job_data(1)
-        assert batch.items == ()
+        assert batch.samples == ()
         assert processor.acknowledge(batch.data_id) == frozenset({"do-it"})
         assert len(processor.record2record.pool) == 4
     else:

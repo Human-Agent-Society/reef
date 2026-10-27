@@ -11,7 +11,7 @@ from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, Sample, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 
 class ThresholdSamples(ReportSamples):
@@ -32,7 +32,7 @@ class ThresholdSamples(ReportSamples):
     ) -> Self:
         return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 

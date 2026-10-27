@@ -22,7 +22,7 @@ from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2sample import JudgedSamples
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, Sample, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 pytestmark = pytest.mark.unit
 
@@ -78,7 +78,7 @@ class _ToyJudging(RecordJudging):
 class _ToySamples(JudgedSamples):
     """One-token stub samples; a judgment that is not good cannot train."""
 
-    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectorySample | None:
         if not judgment.good:
             return None
         return policy_trajectory(
@@ -133,7 +133,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     worker.push(_Judgment("r1"))
     assert processor.ready(1)
     batch = processor.build_job_data(1)
-    assert source_record_id(batch.items[0]) == "r1"
+    assert source_record_id(batch.samples[0]) == "r1"
     processor.acknowledge(batch.data_id)
     decision = processor.releasable_record_ids()
     assert "r1" in decision

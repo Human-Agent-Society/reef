@@ -140,9 +140,9 @@ def write_fake_sdk(root: Path, model: str) -> Path:
 
 
 def training_item(version: str, index: int):
-    from reef.core.job_data import TrajectoryItem
+    from reef.core.job_data import TrajectorySample
 
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": "test"},

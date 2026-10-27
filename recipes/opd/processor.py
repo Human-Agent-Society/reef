@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
@@ -61,7 +61,7 @@ class OPDSamples(ReportSamples):
     def operational_metrics(self) -> Mapping[str, float | int]:
         return {"teacher_overflow_reports": self.overflow_count}
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         report = context.parsed_report
         if not isinstance(report, TeacherContextReport):
             raise ValueError("OPD requires TeacherContextReport")

@@ -16,7 +16,7 @@ from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobData, JobOutcome, TaskItem, TrajectoryItem
+from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
@@ -147,7 +147,7 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
     return [] if own is None else [item.metadata["task"]["name"] for item in own]
 
 
-def sample(task: str, index: int, reward: float) -> TrajectoryItem:
+def sample(task: str, index: int, reward: float) -> TrajectorySample:
     """One episode's sample in the task group ``task``, as the training component's rollout makes it."""
     trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, "r1")
     return dataclasses.replace(trajectory, group_id=task)
@@ -177,7 +177,7 @@ def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_cou
 
 
 def pooled(name: str) -> PooledTask:
-    return PooledTask(name, 0, None, TaskItem(Path(name)))
+    return PooledTask(name, 0, None, TaskSample(Path(name)))
 
 
 @pytest.mark.parametrize(
@@ -387,7 +387,7 @@ def train_job(
     1.0 and 0.0 by default. A job with ``error`` failed and reports no metrics.
     """
     data = p.build_job_data(BATCH_SIZE)
-    names = [item.metadata["task"]["name"] for item in data.items]
+    names = [item.metadata["task"]["name"] for item in data.samples]
     p.acknowledge(data.data_id)
     # The trainer releases the consumed IDs once the submission's commit is durable.
     p.release_records(p.releasable_record_ids())
@@ -428,8 +428,8 @@ def test_the_first_look_for_a_batch_runs_round_zero_end_to_end(tmp_path: Path) -
     names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
     assert task_generator.validated == names
     data = p.build_job_data(BATCH_SIZE)
-    assert [item.metadata["task"]["name"] for item in data.items] == names
-    assert all(isinstance(item, TaskItem) and (item.task_path / "instruction.md").is_file() for item in data.items)
+    assert [item.metadata["task"]["name"] for item in data.samples] == names
+    assert all(isinstance(item, TaskSample) and (item.task_path / "instruction.md").is_file() for item in data.samples)
     assert service.writes == [] and service.episode_requests == [], "Reef runs no episode of a task job"
     assert task_generator.results == [], "no result before the job ends"
 
@@ -709,7 +709,7 @@ def test_saved_tasks_are_handed_out_as_one_task_job_and_marked_trained_once_its_
     stage = job_stage(p)
     built = p.build_job_data(BATCH_SIZE)
     names = ["harbor-00000-000", "harbor-00000-001"]
-    assert built.items == stage.own_job_data() and handed_out_names(p) == names
+    assert built.samples == stage.own_job_data() and handed_out_names(p) == names
     assert p.status()["handed_out"]["tasks"] == 2 and p.status()["task_pool"] == 1
     handed_out = stage.handed_out
     assert handed_out is not None

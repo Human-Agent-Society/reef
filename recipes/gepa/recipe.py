@@ -53,7 +53,7 @@ from reef.storage.tasks import TaskStorage
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.trainer import Trainer
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 from .archive import Archive
 from .backend import ARCHIVE_STATE_KEY, GEPABackend
@@ -78,7 +78,7 @@ class _UnboundProposer(Proposer):
     def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectoryItem, ...],
+        samples: tuple[TrajectorySample, ...],
         models: Any,
         *,
         manifest: FailureManifest | None = None,

@@ -35,7 +35,7 @@ Propose a change
 ``Proposer.propose`` receives three positional arguments:
 
 - ``nodes``: the current tree as ``(kind, config)`` pairs in tree order.
-- ``samples``: the ATIF ``TrajectoryItem`` values of the step's job data. Read the trajectory
+- ``samples``: the ATIF ``TrajectorySample`` values of the step's job data. Read the trajectory
   from ``item.trajectory``, reward and feedback from ``item.metadata``, and
   original provider exchanges through ``reef.core.trajectories.recorded_payloads``.
 - ``models``: bindings for models the method can call. ``models.served`` is

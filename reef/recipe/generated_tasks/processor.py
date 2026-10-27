@@ -40,7 +40,7 @@ from typing import Any, Self
 from reef.background_jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.core import AgentRecord
 from reef.core.config import config_option
-from reef.core.job_data import JobOutcome, TaskItem
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
@@ -218,11 +218,11 @@ def task_counts(store: TaskStore) -> dict[str, int]:
     }
 
 
-def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskItem:
+def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSample:
     """The task that the task pool holds for a saved train task, with its generation and the digest of its files."""
     path = store.path(stored.files_digest)
     task = read_harbor_task(path)
-    return TaskItem(
+    return TaskSample(
         path,
         source_agent_record_ids=task.source_agent_record_ids,
         metadata={
@@ -287,7 +287,7 @@ class RoundResult:
     ``GeneratedTaskRecord2Record.advance`` reads it.
     """
 
-    tasks: tuple[TaskItem, ...] = ()
+    tasks: tuple[TaskSample, ...] = ()
     counts: bool = True
     retry: bool = False
 
@@ -323,7 +323,7 @@ class GenerationOutcome(SupportsReceipt):
     """
 
     generation: int
-    tasks: tuple[TaskItem, ...]
+    tasks: tuple[TaskSample, ...]
     is_complete: bool
     error: str
 
@@ -975,7 +975,7 @@ class GeneratedTaskJobData(Sample2Job):
 
     The stage owns the task pool: the record stage adds each round's train tasks to it, and a restart puts the
     train tasks that did not train back in it. On each ``advance`` with no tasks handed out, the stage takes up
-    to ``tasks_per_step`` of them as the next job's data: the ``TaskItem`` values themselves. The training
+    to ``tasks_per_step`` of them as the next job's data: the ``TaskSample`` values themselves. The training
     component rolls them out on its own sampler and trains on their episodes (a task job; see the Tinker
     component's ``rollout`` job parameter). When the trainer commits the job's submission, the commit lists
     ``rollout:<task use>``; the store marks the tasks trained once that commit is durable. The tasks stay

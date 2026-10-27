@@ -16,7 +16,7 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
@@ -143,7 +143,7 @@ def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenize
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    (sample,) = pipeline.build_job_data(1).items
+    (sample,) = pipeline.build_job_data(1).samples
 
     assert source_record_id(sample) == "i1"
     assert sample.source_agent_record_ids == ("i1", "r1")
@@ -161,7 +161,7 @@ def test_chat_template_kwargs_reach_every_render(tokenizer: TurnTokenizer) -> No
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    assert len(pipeline.build_job_data(1).items) == 1
+    assert len(pipeline.build_job_data(1).samples) == 1
     # The prompt and the sequence render alike, as the inference handler renders the served prompt.
     assert tokenizer.template_kwargs == [{"enable_thinking": False}, {"enable_thinking": False}]
 
@@ -174,7 +174,7 @@ def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: T
     pipeline.push(_inference("i1", response))
     pipeline.push(_report("r1", ("i1",), teacher_context=""))
 
-    (sample,) = pipeline.build_job_data(1).items
+    (sample,) = pipeline.build_job_data(1).samples
 
     target_ids = [ord(character) for character in "lookup"] + [END_OF_TURN]
     assert sample.training["tokens"] == [*_prompt_ids(), *target_ids]
@@ -231,7 +231,7 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
     pipeline.observe_serving_runtime_load_id("slime-v5")
 
     assert pipeline.ready(1)
-    assert len(pipeline.build_job_data(1).items) == 1
+    assert len(pipeline.build_job_data(1).samples) == 1
 
 
 @pytest.mark.unit
@@ -366,8 +366,8 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
 # --- uploaded trajectories ----------------------------------------------------
 
 
-def _uploaded(*steps: Mapping[str, Any]) -> TrajectoryItem:
-    return TrajectoryItem(
+def _uploaded(*steps: Mapping[str, Any]) -> TrajectorySample:
+    return TrajectorySample(
         {"schema_version": "ATIF-v1.4", "session_id": "u", "agent": {"name": "a"}, "steps": list(steps)}
     )
 
@@ -493,6 +493,6 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
     )
     pipeline.push_trajectory("t1", _uploaded(ASK, ANSWER))
     data = pipeline.build_job_data(1)
-    (item,) = data.items
+    (item,) = data.samples
     assert item.training["loss_mask"] == [1] * (len(TurnTokenizer.text_ids({"content": "100 C"})) + 1)
     assert pipeline.acknowledge(data.data_id) == {"trajectory:t1"}

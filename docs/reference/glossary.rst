@@ -136,7 +136,7 @@ Sample
 ------
 
 One item of job data, a ``Sample`` (``reef.core.job_data``): a
-``TrajectoryItem`` that trains as it is, or a ``TaskItem``, a Harbor task that
+``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task that
 the training component rolls out. The record-to-sample stage makes samples;
 ``job_samples`` and the sample buffer count them. A sample is not a sampling
 call to a model.

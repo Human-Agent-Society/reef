@@ -33,7 +33,7 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import TrajectoryItem, trajectory_groups
+from reef.train.types import TrajectorySample, trajectory_groups
 
 
 class _ExperimentLogger:
@@ -617,7 +617,7 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     from reef.train.algos.registry import resolve_objective
     from reef.train.types import JobData
 
-    def sample(record_id: str, reward: float) -> TrajectoryItem:
+    def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
     objective = resolve_objective("tttd")

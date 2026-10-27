@@ -12,7 +12,7 @@ from reef.record2sample import Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.samples import make_policy_trajectory, recorded_training
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 
 class SAOSampleAssembly(SampleAssembly):
@@ -27,7 +27,7 @@ class SAOSampleAssembly(SampleAssembly):
     ``rollout_created_at``, for the backend's queue-age metric.
     """
 
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectoryItem:
+    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
         base = make_policy_trajectory(record, score)
         action_mask = recorded_training(record.payload).get("action_mask", record.payload.get("action_mask", ()))
         return base.with_training(
@@ -56,7 +56,7 @@ class SAOSamples(ReportSamples):
     ) -> Self:
         return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = self.assembly.build(context, context.require_score())
         if not sample.training.get("action_mask", []):
             sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
@@ -73,7 +73,7 @@ class SAOJobData(Sample2Job):
     the job is one optimizer step; the paper uses 128 (arXiv:2607.07508,
     §4.1), and 1 trains once per accepted rollout for smoke runs.
 
-    SAO reuses ``TrajectoryItem`` / ``JobData`` and fills ``action_mask``
+    SAO reuses ``TrajectorySample`` / ``JobData`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
     tensors; malformed training input fails explicitly.
 

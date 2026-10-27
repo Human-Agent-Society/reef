@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.record2record import JudgedSet, RecordSet
 from reef.record2sample.base import ImmediateRecord2Sample, SampleResult
@@ -20,7 +20,7 @@ class JudgedSamples(ImmediateRecord2Sample, ABC):
     """Turn one judged record into one sample. A recipe implements ``make_sample``."""
 
     @abstractmethod
-    def make_sample(self, record: AgentRecord, judgment: Any) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: Any) -> TrajectorySample | None:
         """One judged record into a sample; ``None`` cannot train."""
 
     def make_samples(self, record_set: RecordSet) -> SampleResult:

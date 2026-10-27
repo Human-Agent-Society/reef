@@ -51,7 +51,7 @@ SFT has three pipeline stages
 - ``SFTRecord2Record`` makes each report its own record set. It never drops a
   record set unit as stale. An SFT target is fixed text, not tokens that an older model
   version sampled. Thus the stage takes no ``max_staleness`` and refuses the key.
-- ``SFTSamples`` makes one ``TrajectoryItem`` from each report. The item has the
+- ``SFTSamples`` makes one ``TrajectorySample`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.
 - ``SFTJobData`` puts the tasks into job data in arrival order. One job's
   data holds ``pipeline.sample2job.config.job_samples`` samples. It also takes

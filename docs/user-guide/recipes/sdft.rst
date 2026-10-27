@@ -55,7 +55,7 @@ the tasks into job data in arrival order. One job's data holds
 ``pipeline.sample2job.config.job_samples`` tasks.
 
 ``SDFTSamples`` extends the shared ``DistillSamples``. ``DistillSamples`` turns every
-``TeacherContextReport`` into one ``TrajectoryItem``. The item carries the
+``TeacherContextReport`` into one ``TrajectorySample``. The item carries the
 student's recorded tokens and ``teacher_tokens``. ``teacher_tokens`` is the
 teacher's request rendered with the served model's chat template and
 followed by the student's response ids.

@@ -29,7 +29,7 @@ from reef.record2record import Record2Record
 from reef.record2sample import JudgedSamples, Record2Sample
 from reef.record2sample.samples import make_policy_trajectory
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectoryItem, policy_row_violation
+from reef.train.types import JobData, Sample, TrajectorySample, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class OpenClawRLSamples(JudgedSamples):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectorySample | None:
         # 1. A declined judgment never trains. (Narrow on the score itself:
         #    it is what step 2 needs, and a property would not narrow it.)
         if judgment.score is None:
@@ -135,7 +135,7 @@ class OpenClawRLJobData(Sample2Job):
         return cls(context, settings, record2record)
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
-        samples = tuple(task for task in samples if isinstance(task, TrajectoryItem))
+        samples = tuple(task for task in samples if isinstance(task, TrajectorySample))
         if len(samples) != len(samples):
             raise TypeError("OpenClaw-RL samples must be trajectories")
         self.write_record_line(samples, data_id)
@@ -144,7 +144,7 @@ class OpenClawRLJobData(Sample2Job):
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def write_record_line(self, samples: tuple[TrajectoryItem, ...], data_id: str) -> None:
+    def write_record_line(self, samples: tuple[TrajectorySample, ...], data_id: str) -> None:
         """Append this job's judged population to the PRM record file.
 
         One line per job: what the judges returned since the previous one,

@@ -22,7 +22,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.core.job_data import JobOutcome, TrajectoryItem
+from reef.core.job_data import JobOutcome, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -341,7 +341,7 @@ class Trainer:
                     return True
             return self._pipeline.background_jobs_running()
 
-    def uploaded_sample(self, trajectory: TrajectoryItem) -> TrajectoryItem:
+    def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded trajectory (``TrainingPipeline.uploaded_sample``), under the lock.
 
         Admission calls it from a request thread; the lock keeps the pipeline's stages, such as a tokenizer,

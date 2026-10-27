@@ -39,7 +39,7 @@ from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
 from reef.record2sample.samples import recorded_request, recorded_response
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectoryItem, trajectories
+from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.
 REPROMPT_TEMPLATE = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
@@ -201,7 +201,7 @@ class SDPOSamples(ReportSamples):
             )
         return cls(settings, record2record)
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed = context.parsed_report
         if not isinstance(parsed, SDPOReport):
             raise ValueError("SDPOSamples requires the SDPOReport schema")
@@ -305,7 +305,7 @@ class SDPOJobData(Sample2Job):
             )
         return cls(context, settings, record2sample)
 
-    def demonstration(self, sample: TrajectoryItem, samples: Sequence[TrajectoryItem]) -> str | None:
+    def demonstration(self, sample: TrajectorySample, samples: Sequence[TrajectorySample]) -> str | None:
         """The response of the first successful sibling in rollout order, or None when the question has none."""
         group = sample.metadata["sdpo"]["group"]
         for candidate in samples:
@@ -324,7 +324,7 @@ class SDPOJobData(Sample2Job):
         samples = sorted(
             trajectories(job_data), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
         )
-        result: list[TrajectoryItem] = []
+        result: list[TrajectorySample] = []
         solutions_used = feedback_used = 0
         for sample in samples:
             data = sample.metadata["sdpo"]

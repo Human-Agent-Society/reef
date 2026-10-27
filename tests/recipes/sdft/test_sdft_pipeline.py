@@ -180,7 +180,7 @@ def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: Countin
 
     assert isinstance(batch, JobData)
     assert batch.data_id == "science:data:1"
-    (sample,) = batch.items
+    (sample,) = batch.samples
     assert source_record_id(sample) == "i1"
     prompt_ids = tokenizer.count_ids(tokenizer.calls[0][0])
     # The teacher sequence is the rendered teacher prompt plus the response ids verbatim.

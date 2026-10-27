@@ -949,7 +949,7 @@ record2sample=..., sample2job=...)``):
   (``pull``). Most stages inherit ``ImmediateRecord2Sample`` and implement
   ``make_samples``; a stage with slow work returns a result later (see `slow
   record-to-sample work <../developer-guide/processors.rst#slow-record-to-sample-work>`__).
-  ``uploaded_sample(trajectory) -> TrajectoryItem`` turns an uploaded ATIF
+  ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
@@ -1061,7 +1061,7 @@ report id and ordered references to ``source_agent_record_ids``. Grouping and
 consumption state stay in the stage; recipes never receive buffered report objects.
 ``placement`` returns ``(None, None)`` by default. A group key collects reports,
 and a slot deduplicates retries within that group (None uses the report id).
-This collection group differs from ``TrajectoryItem.group_id``: TTTD waits for
+This collection group differs from ``TrajectorySample.group_id``: TTTD waits for
 a complete step, then trains several comparison groups within it.
 ``make_job_data`` receives samples in group/arrival order. Acknowledgement consumes
 all selected reports, even when the recipe omits constant-reward groups from
@@ -1095,8 +1095,8 @@ the judged samples into job data.
 | ``RecordJudging.expire(now)``            | optionally return receipts whose  |
 |                                          | completion window ended           |
 +------------------------------------------+-----------------------------------+
-| ``JudgedSamples.make_sample(record,``    | a ``TrajectoryItem``, or ``None`` |
-| ``judgment)``                            | to retire the record              |
+| ``JudgedSamples.make_sample(record,``    | a ``TrajectorySample``, or        |
+| ``judgment)``                            | ``None`` to retire the record     |
 +------------------------------------------+-----------------------------------+
 | ``make_job_data(samples, data_id)``      | the declared job data type        |
 +------------------------------------------+-----------------------------------+
@@ -1182,29 +1182,29 @@ Job data
 
    from pathlib import Path
    from reef.train.types import (
-       TaskItem, Sample, JobData, TrajectoryItem,
+       TaskSample, Sample, JobData, TrajectorySample,
        trajectories, trajectory_groups,
    )
 
-``Sample = TrajectoryItem | TaskItem``. Every processor returns a frozen
-``JobData(data_id, items, request=None)`` with an ordered tuple of items.
+``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
+``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
 The same job data may contain both kinds. ``request`` is keyword-only and carries
 an optional explicit training instruction; request-only job data may be empty.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
-items into its own optimizer batches.
+samples into its own optimizer batches.
 
 .. code:: python
 
    data = JobData(
        "scenario:data:1",
        (
-           TrajectoryItem(atif_document, source_agent_record_ids=("inference-1", "report-1")),
-           TaskItem(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+           TrajectorySample(atif_document, source_agent_record_ids=("inference-1", "report-1")),
+           TaskSample(Path("tasks/example"), source_agent_record_ids=("record-2",)),
        ),
    )
 
-A ``TrajectoryItem.trajectory`` is an
+A ``TrajectorySample.trajectory`` is an
 `ATIF document <https://github.com/harbor-framework/harbor/blob/main/rfcs/0001-trajectory-format.md>`__
 as a JSON-compatible mapping. All shipped processors and recipes use this
 representation. The item checks the envelope; consumers validate the fields
@@ -1227,24 +1227,25 @@ Reef-specific fields live inside ``trajectory.extra.reef``:
 other extensions. Training arrays are JSON lists, and runtime load spans are
 objects with ``start``, ``end`` and ``runtime_load_id``.
 
-``TrajectoryItem.group_id`` is an optional string, scoped to the job data.
+``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require
-an explicit id on every trajectory and contiguous items for each group, so
+an explicit id on every trajectory and contiguous samples for each group, so
 advantages and rows stay aligned. TTTD and CORAL preserve their existing group
 barriers and ordering. SAO and OpenClaw-RL explicitly schedule each trajectory
 independently, even when group metadata is present. ``trajectory_groups(data)`` reads these comparison groups;
-``trajectories(data)`` reads ATIF items in flat item order.
+``trajectories(data)`` reads the trajectory samples in order.
 
-A ``TaskItem`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
+A ``TaskSample`` names a `Harbor task directory <https://www.harborframework.com/docs/tasks>`__
 with ``task_path: Path``: the directory contains the instruction, environment
 and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
-environment execution and conversion to trajectories. Current built-in policy
-and harness backends explicitly reject task items; accepting the container
-contract does not imply that every algorithm supports every item kind.
+environment execution and conversion to trajectories. The Tinker component
+rolls task samples out in task jobs; the Slime component and the harness
+backends refuse them. Accepting ``JobData`` does not imply that every algorithm
+supports both sample kinds.
 
-Both item kinds may carry ``source_agent_record_ids``. These record derivation
+Both sample kinds may carry ``source_agent_record_ids``. These record derivation
 inputs; processor acknowledgement remains authoritative for consumption,
 including inputs removed by a recipe's existing group rules.
 
@@ -1256,7 +1257,7 @@ methods, including external ATIF without captured records; and
 ``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from
 ``reef.record2sample.samples`` to add exact captured tensors. Missing required
 tensors fail at the training boundary; these helpers do not invent tokens or
-log probabilities from text. Both job data readers reject unsupported item kinds
+log probabilities from text. Both job data readers reject unsupported sample kinds
 instead of silently filtering mixed job data.
 
 Completed text-only streaming responses contribute their aggregated
@@ -1266,7 +1267,7 @@ are reused as context without duplicating those steps. An explicit
 ``training.response_message`` takes precedence over the stream summary.
 
 Migration: the former policy/trace sample types and their batch subclasses are
-removed. Construct ATIF items directly and return ``JobData(id, items)``.
+removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
 Use ``group_id`` on each member for grouped job data. Read captured tensors from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
 ``output_schema`` defaults to ``JobData``. Keep job data serializable, with
@@ -1428,7 +1429,7 @@ builds the class with no arguments and refuses a non-empty ``config``.
 +========================+==========================================================+
 | ``nodes``              | the tree as ``(kind, config)`` pairs                     |
 +------------------------+----------------------------------------------------------+
-| ``samples``            | the job data's ATIF ``TrajectoryItem`` values            |
+| ``samples``            | the job data's ATIF ``TrajectorySample`` values          |
 +------------------------+----------------------------------------------------------+
 | ``models``             | the method's only path to a model: ``models.served`` is  |
 |                        | the model under test, ``models["teacher"]`` comes from   |
@@ -1800,7 +1801,7 @@ Once the commit of a job's end is durable, the trainer calls
 A trainer that starts with no running job calls it again for the last job
 that ended, before any other call to a new stage. The stage takes it as the
 end of the last job that it may have handed out.
-A stage whose job data holds ``TaskItem`` values (Harbor tasks) reads each
+A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
 reports ``rollout_rewards``, the rewards of each task's episodes, by task
 name. A component that cannot roll out tasks refuses such a job in

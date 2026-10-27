@@ -281,7 +281,7 @@ class RecordingComponent(StubTrainingComponent):
         self.trained_data: list[list[str]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.trained_data.append([source_record_id(sample) for sample in job.data.items])
+        self.trained_data.append([source_record_id(sample) for sample in job.data.samples])
         return super().train(job)
 
 

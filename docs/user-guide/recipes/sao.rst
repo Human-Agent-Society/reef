@@ -44,7 +44,7 @@ How Reef implements it
 ----------------------
 
 The record-to-sample stage turns every eligible ``ScoredRolloutReport`` into one
-``TrajectoryItem``. "Single rollout" means one rollout per prompt, with no
+``TrajectorySample``. "Single rollout" means one rollout per prompt, with no
 comparison group. ``pipeline.sample2job.config.job_samples`` such rollouts,
 from different prompts, form one job. Slime's ``--global-batch-size`` is the
 rollouts of one optimizer step; with the same value, one job is one step. The

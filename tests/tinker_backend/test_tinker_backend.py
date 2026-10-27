@@ -17,7 +17,7 @@ import yaml
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
 from reef.cli import main
-from reef.core.job_data import JobData, TrajectoryItem
+from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
 from reef.recipe.sft import SftObjective
 from reef.runtime.deployment import RuntimeConfigError
@@ -112,7 +112,7 @@ class SampleObjective(TrainingObjective):
         return TrainingSignal(
             self.action,
             {"steps": state.get("steps", 0) + 1},
-            advantages=tuple(float(i + 1) for i in range(len(batch.items))),
+            advantages=tuple(float(i + 1) for i in range(len(batch.samples))),
         )
 
 
@@ -171,7 +171,7 @@ def inference(client):
 
 
 def item(version="v", group="g", token=20):
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": "test"},
@@ -210,7 +210,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
         "method": TrainingMethod(objective_name, schedule).to_dict(),
         **parameters,
     }
-    job_id = job_id_for(component.name, start, data.to_dict()["items"], parameters)
+    job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
     component.submit(TrainingJob(job_id, component.name, start, data, parameters))
     return job_id
 
@@ -909,9 +909,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         inference.shutdown()
 
 
-def sft_item(name: str) -> TrajectoryItem:
+def sft_item(name: str) -> TrajectorySample:
     """A supervised sample: three prompt tokens, two target tokens and no rollout log probabilities."""
-    return TrajectoryItem(
+    return TrajectorySample(
         {
             "schema_version": "ATIF-v1.6",
             "agent": {"name": name},

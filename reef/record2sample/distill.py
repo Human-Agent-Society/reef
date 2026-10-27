@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Self, cast
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectoryItem
+from reef.core.job_data import TrajectorySample
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
@@ -125,7 +125,7 @@ class TeacherRenderer:
         return [*prompt_ids, *(int(token) for token in response_ids)]
 
 
-def recorded_sample(assembly: SampleAssembly, context: ReportContext, score: float) -> TrajectoryItem:
+def recorded_sample(assembly: SampleAssembly, context: ReportContext, score: float) -> TrajectorySample:
     """The student's policy sample from the report's one recorded inference.
 
     Checks what a teacher sequence needs: one inference, and its recorded
@@ -204,7 +204,7 @@ class DistillSamples(ReportSamples):
     def operational_metrics(self) -> Mapping[str, float | int]:
         return {"teacher_overflow_reports": self.overflow_count}
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")
