@@ -46,7 +46,7 @@ class _LocalBackend(CandidateBackend):
             artifact=Artifact.local(artifact_path),
         )
         self._wait_if_blocked("prepare")
-        return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
+        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
 
     def evaluate(self, candidate):
         self._wait_if_blocked("evaluate")
@@ -77,6 +77,7 @@ class _LocalRecipe(Recipe):
             candidate_backend=self.backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            default_job_samples=1,
         )
 
 

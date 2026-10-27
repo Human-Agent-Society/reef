@@ -20,9 +20,9 @@ from reef.core.trajectories import source_record_id
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2task import JudgedTasks
-from reef.task2batch import Task2Batch
+from reef.task2job import Task2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
@@ -91,22 +91,22 @@ class _ToyTasks(JudgedTasks):
         )
 
 
-class ToyBatches(Task2Batch):
+class ToyJobData(Task2Job):
     """Batches the judged samples in the order that the stage selected them."""
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
 
 class _ToyProcessor(TrainingPipeline):
     """Trains the judged records of ``_ToyJudging``. Samples are one-token stubs."""
 
-    def __init__(self, context: PipelineContext, *, worker: Any) -> None:
+    def __init__(self, context: PipelineContext, *, worker: Any, max_staleness: int = 0) -> None:
         super().__init__(
             context,
-            record2record=JudgingRecord2Record(_ToyJudging(), worker),
+            record2record=JudgingRecord2Record(_ToyJudging(), worker, max_staleness=max_staleness),
             record2task=_ToyTasks(),
-            task2batch=ToyBatches(context, None),
+            task2job=ToyJobData(context, None, None),
         )
 
 
@@ -132,9 +132,9 @@ def test_track_complete_judge_batch_acknowledge() -> None:
 
     worker.push(_Judgment("r1"))
     assert processor.ready(1)
-    batch = processor.build_batch(1)
+    batch = processor.build_job_data(1)
     assert source_record_id(batch.items[0]) == "r1"
-    processor.acknowledge(batch.batch_id)
+    processor.acknowledge(batch.data_id)
     decision = processor.releasable_record_ids()
     assert "r1" in decision
     assert "r2" not in decision  # still tracked
@@ -188,7 +188,7 @@ def test_judged_sets_behind_the_serving_version_drop_before_a_batch() -> None:
 
 def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
     worker = _FakeWorker()
-    processor = _ToyProcessor(PipelineContext("s", max_staleness=1), worker=worker)
+    processor = _ToyProcessor(PipelineContext("s"), worker=worker, max_staleness=1)
     for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
         processor.observe_serving_runtime_load_id(version)
         processor.push(_record(name, track=True, version=version))

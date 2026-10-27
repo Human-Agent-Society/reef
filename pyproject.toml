@@ -89,6 +89,8 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
+    # Runs the suite in parallel, as CI does (-n 8 --dist loadfile).
+    "pytest-xdist==3.8.0",
     "ruff==0.17.2",
 ]
 
@@ -210,13 +212,12 @@ source = ["reef"]
 # Coverage from the GitHub and Blacksmith checkouts is combined in one gate.
 relative_files = true
 # Reef-authored training control flow counts toward the CPU coverage gate. These
-# four modules execute only inside a live Megatron/CUDA worker; their useful
+# three modules execute only inside a live Megatron/CUDA worker; their useful
 # validation is the GPU integration suite, not import-only CPU mocks.
 omit = [
     "reef/train/slime_backend/reef_adapters/megatron/hf_export.py",
     "reef/train/slime_backend/reef_adapters/megatron/model_provider.py",
     "reef/train/slime_backend/reef_adapters/megatron/train_actor.py",
-    "reef/train/slime_backend/reef_adapters/weight_updaters/*",
 ]
 
 [tool.coverage.report]

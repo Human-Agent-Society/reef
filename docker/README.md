@@ -14,10 +14,11 @@ docker build -f docker/Dockerfile.reef -t reef .
 
 The image inherits the GPU training stack and installs Reef's exact runtime
 pin from `pyproject.toml`, together with SGLang, Ray, and the training
-dependencies. Having the runtime in the image does not mean its training
-driver is running — only the `services` listed in your config run.
+dependencies. Having the runtime in the image does not start it: `reef serve`
+starts only the `services` that your config lists and the ones that its
+training backend needs.
 
-The default image pins the SGLang revision carrying Reef's adapter receiver,
+The default image pins the SGLang revision that Reef's serving engines run,
 so LoRA training (`--megatron-lora-rank`) works on any weight-training recipe
 without a separate image. Override the revision with
 `--build-arg SGLANG_COMMIT=<sha>`. The build also applies
@@ -33,9 +34,8 @@ computes the same image features as SGLang. It copies
 bit-identical to the engine's only when all of these are true:
 
 * The engine uses the sdpa vision attention backend. On CUDA, SGLang uses
-  another backend by default. For an engine that Slime starts, pass
-  `--sglang-mm-attention-backend sdpa`. For an engine that Reef starts, set
-  `mm-attention-backend: sdpa` under `inference.options`. The engine log shows
+  another backend by default. Set `mm-attention-backend: sdpa` under
+  `inference.options`. The engine log shows
   the backend in the line `Using <backend> as multimodal attention backend`.
 * Each request has at most one image that misses the engine's embedding
   cache. The engine encodes those images of one request together, and the
@@ -89,7 +89,7 @@ docker build -f docker/Dockerfile.reef --target tttd \
 |---|---|---:|---:|
 | `recipes/basic/local-sglang.yaml` | local SGLang + Reef | yes | no |
 | `recipes/basic/external-provider.yaml` | Reef proxying to an HTTP provider | no | no |
-| `recipes/<method>/examples/<example>/serve.yaml` | Ray + Slime bridge + Reef training | 2+ | yes |
+| `recipes/<method>/examples/<example>/serve.yaml` | Ray + inference component + Reef with Slime training | 2+ | yes |
 
 Each config declares its services declaratively (`name`, `command`,
 `ready` probe, `depends_on`). Commands use `${a.b.c}` interpolation against

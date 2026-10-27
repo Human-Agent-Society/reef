@@ -44,8 +44,8 @@ Offline tasks with a known answer
 ---------------------------------
 
 Independent tasks from a fixed set, each with a reference answer. The recipe
-samples a batch through Reef, trains on it, and serves the next batch from
-the update.
+samples one job's responses through Reef, trains on them, and serves the next
+responses from the update.
 
 .. list-table::
    :header-rows: 1

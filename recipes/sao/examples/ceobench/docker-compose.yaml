@@ -8,7 +8,7 @@ services:
     container_name: reef-ceobench
     command: reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve.yaml
     # Host networking: the task container reaches Reef on the machine's IP,
-    # and slime binds the training engines' router to that same IP.
+    # and the serving engines bind to that same IP.
     network_mode: host
     ipc: host
     shm_size: 32gb
@@ -17,7 +17,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Four actor GPUs (critic colocated) and a two-GPU rollout engine.
+              # Four actor GPUs (the critic on the same GPUs) and a two-GPU rollout engine.
               device_ids:
                 - "${REEF_GPU_0:-0}"
                 - "${REEF_GPU_1:-1}"

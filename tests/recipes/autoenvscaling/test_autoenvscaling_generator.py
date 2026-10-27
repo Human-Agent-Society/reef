@@ -57,7 +57,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskTasks
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
-from reef.recipe.generated_tasks.results import rollout_results
+from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.record2task.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2task.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2task.generator.inputs import TaskGenerationRequest
@@ -592,19 +592,16 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     )
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
     for task in generated.tasks:
-        asyncio.run(generation.run_and_record(task, count=2))
+        # The end of the task job saves each task's training rewards, from the training component's rollout.
+        generation.save_result(TaskRolloutResult(task.metadata["task"]["name"], (0.5, 0.5)))
     delivery_error = asyncio.run(generation.deliver_results())
     results = list(rollout_results(generation.task_store).values())
     generation.close()
     assert len(generated.tasks) == 2 and delivery_error == ""
     assert [result.rollout_rewards for result in results] == [(0.5, 0.5)] * 2
-    assert [(call["task"], call["arm"], call["count"]) for call in service.episode_requests] == [
-        (NAMES[0], "plain", 2),
-        (NAMES[1], "plain", 2),
-    ]
+    assert service.episode_requests == [], "the training component runs the training episodes"
     assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
-    assert read_harbor_task(tmp_path / "tasks" / NAMES[0]).name == NAMES[0]
 
 
 def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
@@ -617,6 +614,7 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
         "REEF_AUTOENVSCALING_DESIGNER_URL": "http://127.0.0.1:8901",
         "REEF_AUTOENVSCALING_DESIGNER_TOKEN": "designer-token",
         "E2B_API_KEY": "e2b-test",
+        "TINKER_API_KEY": "tinker-test",
     }.items():
         monkeypatch.setenv(name, value)
     example = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples/tinker/serve.yaml"

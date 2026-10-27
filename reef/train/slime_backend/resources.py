@@ -1,7 +1,8 @@
-"""Reef-owned Ray session and model GPU reservations for a Slime deployment.
+"""Reef-owned Ray session and training GPU reservation for the Slime training component.
 
-Reef reserves the model GPUs itself from the parsed Slime topology; the
-separate components borrow their bundles from that one reservation.
+Reef reserves the training GPUs itself from the parsed Slime topology; the
+actor and critic groups borrow their bundles from that one reservation. The
+serving engines reserve their own GPUs on the inference component.
 """
 
 from __future__ import annotations
@@ -11,88 +12,60 @@ from uuid import uuid4
 
 import ray
 
-from reef.runtime.deployment import InferenceResources
+from reef.runtime.deployment import DeploymentResources
 from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
-def model_gpu_layout(args: SlimeArguments, *, remote_inference: bool = False) -> ModelGpuLayout:
-    """The deployment's GPU layout from Slime's parsed topology flags.
-
-    Inference is external to the reservation when Slime's engines are
-    (``--rollout-external``), when they run on a remote component, or when
-    Slime starts none (``--rollout-num-gpus 0``, which ``inference.backend:
-    none`` sets). Every model GPU then trains.
-    """
-    inference_gpus = int(args.rollout_num_gpus or 0)
+def model_gpu_layout(args: SlimeArguments) -> ModelGpuLayout:
+    """The training GPUs from Slime's parsed topology flags: actor nodes times GPUs per node."""
     return ModelGpuLayout(
-        training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node),
-        inference_gpus=inference_gpus,
-        colocate=bool(args.colocate),
-        external_inference=bool(args.rollout_external) or remote_inference or inference_gpus == 0,
+        training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node), inference_gpus=0
     )
 
 
-class SlimeDeploymentResources(InferenceResources):
-    """Own one Ray client session and the coordinated model reservations."""
+class SlimeDeploymentResources(DeploymentResources):
+    """Own one Ray client session and the training GPU reservation."""
 
     def __init__(
         self,
-        args: Any,
+        args: SlimeArguments,
         *,
         ray_address: str,
         namespace: str,
         runtime_env: dict[str, Any] | None = None,
-        allocate_models: bool = True,
-        remote_inference: bool = False,
     ) -> None:
         self.args = args
-        self.remote_inference = remote_inference
         self.ray_address = ray_address
         self.namespace = namespace
         self.runtime_env = runtime_env
-        self.allocate_models = allocate_models
-        #: Slime's view of the reservation: the actor and critic groups share
-        #: the training bundles, rollout engines take the inference bundles.
+        #: Slime's view of the reservation: the actor and critic groups share the training bundles.
         self.placement_groups: dict[str, GpuBundles | None] = {}
         self._reservation: ModelGpuReservation | None = None
         self._started = False
         self._closed = False
         self._owns_session = False
-        self._process_lease = uuid4().hex if allocate_models else None
+        self._process_lease = uuid4().hex
         self._nodes: list[str] = []
-
-    @property
-    def inference_placement(self) -> Any:
-        return self.placement_groups.get("rollout")
-
-    @property
-    def training_node_id(self) -> str | None:
-        """Ray node of the trainer's first bundle; None before reservation or for a hosted trainer."""
-        return None if self._reservation is None else self._reservation.training_node_id
 
     def start(self) -> None:
         if self._started or self._closed:
             raise RuntimeError("deployment resources can only be started once")
         if ray.is_initialized():
-            raise RuntimeError("the Slime model driver requires its own Ray client session")
+            raise RuntimeError("the Slime training component requires its own Ray client session")
         self._started = True
         self._owns_session = True
         runtime_env = dict(self.runtime_env or {})
-        if self._process_lease is not None:
-            runtime_env["env_vars"] = {**runtime_env.get("env_vars", {}), DEPLOYMENT_ENV: self._process_lease}
-            runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
-        ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env or None)
-        if self._process_lease is not None:
-            self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
-        if self.allocate_models:
-            self._reservation = reserve_model_gpus(model_gpu_layout(self.args, remote_inference=self.remote_inference))
-            self.placement_groups = {
-                "actor": self._reservation.training,
-                "critic": self._reservation.training if getattr(self.args, "use_critic", False) else None,
-                "rollout": self._reservation.inference,
-            }
+        runtime_env["env_vars"] = {**runtime_env.get("env_vars", {}), DEPLOYMENT_ENV: self._process_lease}
+        runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
+        ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
+        self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
+        self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+        self.placement_groups = {
+            "actor": self._reservation.training,
+            "critic": self._reservation.training if self.args.use_critic else None,
+        }
 
     def close(self) -> None:
         if self._closed:
@@ -112,7 +85,7 @@ class SlimeDeploymentResources(InferenceResources):
                 # Job-scoped reservations also expire if a launch helper failed
                 # before returning its placement handles.
                 try:
-                    if self._process_lease is not None and self._nodes:
+                    if self._nodes:
                         self._retire_processes()
                 except Exception as exc:
                     errors.append(exc)
@@ -125,8 +98,6 @@ class SlimeDeploymentResources(InferenceResources):
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
         lease = self._process_lease
-        if lease is None:
-            return
         nodes = set(self._nodes)
         nodes.update(node["NodeID"] for node in ray.nodes() if node["Alive"])
         cleanup = ray.remote(num_cpus=0, max_retries=0)(retire)

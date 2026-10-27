@@ -405,11 +405,12 @@ jobs:
               if path.startswith("reef/runtime/") and path.endswith(".py")
           }
           assert runtime_roots == {
-              "interfaces.py", "jobs.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "serving.py", "executor"
+              "interfaces.py", "jobs.py", "deployment.py", "durable_files.py", "recovery.py", "residency.py",
+              "serving.py", "executor",
           }, runtime_roots
           assert {
-              "reef/inference/runtime.py", "reef/inference/http.py", "reef/train/runtime.py",
-              "reef/inference/sglang/runtime.py", "reef/train/slime_backend/runtime.py",
+              "reef/inference/http.py", "reef/inference/null.py", "reef/inference/remote/runtime.py",
+              "reef/train/jobs.py", "reef/train/local_jobs.py", "reef/train/slime_backend/component.py",
           } <= installed_files
           assert not any(path.startswith("reef/runtime/sglang/") for path in installed_files)
           assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)

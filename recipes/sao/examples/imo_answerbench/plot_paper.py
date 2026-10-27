@@ -6,8 +6,9 @@ Top row: held-out accuracy of the kept checkpoints (``eval-<run>-<step>-<set>.js
 evaluate.py) on AIME 2025, HMMT Feb 2025 and IMO-AnswerBench, 95% Wilson intervals, the
 untrained model as a dotted line. Bottom row: the mean response length and mean reward of the
 training rollouts, grouped by the number of optimizer steps the trainer had completed when each
-rollout was scored (``--steps run=slime-driver.log`` supplies the step timestamps; without it,
-rollouts are grouped by position in batches of 128), smoothed with a trailing four-step mean.
+rollout was scored (``--steps run=<log>`` supplies the step timestamps from the log that holds
+Slime's training lines, ``slime-driver.log`` in the recorded runs; without it, rollouts are
+grouped by position in batches of 128), smoothed with a trailing four-step mean.
 Held-out accuracy
 and training reward are different quantities and stay in separate panels. Runs whose name
 starts with ``sao`` are red, ``grpo`` blue; run-1 arms are dashed.
@@ -51,7 +52,7 @@ def accuracy(path: str, expected: int) -> tuple[float, int, float, float] | None
 
 
 def step_times(log_path: str) -> list[float]:
-    """First log time (UTC epoch) of each optimizer step, actor or critic-only, from the slime driver log.
+    """First log time (UTC epoch) of each optimizer step, actor or critic-only, from a Slime training log.
 
     Checkpoints are numbered by the same counter (hf/<step>), so SAO's critic warmup steps count."""
     seen: dict[int, float] = {}
@@ -88,7 +89,7 @@ def main() -> None:
     parser.add_argument("--evals", required=True)
     parser.add_argument("--records", nargs="*", default=[], help="run=path pairs of stream.py record files")
     parser.add_argument(
-        "--steps", nargs="*", default=[], help="run=slime-driver.log pairs giving optimizer-step completion times"
+        "--steps", nargs="*", default=[], help="run=log pairs of Slime training logs: optimizer-step completion times"
     )
     parser.add_argument("--labels", nargs="*", default=[], help="run=display name pairs")
     parser.add_argument("--style", nargs="*", default=[], help="run=color:linestyle:marker, e.g. sao-h2=salmon:-:^")

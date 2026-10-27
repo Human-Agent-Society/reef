@@ -1,7 +1,7 @@
 """The teacher on the actor: whose weights it runs on, and the forward-only pass that scores the samples.
 
 This is the first of a distillation family's two teacher paths; a teacher
-served by its own engine is scored by ``teacher_engine`` on the bridge. The
+served by its own engine is scored by ``teacher_engine`` in the training component. The
 weights here are the student's own (the current ones, or a slow-moving copy
 of them: the SDFT reference's ``ref_model`` that moves toward the policy by
 the update rate after every step, a frozen snapshot at rate 0) or another
@@ -132,7 +132,7 @@ class MovingCopy(TeacherWeights):
 class SeparateCheckpoint(TeacherWeights):
     """Another model's weights, loaded once from its checkpoint beside the actor's.
 
-    The checkpoint (Megatron, or a Hugging Face directory the bridge loads)
+    The checkpoint (Megatron, or a Hugging Face directory the training component loads)
     must fit the actor's model and parallel layout: the pass runs it through
     the actor's own modules. Slime's tagged loader puts it into the model and
     backs it up under ``TEACHER_TAG``; the actor's backup taken just before

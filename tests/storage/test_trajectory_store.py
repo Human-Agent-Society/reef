@@ -4,7 +4,7 @@ from contextlib import closing
 
 import pytest
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.trajectories import TrajectoryConflict

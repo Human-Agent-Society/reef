@@ -31,7 +31,7 @@ TEST_DIRECTORIES = {
     "smoke",
     "storage",
     "surface",
-    "task2batch",
+    "task2job",
     "tinker_backend",
     "train",
 }

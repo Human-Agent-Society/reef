@@ -65,7 +65,7 @@ from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress,
 from reef.train.cordis_backend.manifest import FailureManifest, advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import AgentHost, Promoter, Proposer, ProposerCalls, StepProposal
-from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
+from reef.train.types import JobData, TrainStepResult, TrajectoryItem, trajectories
 
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
@@ -639,7 +639,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
@@ -647,7 +647,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._step_progress = None
         self._failed_step = {}
         try:
-            prepared = self._prepare_step(batch, state, scenario_step)
+            prepared = self._prepare_step(data, state, scenario_step)
         except BaseException:
             if self._step_progress is not None:
                 self._failed_step = {"failed_stage": self._step_progress.phase}
@@ -663,11 +663,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     def _prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        samples = trajectories(batch)
+        samples = trajectories(data)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
             self._episode_evaluator.use_models(self._models)
@@ -716,14 +716,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             carried["rejected_proposals"] = rejected
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
-        # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
-        if batch.request is None and self._max_steps and steps > self._max_steps:
+        # The budgets stop a runaway automatic loop; a skip consumes its data, so an instruction runs instead.
+        if data.request is None and self._max_steps and steps > self._max_steps:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={**metrics, "skipped": f"step budget of {self._max_steps} exhausted"},
             )
         streak = int(state.get("failure_streak", 0))
-        if batch.request is None and self._max_failure_streak and streak >= self._max_failure_streak:
+        if data.request is None and self._max_failure_streak and streak >= self._max_failure_streak:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={
@@ -768,7 +768,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
         self._step_calls = None
-        self.step_request_id = None if batch.request is None else batch.request.id
+        self.step_request_id = None if data.request is None else data.request.id
         self._step_progress = StepProgress(
             request_id=self.step_request_id,
             phase="proposing",
@@ -778,7 +778,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # Re-evaluate the last-good tree against the published one on cadence or when the served model changed.
         drifted = rollback_evaluation_context is not None and rollback_evaluation_context != self.evaluation_context()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
-        if batch.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
+        if data.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
             target = [dict(entry) for entry in rollback_entries]
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
@@ -789,7 +789,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["proposer_input_tokens"] = metrics["proposer_output_tokens"] = 0
             return PreparedStep.with_candidate(
                 HarnessCandidate(
-                    candidate_id=f"{batch.batch_id}:recheck",
+                    candidate_id=f"{data.data_id}:recheck",
                     candidate_files=render_composition(nodes_from_entries(target), self._descriptor),
                     current_files=render_composition(nodes_from_entries(published), self._descriptor),
                     candidate_entries=tuple(target),
@@ -809,8 +809,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # An agent's pending proposal goes first; the method proposes only when none waits.
         inbox = self.proposals
         # A manual request owns this step; an unrelated inbox proposal must
-        # not consume its batch without the proposer reading the instruction.
-        claimed = None if inbox is None or batch.request is not None else inbox.claim()
+        # not consume its data without the proposer reading the instruction.
+        claimed = None if inbox is None or data.request is not None else inbox.claim()
         if inbox is not None and claimed is not None:
             metrics["proposal"] = {
                 "id": claimed.id,
@@ -837,14 +837,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if self._propose.runs_agent:
                 # No agent executor configured: the proposer gets None and answers without an agent.
                 agent_host = self._agent_host(step_dir, calls)
-                if agent_host is None and batch.request is not None:
+                if agent_host is None and data.request is not None:
                     calls.note("proposer", "the agent proposer is off on this host; the text proposer answers")
             handed: dict[str, Any] | None = None
-            if batch.request is not None:
+            if data.request is not None:
                 if not self._propose.reads_requests:
                     raise ValueError("an instruction step requires a proposer whose reads_requests is true")
                 # A fresh dict the method may extend: the requires items it adds join the commit's after the screens.
-                handed = {"id": batch.request.id, **batch.request.to_dict(), "untrusted": True}
+                handed = {"id": data.request.id, **data.request.to_dict(), "untrusted": True}
             try:
                 proposal = self._propose.propose(
                     self._nodes(),
@@ -865,10 +865,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
             # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
             metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
-            if batch.request is not None and handed is not None:
-                requires, refused = merged_requires(batch.request.requires, handed.get("requires"))
+            if data.request is not None and handed is not None:
+                requires, refused = merged_requires(data.request.requires, handed.get("requires"))
                 requires_count = len(requires)
-                metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+                metrics["training_request"] = {"id": data.request.id, **data.request.to_dict(), "requires": requires}
                 if refused:
                     metrics["training_request"]["refused_requires"] = refused
             if isinstance(proposal, StepProposal):
@@ -897,7 +897,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._loader.root.update([dict(entry) for entry in admitted])
         return PreparedStep.with_candidate(
             HarnessCandidate(
-                candidate_id=f"{batch.batch_id}:candidate",
+                candidate_id=f"{data.data_id}:candidate",
                 candidate_files=render_composition(self._nodes(), self._descriptor),
                 current_files=current_files,
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
@@ -926,7 +926,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         prepared: PreparedStep,
         decision: SelectionDecision,
     ) -> TrainStepResult:
-        # The result is in: the page reads the committed row from here on, the trainer's reserved batch covering
+        # The result is in: the page reads the committed row from here on, the trainer's reserved data covering
         # the commit window.
         self._step_progress = None
         candidate = self._candidate_from(prepared)

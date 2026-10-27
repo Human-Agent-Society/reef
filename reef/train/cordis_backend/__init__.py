@@ -1,6 +1,6 @@
 """Harness evolution backend: candidate selection scored by real episodes.
 
-Per training step, ``propose`` reads the current composition and the batched
+Per training step, ``propose`` reads the current composition and the job's
 traces and returns one ``Mutation``, a sequence of them, or a ``StepProposal``
 (the mutations plus notes the step records); the backend
 applies the proposal to the compose Entry tree under one snapshot; the
@@ -27,7 +27,7 @@ from reef.harness.tree.mutations import Mutation, MutationError
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.contracts import StepProgress
 from reef.train.cordis_backend.manifest import FailureManifest, FailureRecord
-from reef.train.cordis_backend.processor import InferenceTasks, TraceBatches, TraceTasks
+from reef.train.cordis_backend.processor import InferenceTasks, TraceJobData, TraceTasks
 from reef.train.cordis_backend.strategies import Promoter, Proposer, StepProposal
 
 __all__ = [
@@ -41,6 +41,6 @@ __all__ = [
     "Proposer",
     "StepProgress",
     "StepProposal",
-    "TraceBatches",
+    "TraceJobData",
     "TraceTasks",
 ]

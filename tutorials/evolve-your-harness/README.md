@@ -127,7 +127,7 @@ Defaults: port `8901`, no Reef access token unless `REEF_TOKEN` is set, state
 under `work/deployment/`. Use `--reef.port` and `--reef.token` to override the
 port and access token. The `run.sh` demo keeps its separate configuration and state.
 
-`data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step that reads it runs it first, with no mode switch. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never batches on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.
+`data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step that reads it runs it first, with no mode switch. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never trains on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.
 
 Install a harness from this service and submit feedback as shown in the
 [root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s
@@ -145,13 +145,13 @@ harness configuration.
 
 `evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook loads serve.yaml, sets `inference.upstream-url` and `inference.upstream-model` to those values, writes the result to `work/serve-notebook.yaml`, and materializes the recipe config from it with `harness/materialize_recipe.py`, the step `run.sh` runs. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
-Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks still batches one step per report, but both gate sides then score every task, so the gate can only tie and nothing publishes (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible on the step's row in `GET /reef/harness/releases`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
+Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks still trains one step per report, but both gate sides then score every task, so the gate can only tie and nothing publishes (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible on the step's row in `GET /reef/harness/releases`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
 
 ## What one run does
 
 1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint and the model live only in serve.yaml's `inference` section (`upstream-url`, `upstream-api-key`, `upstream-model`); Reef hands them to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
 2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evolve gate grades episodes, and the score is reported against the receipt.
-3. Every valid scored report batches, passing ones included, and `evolution.batch_size: 1` makes each report one evolve step: `propose` sends the batched requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win. A passing report still gets a step, and that step can still be rejected, skipped or tie, so a passing run is not a run that batched nothing.
+3. Every valid scored report trains, passing ones included, and `evolution.batch_size: 1` makes each report one evolve step: `propose` sends the step's requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win. A passing report still gets a step, and that step can still be rejected, skipped or tie, so a passing run is not a run that batched nothing.
 4. `run.py` pulls `GET /reef/harness` and prints the gate metrics and the evolved `SKILL.md` files. Point any pi at the pulled tree, with its model set to Reef, and it carries the learned skill.
 
 ## Native variant
@@ -264,7 +264,7 @@ The model name is set in two places, `inference.upstream-model` in the serve fil
 
 ### Notes
 
-[1] The recorded pass alone; under the failure-only filter of that measurement no report batched and no step ran. Today every valid scored report batches, so the same all-passing run runs three steps and `run.py` waits for all three.
+[1] The recorded pass alone; under the failure-only filter of that measurement no report trained and no step ran. Today every valid scored report trains, so the same all-passing run runs three steps and `run.py` waits for all three.
 [2] End to end, including the pull of the published tree.
 [3] The notebook's committed outputs hold the run cell by cell but no timing.
 [4] `current_residue: 16`: on macOS a `run_bash` call that runs Apple's python3 leaves its bytecode cache under the episode's `HOME`; a Linux run reports 0, and residue is counted, never forbidden, unless `evolution.forbid_residue` is set.

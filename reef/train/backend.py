@@ -1,4 +1,4 @@
-"""Candidate lifecycle shared by weight training and harness evolution."""
+"""The candidate lifecycle of harness evolution backends."""
 
 from __future__ import annotations
 
@@ -9,34 +9,28 @@ from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 
 @dataclass(frozen=True)
 class PreparedStep:
     """One backend preparation, with or without a candidate to select.
 
+    ``outcome`` is ``"candidate"`` exactly when ``candidate`` is given.
     ``state`` and ``metrics`` are final for a skipped step. For a candidate
     step they are the common preparation values that settlement may extend.
     """
 
-    outcome: Literal["candidate", "skip", "retry", "drop"]
+    outcome: Literal["candidate", "skip"]
     state: Mapping[str, Any]
     metrics: Mapping[str, Any] = field(default_factory=dict)
     candidate: UpdateCandidate | None = None
-    storage: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"candidate", "skip", "retry", "drop"}:
-            raise ValueError("prepared step outcome must be 'candidate', 'skip', 'retry', or 'drop'")
-        if self.outcome == "candidate" and self.candidate is None:
-            raise ValueError("a candidate step requires a candidate")
-        if self.outcome != "candidate" and self.candidate is not None:
-            raise ValueError(f"a {self.outcome} step cannot carry a candidate")
-        if self.outcome == "retry" and self.storage is None:
-            raise ValueError("a retry step requires its blocking storage status")
-        if self.outcome != "retry" and self.storage is not None:
-            raise ValueError(f"a {self.outcome} step cannot carry storage status")
+        if self.outcome not in {"candidate", "skip"}:
+            raise ValueError("prepared step outcome must be 'candidate' or 'skip'")
+        if (self.outcome == "candidate") != (self.candidate is not None):
+            raise ValueError("a candidate step, and only a candidate step, carries a candidate")
 
     @classmethod
     def with_candidate(
@@ -57,45 +51,6 @@ class PreparedStep:
     ) -> PreparedStep:
         return cls("skip", state, metrics or {})
 
-    @classmethod
-    def retrying(
-        cls,
-        *,
-        state: Mapping[str, Any],
-        storage: Mapping[str, Any],
-        metrics: Mapping[str, Any] | None = None,
-    ) -> PreparedStep:
-        return cls("retry", state, metrics or {}, storage=storage)
-
-    @classmethod
-    def dropped(
-        cls,
-        *,
-        state: Mapping[str, Any],
-        metrics: Mapping[str, Any] | None = None,
-    ) -> PreparedStep:
-        return cls("drop", state, metrics or {})
-
-
-@dataclass(frozen=True)
-class StepExecution:
-    """One backend attempt returned to the dispatcher."""
-
-    outcome: Literal["commit", "retry", "drop"]
-    result: TrainStepResult | None = None
-    storage: Mapping[str, Any] | None = None
-    metrics: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if self.outcome == "commit" and self.result is None:
-            raise ValueError("a committed execution requires a training result")
-        if self.outcome != "commit" and self.result is not None:
-            raise ValueError(f"a {self.outcome} execution cannot carry a training result")
-        if self.outcome == "retry" and self.storage is None:
-            raise ValueError("a retry execution requires its blocking storage status")
-        if self.outcome != "retry" and self.storage is not None:
-            raise ValueError(f"a {self.outcome} execution cannot carry storage status")
-
 
 class CandidateBackend(CandidateEvaluator, ABC):
     """Prepare and evaluate updates while Reef owns candidate selection.
@@ -111,29 +66,9 @@ class CandidateBackend(CandidateEvaluator, ABC):
     @abstractmethod
     def initial_state(self) -> Mapping[str, Any]: ...
 
-    def retire_scenario(self, scenario: str) -> None:
-        """The scenario is being deleted: release what the backend holds for it beyond Reef's own state.
-
-        The default releases nothing. A backend that keeps per-scenario
-        residency in a serving engine or publication history in a training job overrides
-        this to let those go; until it does, the deletion is Reef-side only
-        and the engine keeps the scenario's adapter until it is evicted or
-        the group restarts.
-        """
-
     def close(self) -> None:
         """Release resources owned by this backend; safe to call repeatedly."""
         return
-
-    @property
-    def dispatched(self) -> bool:
-        """Whether the dispatcher must run this backend outside scenario locks."""
-        return False
-
-    @property
-    def colocated(self) -> bool:
-        """Whether a dispatched job holds the served engine, so no other component can evaluate meanwhile."""
-        return False
 
     @property
     def harness_node_paths(self) -> Mapping[str, str] | None:
@@ -144,14 +79,6 @@ class CandidateBackend(CandidateEvaluator, ABC):
     def harness_adapter(self) -> str | None:
         """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
         return None
-
-    def recover_pending_step(self, scenario_step: int, *, committed_training_job_id: str | None) -> None:
-        """Finish or roll back backend work left pending across a restart."""
-        return
-
-    def acknowledge_commit(self, scenario_step: int, training_job_id: str) -> None:
-        """Acknowledge that Reef durably committed a backend training job."""
-        return
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Observe algorithm state only after its scenario commit is durable.
@@ -189,7 +116,7 @@ class CandidateBackend(CandidateEvaluator, ABC):
     @abstractmethod
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep: ...
@@ -215,4 +142,4 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]
+__all__ = ["CandidateBackend", "PreparedStep"]
