@@ -1,8 +1,8 @@
-"""Sample the native proposer over one failing task and count what validation lets through.
+"""Sample the native method's model call over one failing task and count what validation lets through.
 
-The proposer is ``harness.native_evolution.propose`` with the serve file's
-seed tree and one recorded failure; each sample is one model call. A sample
-is parsed when it yields a patch and admitted when the patch passes
+Each sample is one call with the prompt ``NativeMethod`` sends, over the
+serve file's seed tree and one failing trace of the task. A sample is parsed
+when its reply yields a patch and admitted when the patch passes
 ``validate_patch`` for the native adapter, the same check the evolve step
 runs before any episode. The table this prints is the one the README's
 results carry.
@@ -22,20 +22,11 @@ sys.path.insert(0, str(HERE.parent))  # the harness package
 sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 
 from harness import native_evolution
-from reef.core import AgentRecord, RequestType
-from reef.core.trajectories import make_trajectory
+from harness.plugins import MAX_TOKENS, TIMEOUT_S, failures_text
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree import HarnessTree, locate, validate_patch
-
-KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")
-
-
-class Models:
-    """What ``propose`` reads: ``models.served``, one binding that records its replies."""
-
-    def __init__(self, binding: ModelBinding) -> None:
-        self.served = binding
+from reef.train.harness_backend import Trace
 
 
 def seed_tree(serve: Path) -> HarnessTree:
@@ -45,7 +36,7 @@ def seed_tree(serve: Path) -> HarnessTree:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sample the native proposer and count admitted changes by kind.")
+    parser = argparse.ArgumentParser(description="Sample the native method and count admitted changes by kind.")
     parser.add_argument("--serve", default=HERE.parent / "configs" / "serve-native.yaml", type=Path)
     parser.add_argument("--base-url", default="http://127.0.0.1:11434", help="the OpenAI compatible endpoint")
     parser.add_argument("--model", default="qwen2.5:7b")
@@ -55,29 +46,34 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = yaml.safe_load(args.serve.read_text())
-    task = next(t for t in config["recipe"]["config"]["evolution"]["tasks"] if t.startswith(args.task))
+    task = next(t for t in config["recipe"]["config"]["evolution"]["evaluation"]["tasks"] if t.startswith(args.task))
     tree = seed_tree(args.serve)
     descriptor = get_adapter("native")
-    models = Models(ModelBinding(base_url=args.base_url, model=args.model, api_key="none"))
-    sample = make_trajectory(
-        (
-            AgentRecord.create(
-                scenario="probe",
-                request_type=RequestType.INFERENCE,
-                agent_record_id="probe",
-                payload={"messages": [{"role": "user", "content": task}]},
-            ),
-        ),
-        reward=0.0,
+    model = ModelBinding(base_url=args.base_url, model=args.model, api_key="none")
+    # One failing trace of the task, as a step's material shows it; the probe reads no trace files.
+    trace = Trace(
+        directory=HERE,
+        task=task,
+        reply=None,
+        score=0.0,
+        feedback=None,
+        record="probe",
+        client="untagged",
     )
 
     rows = []
     for i in range(args.samples):
         started = time.time()
-        patch = native_evolution.propose(tree, (sample,), models)
+        prompt = native_evolution.change_prompt(tree, failures_text([trace]))
+        try:
+            reply = model.chat([{"role": "user", "content": prompt}], max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S)
+        except ModelBindingError as exc:
+            print(f"sample {i}: {exc}", file=sys.stderr)
+            reply = ""
+        patch = native_evolution.patch_of(tree, reply)
         row = {"i": i, "seconds": round(time.time() - started), "parsed": patch is not None}
         if patch is not None:
-            # The first path is the proposal's own file; an agent's graph edit rides beside it.
+            # The first path is the change's own file; an agent's graph edit rides beside it.
             location = locate(next(iter(patch.changes)))
             row["kind"] = "?" if location is None else location.kind.value
             validation = validate_patch(tree, patch, descriptor)
@@ -93,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     by_kind = Counter(row["kind"] for row in parsed)
     admitted = Counter(row["kind"] for row in parsed if row["admitted"])
     print(f"\nsamples {len(rows)}  parsed {len(parsed)}  unparsed {len(rows) - len(parsed)}")
-    for kind in KINDS:
+    for kind in native_evolution.KINDS:
         if by_kind[kind]:
             print(f"{kind}: {by_kind[kind]} proposed, {admitted[kind]} admitted")
     for row in parsed:

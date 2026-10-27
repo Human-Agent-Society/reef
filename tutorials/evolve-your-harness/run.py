@@ -6,11 +6,11 @@ One pass on pi (``./run.sh``):
              reply and records the exchange against a receipt
     report - the reply is graded with the same grader the evaluation uses
              and the score is reported against the receipt; every valid report
-             batches and triggers one evolve step - the model proposes a
-             change over its recorded attempts, real episodes score it, a win
-             publishes
-    pull   - GET /reef/harness returns the winning tree; the evolved skill,
-             tool, hook, and graph files are printed
+             batches and triggers one evolve step - the method has the model
+             rewrite rules.md from the failing attempts, real episodes score
+             the new tree, a win publishes
+    pull   - GET /reef/harness returns the winning tree; the files the
+             winning step changed are printed
 
 On reef's native harness (``./run.sh native``) the same pass runs through a
 resident ``reef-native serve`` process, so the publish lands in a process
@@ -57,7 +57,7 @@ PULL_TIMEOUT_S = 900.0
 MOUNT_TIMEOUT_S = 120.0
 
 WORK = Path(__file__).resolve().parent / "work"
-# run.sh copies serve.yaml's evolution.tasks here; the recorded traffic and
+# run.sh copies serve.yaml's evolution.evaluation.tasks here; the recorded traffic and
 # the evolve episodes run the same three tasks.
 TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
@@ -108,20 +108,20 @@ def main():
     deadline = time.monotonic() + PULL_TIMEOUT_S
     steps = wait_for_steps(client, before, batched, deadline)
     if not any((row.get("metrics") or {}).get("selected") for row in steps):
-        print(
-            f"no skill change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt"
-        )
+        print(f"no change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
 
     manifest = client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
     print(f"published: release {manifest['release_id']} (parent {manifest['parent_release_id']})")
+    # The step's patch maps each tree path it changed to the new text, or to null for a removed file.
+    evaluation = dict(manifest["evaluation"])
+    patch = evaluation.pop("patch", {})
     print("evaluation metrics (the evolve step that published this release):")
-    print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
-    print("evolved files:")
-    for path, text in sorted(manifest["files"].items()):
-        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/", "/agents/")):
-            print(f"--- {path} ---")
-            print(text)
+    print(json.dumps(evaluation, indent=2, sort_keys=True))
+    print("changed files:")
+    for path, text in sorted(patch.items()):
+        print(f"--- {path} ---")
+        print("(removed)" if text is None else text)
     # Every step this run triggered already has its result from the wait above, so there is nothing left to
     # wait for: the head this run pulled is the one a win left behind.
 

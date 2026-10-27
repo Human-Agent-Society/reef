@@ -20,42 +20,48 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      propose: recipes.beta.reefine.proposer:TextProposer
-      evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
+      # One call to the served model rewrites rules.md from the failing traces, and from the request when a
+      # person asks with POST /reef/train.
+      method: tutorials.evolve-your-harness.harness.plugins:RulesMethod
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.
-      tasks:
-        - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
-          integer alone on the last line.'
-        - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
-          as a plain integer alone on the last line.'
-        - '[csv] Compute the median of the value column in this csv:
-
-          id,value
-
-          1,12
-
-          2,47
-
-          3,3
-
-          4,88
-
-          5,21
-
-          6,56
-
-          7,9
-
-          8,74
-
-          9,30
-
-          Reply with the median as a plain integer alone on the last line.'
-      # The first tree: the starter skill (run from the repository root).
+      # The first tree: the starter rules.md (run from the repository root).
       seed: tutorials/evolve-your-harness/seeds/pi
+      # Each scenario's proposals, history (the score cache) and step records.
+      state_dir: tutorials/evolve-your-harness/work/deployment/harness
+      evaluation:
+        scorer: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
+        policy: compare
+        tasks:
+          - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a
+            plain integer alone on the last line.'
+          - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
+            value as a plain integer alone on the last line.'
+          - '[csv] Compute the median of the value column in this csv:
+
+            id,value
+
+            1,12
+
+            2,47
+
+            3,3
+
+            4,88
+
+            5,21
+
+            6,56
+
+            7,9
+
+            8,74
+
+            9,30
+
+            Reply with the median as a plain integer alone on the last line.'
     # The person asks with POST /reef/train while the deployment keeps learning from failures.
     training-mode: hybrid
 

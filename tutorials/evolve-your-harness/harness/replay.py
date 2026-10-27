@@ -104,6 +104,7 @@ def collect(work: Path) -> dict:
                 "skipped": metrics.get("skipped"),
                 "recorded_at": row.get("recorded_at"),
                 "proposal": metrics.get("proposal"),
+                "summary": metrics.get("method_summary"),
                 "patch": sorted(patch),
                 "result": {
                     "wins": metrics.get("wins"),
@@ -114,7 +115,7 @@ def collect(work: Path) -> dict:
                     "reason": (selection.get("reason") if isinstance(selection, dict) else None),
                     "candidate_paths": metrics.get("candidate_paths"),
                     "current_paths": metrics.get("current_paths"),
-                    "proposer_seconds": metrics.get("proposer_seconds"),
+                    "model_seconds": metrics.get("model_seconds"),
                 },
                 "files": files,
                 "diff": changed(previous, patch) if published else None,
@@ -229,13 +230,13 @@ function renderChain() {
   const el = document.getElementById('chain'); el.innerHTML = '';
   D.releases.forEach((r, i) => {
     const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
-    const v = r.result || r.verdict || {};
+    const v = r.result || {};
     const source = r.proposal ? `agent proposal, session ${short(r.proposal.session)}` : (r.step ? 'method proposal' : 'the served tree before any step');
     const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
     d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.release_id) || '-')}</div>` +
       `<div class="k ${r.kind}">${esc(r.kind)}${r.skipped ? ': ' + esc(r.skipped) : ''}</div>` +
-      `<div>${esc(source)}</div>` +
+      `<div>${esc(source)}</div>` + (r.summary ? `<div>${esc(r.summary)}</div>` : '') +
       (v.wins != null ? `<div>W / L / T ${v.wins} / ${v.losses} / ${v.ties} · candidate ${v.candidate_score} vs current ${v.current_score}</div>` : '') +
       (muts ? `<ul>${muts}</ul>` : '') + (diff ? `<ul>${diff}</ul>` : '') +
       `<div class="id">${Object.keys(r.files||{}).length} files</div>`;

@@ -13,7 +13,7 @@ reef:
   # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
   token: ${REEF_TOKEN}
   # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
-  # Reef proxies recorded traffic here, the proposer's calls go here, and
+  # Reef proxies recorded traffic here, the method's model calls go here, and
   # evaluation episodes are pointed here - nothing else ever sees it.
   run-dir: work/stack
 
@@ -26,43 +26,50 @@ recipe:
       # The default pipeline stages batch every valid scored report, a passing one included.
       # batch_size 1 makes each report one evolve step.
       batch_size: 1
-      # The proposer is the text proposer of the beta Reefine recipe: the served model
-      # proposes one skill change over its failures. The grader is the method
-      # package beside this file (harness/): the reef service resolves the
-      # dotted reference because run.sh starts it with this cwd.
-      propose: recipes.beta.reefine.proposer:TextProposer
-      evaluate: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
+      # The method beside this file (harness/plugins.py): one call to the served
+      # model reads the step's failing traces and rewrites rules.md. The reef
+      # service resolves the dotted reference because run.sh starts it with
+      # the repository root on PYTHONPATH.
+      method: tutorials.evolve-your-harness.harness.plugins:RulesMethod
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi. Set evolution.binary to a path to use an install of your own instead.
-      # Three exact-answer coding tasks. Each prefix keys the expected answer
-      # in harness/evolution.py's answer table; each prompt pins the reply
-      # format the grader checks (the answer alone on the last line).
-      tasks:
-        - >-
-          [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
-          integer alone on the last line.
-        - >-
-          [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
-          as a plain integer alone on the last line.
-        - |-
-          [csv] Compute the median of the value column in this csv:
-          id,value
-          1,12
-          2,47
-          3,3
-          4,88
-          5,21
-          6,56
-          7,9
-          8,74
-          9,30
-          Reply with the median as a plain integer alone on the last line.
       # The first tree, a directory relative to the one run.sh starts Reef in:
-      # the starter skill gives the proposer a file to improve. It carries no
-      # provider: Reef renders its own model binding (inference.upstream-url and
+      # the starter rules.md the method rewrites. It carries no provider: Reef
+      # renders its own model binding (inference.upstream-url and
       # inference.upstream-model below) into each evaluation episode, and the
       # published tree never names an endpoint.
       seed: seeds/pi
+      # Each scenario's proposals, history (the score cache) and step records,
+      # relative to the directory run.sh starts Reef in, as every path in this file is.
+      state_dir: work/harness
+      evaluation:
+        # The grader beside this file: exact last-line answers (harness/evolution.py).
+        scorer: tutorials.evolve-your-harness.harness.plugins:AnswerScorer
+        # A candidate publishes when it wins more task pairings against the served tree than it loses.
+        policy: compare
+        # Three exact-answer coding tasks. Each prefix keys the expected answer
+        # in harness/evolution.py's answer table; each prompt pins the reply
+        # format the grader checks (the answer alone on the last line).
+        tasks:
+          - >-
+            [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a
+            plain integer alone on the last line.
+          - >-
+            [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
+            value as a plain integer alone on the last line.
+          - |-
+            [csv] Compute the median of the value column in this csv:
+            id,value
+            1,12
+            2,47
+            3,3
+            4,88
+            5,21
+            6,56
+            7,9
+            8,74
+            9,30
+            Reply with the median as a plain integer alone on the last line.
 
     # The default: nobody asks in this demo, and auto refuses POST /reef/train.
     training-mode: auto
