@@ -3,26 +3,41 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 : "${MODEL_DIR:?Set MODEL_DIR to a Qwen3 checkpoint}"
-: "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to a fresh scratch directory}"
-: "${REEF_WORK:?Set REEF_WORK to a fresh run directory}"
+: "${CHECKPOINT_DIR:?Set CHECKPOINT_DIR to the scratch checkpoint directory}"
+: "${REEF_WORK:?Set REEF_WORK to the run directory}"
 export MODEL_DIR CHECKPOINT_DIR REEF_WORK
 export REEF_PORT=${REEF_PORT:-8900}
 export REEF_SERVICE_URL="http://127.0.0.1:${REEF_PORT}"
 export REEF_SCENARIO=${REEF_SCENARIO:-retail-l1}
 export SAO_GPUS=${SAO_GPUS:-4}
-export SAO_BATCH=${SAO_BATCH:-8}
-export SAO_WARMUP=${SAO_WARMUP:-10}
 method=${METHOD:-sao}
 python=${REEF_PYTHON:-python3}
+# Only validated integer exports come from this module.
+configuration_exports=$("$python" -m harness.config)
+eval "$configuration_exports"
+resume=0
+check_only=0
+for argument in "$@"; do
+    if [[ "$argument" == --resume ]]; then resume=1; fi
+    if [[ "$argument" == --check-only ]]; then check_only=1; fi
+done
 case "$method" in
     sao|blind|oracle) ;;
     *) echo "METHOD must be sao, blind, or oracle" >&2; exit 1 ;;
 esac
-"$python" - "$REEF_WORK" "$CHECKPOINT_DIR" <<'PY'
+"$python" run.py --method "$method" --scenario "$REEF_SCENARIO" \
+    --output "$REEF_WORK/results.jsonl" --max-tokens 16384 --max-steps 100 --batch-size "$SAO_BATCH" "$@" --check-only
+if [[ "$check_only" == 1 ]]; then exit 0; fi
+"$python" - "$REEF_WORK" "$CHECKPOINT_DIR" "$resume" <<'PY'
 import sys
 from pathlib import Path
-for value in sys.argv[1:]:
+resume = sys.argv[3] == "1"
+for value in sys.argv[1:3]:
     path = Path(value)
+    if resume:
+        if not path.is_dir() or not any(path.iterdir()):
+            raise SystemExit(f"Resume requires the original populated directory: {path}")
+        continue
     if path.exists() and any(path.iterdir()):
         raise SystemExit(f"Use a fresh empty directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
@@ -40,7 +55,7 @@ export REEF_MODEL_NAME=${REEF_MODEL_NAME:-$(basename "$MODEL_DIR")}
 config="$PWD/serve.yaml"
 # All methods share exact-token history and engine settings. Baselines send
 # no reports, so their training backend remains idle throughout the campaign.
-"$python" -m reef serve -c "$config" > "$REEF_WORK/reef.log" 2>&1 &
+"$python" -m reef serve -c "$config" >> "$REEF_WORK/reef.log" 2>&1 &
 reef_pid=$!
 trap 'kill "$reef_pid" 2>/dev/null || true; wait "$reef_pid" 2>/dev/null || true' EXIT
 trap 'exit 130' INT

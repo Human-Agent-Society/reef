@@ -193,6 +193,8 @@ _CONFIG_ENV = {
     "REEF_PORT": "8900",
     "SAO_GPUS": "4",
     "SAO_WARMUP": "10",
+    "SAO_MICRO_BATCH": "16",
+    "SAO_CONTEXT": "40960",
     "OPD_MODEL_PATH": "/root/models/Qwen3-8B-Base-SFT",
     "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
     "OPD_TEACHER_PATH": "/root/models/Qwen3-32B",

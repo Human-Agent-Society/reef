@@ -22,6 +22,8 @@ from servelearnbench.scoring import read_rows, setting_scores
 
 from recipes.sao.examples.servelearnbench import harness as reef_harness
 from recipes.sao.examples.servelearnbench.harness import agent as reef_agent
+from recipes.sao.examples.servelearnbench.harness import campaign as campaign_results
+from recipes.sao.examples.servelearnbench.harness import config as campaign_config
 from recipes.sao.examples.servelearnbench.harness import report as reef_report
 from recipes.sao.processor import SAOTasks
 from reef.core import AgentRecord, RequestType
@@ -37,10 +39,20 @@ def load_campaign(monkeypatch):
     monkeypatch.setitem(sys.modules, "harness", reef_harness)
     monkeypatch.setitem(sys.modules, "harness.agent", reef_agent)
     monkeypatch.setitem(sys.modules, "harness.report", reef_report)
+    monkeypatch.setitem(sys.modules, "harness.campaign", campaign_results)
+    monkeypatch.setitem(sys.modules, "harness.config", campaign_config)
     spec = importlib.util.spec_from_file_location("retail_campaign", EXAMPLE / "run.py")
     campaign = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(campaign)
     return campaign
+
+
+@pytest.fixture(autouse=True)
+def campaign_environment(monkeypatch):
+    monkeypatch.setenv("SAO_BATCH", "64")
+    monkeypatch.setenv("SAO_MICRO_BATCH", "1")
+    monkeypatch.setenv("SAO_WARMUP", "1")
+    monkeypatch.setenv("SAO_CONTEXT", "40960")
 
 
 @pytest.fixture
@@ -291,7 +303,7 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
 
     def wait_for_training(client, scenario, count, timeout):
         assert len(reports) == count * batch_size
-        releases.append({"operation": "training", "runtime_load_id": f"v{count}"})
+        releases.append({"operation": "training", "runtime_load_id": f"v{count}", "release_id": f"release-{count}"})
         return releases[-1]
 
     monkeypatch.setattr(campaign, "run_episode", run_episode)
@@ -362,3 +374,170 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     assert config["max_steps"] == 20
     assert config["windows"] == windows
     assert setting_scores(official_rows)["n_test"] == test_count
+
+
+def test_default_plan_and_no_actor_guard(monkeypatch, capsys, tmp_path):
+    campaign = load_campaign(monkeypatch)
+    monkeypatch.setenv("SAO_MICRO_BATCH", "16")
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--method", "sao", "--output", str(tmp_path / "results.jsonl"), "--check-only"]
+    )
+    campaign.main()
+    plan = json.loads(capsys.readouterr().out)["training_plan"]
+    assert (plan["training_batches"], plan["critic_only_batches"], plan["actor_updates"]) == (8, 1, 7)
+    assert [row["untrained_tail"] for row in plan["windows"]] == [15, 12, 12, 56, 56, 57]
+    monkeypatch.setenv("SAO_WARMUP", "10")
+    with pytest.raises(SystemExit, match="2"):
+        campaign.main()
+    assert "no actor update" in capsys.readouterr().err
+    assert not (tmp_path / "results.jsonl").exists()
+
+
+@pytest.mark.parametrize("windows", ["1,1", "2,1", "-1", "6", "1,", "a"])
+def test_invalid_windows_fail_before_connecting(monkeypatch, tmp_path, windows):
+    campaign = load_campaign(monkeypatch)
+    monkeypatch.setattr(campaign, "ReefClient", Mock(side_effect=AssertionError("must not connect")))
+    monkeypatch.setattr(
+        sys, "argv", ["run.py", "--method", "blind", "--windows", windows, "--output", str(tmp_path / "out")]
+    )
+    with pytest.raises(SystemExit, match="2"):
+        campaign.main()
+
+
+def test_category_scores_match_official_weighting():
+    rows = [
+        {"phase": "test", "category": "hidden", "reward": 1.0},
+        {"phase": "test", "category": "hidden", "reward": 0.0},
+        {"phase": "test", "category": "fully_specified", "reward": 1.0},
+        {"phase": "serving", "category": "hidden", "reward": 1.0},
+    ]
+    assert campaign_results.category_scores(rows) == {
+        "hidden": {"count": 2, "score": 50.0},
+        "fully_specified": {"count": 1, "score": 100.0},
+    }
+    assert campaign_results.category_scores(rows[:2])["fully_specified"] == {"count": 0, "score": None}
+
+
+def test_config_single_source_and_micro_divisibility(monkeypatch):
+    for name in campaign_config.DEFAULTS:
+        monkeypatch.delenv(name)
+    assert campaign_config.training_config() == {
+        "SAO_BATCH": 64,
+        "SAO_MICRO_BATCH": 16,
+        "SAO_WARMUP": 1,
+        "SAO_CONTEXT": 40960,
+    }
+    monkeypatch.setenv("SAO_BATCH", "63")
+    with pytest.raises(ValueError, match="divisible"):
+        campaign_config.training_config()
+
+
+@pytest.mark.parametrize(
+    "interruption", ["batch_boundary", "partial_collection", "partial_reports", "committed_without_log", "test"]
+)
+def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, interruption):
+    campaign = load_campaign(monkeypatch)
+    monkeypatch.setenv("SAO_BATCH", "2")
+    client = Mock(spec=ReefClient)
+    client.service_url, client.token = "http://reef.invalid", None
+    monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
+    releases, accepted, sampled = [], {}, []
+    monkeypatch.setattr(campaign, "training_releases", lambda *args: copy.deepcopy(releases))
+    monkeypatch.setattr(campaign, "episode_runtime_load_id", lambda model: f"session-{session[0]}-v{len(releases)}")
+    session = [0]
+    interrupted = [False]
+
+    def run_episode(model, bundle, task, **kwargs):
+        # Stop before the second collection or test task. Its predecessor is already durable.
+        threshold = 1 if interruption == "partial_collection" else 5
+        if interruption in ("partial_collection", "test") and not interrupted[0] and len(sampled) == threshold:
+            interrupted[0] = True
+            raise RuntimeError("simulated interruption")
+        sampled.append(task.task_id)
+        model.receipts.append(f"receipt-{len(sampled)}")
+        return (
+            type("Reward", (), {"reward": 1.0, "answer_detail": {}})(),
+            [{"kind": "finish", "name": "finish"}],
+            {},
+            {},
+        )
+
+    def report_episode(model, run_id, task_id, reward, end_reason):
+        report = (tuple(model.receipts), reward, end_reason)
+        if task_id in accepted:
+            assert accepted[task_id] == report  # Idempotent retry must keep the original receipts.
+        else:
+            accepted[task_id] = report
+        if interruption == "partial_reports" and not interrupted[0]:
+            interrupted[0] = True
+            raise RuntimeError("simulated interruption")
+        return {"status": "accepted"}
+
+    def wait_for_training(client, scenario, count, timeout):
+        if len(releases) < count:
+            assert len(accepted) == count * 2
+            releases.append({"operation": "training", "release_id": f"release-{count}"})
+        if interruption == "committed_without_log" and not interrupted[0]:
+            interrupted[0] = True
+            raise RuntimeError("simulated interruption")
+        return {**releases[-1], "runtime_load_id": f"session-{session[0]}-v{count}"}
+
+    monkeypatch.setattr(campaign, "run_episode", run_episode)
+    monkeypatch.setattr(campaign, "report_episode", report_episode)
+    monkeypatch.setattr(campaign, "wait_for_training", wait_for_training)
+    monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
+    output = tmp_path / "results.jsonl"
+    command = ["run.py", "--method", "sao", "--smoke", "--windows", "1", "--output", str(output)]
+    monkeypatch.setattr(
+        sys, "argv", command + (["--stop-after-batches", "1"] if interruption == "batch_boundary" else [])
+    )
+    if interruption == "batch_boundary":
+        campaign.main()
+    else:
+        with pytest.raises(RuntimeError, match="simulated interruption"):
+            campaign.main()
+    session[0] += 1
+    monkeypatch.setattr(sys, "argv", [*command, "--resume"])
+    campaign.main()
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    episodes = [row for row in rows if row.get("type") == "episode"]
+    assert len(episodes) == len({row["task_id"] for row in episodes}) == 6
+    assert len(accepted) == 4 and len(releases) == 2
+    assert all(row["task_id"] not in accepted for row in episodes if row["phase"] == "test")
+    assert rows[-1]["test_score"] == 100.0
+    assert rows[-1]["training_releases"] == 2
+    assert rows[-1]["trained_tasks"] == 4
+    # Resuming a completed run neither samples nor reports again.
+    counts = (len(sampled), len(accepted), len(releases))
+    campaign.main()
+    assert (len(sampled), len(accepted), len(releases)) == counts
+
+
+def test_resume_rejects_changed_config_and_mismatched_checkpoints(monkeypatch, tmp_path):
+    campaign = load_campaign(monkeypatch)
+    path = tmp_path / "results.jsonl"
+    log = campaign_results.ResultLog(path, resume=False)
+    log.append({"config": {"seed": 42}})
+    client = Mock(spec=ReefClient)
+    model = model_with_responses([])
+    try:
+        with pytest.raises(RuntimeError, match="configuration differs"):
+            campaign.recover_campaign(log, client, model, {"seed": 43}, 1)
+        log.append({"type": "batch_ready", "task_ids": ["a"]})
+        log.append({"type": "training", "task_ids": ["a"], "release": {"release_id": "original"}})
+        monkeypatch.setattr(campaign, "training_releases", lambda *args: [{"release_id": "different"}])
+        with pytest.raises(RuntimeError, match="history disagree"):
+            campaign.recover_campaign(log, client, model, {"seed": 42}, 1)
+    finally:
+        log.close()
+
+
+def test_resume_discards_only_incomplete_final_json_line(tmp_path):
+    path = tmp_path / "results.jsonl"
+    path.write_bytes(b'{"config": {}}\n{"type": "episode"')
+    log = campaign_results.ResultLog(path, resume=True)
+    try:
+        assert log.rows == [{"config": {}}]
+        assert path.read_bytes() == b'{"config": {}}\n'
+    finally:
+        log.close()
