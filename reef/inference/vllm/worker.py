@@ -1,8 +1,7 @@
-"""Own vLLM engines, recovery and update control independently of training."""
+"""Own vLLM engines, their recovery and weight loads independently of training."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
 
@@ -10,20 +9,18 @@ import ray
 
 from reef.inference.process import EngineStartup, retire_engines
 from reef.inference.vllm.config import VLLMConfig
-from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks, engine_environment
-from reef.runtime.publication import WeightUpdateLock
+from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks
 from reef.runtime.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
     InferenceEngineGroup,
     InferenceMonitor,
-    WeightUpdateConnection,
 )
 
 
 class VLLMWorker:
-    """Own the serving engines, their update lock and the health monitor."""
+    """Own the serving engines and their health monitor."""
 
     def __init__(self, config: VLLMConfig, pg: Any) -> None:
         self.config = config
@@ -34,10 +31,7 @@ class VLLMWorker:
             startup = EngineStartup()
             startup.start(self.group)
             startup.wait()
-            self.rollout_engine_lock = self._new_rollout_engine_lock()
-            self._control = InferenceControl(
-                _VLLMEngineGroup(self), _VLLMWeightUpdateConnection(self), _VLLMInferenceMonitor(self)
-            )
+            self._control = InferenceControl(_VLLMEngineGroup(self), _VLLMInferenceMonitor(self))
             if config.health_enabled:
                 monitor = EngineHealthMonitor(
                     VLLMEngineHealthChecks(self.group),
@@ -70,9 +64,8 @@ class VLLMWorker:
     def load_adapter_from_disk(self, lora_name: str, lora_path: str, runtime_load_id: str | None = None) -> None:
         """Load one adapter directory into every engine and serve it as ``runtime_load_id``.
 
-        The sender that owns the files is elsewhere; the engines read the
-        directory themselves. Generation is already paused by the publisher,
-        so no request observes an engine mid-load.
+        The engines read the directory themselves. Generation is already
+        paused by the caller, so no request observes an engine mid-load.
         """
         engines = self.engines
         if not engines:
@@ -89,8 +82,8 @@ class VLLMWorker:
     def load_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> None:
         """Reload every engine's weights from a Hugging Face directory and serve them as ``runtime_load_id``.
 
-        The trainer that wrote the files is elsewhere; the engines read the
-        directory themselves. Generation is already paused by the publisher.
+        The engines read the directory themselves. Generation is already
+        paused by the caller.
         """
         engines = self.engines
         if not engines:
@@ -108,57 +101,11 @@ class VLLMWorker:
     def terminate_updatable_engines(self) -> int:
         return self._control.terminate()
 
-    def get_updatable_engines_and_lock(self) -> tuple[Any, ...]:
-        engines = self.engines
-        num_new_engines = self.group.num_new_engines
-        if self._control.reconnect_required:
-            num_new_engines = max(num_new_engines, 1)
-        width = self.config.gpus_per_engine
-        return (
-            engines,
-            self.rollout_engine_lock,
-            num_new_engines,
-            [width for _ in engines],
-            [index * width for index, engine in enumerate(self.group.all_engines) if engine is not None],
-            [self.group.parallel_config() for _ in engines],
-        )
+    def updatable_engines(self) -> list[Any]:
+        return self.engines
 
-    def offload(self, tags: Sequence[str] | None = None) -> list[Any]:
-        self.health_monitoring_pause()
-        if not self.group.needs_offload:
-            return []
-        selection = list(tags) if tags else None
-        return ray.get([engine.release_memory_occupation.remote(tags=selection) for engine in self.engines])
-
-    def onload(self, tags: Sequence[str] | None = None) -> list[Any]:
-        if not self.group.needs_offload:
-            return []
-        selection = list(tags) if tags else None
-        return ray.get([engine.resume_memory_occupation.remote(tags=selection) for engine in self.engines])
-
-    def onload_weights(self) -> list[Any]:
-        return self.onload(["weights"])
-
-    def onload_kv(self) -> list[Any]:
-        return self.onload(["kv_cache", "cuda_graph"])
-
-    def prepare_training_connection(self) -> None:
-        self._control.prepare_training_connection()
-
-    def recover_updatable_engines(self) -> tuple[Any, ...]:
-        self._control.recover()
-        return self.get_updatable_engines_and_lock()
-
-    def clear_updatable_num_new_engines(self) -> None:
-        self.group.num_new_engines = 0
-        self._control.acknowledge_reconnect()
-
-    def _new_rollout_engine_lock(self) -> Any:
-        return (
-            ray.remote(WeightUpdateLock)
-            .options(num_cpus=1, num_gpus=0, runtime_env={"env_vars": engine_environment(self.config)})
-            .remote()
-        )
+    def recover_updatable_engines(self) -> int:
+        return self._control.recover()
 
     def health_monitoring_pause(self) -> None:
         if self._health_monitor is not None:
@@ -191,11 +138,6 @@ class VLLMWorker:
         self._closed = True
         retire_engines(self.engines)
         self.group.all_engines = [None] * len(self.group.all_engines)
-        lock = getattr(self, "rollout_engine_lock", None)
-        if lock is not None:
-            with suppress(Exception):
-                ray.kill(lock, no_restart=True)
-            self.rollout_engine_lock = None
 
 
 class _VLLMEngineGroup(InferenceEngineGroup):
@@ -209,16 +151,19 @@ class _VLLMEngineGroup(InferenceEngineGroup):
         return True
 
     def pause(self) -> Any:
-        """Stop generation for a publication; a ``retract`` pause also leaves no reusable cache entry."""
+        """Stop generation for a weight load; a ``retract`` pause also leaves no reusable cache entry."""
         mode = self._worker.config.pause_mode
         return ray.get([engine.pause_generation.remote(mode) for engine in self._worker.engines])
 
     def resume(self) -> Any:
         return ray.get([engine.continue_generation.remote() for engine in self._worker.engines])
 
-    def recover(self) -> None:
-        if any(engine is None for engine in self._worker.group.all_engines):
-            self._worker.group.recover()
+    def recover(self) -> int:
+        group = self._worker.group
+        dead = sum(engine is None for engine in group.all_engines)
+        if dead:
+            group.recover()
+        return dead - sum(engine is None for engine in group.all_engines)
 
     def terminate(self) -> int:
         group = self._worker.group
@@ -227,23 +172,6 @@ class _VLLMEngineGroup(InferenceEngineGroup):
         for index in slots:
             group.all_engines[index] = None
         return len(slots)
-
-
-class _VLLMWeightUpdateConnection(WeightUpdateConnection):
-    """Keep Ray lock handles and their replacement private to the integration."""
-
-    def __init__(self, worker: VLLMWorker) -> None:
-        self._worker = worker
-
-    def is_usable(self) -> bool:
-        status = ray.get(self._worker.rollout_engine_lock.status.remote())
-        return isinstance(status, dict) and status.get("locked") is False and status.get("poisoned") is False
-
-    def replace(self) -> None:
-        old_lock = self._worker.rollout_engine_lock
-        self._worker.rollout_engine_lock = self._worker._new_rollout_engine_lock()
-        with suppress(Exception):
-            ray.kill(old_lock, no_restart=True)
 
 
 class _VLLMInferenceMonitor(InferenceMonitor):

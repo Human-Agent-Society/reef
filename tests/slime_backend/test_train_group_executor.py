@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -17,23 +16,20 @@ class _Worker:
     def __init__(self, rank):
         self.rank = rank
         self.init_calls = []
-        self.manager_calls = []
+        self.layout_calls = 0
         self.train_calls = []
         self.save_calls = []
-        self.update_calls = []
-        self.published_adapters = []
         self.shutdown_calls = 0
-        self.version = "deployment:6"
 
     def init(self, args, role, *, with_ref, with_opd_teacher):
         self.args = args
-        self.init_calls.append((args.update_weight_start_version, args.load, role, with_ref, with_opd_teacher))
+        self.init_calls.append((args.load, role, with_ref, with_opd_teacher))
         if args.fail_init_rank == self.rank:
             raise RuntimeError("worker init failed")
         return args.start_ids[self.rank]
 
-    def set_rollout_manager(self, manager):
-        self.manager_calls.append(manager)
+    def parallel_layout(self):
+        self.layout_calls += 1
         return {"dp_size": 2, "cp_size": 1}
 
     def train(self, rollout_id, data, *, external_data):
@@ -42,24 +38,11 @@ class _Worker:
             self.args.train_barrier.wait(timeout=5)
         return {"rank": self.rank, "external_data": external_data}
 
-    def save_model(self, rollout_id, *, force_sync, scenario_step):
+    def save_model(self, rollout_id, *, force_sync):
         self.save_calls.append((rollout_id, force_sync))
         if self.args.fail_save_rank == self.rank:
             raise RuntimeError("worker save failed")
         return self.rank
-
-    def update_weights(self, **kwargs):
-        self.update_calls.append(kwargs)
-        return self.rank
-
-    def get_runtime_load_id(self):
-        return self.version
-
-    def initialize_runtime_load_id(self, runtime_load_id):
-        self.version = runtime_load_id
-
-    def publish_adapter(self, scenario, lora_name):
-        self.published_adapters.append((scenario, lora_name))
 
     def shutdown(self):
         self.shutdown_calls += 1
@@ -95,18 +78,10 @@ class CpuSlimeExecutor(Executor):
 def make_group():
     groups = []
 
-    def make(*, role="actor", train_rpc_timeout_s=14400, **overrides):
+    def make(*, role="actor", train_timeout_s=14400, **overrides):
         values = {
             "reef_executor_backend": f"{__name__}:CpuSlimeExecutor",
-            "update_weight_start_version": 5,
-            "release_train": False,
-            "update_weight_mode": "full",
-            "update_weight_transport": "nccl",
-            "update_weight_disk_dir": "/unused/weight-export",
-            "update_weight_disk_keep_files": True,
-            "update_weight_local_checkpoint_dir": None,
-            "offload_rollout": False,
-            "ci_test": False,
+            "reef_train_executor_options": {},
             "save": "checkpoint-root",
             "load": "initial-checkpoint",
             "ckpt_step": 3,
@@ -132,7 +107,7 @@ def make_group():
             num_gpus_per_actor=0.4,
             with_ref=True,
             with_opd_teacher=True,
-            train_rpc_timeout_s=train_rpc_timeout_s,
+            train_timeout_s=train_timeout_s,
         )
         groups.append(group)
         return group
@@ -143,45 +118,29 @@ def make_group():
 
 
 @pytest.mark.unit
-def test_custom_executor_factory_recreates_workers_with_checkpoint_and_manager(make_group) -> None:
-    group = make_group(release_train=True)
-    manager = object()
+def test_custom_executor_starts_the_workers_once_and_reads_their_parallel_layout(make_group) -> None:
+    group = make_group()
 
-    assert group.create(rollout_manager=manager) == [4, 4]
+    assert group.create() == [4, 4]
     assert group.train_parallel_config == {"dp_size": 2, "cp_size": 1}
-    first = group.executor
-    assert isinstance(first, CpuSlimeExecutor)
-    assert first.launch_options["pg"] == "shared-placement"
-    assert first.launch_options["num_gpus_per_actor"] == 0.4
-    for worker in first.workers:
-        assert worker.init_calls == [(5, "initial-checkpoint", "actor", True, True)]
-        assert worker.manager_calls == [manager]
+    executor = group.executor
+    assert isinstance(executor, CpuSlimeExecutor)
+    assert executor.launch_options["pg"] == "shared-placement"
+    assert executor.launch_options["num_gpus_per_actor"] == 0.4
+    for worker in executor.workers:
+        assert worker.init_calls == [("initial-checkpoint", "actor", True, True)]
+        assert worker.layout_calls == 1
     assert group.create() is None
     assert len(group.args.launches) == 1
 
-    assert group.save_model(4, force_sync=True, scenario_step=4) == [0, 1]
+    assert group.save_model(4, force_sync=True) == [0, 1]
     group.release()
     group.release()
-    assert [worker.shutdown_calls for worker in first.workers] == [1, 1]
+    assert [worker.shutdown_calls for worker in executor.workers] == [1, 1]
+    # Released workers stay released: a group never starts its workers again on its own.
     with pytest.raises(RuntimeError, match="not running"):
-        _ = group.executor
-
-    assert resolve(group.async_train(5, "batch")) == [
-        {"rank": 0, "external_data": None},
-        {"rank": 1, "external_data": None},
-    ]
-    assert group.create() is None
-    second = group.executor
-    assert second is not first
-    assert len(group.args.launches) == 2
-    for worker in second.workers:
-        assert worker.init_calls == [(5, "checkpoint-root", "actor", True, True)]
-        assert worker.manager_calls == [manager]
-        assert worker.train_calls == [(5, "batch", None)]
-    assert group.args.ckpt_step is None
-    assert group.args.finetune is False
-    assert group.args.no_load_optim is False
-    assert group.args.no_load_rng is False
+        group.async_train(5, "batch")
+    assert len(group.args.launches) == 1
 
 
 @pytest.mark.unit
@@ -218,8 +177,8 @@ def test_invalid_critic_rank_count_is_rejected_before_any_worker_is_called(make_
 
 
 @pytest.mark.unit
-def test_failed_save_does_not_repoint_checkpoint_resume_parameters(make_group) -> None:
-    group = make_group(release_train=True, fail_save_rank=1)
+def test_a_save_leaves_the_checkpoint_load_arguments_as_they_are(make_group) -> None:
+    group = make_group(fail_save_rank=1)
     group.create()
     before = (
         group.args.load,
@@ -230,7 +189,7 @@ def test_failed_save_does_not_repoint_checkpoint_resume_parameters(make_group) -
     )
 
     with pytest.raises(RuntimeError, match="worker save failed"):
-        group.save_model(6, force_sync=True, scenario_step=6)
+        group.save_model(6, force_sync=True)
 
     assert (
         group.args.load,
@@ -256,88 +215,6 @@ def test_failed_or_inconsistent_initialization_releases_the_entire_group(make_gr
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("manage_generation,force_full", [(True, False), (False, True)])
-def test_disk_update_preserves_flags_version_and_recreate_sequence(
-    make_group,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    manage_generation,
-    force_full,
-) -> None:
-    group = make_group(release_train=True, update_weight_transport="disk", update_weight_disk_dir=str(tmp_path))
-    manager = object()
-    group.create(rollout_manager=manager)
-    first = group.executor
-    publications = []
-
-    def publish(path, sequence, runtime_load_id, *, manage_generation):
-        assert [worker.shutdown_calls for worker in first.workers] == [1, 1]
-        publications.append((path, sequence, runtime_load_id, manage_generation))
-
-    monkeypatch.setattr(group, "_reload_rollout_weights_from_disk", publish)
-    group.update_weights(manage_generation=manage_generation, force_full=force_full)
-
-    expected_kwargs = (
-        {}
-        if manage_generation and not force_full
-        else {
-            "manage_generation": manage_generation,
-            "force_full": force_full,
-        }
-    )
-    assert all(worker.update_calls == [expected_kwargs] for worker in first.workers)
-    assert publications == [(tmp_path / "weight_v000006", 6, "deployment:6", manage_generation)]
-    assert resolve(group.async_get_rank0_runtime_load_id()) == "deployment:6"
-    assert group._disk_weight_version == 6
-    assert group.create() == [4, 4]
-    assert group.args.update_weight_start_version == 6
-    assert all(worker.init_calls[0][0] == 6 for worker in group.executor.workers)
-    assert all(worker.manager_calls == [manager] for worker in group.executor.workers)
-    group.executor.workers[0].version = "new-worker-incarnation:6"
-    assert resolve(group.async_get_rank0_runtime_load_id()) == "new-worker-incarnation:6"
-
-
-@pytest.mark.parametrize("release_train", [False, True])
-def test_disk_recovery_and_retry_load_the_directory_written_for_reef_target(
-    make_group, monkeypatch, tmp_path, release_train
-):
-    from reef.runtime.interfaces import RuntimeLoadId
-
-    def assign(worker, value):
-        worker.version = value
-
-    def write_checkpoint(worker, **kwargs):
-        if worker.rank == 0:
-            sequence = RuntimeLoadId.parse(worker.version).sequence
-            path = tmp_path / f"weight_v{sequence:06d}"
-            path.mkdir(exist_ok=True)
-            (path / "weights").write_text(worker.version)
-
-    monkeypatch.setattr(_Worker, "set_runtime_load_id_for_update", assign, raising=False)
-    monkeypatch.setattr(_Worker, "update_weights", write_checkpoint)
-    group = make_group(
-        release_train=release_train,
-        update_weight_transport="disk",
-        update_weight_disk_dir=str(tmp_path),
-        update_weight_start_version=0,
-    )
-    loaded = []
-
-    def load(path, sequence, runtime_load_id, *, manage_generation):
-        loaded.append((sequence, (path / "weights").read_text()))
-        assert runtime_load_id == "deployment:9"
-        assert not manage_generation
-
-    monkeypatch.setattr(group, "_reload_rollout_weights_from_disk", load)
-    for _ in range(2):
-        group.create(rollout_manager=object())
-        group.set_runtime_load_id_for_update("deployment:9")
-        group.update_weights(manage_generation=False, force_full=True)
-    assert loaded == [(9, "deployment:9"), (9, "deployment:9")]
-    assert group._disk_weight_version == 9
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize("failure", ["critic_config", "critic_init"])
 def test_create_train_groups_releases_actor_when_critic_setup_fails(
     make_group,
@@ -356,10 +233,9 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
         use_critic=True,
         start_rollout_id=None,
     ).args
-    manager = object()
 
     def prepare_critic(config):
-        assert all(worker.manager_calls == [manager] for worker in config.launches[0].workers)
+        assert all(worker.layout_calls == 1 for worker in config.launches[0].workers)
         if failure == "critic_config":
             raise ValueError("invalid critic configuration")
         critic = SimpleNamespace(**vars(config))
@@ -375,7 +251,6 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
             train_groups.create_train_groups(
                 args,
                 {"actor": "shared-placement", "critic": "shared-placement"},
-                manager,
                 actor_cls=_Worker,
             )
 
@@ -390,133 +265,18 @@ def test_create_train_groups_releases_actor_when_critic_setup_fails(
             launched.shutdown()
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "manage_generation,mismatch",
-    [(True, False), (False, False), (True, True)],
-)
-def test_disk_reload_orders_serving_operations_and_checks_published_version(
-    make_group,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    manage_generation,
-    mismatch,
-) -> None:
-    events = []
-    local_checkpoint = str(tmp_path / "engine-local-checkpoint")
-
-    class Engine:
-        def __init__(self, rank):
-            self.rank = rank
-            self.version = None
-
-        def pull_weights(self, sequence, *, source_dir, local_checkpoint_dir):
-            events.append(("pull", self.rank, (sequence, source_dir, local_checkpoint_dir)))
-
-        def pause_generation(self, mode):
-            events.append(("pause", self.rank, mode))
-
-        def flush_cache(self):
-            events.append(("flush", self.rank, None))
-
-        def update_weights_from_disk(self, *, model_path, runtime_load_id):
-            events.append(("update", self.rank, (model_path, runtime_load_id)))
-            self.version = runtime_load_id
-
-        def get_runtime_load_id(self):
-            events.append(("verify", self.rank, None))
-            return "other-incarnation:6" if mismatch and self.rank == 1 else self.version
-
-        def continue_generation(self):
-            events.append(("continue", self.rank, None))
-
-    engines = [Engine(0), Engine(1)]
-
-    class Manager:
-        def onload_weights(self):
-            events.append(("onload", None, None))
-
-        def get_updatable_engines_and_lock(self):
-            events.append(("engines", None, None))
-            return engines, None
-
-    attached = []
-    rpc_waits = []
-
-    def attach(workers):
-        executor = AttachedTestGroup.from_workers(workers)
-        attached.append(executor)
-        rpc = executor.rpc
-        collective_rpc = executor.collective_rpc
-
-        def record_rpc(rank, method, **kwargs):
-            rpc_waits.append((method, kwargs.get("timeout")))
-            return rpc(rank, method, **kwargs)
-
-        def record_collective(method, **kwargs):
-            rpc_waits.append((method, kwargs.get("timeout")))
-            return collective_rpc(method, **kwargs)
-
-        monkeypatch.setattr(executor, "rpc", record_rpc)
-        monkeypatch.setattr(executor, "collective_rpc", record_collective)
-        return executor
-
-    monkeypatch.setattr(train_groups.RayExecutor, "from_workers", staticmethod(attach))
-    group = make_group(
-        release_train=True,
-        update_weight_transport="disk",
-        update_weight_disk_dir=str(tmp_path),
-        train_rpc_timeout_s=43200,
-        update_weight_local_checkpoint_dir=local_checkpoint,
-        offload_rollout=True,
-        weight_update_pause_mode="in_place",
-        ci_test=True,
-    )
-    group.create(rollout_manager=Manager())
-    try:
-        if mismatch:
-            with pytest.raises(RuntimeError, match=r"runtime load ID mismatch.*deployment:6"):
-                group.update_weights(manage_generation=manage_generation, force_full=not manage_generation)
-        else:
-            group.update_weights(manage_generation=manage_generation, force_full=not manage_generation)
-
-        phases = (["onload"] if manage_generation else []) + ["engines", "pull", "pull"]
-        if manage_generation:
-            phases += ["pause", "pause", "flush", "flush"]
-        phases += ["update", "update", "verify", "verify"]
-        if manage_generation and not mismatch:
-            phases += ["continue", "continue"]
-        assert rpc_waits and all(timeout == 43200 for method, timeout in rpc_waits)
-        assert [event[0] for event in events] == phases
-        assert sorted(event for event in events if event[0] == "pull") == [
-            ("pull", 0, (6, str(tmp_path), local_checkpoint)),
-            ("pull", 1, (6, str(tmp_path), local_checkpoint)),
-        ]
-        assert sorted(event for event in events if event[0] == "update") == [
-            ("update", 0, (local_checkpoint, "deployment:6")),
-            ("update", 1, (local_checkpoint, "deployment:6")),
-        ]
-        if manage_generation:
-            assert sorted(event for event in events if event[0] == "pause") == [
-                ("pause", 0, "in_place"),
-                ("pause", 1, "in_place"),
-            ]
-    finally:
-        for executor in attached:
-            executor.shutdown()
-
-
 @pytest.mark.parametrize("invalid", [None, {"dp_size": 99}])
-def test_attachment_rejects_missing_or_inconsistent_training_layout(make_group, monkeypatch, invalid):
+def test_a_start_refuses_a_missing_or_inconsistent_parallel_layout(make_group, monkeypatch, invalid):
     group = make_group()
 
-    def attach(worker, inference):
+    def layout(worker):
         return {"dp_size": 2, "cp_size": 1} if worker.rank == 0 else invalid
 
-    monkeypatch.setattr(_Worker, "set_rollout_manager", attach)
+    monkeypatch.setattr(_Worker, "parallel_layout", layout)
     with pytest.raises(RuntimeError, match="training parallel config"):
-        group.create(rollout_manager=object())
-    assert group._executor is None
+        group.create()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = group.executor
 
 
 def test_failure_observer_follows_recreated_training_workers(make_group):
@@ -526,7 +286,7 @@ def test_failure_observer_follows_recreated_training_workers(make_group):
         def on_executor_failure(self, failure):
             failures.append(failure)
 
-    group = make_group(release_train=True)
+    group = make_group()
     group.register_failure_listener(Observer())
     group.create()
     first = group.executor
@@ -538,98 +298,6 @@ def test_failure_observer_follows_recreated_training_workers(make_group):
     assert len(failures) == 1
     assert failures[0].reason == "replacement worker died"
     assert failures[0].rank == 1
-
-
-@pytest.mark.parametrize("release_train", [False, True])
-def test_weight_file_export_runs_on_every_rank_without_a_receiver(make_group, monkeypatch, tmp_path, release_train):
-    calls = []
-
-    def export(worker, directory):
-        calls.append((worker.rank, directory))
-
-    monkeypatch.setattr(_Worker, "export_weight_files", export, raising=False)
-    group = make_group(release_train=release_train, train_rpc_timeout_s=43200)
-    group.create(rollout_manager=None)
-    if release_train:
-        group.release()
-    group.export_weight_files(tmp_path / "inc-1")
-    assert sorted(calls) == [(0, str(tmp_path / "inc-1")), (1, str(tmp_path / "inc-1"))]
-
-
-@pytest.mark.parametrize("release_train", [False, True])
-def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepare(
-    make_group, monkeypatch, tmp_path, release_train
-):
-    from reef.runtime.interfaces import RuntimeLoadId
-
-    exports = []
-    loads = []
-    result_waits = []
-
-    def resolve_export(value, *, timeout):
-        result_waits.append(timeout)
-        return resolve(value, timeout=timeout)
-
-    monkeypatch.setattr(train_groups, "resolve", resolve_export)
-
-    def assign(worker, value):
-        worker.version = value
-
-    def write_checkpoint(worker, **kwargs):
-        if worker.rank == 0:
-            sequence = RuntimeLoadId.parse(worker.version).sequence
-            path = tmp_path / f"weight_v{sequence:06d}"
-            path.mkdir(exist_ok=True)
-            (path / "weights").write_text(worker.version)
-            exports.append(worker.version)
-
-    monkeypatch.setattr(_Worker, "set_runtime_load_id_for_update", assign, raising=False)
-    monkeypatch.setattr(_Worker, "update_weights", write_checkpoint)
-    group = make_group(
-        release_train=release_train,
-        update_weight_transport="disk",
-        update_weight_disk_dir=str(tmp_path),
-        update_weight_start_version=0,
-        train_rpc_timeout_s=43200,
-    )
-    group.create(rollout_manager=object())
-    first_workers = tuple(group.executor.workers)
-
-    def load(path, sequence, runtime_load_id, *, manage_generation):
-        assert not manage_generation
-        assert (path / "weights").read_text() == runtime_load_id == "deployment:9"
-        loads.append(runtime_load_id)
-        assert [worker.shutdown_calls for worker in first_workers] == [int(release_train)] * 2
-        if len(loads) == 1:
-            raise RuntimeError("receiver failed after partial checkpoint load")
-
-    monkeypatch.setattr(group, "_reload_rollout_weights_from_disk", load)
-    group.prepare_weight_update("deployment:9", force_full=True)
-    assert loads == []
-    assert exports == ["deployment:9"]
-    if release_train:
-        with pytest.raises(RuntimeError, match="not running"):
-            _ = group.executor
-    with pytest.raises(RuntimeError, match="partial checkpoint load"):
-        group.send_prepared_weights("deployment:9", force_full=True)
-    group.prepare_weight_update("deployment:9", force_full=True)
-    group.send_prepared_weights("deployment:9", force_full=True)
-    assert len(group.args.launches) == 1
-    assert exports == ["deployment:9"]
-    assert loads == ["deployment:9", "deployment:9"]
-    # A later publication after successful file consumption prepares again.
-    # Worker recreation happens in preparation, never in receiver loading.
-    group.prepare_weight_update("deployment:9", force_full=True)
-    assert len(group.args.launches) == (2 if release_train else 1)
-    assert exports == ["deployment:9", "deployment:9"]
-    assert result_waits == [43200, 43200]
-    export_waits = [
-        timeout
-        for executor in group.args.launches
-        for method, timeout in executor.rpc_waits
-        if method in {"set_runtime_load_id_for_update", "update_weights"}
-    ]
-    assert export_waits == [43200] * 4
 
 
 @pytest.mark.parametrize("timeout", [14400, 43200, 0.5])
@@ -650,24 +318,19 @@ def test_actor_and_critic_use_job_timeout_without_changing_initialization(make_g
     groups = train_groups.create_train_groups(
         args,
         {"actor": "actor-pg", "critic": "critic-pg"},
-        object(),
         actor_cls=_Worker,
-        train_rpc_timeout_s=timeout,
+        train_timeout_s=timeout,
     )
     try:
         for group in groups:
-            group.initialize_runtime_load_id("deployment:0")
-            group.save_model(4, force_sync=True, scenario_step=4)
-            group.update_weights()
-            group.publish_adapter("scenario", "adapter")
-            assert all(worker.published_adapters == [("scenario", "adapter")] for worker in group.executor.workers)
+            assert group is not None
+            group.save_model(4, force_sync=True)
+            assert all(worker.save_calls == [(4, True)] for worker in group.executor.workers)
+            # Starting the workers waits the startup budget; a job's calls wait the job timeout.
             assert group.executor.rpc_waits == [
                 ("init", 14400),
-                ("set_rollout_manager", 14400),
-                ("initialize_runtime_load_id", 14400),
+                ("parallel_layout", 14400),
                 ("save_model", timeout),
-                ("update_weights", timeout),
-                ("publish_adapter", timeout),
             ]
     finally:
         for group in groups:

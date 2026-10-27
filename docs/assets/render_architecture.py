@@ -230,7 +230,7 @@ def render(theme: str, fonts) -> str:
     o.append(cap(40, Y2 - 18, "learning", p["faint"]))
     for (x, w), (name, line1, line2) in zip(ROW2, LEARNING, strict=True):
         o.append(box(p, x, Y2, w, name, line1, line2))
-    labels = ["batch", "candidate", "accepted"]
+    labels = ["job data", "candidate", "accepted"]
     for k in range(3):
         gx0, gx1 = ROW2[k][0] + ROW2[k][1], ROW2[k + 1][0]
         y = Y2 + 46

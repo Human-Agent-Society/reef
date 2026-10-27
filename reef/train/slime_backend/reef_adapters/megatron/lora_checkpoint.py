@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import torch
 import torch.distributed as dist
 
 from reef.artifact.peft import ADAPTER_CONFIG, ADAPTER_METADATA, METADATA_SCHEMA, file_sha256
+from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import build_sglang_lora_config, is_lora_weight_name
 
 ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
@@ -22,13 +24,29 @@ ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
 TOKENIZER_FILES = ("tokenizer_config.json", "tokenizer.json", "chat_template.jinja")
 
 
+def export_lora_adapter_tensors(
+    weight_iterator: MegatronToHfWeightIterator, actor_weights: Mapping[str, torch.Tensor]
+) -> list[tuple[str, torch.Tensor]]:
+    """Return this rank's LoRA adapter tensors of ``actor_weights`` as Hugging Face names and tensors.
+
+    ``actor_weights`` is Slime's backup of the actor's weights, and
+    ``weight_iterator`` converts them through Megatron Bridge. Every Megatron
+    rank calls this function, because a tensor-parallel export can run
+    collectives. ``save_lora_adapter_to_path`` checks the result.
+    """
+    return [
+        named_tensor
+        for chunk in weight_iterator.get_hf_weight_chunks(actor_weights, weight_type="lora")
+        for named_tensor in chunk
+    ]
+
+
 def save_lora_adapter_to_path(
     args: Any,
     output_dir: str | Path,
     adapter_tensors,
     *,
-    scenario_step: int | None,
-    scenario: str | None = None,
+    rollout_id: int,
 ) -> None:
     """Gather a replicated/sharded Bridge export and write one PEFT adapter.
 
@@ -38,8 +56,7 @@ def save_lora_adapter_to_path(
 
     The directory is a Hugging Face PEFT adapter plus Reef's training
     metadata, so it loads with plain ``transformers`` + ``peft`` and still
-    records which training step wrote it. ``scenario_step`` is None for an
-    export that is not a training checkpoint, such as a file publication.
+    records the Slime rollout ID of the training step that wrote it.
     """
 
     local_tensors: list[tuple[str, torch.Tensor]] = [(name, _cpu_tensor(tensor)) for name, tensor in adapter_tensors]
@@ -66,8 +83,7 @@ def save_lora_adapter_to_path(
                 args,
                 Path(output_dir),
                 merged,
-                scenario=scenario,
-                scenario_step=scenario_step,
+                rollout_id=rollout_id,
             )
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
@@ -108,8 +124,7 @@ def _write_adapter_checkpoint(
     path: Path,
     tensors: dict[str, torch.Tensor],
     *,
-    scenario_step: int | None,
-    scenario: str | None = None,
+    rollout_id: int,
 ) -> None:
     from safetensors.torch import save_file
 
@@ -134,7 +149,7 @@ def _write_adapter_checkpoint(
             # Read from the tensors that were written, not from a training
             # flag, because that is the dtype a loader will actually find.
             "dtype": _tensor_dtype(tensors),
-            "source": {"scenario": scenario, "scenario_step": scenario_step},
+            "source": {"rollout_id": rollout_id},
             "files": {
                 ADAPTER_CONFIG: file_sha256(config_path),
                 ADAPTER_WEIGHTS_FILE: file_sha256(weights_path),
@@ -207,4 +222,4 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-__all__ = ["save_lora_adapter_to_path"]
+__all__ = ["export_lora_adapter_tensors", "save_lora_adapter_to_path"]

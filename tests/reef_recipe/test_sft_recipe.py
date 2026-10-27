@@ -12,24 +12,26 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import TrajectoryItem
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.recipe.sft import SftObjective, SFTRecipe, SFTRecord2Record, SFTSettings, SFTTasks
+from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTRecord2Record, SFTSettings, SFTTasks
 from reef.runtime.interfaces import TrainingMethod
-from reef.task2batch import DistillBatches
+from reef.task2job import DistillJobData
 from reef.train import PipelineContext
-from reef.train.algos import StepScheduling, registry
+from reef.train.algos import registry
 from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
+from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.sft import SftAlgorithm
 
 TOKENIZER_PATH = "/models/served"
@@ -124,7 +126,7 @@ def _pipeline(**config: Any) -> TrainingPipeline:
         context,
         record2record=SFTRecord2Record(context),
         record2task=SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH, **config)),
-        task2batch=DistillBatches(context, 1),
+        task2job=DistillJobData(context, 1, None),
     )
 
 
@@ -141,7 +143,7 @@ def test_the_demonstration_is_the_trained_assistant_turn(tokenizer: TurnTokenize
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    (sample,) = pipeline.build_batch(1).items
+    (sample,) = pipeline.build_job_data(1).items
 
     assert source_record_id(sample) == "i1"
     assert sample.source_agent_record_ids == ("i1", "r1")
@@ -159,7 +161,7 @@ def test_chat_template_kwargs_reach_every_render(tokenizer: TurnTokenizer) -> No
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    assert len(pipeline.build_batch(1).items) == 1
+    assert len(pipeline.build_job_data(1).items) == 1
     # The prompt and the sequence render alike, as the inference handler renders the served prompt.
     assert tokenizer.template_kwargs == [{"enable_thinking": False}, {"enable_thinking": False}]
 
@@ -172,7 +174,7 @@ def test_the_recorded_response_is_the_target_of_an_imported_example(tokenizer: T
     pipeline.push(_inference("i1", response))
     pipeline.push(_report("r1", ("i1",), teacher_context=""))
 
-    (sample,) = pipeline.build_batch(1).items
+    (sample,) = pipeline.build_job_data(1).items
 
     target_ids = [ord(character) for character in "lookup"] + [END_OF_TURN]
     assert sample.training["tokens"] == [*_prompt_ids(), *target_ids]
@@ -229,7 +231,7 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
     pipeline.observe_serving_runtime_load_id("slime-v5")
 
     assert pipeline.ready(1)
-    assert len(pipeline.build_batch(1).items) == 1
+    assert len(pipeline.build_job_data(1).items) == 1
 
 
 @pytest.mark.unit
@@ -265,10 +267,10 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages(tokenizer
         {
             "pipeline": {
                 "record2task": {"config": {"tokenizer_path": TOKENIZER_PATH, "target": "response", "max_tokens": 8}},
-                "task2batch": {"config": {"buffer_size": 256}},
+                "task2job": {"config": {"buffer_size": 256}},
             }
         },
-        **runtime_bindings(StubTrainingRuntime()),
+        **runtime_bindings(),
     )
 
     assert isinstance(recipe, SFTRecipe)
@@ -276,19 +278,19 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages(tokenizer
     assert recipe.report_type is TeacherContextReport
     spec = SFTRecipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("reef.recipe.sft:SftObjective", "sft")
-    assert spec.scheduling == StepScheduling(unit="sample")
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport, default_buffer_size=64))
+    assert SftObjective.rollout_unit == "sample"
+    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport, default_job_samples=16))
     assert isinstance(pipeline.record2record, SFTRecord2Record)
     assert isinstance(pipeline.record2task, SFTTasks)
     assert (pipeline.record2task.target, pipeline.record2task.max_tokens) == ("response", 8)
-    assert isinstance(pipeline.task2batch, DistillBatches)
-    assert pipeline.task2batch.buffer_size == 256
+    assert isinstance(pipeline.task2job, DistillJobData)
+    assert pipeline.task2job.buffer_size == 256
 
 
 @pytest.mark.unit
 def test_sft_recipe_rejects_a_missing_tokenizer_and_objective_options() -> None:
     def sft_recipe(config: Mapping[str, Any]) -> SFTRecipe:
-        recipe = SFTRecipe.from_environment({}, config=config, **runtime_bindings(StubTrainingRuntime()))
+        recipe = SFTRecipe.from_environment({}, config=config, **runtime_bindings())
         assert isinstance(recipe, SFTRecipe)
         return recipe
 
@@ -307,11 +309,11 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    signal = SftObjective().prepare(pipeline.build_batch(1), {"steps": 2})
+    signal = SftObjective().prepare(pipeline.build_job_data(1), {"steps": 2})
 
     assert (signal.action, signal.next_algorithm_state, signal.advantages) == ("train", {"steps": 3}, None)
     assert signal.metrics == {"steps": 3, "samples": 1}
-    SftObjective().validate_scheduling(StepScheduling(unit="sample", epochs=3))
+    SftObjective().validate_scheduling(StepScheduling(epochs=3))
     # Another recipe selects the objective for a job by its dotted reference.
     assert isinstance(resolve_objective("reef.recipe.sft:SftObjective"), SftObjective)
 
@@ -326,11 +328,11 @@ def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    step = prepare_slime_step(
-        pipeline.build_batch(1),
+    step = prepare_slime_job(
+        pipeline.build_job_data(1),
         TrainingMethod(SFTRecipe.training_spec().objective),
         {},
-        StepScheduling(unit="sample"),
+        StepScheduling(),
         step_size=1,
     )
 
@@ -344,14 +346,14 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
 
-    payload = prepare_slime_step(
-        pipeline.build_batch(1), TrainingMethod("sft"), {}, StepScheduling(unit="sample"), step_size=1
+    payload = prepare_slime_job(
+        pipeline.build_job_data(1), TrainingMethod("sft"), {}, StepScheduling(), step_size=1
     ).payload
 
     assert payload is not None
     assert payload["loss"] == "sft"
     assert "advantages" not in payload
-    data = to_slime_rollout_data({key: value for key, value in payload.items() if key != "source_rows"})
+    data = to_slime_rollout_data(payload)
     target_length = len("100 C") + 1
     assert data["response_lengths"] == [target_length]
     assert data["loss_masks"] == [[1] * target_length]
@@ -359,3 +361,138 @@ def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: Tur
     family = resolve_loss_family("sft")
     assert isinstance(family, SftAlgorithm)
     assert (family.loss_type, family.requires_rollout_logprobs) == ("sft_loss", False)
+
+
+# --- uploaded trajectories ----------------------------------------------------
+
+
+def _uploaded(*steps: Mapping[str, Any]) -> TrajectoryItem:
+    return TrajectoryItem(
+        {"schema_version": "ATIF-v1.4", "session_id": "u", "agent": {"name": "a"}, "steps": list(steps)}
+    )
+
+
+ASK = {"step_id": 1, "source": "user", "message": "Boil?"}
+CALL = {
+    "step_id": 2,
+    "source": "agent",
+    "message": "Look",
+    "tool_calls": [{"tool_call_id": "c1", "function_name": "search", "arguments": {"q": "boil"}}],
+    "observation": {"results": [{"source_call_id": "c1", "content": "100"}]},
+}
+ANSWER = {"step_id": 3, "source": "agent", "message": "100 C"}
+THANKS = {"step_id": 4, "source": "user", "message": "Thanks"}
+
+
+@pytest.mark.unit
+def test_an_uploaded_trajectory_trains_every_agent_turn_and_masks_the_rest(tokenizer: TurnTokenizer) -> None:
+    tasks = SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH))
+
+    sample = tasks.uploaded_sample(_uploaded(ASK, CALL, ANSWER, THANKS))
+
+    ask, look, observation, answer = (
+        TurnTokenizer.text_ids({"content": "Boil?"}),
+        TurnTokenizer.text_ids({"content": "Look", "tool_calls": [{"function": {"name": "search"}}]}),
+        TurnTokenizer.text_ids({"content": "100"}),
+        TurnTokenizer.text_ids({"content": "100 C"}),
+    )
+    # The step after the last agent turn is left out; the generation prompt of the first agent turn ends the prompt.
+    assert sample.training["tokens"] == [
+        *ask,
+        GENERATION_PROMPT,
+        *look,
+        END_OF_TURN,
+        *observation,
+        GENERATION_PROMPT,
+        *answer,
+        END_OF_TURN,
+    ]
+    assert sample.training["loss_mask"] == [
+        *[1] * (len(look) + 1),
+        *[0] * (len(observation) + 1),
+        *[1] * (len(answer) + 1),
+    ]
+    assert sample.training["rollout_log_probs"] == []
+    assert sample.trajectory["steps"] == [ASK, CALL, ANSWER, THANKS], "the uploaded steps stay as they are"
+
+
+@pytest.mark.unit
+def test_copied_context_agent_steps_render_and_train_nothing(tokenizer: TurnTokenizer) -> None:
+    tasks = SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH))
+    ask, look, observation, answer = (
+        TurnTokenizer.text_ids({"content": "Boil?"}),
+        TurnTokenizer.text_ids({"content": "Look", "tool_calls": [{"function": {"name": "search"}}]}),
+        TurnTokenizer.text_ids({"content": "100"}),
+        TurnTokenizer.text_ids({"content": "100 C"}),
+    )
+
+    # The copied turn is context: in the tokens, before the prompt that the loss mask starts after.
+    sample = tasks.uploaded_sample(_uploaded(ASK, {**CALL, "is_copied_context": True}, ANSWER))
+    assert sample.training["tokens"] == [
+        *ask,
+        GENERATION_PROMPT,
+        *look,
+        END_OF_TURN,
+        *observation,
+        GENERATION_PROMPT,
+        *answer,
+        END_OF_TURN,
+    ]
+    assert sample.training["loss_mask"] == [1] * (len(answer) + 1)
+
+    # A copied turn after the last trained one trains nothing either, so the sample ends before it.
+    sample = tasks.uploaded_sample(_uploaded(ASK, CALL, {**ANSWER, "is_copied_context": True}))
+    assert sample.training["tokens"] == [*ask, GENERATION_PROMPT, *look, END_OF_TURN]
+    assert sample.training["loss_mask"] == [1] * (len(look) + 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("steps", "reason"),
+    [
+        ((ASK, THANKS), "needs one or more agent steps"),
+        ((ASK, {**ANSWER, "is_copied_context": True}), "copied context steps train nothing"),
+        ((ASK, {**ANSWER, "is_copied_context": "yes"}), "is_copied_context must be a boolean"),
+        ((ANSWER, THANKS), "needs a system or user step before its first agent step"),
+        (({"step_id": 1, "message": "no source"},), "string source"),
+        ((ASK, {**CALL, "tool_calls": [{"tool_call_id": "c1"}]}), "tool_calls must be objects"),
+    ],
+)
+def test_an_uploaded_trajectory_that_cannot_train_is_refused(tokenizer: TurnTokenizer, steps, reason) -> None:
+    with pytest.raises(ValueError, match=reason):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)).uploaded_sample(_uploaded(*steps))
+
+
+@pytest.mark.unit
+def test_a_template_that_changes_earlier_turns_or_a_long_sample_refuses_the_upload(
+    tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(ValueError, match="more than max_tokens 5"):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH, max_tokens=5)).uploaded_sample(_uploaded(ASK, ANSWER))
+    render = tokenizer.apply_chat_template
+
+    def drops_earlier_turns(conversation, **options):
+        # Like a template that strips earlier turns' reasoning: the whole conversation renders its first turn shorter.
+        ids = render(conversation, **options)
+        return ids[1:] if len(conversation) > 2 else ids
+
+    monkeypatch.setattr(tokenizer, "apply_chat_template", drops_earlier_turns)
+    with pytest.raises(ValueError, match="does not render each turn as a prefix"):
+        SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)).uploaded_sample(_uploaded(ASK, CALL, ANSWER))
+
+
+@pytest.mark.unit
+def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenizer: TurnTokenizer) -> None:
+    assert SFTRecipe.pipeline_spec().task2job is SFTJobData and SFTJobData.accepts_trajectories
+    context = PipelineContext("science", TeacherContextReport)
+    pipeline = TrainingPipeline(
+        context,
+        record2record=SFTRecord2Record(context),
+        record2task=SFTTasks(SFTSettings(tokenizer_path=TOKENIZER_PATH)),
+        task2job=SFTJobData(context, None, 1),
+    )
+    pipeline.push_trajectory("t1", _uploaded(ASK, ANSWER))
+    data = pipeline.build_job_data(1)
+    (item,) = data.items
+    assert item.training["loss_mask"] == [1] * (len(TurnTokenizer.text_ids({"content": "100 C"})) + 1)
+    assert pipeline.acknowledge(data.data_id) == {"trajectory:t1"}

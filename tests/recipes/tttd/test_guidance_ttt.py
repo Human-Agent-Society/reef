@@ -37,8 +37,10 @@ from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
     GuidanceRunStateError,
     GuidanceRunStateStore,
     GuidanceTrainingTimeoutError,
-    RayTrainingBridge,
-    TrainingBridge,
+    StatusTrainingProgress,
+    TrainingJobOutcome,
+    TrainingPosition,
+    TrainingProgress,
     read_json,
     require_step_success,
     scenario_status,
@@ -402,30 +404,64 @@ def test_judge_scorer_speaks_the_judge_protocol_and_surfaces_its_score(monkeypat
     assert (verification.reward, verification.valid, verification.status) == (91.5, True, "valid")
 
 
-def _bridge_health(**overrides) -> dict:
-    health = {
-        "ok": True,
-        "completed_train_steps": 1,
-        "last_train_rollout_id": 0,
-        "phase": "awaiting_commit",
-    }
-    health.update(overrides)
-    return health
+TRAIN_METRICS = {
+    "train/grad_norm": 0.75,
+    "train/global_batch_size": 8,
+    "train/lora_trainable_parameters": 2048,
+    "train/lora_base_trainable_parameters": 0,
+    "train/lora_b_nonzero": 128,
+    "train/lora_b_l1": 1.5,
+}
 
 
-def test_training_wait_keeps_polling_until_the_bridge_returns_to_serving() -> None:
-    health = iter([_bridge_health(), _bridge_health(phase="serving")])
+def _job_commits(*, end_event: str = "finished", rollout_id: int = 0, error: str | None = None) -> list[dict]:
+    """The three commits of one job: its submission, its checkpoint and its end."""
+    job = {"job_id": "job-1", "backend": "slime"}
+    end = {**job, "event": end_event, **({} if error is None else {"error": error})}
+    return [
+        {"step": 1, "metrics": {"training_job": {**job, "event": "submitted"}}},
+        {
+            "step": 2,
+            "metrics": {**TRAIN_METRICS, "selected": True, "training_job": {**job, "event": "checkpoint", "step": 1}},
+        },
+        {"step": 3, "metrics": {"rollout_id": rollout_id, "training_job": end}},
+    ]
 
-    result = wait_for_training_step(
-        health=lambda: next(health),
-        status=lambda: scenario_status(_reef_status(), "guidance-run"),
-        expected_completed_steps=1,
-        expected_rollout_id=0,
-        timeout_s=1,
+
+def _wait(statuses, commits=_job_commits, *, timeout_s: float = 1, expected_rollout_id: int = 0):
+    statuses = iter(statuses)
+    return wait_for_training_step(
+        status=lambda: scenario_status(next(statuses), "guidance-run"),
+        commits=lambda after_step: commits(),
+        after=TrainingPosition(0, 0, None),
+        expected_rollout_id=expected_rollout_id,
+        timeout_s=timeout_s,
         poll_interval_s=0,
     )
 
-    assert result["phase"] == "serving"
+
+def test_training_wait_returns_the_checkpoint_once_the_job_ended() -> None:
+    running = _reef_status(scenario_step=1, training_job={"job_id": "job-1"})
+    ended = _reef_status(scenario_step=3, finished_jobs=1, runtime_load_id="guidance:1")
+
+    outcome = _wait([_reef_status(), running, ended])
+
+    assert outcome == TrainingJobOutcome(
+        job_id="job-1",
+        rollout_id=0,
+        checkpoint_metrics=_job_commits()[1]["metrics"],
+        position=TrainingPosition(3, 1, None),
+        runtime_load_id="guidance:1",
+    )
+
+
+def test_training_wait_fails_on_a_failed_job_or_the_wrong_rollout() -> None:
+    ended = _reef_status(scenario_step=3, finished_jobs=1)
+
+    with pytest.raises(RuntimeError, match="job-1 failed: RuntimeError: out of memory"):
+        _wait([ended], lambda: _job_commits(end_event="failed", error="RuntimeError: out of memory"))
+    with pytest.raises(RuntimeError, match="saved rollout 4, expected 0"):
+        _wait([ended], lambda: _job_commits(rollout_id=4))
 
 
 def test_training_wait_fails_when_tttd_reports_the_expected_step_failure() -> None:
@@ -443,29 +479,15 @@ def test_training_wait_fails_when_tttd_reports_the_expected_step_failure() -> No
         RuntimeError,
         match=r"step 1 failed \(mixed_release_ids\).*artifact-old.*artifact-new",
     ):
-        wait_for_training_step(
-            health=lambda: _bridge_health(completed_train_steps=0, last_train_rollout_id=None, phase="serving"),
-            status=lambda: scenario_status(failed, "guidance-run"),
-            expected_completed_steps=1,
-            expected_rollout_id=1,
-            timeout_s=1,
-            poll_interval_s=0,
-        )
+        _wait([failed], expected_rollout_id=1)
 
 
 def test_training_wait_fails_on_reef_training_error() -> None:
-    """Issue #344: a pre-bridge failure must not look like healthy serving."""
-    body = _reef_status(error="guidance-run: RuntimeError: failed before RolloutManager submission")
+    """Issue #344: a failure before the job must not look like a step still in progress."""
+    body = _reef_status(error="guidance-run: RuntimeError: failed before the training job was submitted")
 
-    with pytest.raises(RuntimeError, match="failed before RolloutManager submission"):
-        wait_for_training_step(
-            health=lambda: _bridge_health(last_train_rollout_id=11, phase="serving"),
-            status=lambda: scenario_status(body, "guidance-run"),
-            expected_completed_steps=2,
-            expected_rollout_id=12,
-            timeout_s=0.01,
-            poll_interval_s=0,
-        )
+    with pytest.raises(RuntimeError, match="failed before the training job was submitted"):
+        _wait([body], timeout_s=0.01)
 
 
 def test_training_wait_deadline_is_not_a_builtin_timeout(monkeypatch) -> None:
@@ -474,21 +496,9 @@ def test_training_wait_deadline_is_not_a_builtin_timeout(monkeypatch) -> None:
         "recipes.tttd.examples.guidance_ttt.harness.run_controller.time.monotonic",
         lambda: next(monotonic),
     )
-    blocked_status = _reef_status()["scenarios"]["guidance-run"]
-    blocked_status["checkpoint_storage"] = {
-        "blocked": True,
-        "reasons": ["protected checkpoints plus reservation exceed the managed storage cap"],
-    }
 
     with pytest.raises(GuidanceTrainingTimeoutError, match="rollout 11 did not complete after 1s") as raised:
-        wait_for_training_step(
-            health=lambda: _bridge_health(completed_train_steps=0, last_train_rollout_id=None),
-            status=lambda: blocked_status,
-            expected_completed_steps=1,
-            expected_rollout_id=11,
-            timeout_s=1,
-            poll_interval_s=0,
-        )
+        _wait([_reef_status(scenario_step=1, training_job={"job_id": "job-1"})], expected_rollout_id=11)
 
     assert not isinstance(raised.value, TimeoutError)
 
@@ -497,15 +507,67 @@ def _reef_status(
     *,
     error: str | None = None,
     failed_steps: list[dict] | None = None,
+    scenario_step: int = 0,
+    finished_jobs: int = 0,
+    training_job: dict | None = None,
+    runtime_load_id: str | None = None,
 ) -> dict:
     return {
         "error": error,
+        "preload_errors": {},
         "scenarios": {
             "guidance-run": {
+                "scenario_step": scenario_step,
+                "training_job": training_job,
+                "finished_jobs": finished_jobs,
+                "current_runtime_load_id": runtime_load_id,
                 "processor": {"failed_steps": failed_steps or []},
             }
         },
     }
+
+
+def test_status_progress_reads_reef_over_http(monkeypatch) -> None:
+    from recipes.tttd.examples.guidance_ttt.harness import run_controller
+
+    commits = _job_commits()
+    pages = {
+        "/reef/status": {"error": None, "scenarios": {}},
+        "/reef/scenarios/guidance-run/commits?after_step=0&limit=100": {"commits": commits[:2], "next_after_step": 2},
+        "/reef/scenarios/guidance-run/commits?after_step=2&limit=100": {
+            "commits": commits[2:],
+            "next_after_step": None,
+        },
+    }
+    seen = []
+
+    class Response:
+        def __init__(self, body) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def read(self):
+            return json.dumps(self.body).encode()
+
+    def urlopen(request, timeout):
+        seen.append((request.get_header("Authorization"), timeout))
+        return Response(pages[request.full_url.removeprefix("http://127.0.0.1:8900")])
+
+    monkeypatch.setattr(run_controller.urllib.request, "urlopen", urlopen)
+    progress = StatusTrainingProgress("http://127.0.0.1:8900/", "guidance-run", token="reef-local")
+
+    # A scenario the status does not list yet has not trained.
+    assert progress.position() == TrainingPosition(0, 0, None)
+    assert progress.commits_after(0) == commits
+    assert seen == [("Bearer reef-local", 30.0)] * 3
+
+    with pytest.raises(ValueError, match="training timeout"):
+        StatusTrainingProgress("http://127.0.0.1:8900", "guidance-run", timeout_s=0)
 
 
 def test_the_harness_takes_its_task_vocabulary_from_the_harbor_task(tmp_path: Path) -> None:
@@ -593,34 +655,29 @@ def test_execution_client_sends_and_decodes_openai_compatible_request(monkeypatc
     assert result.metadata["api_attempts"] == 1
 
 
-def test_guidance_training_success_gate_accepts_complete_lora_update() -> None:
-    health = {
-        "ok": True,
-        "phase": "serving",
-        "completed_train_steps": 1,
-        "last_train_rollout_id": 0,
-        "last_train_metrics": {
-            "train/global_batch_size": 8,
-            "train/lora_trainable_parameters": 2048,
-            "train/lora_base_trainable_parameters": 0,
-            "train/lora_b_nonzero": 128,
-            "train/lora_b_l1": 1.5,
-        },
-    }
-
-    assert (
-        require_step_success(
-            expected_rollouts=8,
-            actual_rollouts=8,
-            retained_trajectories=8,
-            bridge_health=health,
-            expected_completed_train_steps=1,
-            expected_rollout_id=0,
-            grad_norm=0.75,
-            lora_rank=32,
-        )
-        == 0.75
+def _outcome(**metrics) -> TrainingJobOutcome:
+    return TrainingJobOutcome(
+        job_id="job-1",
+        rollout_id=0,
+        checkpoint_metrics={**TRAIN_METRICS, **metrics},
+        position=TrainingPosition(3, 1, None),
+        runtime_load_id="guidance:1",
     )
+
+
+def test_guidance_training_success_check_accepts_complete_lora_update_only() -> None:
+    def check(outcome: TrainingJobOutcome) -> float:
+        return require_step_success(
+            expected_rollouts=8, actual_rollouts=8, retained_trajectories=8, outcome=outcome, lora_rank=32
+        )
+
+    assert check(_outcome()) == 0.75
+    with pytest.raises(RuntimeError, match="grad norm"):
+        check(_outcome(**{"train/grad_norm": 0.0}))
+    with pytest.raises(RuntimeError, match="consumed global batch 4"):
+        check(_outcome(**{"train/global_batch_size": 4}))
+    with pytest.raises(RuntimeError, match="LoRA-B remained zero"):
+        check(_outcome(**{"train/lora_b_nonzero": 0}))
 
 
 def _identity(**overrides) -> GuidanceRunIdentity:
@@ -666,11 +723,6 @@ def test_guidance_committed_archive_is_the_only_resume_source(tmp_path: Path) ->
     store.restore_working_library()
 
     assert read_json(store.working_library_path)["step"] == 1
-
-
-def test_ray_bridge_rejects_an_invalid_training_timeout() -> None:
-    with pytest.raises(ValueError, match="training timeout"):
-        RayTrainingBridge("http://127.0.0.1:8900", "guidance-run", ray_address="127.0.0.1:12345", timeout_s=0)
 
 
 def _harbor_agent_module(monkeypatch):
@@ -726,39 +778,26 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(
     checkpoint_root = tmp_path / "checkpoints" / "megatron"
     checkpoint_root.mkdir(parents=True)
     (checkpoint_root / "latest_checkpointed_iteration.txt").write_text("1")
-    runtime_path = tmp_path / "stack" / "slime-driver" / "runtime.yaml"
-    runtime_path.parent.mkdir(parents=True)
-    runtime_path.write_text('reef: {ray_address: "10.0.0.1:12345", ray_namespace: test, ray_actor_name: test-bridge}')
 
-    class _Bridge(TrainingBridge):
+    class _Progress(TrainingProgress):
         def __init__(self, *args, **kwargs) -> None:
-            self.args = (args, kwargs)
-            assert kwargs["ray_address"] == "10.0.0.1:12345"
-            assert kwargs["ray_namespace"] == "test"
-            assert kwargs["ray_actor_name"] == "test-bridge"
+            assert args == ("http://127.0.0.1:8900", "guidance-smoke")
+            assert kwargs["token"] == "reef-local"
 
-        def start_step(self) -> int:
-            return 0
+        def position(self) -> TrainingPosition:
+            return TrainingPosition(0, 0, None)
 
-        def wait_for_step(self, *, expected_completed_steps, expected_rollout_id):
-            assert (expected_completed_steps, expected_rollout_id) == (1, 0)
-            return {
-                "ok": True,
-                "phase": "serving",
-                "completed_train_steps": 1,
-                "last_train_rollout_id": 0,
-                "runtime_load_id": "guidance:1",
-                "last_train_metrics": {
-                    "train/grad_norm": 0.5,
-                    "train/global_batch_size": 2,
-                    "train/lora_trainable_parameters": 1024,
-                    "train/lora_base_trainable_parameters": 0,
-                    "train/lora_b_nonzero": 8,
-                    "train/lora_b_l1": 0.25,
-                },
-            }
+        def wait_for_step(self, *, after, expected_rollout_id):
+            assert (after, expected_rollout_id) == (TrainingPosition(0, 0, None), 0)
+            return TrainingJobOutcome(
+                job_id="job-1",
+                rollout_id=0,
+                checkpoint_metrics={**TRAIN_METRICS, "train/grad_norm": 0.5, "train/global_batch_size": 2},
+                position=TrainingPosition(3, 1, None),
+                runtime_load_id="guidance:1",
+            )
 
-    monkeypatch.setattr(agent_module, "RayTrainingBridge", _Bridge)
+    monkeypatch.setattr(agent_module, "StatusTrainingProgress", _Progress)
     monkeypatch.setattr(agent_module, "OpenAICompatibleExecutionClient", lambda _backend: _ExecutionClient())
     for name, value in {
         "SCENARIO": "guidance-smoke",

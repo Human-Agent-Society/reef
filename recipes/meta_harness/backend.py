@@ -11,7 +11,7 @@ from reef.core.evaluation import SelectionDecision
 from reef.evaluation.harness import HarnessCandidate
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import CordisBackend
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 from .population import Population, PopulationStore, content_id
 
@@ -41,7 +41,7 @@ class MetaHarnessBackend(CordisBackend):
 
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
@@ -55,7 +55,7 @@ class MetaHarnessBackend(CordisBackend):
             raise ValueError("Meta-Harness composition entries state must be a list")
         try:
             population.sync_served(entries, step=scenario_step)
-            prepared = super().prepare_step(batch, state, scenario_step)
+            prepared = super().prepare_step(data, state, scenario_step)
             if prepared.outcome == "candidate":
                 prepared = self._bind_candidate(prepared, population)
             elif population.pending_id is not None:

@@ -49,15 +49,16 @@ APPLIED_LEARNING_RATE = AppliedLearningRate()
 def _loss_family_spec(args) -> SlimeAlgorithm | None:
     """Resolve the worker's loss-family spec from ``args``, or ``None``.
 
-    Mirrors :func:`resolve_objective_paths`: the driver stamps ``loss_family``
-    before workers start, so the spec's wire-surface declarations are readable
-    here without the driver forwarding each one.
+    Mirrors :func:`resolve_objective_paths`: the training component stamps
+    ``loss_family`` on the arguments before the workers start, so the spec's
+    wire-surface declarations are readable here without the component
+    forwarding each one.
 
-    ``None`` means a bridge booted without a family, or with one this process
-    cannot resolve. The key-set declarations survive that: the driver mirrors
-    them onto ``args`` (``configure_reef_loss_args``) and every caller unions
-    both sources. ``critic_value_head_zero_init`` has no args-carried mirror,
-    so it is the one declaration that needs the spec.
+    ``None`` means arguments without a family, or with one this process
+    cannot resolve. The key-set declarations survive that: the component
+    mirrors them onto ``args`` (``configure_reef_loss_args``) and every caller
+    unions both sources. ``critic_value_head_zero_init`` has no args-carried
+    mirror, so it is the one declaration that needs the spec.
     """
     if not getattr(args, "loss_family", None):
         return None
@@ -121,7 +122,6 @@ def initialize_megatron_objective(args) -> None:
     _install_critic_metrics(args)
     _install_critic_hf_bootstrap(args)
     _install_lora_hf_bootstrap(args)
-    _install_versioned_updaters()
     _install_pg_primitive(args)
     _install_score_centering(args)
 
@@ -224,6 +224,7 @@ def _install_metric_capture() -> None:
         return
 
     def log(args, metrics, step_key):
+        metrics = finalize_critic_metrics(metrics)
         learning_rate = APPLIED_LEARNING_RATE.value
         if learning_rate is not None and step_key == "train/step":
             # The recipe's schedule set this step's rate, not Slime's scheduler.
@@ -297,12 +298,18 @@ def _install_critic_metrics(args) -> None:
                     raise RuntimeError(f"{mask_key}/returns length mismatch: {selected.numel()} vs {returns.numel()}")
                 returns = returns[selected]
                 old_values = old_values[selected]
-            if returns.numel() == 0 or returns.var(unbiased=False) == 0:
-                explained_variance = returns.new_tensor(0.0)
-            else:
-                explained_variance = 1.0 - (returns - old_values).var(unbiased=False) / returns.var(unbiased=False)
+            # Additive statistics survive Slime's microbatch and DP/CP
+            # reductions. Averaging microbatch EVs does not compute global EV.
+            returns = returns.double()
+            errors = returns - old_values.double()
         metrics = dict(metrics)
-        metrics["explained_variance"] = explained_variance.detach()
+        metrics.update(
+            ev_count=returns.new_tensor(returns.numel()),
+            ev_return_sum=returns.sum(),
+            ev_return_square_sum=returns.square().sum(),
+            ev_error_sum=errors.sum(),
+            ev_error_square_sum=errors.square().sum(),
+        )
         return value, metrics
 
     marked_value_loss: Any = value_loss_function
@@ -376,24 +383,6 @@ def _install_lora_hf_bootstrap(args) -> None:
     marked_loader: Any = load_model_hf_weights
     marked_loader._reef_lora_hf_bootstrap = True
     hf_to_megatron.load_model_hf_weights = load_model_hf_weights
-
-
-def _install_versioned_updaters() -> None:
-    from slime.backends.megatron_utils import actor
-
-    from reef.train.slime_backend.reef_adapters.weight_updaters import (
-        ReefUpdateWeightFromDisk,
-        ReefUpdateWeightFromDiskDelta,
-        ReefUpdateWeightFromDistributed,
-        ReefUpdateWeightFromTensor,
-    )
-
-    actor.UpdateWeightFromDisk = ReefUpdateWeightFromDisk
-    actor.UpdateWeightFromDistributed = ReefUpdateWeightFromDistributed
-    actor.UpdateWeightFromTensor = ReefUpdateWeightFromTensor
-    from slime.backends.megatron_utils.update_weight import update_weight_from_disk_delta
-
-    update_weight_from_disk_delta.UpdateWeightFromDiskDelta = ReefUpdateWeightFromDiskDelta
 
 
 def _install_pg_primitive(args) -> None:
@@ -499,20 +488,55 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
     APPLIED_LEARNING_RATE.value = learning_rate
 
 
+def finalize_critic_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
+    """Replace the critic's additive moments with its token-weighted explained variance.
+
+    The value loss hook logs five moments per step: the token count and the
+    sums and square sums of the returns and of the value errors. Slime reduces
+    them over microbatches and ranks by the same factor, so their ratios give
+    the global moments. Zero return variance has no defined EV; the result
+    then carries ``explained_variance_valid`` 0 and no ``explained_variance``.
+    """
+    result = dict(metrics)
+    for key in metrics:
+        if not key.endswith("ev_count"):
+            continue
+        prefix = key.removesuffix("ev_count")
+        moments: list[float] = []
+        for name in ("count", "return_sum", "return_square_sum", "error_sum", "error_square_sum"):
+            value = result.pop(f"{prefix}ev_{name}")
+            if not isinstance(value, int | float) or isinstance(value, bool):
+                raise TypeError(f"{prefix}ev_{name} must be a numeric scalar")
+            moments.append(float(value))
+        count, return_sum, return_square_sum, error_sum, error_square_sum = moments
+        if count > 0:
+            return_variance = max(0.0, return_square_sum / count - (return_sum / count) ** 2)
+            error_variance = max(0.0, error_square_sum / count - (error_sum / count) ** 2)
+        else:
+            return_variance, error_variance = 0.0, 0.0
+        result[f"{prefix}return_variance"] = return_variance
+        result[f"{prefix}explained_variance_valid"] = float(return_variance > 0)
+        if return_variance > 0:
+            result[f"{prefix}explained_variance"] = 1.0 - error_variance / return_variance
+    return result
+
+
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
-    """Merge numeric worker metrics for the bridge's next drain.
+    """Merge numeric worker metrics for the training component's next drain (``drain_worker_metrics``).
 
     Non-finite values are dropped: a loss family may log NaN for a metric
     whose phase is absent from a step, and the drained metrics are written
     into the durable training-job marker with ``allow_nan=False``.
     """
     for name, value in metrics.items():
+        if name.endswith("explained_variance_valid") and value == 0:
+            _WORKER_METRICS.pop(name.removesuffix("_valid"), None)
         if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
             _WORKER_METRICS[str(name)] = float(value)
 
 
 def record_worker_step(metrics: Mapping[str, Any]) -> None:
-    """Append one optimizer step's numeric metrics for the bridge's next drain."""
+    """Append one optimizer step's numeric metrics for the training component's next drain."""
     numeric = {
         str(name): float(value)
         for name, value in metrics.items()

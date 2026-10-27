@@ -1528,7 +1528,7 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
             break
         captures_file.unlink()
 
-    # One report referencing the whole run batches as one trajectory sample;
+    # One report referencing the whole run trains as one trajectory sample;
     # --per-receipt sends the same score against each receipt on its own.
     reference_lists = [[receipt] for receipt in receipts] if per_receipt else [receipts]
     release = _installed_release(compose_dir)

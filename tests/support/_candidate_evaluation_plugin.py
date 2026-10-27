@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from reef.core.evaluation import CheckpointCandidate
 from reef.evaluation import (
     CandidateEvaluator,
     ConfiguredEvaluationPlugin,
@@ -11,7 +12,6 @@ from reef.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.runtime.interfaces import ModelCandidate
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class CheckpointEvaluator(ConfiguredEvaluationPlugin):
     token: str | None
 
     @classmethod
-    def from_config(cls, config, *, runtime, training_runtime, scenario, environ):
+    def from_config(cls, config, *, runtime, scenario, environ):
         token_env = config.get("token_env")
         return cls(
             score=float(config["score"]),
@@ -32,12 +32,12 @@ class CheckpointEvaluator(ConfiguredEvaluationPlugin):
         )
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        if not isinstance(candidate, ModelCandidate):
-            raise TypeError("checkpoint evaluation requires a ModelCandidate")
+        if not isinstance(candidate, CheckpointCandidate):
+            raise TypeError("checkpoint evaluation requires a CheckpointCandidate")
         return EvaluationResult(
             evaluator="external_checkpoint",
             evaluator_version="1",
-            metrics={"score": self.score, "checkpoint_path": candidate.checkpoint_path},
+            metrics={"score": self.score, "release_path": candidate.release_path},
             metadata={"scenario": self.scenario, "token_present": self.token is not None},
         )
 
@@ -79,5 +79,5 @@ class IncompletePlugin(ConfiguredEvaluationPlugin):
     pass
 
 
-def plain_function(config, *, runtime, training_runtime, scenario, environ):
+def plain_function(config, *, runtime, scenario, environ):
     raise AssertionError("a function must not be invoked as a plugin")

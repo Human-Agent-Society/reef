@@ -89,12 +89,10 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         step=1,
         source_artifact_ref=seed,
         component="weights",
-        backend="RuntimeBackend",
+        backend="stub",
         backend_config={"objective": "policy"},
     )
-    correlation = observer.prepare(
-        context, source_runtime_load_id="load-0", produced_runtime_load_id="load-1", checkpoint_path="/checkpoint/1"
-    )
+    correlation = observer.prepare(context, checkpoint_path="/checkpoint/1")
     record = replace(training_record(), metrics={**correlation, "score": 0.8})
     commit_step = inner.commit_step
 
@@ -119,8 +117,6 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         assert event.metrics["experiment/run_id"] == "run-0"
         assert event.produced_artifact_ref == landed.artifact_ref
         assert event.training_job_id == "job-1"
-        assert event.source_runtime_load_id == "load-0"
-        assert event.produced_runtime_load_id == "load-1"
         assert event.checkpoint_path == "/checkpoint/1"
         assert observer.run_step == 1
     finally:
@@ -145,9 +141,7 @@ def test_rollback_retries_rotate_once_and_tracker_errors_do_not_fail_storage(tmp
     )
     store = observer.store
     context = TrainingExperimentContext(scenario="math", recipe="recipe", step=1, source_artifact_ref=seed)
-    correlation = observer.prepare(
-        context, source_runtime_load_id=None, produced_runtime_load_id=None, checkpoint_path=None
-    )
+    correlation = observer.prepare(context, checkpoint_path=None)
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
     rollback = replace(

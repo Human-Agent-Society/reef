@@ -35,7 +35,7 @@ Propose a change
 ``Proposer.propose`` receives three positional arguments:
 
 - ``nodes``: the current tree as ``(kind, config)`` pairs in tree order.
-- ``samples``: a batch of ATIF ``TrajectoryItem`` values. Read the trajectory
+- ``samples``: the ATIF ``TrajectoryItem`` values of the step's job data. Read the trajectory
   from ``item.trajectory``, reward and feedback from ``item.metadata``, and
   original provider exchanges through ``reef.core.trajectories.recorded_payloads``.
 - ``models``: bindings for models the method can call. ``models.served`` is
@@ -86,10 +86,10 @@ with ``RecipeConfigError``. See `Manual training
 ``requests`` contains one mapping with ``id``, ``text``, ``session``,
 ``release_id``, ``requires``, and ``untrusted=True``. In ``manual`` mode,
 ``samples`` is empty. In ``hybrid`` mode, it contains up to
-``evolution.batch_size`` samples from the next automatic batch, and may be
+``job_samples`` samples from the next automatic job data, and may be
 empty. These samples are
 scored traces, or unscored records with the inference stages that "Two
-batching modes" below describes.
+trace sources" below describes.
 
 Reef evaluates request mutations and applies the same ``evolution.publish``
 policy as for other steps. Pending agent proposals and periodic rollback
@@ -139,7 +139,7 @@ This example uses a ``[fib]`` prefix to look up the expected answer in
 the scorer. The prefix is a convention of this method; Reef passes the
 task string through unchanged.
 
-This method adds a rules node the first time a batch contains a failure:
+This method adds a rules node the first time a step's samples contain a failure:
 
 .. code:: python
 
@@ -152,7 +152,7 @@ This method adds a rules node the first time a batch contains a failure:
 
    class FinalLineRule(Proposer):
        def propose(self, nodes, samples, models, **keywords):
-           """Add the rule after a failing batch; once it is in the tree, sit out."""
+           """Add the rule after a failing sample; once it is in the tree, sit out."""
            if all((sample.score or 0.0) > 0.0 for sample in samples):
                return None
            if any(config.get("text") == RULE for kind, config in nodes if kind == "rules"):
@@ -174,17 +174,18 @@ This method adds a rules node the first time a batch contains a failure:
                return message["content"]
        return None
 
-Two batching modes
-~~~~~~~~~~~~~~~~~~
+Two trace sources
+~~~~~~~~~~~~~~~~~
 
-The deployment's ``pipeline`` section selects the source of each batch.
-``recipe.config.evolution.batch_size`` (default 1) sets the number of
-traces in one batch.
+The deployment's ``pipeline`` section selects the source of each step's
+traces. ``pipeline.task2job.config.job_samples`` sets the number of traces
+in one step. Without it, ``recipe.config.evolution.batch_size`` (default 1)
+gives the number.
 
-- The recipe's default stages batch valid reports with explicit scores. Use
+- The recipe's default stages train on valid reports with explicit scores. Use
   them when a grader, test, or user action supplies an outcome.
-- The inference stages batch recorded inference requests and do not require
-  reports. A step starts every ``batch_size`` requests. These samples have
+- The inference stages train on recorded inference requests and do not require
+  reports. A step starts every ``job_samples`` requests. These samples have
   ``score=None``, which the proposer must handle. The SkillClaw night
   example judges its own unscored samples later. Name the stages as follows:
 
@@ -199,7 +200,7 @@ traces in one batch.
 Configure it
 ~~~~~~~~~~~~
 
-The recipe config names the plugin classes, the tasks, the batch size, and
+The recipe config names the plugin classes, the tasks, the step size, and
 the first-boot tree:
 
 .. code:: yaml

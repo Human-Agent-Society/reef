@@ -10,8 +10,8 @@ from reef.core.trajectories import trajectory_reward
 from reef.train.algos import TrainingObjective
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.registry import register_objective
-from reef.train.algos.signals import StepSignal
-from reef.train.types import TrainingBatch, trajectory_groups
+from reef.train.algos.signals import TrainingSignal
+from reef.train.types import JobData, trajectory_groups
 
 
 @register_objective
@@ -88,8 +88,8 @@ class TttdObjective(TrainingObjective):
         advantages = tuple(e / (n + epsilon) - 1.0 for e, n in zip(exponentials, normalizers, strict=True))
         return advantages, beta
 
-    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        comparison_sets = trajectory_groups(batch)
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        comparison_sets = trajectory_groups(data)
         advantages: list[float] = []
         betas: list[float] = []
         for comparison_set in comparison_sets:
@@ -101,9 +101,9 @@ class TttdObjective(TrainingObjective):
         steps = next_steps(state)
         normalized = tuple(advantages)
         # The processor drops constant-reward groups but keeps one when every
-        # group is constant; flag that batch (its advantages carry no signal).
+        # group is constant; flag that job's data (its advantages carry no signal).
         constant_groups = all(len({trajectory_reward(sample) for sample in group}) == 1 for group in comparison_sets)
-        return StepSignal(
+        return TrainingSignal(
             "train",
             {"steps": steps},
             {

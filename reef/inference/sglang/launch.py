@@ -75,7 +75,6 @@ class SGLangEngineGroup(EngineGroup):
         self.all_engines: list[Any] = [] if group.worker_type == "placeholder" else [None] * count
         self.num_new_engines = 0
         self.port_ranges: dict[int, tuple[str, range]] = {}
-        self.needs_offload = bool(config.offload and gpu_offset < config.shared_gpus and not external)
 
     @property
     def engines(self) -> list[Any]:
@@ -122,8 +121,6 @@ class SGLangEngineGroup(EngineGroup):
         if not self.external:
             base_gpu, options["scheduling_strategy"] = self._placement(index)
         overrides = dict(self.group.options)
-        if self.config.offload and not self.needs_offload:
-            overrides.setdefault("enable_memory_saver", False)
         return (
             ray.remote(ReefSGLangEngine)
             .options(**options)
@@ -241,39 +238,7 @@ class SGLangModel:
     def engine_parallel_configs(self) -> list[dict[str, int]]:
         return [group.parallel_config() for group in self.generation_groups for _ in group.engines]
 
-    def offload(self):
-        return ray.get(
-            [
-                engine.release_memory_occupation.remote()
-                for group in self.server_groups
-                if group.needs_offload
-                for engine in group.engines
-                if engine is not None
-            ]
-        )
-
-    def onload(self, tags=None):
-        return ray.get(
-            [
-                engine.resume_memory_occupation.remote(tags=tags)
-                for group in self.server_groups
-                if group.needs_offload
-                for engine in group.engines
-                if engine is not None
-            ]
-        )
-
-    def onload_weights(self):
-        return self.onload(["weights"])
-
-    def onload_kv(self):
-        return self.onload(["kv_cache", "cuda_graph"])
-
     def recover(self) -> None:
-        missing = [
-            (group, [i for i, engine in enumerate(group.all_engines) if engine is None])
-            for group in self.server_groups
-        ]
         startup = EngineStartup()
         pending_without_retry: list[ray.ObjectRef] = []
         for group in self.server_groups:
@@ -285,16 +250,6 @@ class SGLangModel:
                 startup.start(group)
         ray.get(pending_without_retry)
         startup.wait()
-        engines = [
-            group.all_engines[index]
-            for group, indices in missing
-            if group.needs_offload
-            for index in indices
-            if index % group.nodes_per_engine == 0
-        ]
-        if engines:
-            ray.get([engine.release_memory_occupation.remote() for engine in engines])
-            ray.get([engine.resume_memory_occupation.remote(tags=["weights"]) for engine in engines])
 
 
 class SGLangCluster:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from numbers import Real
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data
@@ -235,11 +235,11 @@ class OpenclawrlAlgorithm(SlimeAlgorithm):
         args.openclawrl_subset_mode = settings.subset_mode
 
     def bind(self, config=None, *, critic_steps_per_actor=1, critic_only_steps=0):
-        # The driver forwards whatever parse_specific_options returned; the
+        # The component forwards whatever parse_specific_options returned; the
         # knobs themselves travel on args, so the bound instance stays
         # stateless (same pattern as sao).
         if config is not None and not isinstance(config, OpenclawrlSettings):
-            raise TypeError("openclawrl bridge algorithm config must be OpenclawrlSettings")
+            raise TypeError("openclawrl algorithm config must be OpenclawrlSettings")
         return self
 
     def configure_backend_args(self, args: Namespace) -> None:

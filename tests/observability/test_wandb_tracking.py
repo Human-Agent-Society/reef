@@ -91,8 +91,6 @@ def _event(
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
-        source_runtime_load_id="engine:7",
-        produced_runtime_load_id="engine:8",
         checkpoint_path="/checkpoints/hf/7",
     )
 
@@ -171,8 +169,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert "selection/label" not in logged
     assert logged["reef/source_release_id"] == "artifact:7"
     assert logged["reef/produced_release_id"] == "artifact:8"
-    assert logged["reef/source_runtime_load_id"] == "engine:7"
-    assert logged["reef/produced_runtime_load_id"] == "engine:8"
+    assert not {"reef/source_runtime_load_id", "reef/produced_runtime_load_id"} & logged.keys()
     assert logged["reef/training_job_id"] == "job-7"
     assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
     assert client.runs[0].artifacts == []
