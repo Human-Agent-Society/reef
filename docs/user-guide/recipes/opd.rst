@@ -3,7 +3,7 @@ OPD: learn from a separate teacher on your own responses
 
 On-policy distillation lets a frozen teacher score the tokens the student
 actually generated. Reef trains the student's weights on that signal and
-publishes them before the next batch is sampled. The method follows
+publishes them before the next job's responses are sampled. The method follows
 `Thinking Machines Lab's write-up
 <https://thinkingmachines.ai/blog/on-policy-distillation/>`__.
 
@@ -14,7 +14,7 @@ The learning loop
 -----------------
 
 .. flow::
-   :loop: wait for publication before generating the next batch
+   :loop: wait for publication before generating the next job's responses
 
    Sample :: the student answers prompts through Reef
    Report :: submit one empty teacher-context report per inference receipt
@@ -42,10 +42,11 @@ Each report references exactly one inference receipt:
 Configuration
 -------------
 
-Select ``recipes.opd.recipe:OPDRecipe``. ``max_staleness`` in
-``recipe.config`` defaults to zero: wait for each published update before
-sampling the next batch. The stage settings go in the deployment's top-level
-``pipeline`` section. The batch size is Slime's ``--global-batch-size``:
+Select ``recipes.opd.recipe:OPDRecipe``. The stage settings go in the deployment's top-level
+``pipeline`` section. ``pipeline.record2record.config.max_staleness`` defaults
+to zero: wait for each published update before sampling the next job's
+responses. ``job_samples`` is the responses of one job, and
+Slime's ``--global-batch-size`` is the responses of one optimizer step:
 
 .. code:: yaml
 
@@ -53,13 +54,17 @@ sampling the next batch. The stage settings go in the deployment's top-level
      record2task:
        config:
          max_teacher_tokens: 8192
+     task2job:
+       config:
+         job_samples: ${training.config.global_batch_size}
    training:
      config:
        global_batch_size: 32
 
 .. config::
 
-   training.config.global_batch_size | responses in one batch and in one optimizer step. Sample this many responses before you wait for publication, so that one batch is one step.
+   pipeline.task2job.config.job_samples | required | responses in one job. Set it to ``training.config.global_batch_size`` so that one job is one step.
+   training.config.global_batch_size | responses in one optimizer step. Sample this many responses before you wait for publication, so that one job is one step.
    pipeline.record2task.config.max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is skipped and counted in ``teacher_overflow_reports``. 0 disables the check.
 
 The Slime options belong in ``training.options``:
@@ -71,13 +76,13 @@ The Slime options belong in ``training.options``:
    opd-divergence | reverse | sampled-token KL(student || teacher).
    opd-top-k | 1 | selects the sampled-token reverse-KL estimator; the sampled token's probability is normalized over the full vocabulary.
    opd-teacher-update-rate | 0 | the teacher stays frozen.
-   opd-importance-sampling-cap | 0 | no truncated importance-sampling correction: one on-policy update per batch.
+   opd-importance-sampling-cap | 0 | no truncated importance-sampling correction: one on-policy update per optimizer batch.
    opd-advantage-clip | 0 | symmetric bound on the teacher/student log-prob difference used in the sampled reverse-KL gradient. 0 disables clipping.
 
 Also set ``loss-type: custom_loss``, ``use-rollout-logprobs: true`` and
 ``disable-compute-advantages-and-returns: true``. Each report is one sample,
-so a batch holds exactly ``--global-batch-size`` samples and trains one
-optimizer update. The shared backend's other divergences and
+so with ``job_samples`` equal to ``--global-batch-size`` a job holds exactly
+that many samples and trains one optimizer update. The shared backend's other divergences and
 representations are reachable through the inherited ``opd-*`` flags; changing
 them changes the method.
 
@@ -121,14 +126,14 @@ deployment's ``teacher`` section declares it and replaces
 ``num-gpus`` reserves the teacher's GPUs beyond the student's and sets its
 tensor parallel size, ``port`` is its internal endpoint, ``timeout`` bounds one
 scoring request, and ``options`` are native SGLang options. Before each
-optimizer step the bridge sends every recorded prompt and response to the
+optimizer step, Slime sends every recorded prompt and response to the
 engine and stores the teacher's log-probability of each sampled token, so the
 loss stays the sampled-token reverse KL. The engine path requires rollout
 temperature 1, because SGLang's input log-probs are not tempered, and the
 teacher-selected top-K representation; the teacher's tokenizer must map tokens
 to the student's ids, and its context limit must cover the longest recorded
 sequence. A scoring failure fails the step before it starts, so no partially
-scored batch trains. ``perf/distill_teacher_time`` reports the scoring time of
+scored job trains. ``perf/distill_teacher_time`` reports the scoring time of
 each step in seconds.
 
 Math example

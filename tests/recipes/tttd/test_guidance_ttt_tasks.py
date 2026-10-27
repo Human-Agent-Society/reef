@@ -269,37 +269,37 @@ def test_final_verifier_rejects_partial_or_nonfinite_results(task, monkeypatch):
 
 
 def test_constant_reward_step_can_commit_without_a_parameter_change():
-    from recipes.tttd.examples.guidance_ttt.harness.run_controller import require_step_success
+    from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
+        TrainingJobOutcome,
+        TrainingPosition,
+        require_step_success,
+    )
 
-    health = {
-        "ok": True,
-        "phase": "serving",
-        "completed_train_steps": 1,
-        "last_train_rollout_id": 0,
-        "last_train_metrics": {
-            "train/global_batch_size": 2,
-            "train/lora_trainable_parameters": 1024,
-            "train/lora_base_trainable_parameters": 0,
-            "train/lora_b_nonzero": 0,
-            "train/lora_b_l1": 0,
-        },
-    }
-    args = {
-        "expected_rollouts": 4,
-        "actual_rollouts": 4,
-        "retained_trajectories": 2,
-        "bridge_health": health,
-        "expected_completed_train_steps": 1,
-        "expected_rollout_id": 0,
-        "grad_norm": 0.0,
-        "lora_rank": 32,
-    }
-    assert require_step_success(**args, allow_zero_signal=True) == 0.0
+    def outcome(**metrics) -> TrainingJobOutcome:
+        return TrainingJobOutcome(
+            job_id="job-1",
+            rollout_id=0,
+            checkpoint_metrics={
+                "train/grad_norm": 0.0,
+                "train/global_batch_size": 2,
+                "train/lora_trainable_parameters": 1024,
+                "train/lora_base_trainable_parameters": 0,
+                "train/lora_b_nonzero": 0,
+                "train/lora_b_l1": 0,
+                **metrics,
+            },
+            position=TrainingPosition(3, 1, None),
+            runtime_load_id=None,
+        )
+
+    args = {"expected_rollouts": 4, "actual_rollouts": 4, "retained_trajectories": 2, "lora_rank": 32}
+    assert require_step_success(**args, outcome=outcome(), allow_zero_signal=True) == 0.0
     with pytest.raises(RuntimeError, match="grad norm"):
-        require_step_success(**args)
-    health["last_train_metrics"]["train/lora_base_trainable_parameters"] = 1
+        require_step_success(**args, outcome=outcome())
     with pytest.raises(RuntimeError, match="base parameters"):
-        require_step_success(**args, allow_zero_signal=True)
+        require_step_success(
+            **args, outcome=outcome(**{"train/lora_base_trainable_parameters": 1}), allow_zero_signal=True
+        )
 
 
 def test_resume_rejects_a_changed_task_or_executor(tmp_path, monkeypatch):

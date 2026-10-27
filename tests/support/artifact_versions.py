@@ -5,91 +5,56 @@ from __future__ import annotations
 import time
 
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class RollbackRuntime(StubTrainingRuntime):
-    """A runtime that saves the checkpoint of each ``save_interval``-th version, as Slime's ``--save-interval``."""
+class RollbackInference(StubInferenceRuntime):
+    """Serve each release under the version that its materialized ``model.txt`` names; the initial one is ``w0``.
 
-    def __init__(self, checkpoint_dir, save_interval: int = 1) -> None:
+    ``restore_order`` is shared with the training component, so a test sees which side a rollback restored first.
+    """
+
+    def __init__(self, restore_order: list[str]) -> None:
         super().__init__(base_url="http://trainer")
-        self.checkpoint_dir = checkpoint_dir
-        self.save_interval = save_interval
-        self.trained = 0
-        self.restored: list[str] = []
-        self.restore_order = []
-        self.candidate_versions: dict[str, str] = {}
+        self.restore_order = restore_order
 
-    @property
-    def inference_handler(self):
-        return None
+    def serve(self, artifact):
+        return super().serve(artifact.materialize())
 
-    def prepare_training_step(
-        self,
-        batch,
-        objective,
-        algorithm_state,
-        scheduling,
-        scenario_step,
-        *,
-        parent_runtime_load_id=None,
-        scenario=None,
-    ):
-        del batch, objective
-        return PreparedTrainingStep(
-            action="train",
-            payload={"scenario_step": scenario_step},
-            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
-            metrics={},
-        )
-
-    def train_candidate(self, payload):
-        self.trained += 1
-        version = f"w{self.trained}"
-        if (payload["scenario_step"] + 1) % self.save_interval:
-            # A job between two saves publishes nothing.
-            checkpoint_path = None
-        else:
-            checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
-            checkpoint.mkdir(parents=True)
-            (checkpoint / "model.txt").write_text(version)
-            checkpoint_path = str(checkpoint)
-        job_id = f"job-{payload['scenario_step']}"
-        self.candidate_versions[job_id] = version
-        return ModelCandidate(
-            candidate_id=job_id,
-            training_job_id=job_id,
-            checkpoint_path=checkpoint_path,
-            current_runtime_load_id=None,
-        )
-
-    def activate_candidate(self, candidate):
-        return ActivatedModel(candidate.candidate_id, self.candidate_versions[candidate.candidate_id])
-
-    def reject_candidate(self, candidate):
-        self.candidate_versions.pop(candidate.candidate_id, None)
-
-    @property
-    def supports_checkpoint_restore(self):
-        return True
-
-    def restore_checkpoint(self, artifact, *, scenario=None):
-        assert not self.inference.inference_admission_status["open"]
-        self.restore_order.append("training")
-
-    def restore_serving_checkpoint(self, artifact):
-        assert not self.inference.inference_admission_status["open"]
+    def activate_checkpoint(self, artifact, *, scenario=None):
         self.restore_order.append("inference")
-        version = artifact.local_path.joinpath("model.txt").read_text()
-        self.restored.append(version)
-        return f"restored:{version}"
+        return super().activate_checkpoint(artifact, scenario=scenario)
+
+
+class RollbackComponent(StubTrainingComponent):
+    """A component whose ``n``-th job saves ``w<n>``; a rollback imports the release as the next job's start.
+
+    ``inference`` is the runtime that serves its checkpoints. ``activated`` lists the versions that it served, and
+    ``trained`` counts the submitted jobs.
+    """
+
+    def __init__(self, checkpoint_dir) -> None:
+        super().__init__(checkpoint_dir)
+        self.restore_order: list[str] = []
+        self.inference = RollbackInference(self.restore_order)
+
+    @property
+    def activated(self) -> list[str]:
+        return self.inference.activated
+
+    @property
+    def trained(self) -> int:
+        return len(self.submitted)
+
+    def import_start(self, release):
+        self.restore_order.append("training")
+        return super().import_start(release)
 
 
 class RecordingExperimentTracker(ExperimentTracker):
@@ -116,14 +81,17 @@ class RecordingExperimentTracker(ExperimentTracker):
 
 
 def inference(index: int, runtime_load_id: str | None = None) -> AgentRecord:
-    """The inference record of step ``index``, served by the version that step ``index - 1`` published.
+    """The inference record of job ``index``, served by the version that job ``index - 1`` published.
 
     ``runtime_load_id`` names another serving version, such as one that a rollback restored.
     """
-    version = runtime_load_id if runtime_load_id is not None or index == 1 else f"w{index - 1}"
-    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if version is not None:
-        payload["runtime_load_id"] = version
+    version = f"w{index - 1}" if runtime_load_id is None else runtime_load_id
+    payload: dict[str, object] = {
+        "tokens": [1, 2],
+        "loss_mask": [0, 1],
+        "rollout_log_probs": [-0.2],
+        "runtime_load_id": version,
+    }
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
@@ -142,16 +110,14 @@ def report(index: int) -> AgentRecord:
     )
 
 
-def dispatcher(tmp_path, *, save_interval: int = 1, experiment_tracker=None):
+def dispatcher(tmp_path, *, experiment_tracker=None):
     initial = tmp_path / "initial"
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("w0")
-    runtime = RollbackRuntime(tmp_path / "exported", save_interval)
+    runtime = RollbackComponent(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     value = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(runtime),
-        ),
+        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         experiment_tracker=experiment_tracker,
@@ -160,11 +126,22 @@ def dispatcher(tmp_path, *, save_interval: int = 1, experiment_tracker=None):
     return value, runtime, backend_factory
 
 
+def finished_jobs(dispatcher: Dispatcher) -> int:
+    """The number of training jobs that scenario ``math`` finished, as ``GET /reef/status`` reports it."""
+    dispatcher.get_or_create_scenario("math")
+    return dispatcher.build_training_status()["scenarios"]["math"]["finished_jobs"]
+
+
 def train(dispatcher: Dispatcher, index: int, runtime_load_id: str | None = None) -> None:
+    """Accept job ``index``'s records and wait until the job it submits ends.
+
+    A job commits three times: its submission, the decision on its checkpoint, and its end.
+    """
+    finished = finished_jobs(dispatcher)
     dispatcher.accept_record(inference(index, runtime_load_id))
     dispatcher.accept_record(report(index))
-    for _ in range(1000):
-        if dispatcher.get_or_create_scenario("math").scenario_step >= index:
+    for _ in range(5000):
+        if finished_jobs(dispatcher) > finished:
             return
         time.sleep(0.001)
-    raise AssertionError("async training did not commit")
+    raise AssertionError("async training did not finish its job")

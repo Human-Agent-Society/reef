@@ -20,8 +20,8 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.task2batch import Task2Batch
-from reef.train import PreparedStep, Trainer, TrainingBatch
+from reef.task2job import Task2Job
+from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskItem
 
@@ -50,9 +50,9 @@ class FeedbackTasks(ReportTasks):
         return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
 
-class FeedbackBatches(Task2Batch):
-    def make_batch(self, tasks, batch_id):
-        return TrainingBatch(batch_id, tasks)
+class FeedbackJobData(Task2Job):
+    def make_job_data(self, tasks, data_id):
+        return JobData(data_id, tasks)
 
 
 def feedback_pipeline(context):
@@ -60,7 +60,7 @@ def feedback_pipeline(context):
         context,
         record2record=ReportRecord2Record(context, ReportGrouping()),
         record2task=FeedbackTasks(),
-        task2batch=FeedbackBatches(context, None),
+        task2job=FeedbackJobData(context, None, None),
     )
 
 
@@ -76,7 +76,7 @@ class LearningBackend(ExampleBackend):
 
 @dataclass(frozen=True, kw_only=True)
 class LearningRecipe(Recipe):
-    batches: list[TrainingBatch] = field(default_factory=list)
+    batches: list[JobData] = field(default_factory=list)
 
     @property
     def report_type(self):
@@ -92,7 +92,7 @@ class LearningRecipe(Recipe):
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
-            batch_size=2,
+            default_job_samples=2,
         )
 
 

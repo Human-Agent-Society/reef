@@ -755,6 +755,7 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=True,
     )
     scenario_name = "../gepa-demo"
     try:
@@ -803,7 +804,7 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     data_dir = tmp_path / "agent-record"
-    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(data_dir))
+    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(data_dir), hold_local_cycles=True)
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None
@@ -836,7 +837,9 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     finally:
         dispatcher.close()
 
-    recovered_dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(data_dir))
+    recovered_dispatcher = Dispatcher(
+        built, factory, scenario_storage=SQLiteScenarioStorage(data_dir), hold_local_cycles=True
+    )
     try:
         recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")
         assert recovered is not None

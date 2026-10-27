@@ -20,7 +20,7 @@ implementations — override only what your algorithm needs):
     2. **shape row**   — ``shape_sample_row``: per-sample wire-row serialization.
     3. **build batch** — ``build_rollout_data``: wire rows → Slime batch dict.
     4. **prepare**     — ``prepare_rollout``: pre-training work (teacher scoring,
-       advantage hooks, etc.) on the bridge actor.
+       advantage hooks, etc.) in the training component.
     5. **compute loss** — registered via ``@objective`` in ``objective.py``
        (worker-side, resolved by :func:`resolve_objective_paths`). Two lanes:
        a family either replaces Slime's whole loss (``loss_type =
@@ -33,11 +33,12 @@ implementations — override only what your algorithm needs):
        once at actor init and ``reef_actor_pre_train_hook_path`` before each
        train step, for families that keep state on the actor (a frozen
        teacher, for one).
-    6. **train step**  — ``train``: critic→actor orchestration on the bridge
-       actor; ``rollout_metrics`` for telemetry.
+    6. **train step**  — ``train``: critic→actor orchestration in the training
+       component; ``rollout_metrics`` for telemetry.
 
-Stages 1-4 and 6 run in the driver process.  Stage 5 runs in Megatron workers
-that only receive a serialized ``args`` Namespace.  The driver stamps
+Stages 1-4 and 6 run in the training component's process (the HTTP service).
+Stage 5 runs in Megatron workers that only receive a serialized ``args``
+Namespace. The component stamps
 ``args.loss_family``; the worker calls :func:`resolve_objective_paths` during
 init to import the algorithm's ``objective.py`` (triggering ``@objective``
 decorators) and project the dotted paths onto ``args``.
@@ -85,7 +86,7 @@ from dataclasses import dataclass, field
 from numbers import Real
 from typing import Any, Literal
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.trajectories import source_record_id, trajectory_reward
 
 
@@ -247,7 +248,7 @@ class SlimeAlgorithm(ABC):
         ``apply_driver_options``      — apply parsed options to Slime's Namespace.
         ``configure_backend_args``    — project family settings onto backend args.
         ``bind``                      — return a runtime-bound instance.
-        ``prepare_rollout``           — pre-training work on the bridge actor.
+        ``prepare_rollout``           — pre-training work in the training component.
         ``train``                     — critic→actor orchestration.
         ``rollout_metrics``           — telemetry after training.
         ``policy_gradient_weight``    — the loss's per-token weight, for score centering.
@@ -268,7 +269,7 @@ class SlimeAlgorithm(ABC):
     # --- optional wire-surface declarations (consumed generically by the
     # reef_adapters layer via ``configure_reef_loss_args``) ---
     rollout_data_keys: tuple[str, ...] = ()
-    """Extra per-sample payload keys the training coordinator partitions across DP ranks."""
+    """Extra per-sample payload keys the training component partitions across DP ranks."""
     rollout_tensor_dtypes: Mapping[str, str] = {}
     """Payload keys to tensorize before training, as {key: "int"|"long"|"float32"}."""
     external_batch_keys: tuple[str, ...] = ()
@@ -380,11 +381,11 @@ class SlimeAlgorithm(ABC):
         payload_loss = rollout_data.get("loss")
         if self.loss_family and payload_loss != self.loss_family:
             raise ValueError(
-                f"Slime bridge for loss family {self.loss_family!r} received payload loss {payload_loss!r}"
+                f"Slime training for loss family {self.loss_family!r} received payload loss {payload_loss!r}"
             )
 
     def prepare_rollout(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
-        """Pre-training work on the bridge actor (teacher scoring, etc.). Default: no-op."""
+        """Pre-training work in the training component (teacher scoring, etc.). Default: no-op."""
         return {}
 
     def configure_critic_args(self, critic_args: Namespace) -> None:
@@ -408,7 +409,7 @@ class SlimeAlgorithm(ABC):
         results = resolve(actor_group.async_train(rollout_id, rollout_data_refs))
         return TrainResult(worker_results=list(results or ()))
 
-    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
+    def rollout_metrics(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
         """Return telemetry metrics after training. Default: none."""
         return {}
 
@@ -427,16 +428,16 @@ class SlimeAlgorithm(ABC):
         a teacher client or a train schedule; call ``self.__class__()`` to
         create a fresh instance so the registry singleton stays untouched.
 
-        The driver always forwards whatever ``parse_specific_options``
+        The component always forwards whatever ``parse_specific_options``
         returned as ``config``, so a family whose options travel on ``args``
         via ``apply_driver_options`` must still accept its own Settings type
         here — and may ignore the value. A family whose options are consumed
-        bridge-side stores it. ``critic_steps_per_actor`` is ``None`` when the
+        in the component stores it. ``critic_steps_per_actor`` is ``None`` when the
         operator left the flag unset; a critic family substitutes its own
         default.
         """
         if config is not None:
-            raise TypeError(f"loss family {self.loss_family!r} does not accept bridge algorithm config")
+            raise TypeError(f"loss family {self.loss_family!r} does not accept an algorithm config")
         return self
 
     # --- template methods (do not override) ---

@@ -20,7 +20,7 @@ import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.plugins import PluginConfigError, PluginReference
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -39,7 +39,7 @@ from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend, FailureManifest, Mutation, MutationError, Promoter
 from reef.train.trainer import Trainer
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
+from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainStepResult
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the episode scorer can prefer compositions containing the marker.
@@ -73,8 +73,8 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-def batch() -> TrainingBatch:
-    return TrainingBatch("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+def batch() -> JobData:
+    return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 # The deployment's model binding: where episodes and proposals reach a model.
@@ -136,7 +136,7 @@ def backend(tmp_path: Path, propose, seed: tuple = ()) -> CordisBackend:
 
 def run_backend_step(
     backend: CordisBackend,
-    trace_batch: TrainingBatch,
+    trace_batch: JobData,
     state,
 ) -> TrainStepResult:
     """Exercise the backend phases directly; production runs them in Trainer."""
@@ -850,6 +850,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=True,
     )
 
     try:
@@ -892,6 +893,7 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476")
@@ -912,6 +914,7 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=True,
     )
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
@@ -987,6 +990,7 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
@@ -1020,6 +1024,7 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("pregate-476")
@@ -1050,6 +1055,7 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        hold_local_cycles=True,
     )
     try:
         recovered = restarted.get_or_create_scenario("pregate-476")
@@ -1470,7 +1476,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
             pipeline={
                 "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
                 "record2task": {"module": "reef.train.cordis_backend.processor:InferenceTasks"},
-                "task2batch": {"config": {"buffer_size": 6}},
+                "task2job": {"config": {"buffer_size": 6}},
             },
             batch_size=2,
         ),
@@ -1479,17 +1485,22 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     trainer = records.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "InferenceRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "InferenceTasks"
-    assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    # evolution.batch_size is the trainer's batch size, which it batches by.
-    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (2, 6)
+    assert type(trainer.pipeline.task2job).__name__ == "TraceJobData"
+    # evolution.batch_size is the default job_samples.
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 6)
 
     reported = CordisRecipe.from_environment({}, config=config(), runtime=proxy)
     trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.pipeline.record2record).__name__ == "ReportRecord2Record"
     assert type(trainer.pipeline.record2task).__name__ == "TraceTasks"
-    assert type(trainer.pipeline.task2batch).__name__ == "TraceBatches"
-    # The default buffer holds four batches.
-    assert (trainer.batch_size, trainer.pipeline.buffer_size) == (1, 4)
+    assert type(trainer.pipeline.task2job).__name__ == "TraceJobData"
+    # The default buffer holds the data of four jobs.
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (1, 4)
+    # The stage config sets job_samples over evolution.batch_size.
+    sized = CordisRecipe.from_environment(
+        {}, config=config(pipeline={"task2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy
+    ).build("demo", SQLiteRecordStore())
+    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         CordisRecipe.from_environment({}, config=config({"batch_size": 2}))
@@ -1501,20 +1512,17 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path, mon
     # A bad stage config fails when the scenario's pipeline builds.
     for stage_config, message in (
         ({"batch_size": 2}, "unknown config fields: batch_size"),
-        ({"buffer_size": 0}, "buffer_size must be positive"),
+        ({"buffer_size": 0}, "buffer_size must be None or a positive int"),
+        # The stage refuses a buffer that cannot hold one job's data.
+        ({"buffer_size": 1}, "buffer_size 1 is smaller than job_samples 2"),
     ):
         with pytest.raises(RecipeConfigError, match=message):
             CordisRecipe.from_environment(
-                {}, config=config(pipeline={"task2batch": {"config": stage_config}}, batch_size=2), runtime=proxy
+                {}, config=config(pipeline={"task2job": {"config": stage_config}}, batch_size=2), runtime=proxy
             ).build("demo", SQLiteRecordStore())
-    # The trainer refuses a buffer that cannot hold one batch.
-    with pytest.raises(PluginConfigError, match="buffer_size 1 is smaller than the batch size 2"):
-        CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2batch": {"config": {"buffer_size": 1}}}, batch_size=2), runtime=proxy
-        ).build("demo", SQLiteRecordStore())
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         CordisRecipe.from_environment(
-            {}, config=config(pipeline={"task2batch": {"config": {"batch_policy": "records"}}}), runtime=proxy
+            {}, config=config(pipeline={"task2job": {"config": {"batch_policy": "records"}}}), runtime=proxy
         ).build("demo", SQLiteRecordStore())
 
 
@@ -1673,12 +1681,12 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
     assert all(received is executor for received in seen)
 
 
-def _traced_batch(*prompts: str) -> TrainingBatch:
+def _traced_batch(*prompts: str) -> JobData:
     samples = tuple(
         recorded_trajectory(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0)
         for i, p in enumerate(prompts)
     )
-    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
+    return JobData("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
@@ -1752,7 +1760,7 @@ def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
     assert key not in json.dumps(result.state)
 
 
-def _tagged_batch(*pairs: tuple[str, str | None]) -> TrainingBatch:
+def _tagged_batch(*pairs: tuple[str, str | None]) -> JobData:
     samples = tuple(
         recorded_trajectory(
             f"a{i}",
@@ -1761,7 +1769,7 @@ def _tagged_batch(*pairs: tuple[str, str | None]) -> TrainingBatch:
         )
         for i, (p, s) in enumerate(pairs)
     )
-    return TrainingBatch("demo:trace:promote", tuple(sample for sample in samples))
+    return JobData("demo:trace:promote", tuple(sample for sample in samples))
 
 
 def _promoting_backend(tmp_path: Path, **kwargs):
@@ -2403,6 +2411,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=True,
     )
     try:
         scenario = dispatcher.get_or_create_scenario("review")
@@ -2513,6 +2522,7 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         built,
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=True,
     )
 
     async def run() -> None:
@@ -2547,10 +2557,6 @@ def test_pending_requires_durable_bytes() -> None:
     """Only a step with bytes to promote later can ask to be held back, so a
     no-artifact step is refused where it is built."""
     assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
-    assert TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path="/ckpt", pending=True).pending is True
-    # A version names saved weights, so a version without bytes is refused before the pending check.
-    with pytest.raises(ValueError, match="runtime_load_id names saved weights"):
-        TrainStepResult({}, {}, runtime_load_id="w1", pending=True)
     with pytest.raises(ValueError, match="pending step must carry durable bytes"):
         TrainStepResult({}, {}, pending=True)
     with pytest.raises(ValueError, match="pending must be a boolean"):

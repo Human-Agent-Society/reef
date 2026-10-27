@@ -2,9 +2,9 @@
 
 ``SDPORecord2Record`` groups the reports of one sampling step;
 ``SDPOTasks`` turns each rollout into a task and owns the teacher's renderer
-and windows; ``SDPOBatches`` batches one complete step. The teacher's request
+and windows; ``SDPOJobData`` batches one complete step. The teacher's request
 is composed once the step's other rollouts are known
-(:meth:`SDPOBatches.make_batch`), with the reference's reprompt template
+(:meth:`SDPOJobData.make_job_data`), with the reference's reprompt template
 (lasgroup/SDPO at ``7c457fc1b1f6``, ``verl/trainer/config/sdpo.yaml``): the
 original question followed by the first successful sibling's response and,
 when enabled, the environment feedback the report carried.
@@ -23,16 +23,23 @@ from typing import Any, Self
 
 from recipes.sdpo.report import SDPOReport
 from reef.core.config import config_option
-from reef.core.plugins import PluginConfigError, PluginSettings
+from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import GroupDecision, Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2record import (
+    GroupDecision,
+    Record2Record,
+    Record2RecordSettings,
+    ReportContext,
+    ReportGrouping,
+    ReportRecord2Record,
+)
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2task.distill import TeacherRenderer, normalize_messages_for_template, recorded_sample
 from reef.record2task.samples import recorded_request, recorded_response
-from reef.task2batch import BufferSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
+from reef.task2job import Task2Job, Task2JobSettings
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
 
 #: The reference's reprompt strings (``sdpo.yaml`` at the pin), used verbatim.
 REPROMPT_TEMPLATE = "{prompt}{solution}{feedback}\n\nCorrectly solve the original question."
@@ -48,13 +55,19 @@ def sibling_request(context: ReportContext) -> tuple[list[Any], list[Any] | None
 
 
 @dataclass(frozen=True)
-class SDPOGridSettings(PluginSettings):
-    """The config of ``SDPORecord2Record``: the sampling grid of one step."""
+class SDPOGridSettings(Record2RecordSettings):
+    """The config of ``SDPORecord2Record``: the sampling grid of one step, and the staleness limit.
+
+    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two;
+    ``max_staleness`` is as in ``Record2RecordSettings``. The constructor refuses other values.
+    Purpose: ``SDPORecord2Record.from_config`` parses it from ``pipeline.record2record.config``.
+    """
 
     groups_per_step: int = config_option(32, help="The questions in one sampling grid.")
     rollouts_per_group: int = config_option(8, help="The attempts at each question; at least 2.")
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.groups_per_step <= 0 or self.rollouts_per_group < 2:
             raise ValueError("SDPO needs positive groups_per_step and at least two rollouts_per_group")
 
@@ -109,14 +122,20 @@ class SDPOGrouping(ReportGrouping):
 class SDPORecord2Record(ReportRecord2Record):
     """SDPO's record stage: one group per sampling step, in step order; a terminal report owns its source.
 
-    Config: ``groups_per_step`` and ``rollouts_per_group``, the grid. The
+    Config: ``groups_per_step`` and ``rollouts_per_group``, the grid, and ``max_staleness``. The
     later stages read the grid from ``step_grouping``.
     """
 
     def __init__(self, context: PipelineContext, settings: SDPOGridSettings) -> None:
         #: The grouping of sampling steps, with the grid that the later stages read.
         self.step_grouping = SDPOGrouping(settings.groups_per_step, settings.rollouts_per_group)
-        super().__init__(context, self.step_grouping, exclusive_sources=True, ordered_groups=True)
+        super().__init__(
+            context,
+            self.step_grouping,
+            exclusive_sources=True,
+            ordered_groups=True,
+            max_staleness=settings.max_staleness,
+        )
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
@@ -152,7 +171,7 @@ class SDPOTasks(ReportTasks):
     The grid comes from the record stage. The stage owns the teacher's
     renderer and windows (config: ``tokenizer_path``,
     ``max_teacher_prompt_tokens``, ``max_teacher_tokens``,
-    ``enable_thinking``, and the sample assembly's keys); ``SDPOBatches``
+    ``enable_thinking``, and the sample assembly's keys); ``SDPOJobData``
     renders the teacher sequences with them.
     """
 
@@ -210,8 +229,8 @@ class SDPOTasks(ReportTasks):
 
 
 @dataclass(frozen=True)
-class SDPODemonstrationSettings(BufferSettings):
-    """The config of ``SDPOBatches``: which sibling the teacher reads, whether it reads the feedback, and the buffer."""
+class SDPODemonstrationSettings(Task2JobSettings):
+    """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, the buffer and the job size."""
 
     success_reward_threshold: float = config_option(0.5, help="An attempt at or above this score is correct.")
     allow_own_success_as_demonstration: bool = config_option(
@@ -231,8 +250,8 @@ class SDPODemonstrationSettings(BufferSettings):
             raise ValueError("success_reward_threshold must be finite")
 
 
-class SDPOBatches(Task2Batch):
-    """One complete sampling step, one batch; the teacher's context comes from the step's other rollouts.
+class SDPOJobData(Task2Job):
+    """One complete sampling step, one job's data; the teacher's context comes from the step's other rollouts.
 
     A report names its rollout's coordinates in the step's grid
     (``groups_per_step`` questions by ``rollouts_per_group`` attempts), and
@@ -244,9 +263,9 @@ class SDPOBatches(Task2Batch):
     weight of 0, so an all-unsuccessful step still takes its optimizer step,
     as the reference does. The teacher's renderer and windows come from
     ``SDPOTasks``. A teacher sequence over ``max_teacher_tokens`` fails the
-    step instead of dropping part of the grid. ``max_batch_samples`` is the
-    grid, so the trainer refuses a larger batch size and a batch takes
-    exactly one grid.
+    step instead of dropping part of the grid. ``max_job_samples`` is the
+    grid, so the trainer refuses a larger ``job_samples``, and one job's data
+    is exactly one grid. Set ``job_samples`` to the grid.
     """
 
     def __init__(self, context: PipelineContext, settings: SDPODemonstrationSettings, record2task: SDPOTasks) -> None:
@@ -259,9 +278,13 @@ class SDPOBatches(Task2Batch):
         self.remove_thinking_from_demonstration = settings.remove_thinking_from_demonstration
         self.include_environment_feedback = settings.include_environment_feedback
         self.environment_feedback_only_without_solution = settings.environment_feedback_only_without_solution
-        super().__init__(context, settings.buffer_size)
-        # One batch is one grid: a larger batch size would mix the coordinates of two grids.
-        self.max_batch_samples = record2task.groups_per_step * record2task.rollouts_per_group
+        # One job's data is one grid: a larger job_samples would mix the coordinates of two grids.
+        super().__init__(
+            context,
+            settings.buffer_size,
+            settings.job_samples,
+            max_job_samples=record2task.groups_per_step * record2task.rollouts_per_group,
+        )
 
     @classmethod
     def from_config(
@@ -292,10 +315,10 @@ class SDPOBatches(Task2Batch):
             return THINKING_BLOCK.sub("", response) if self.remove_thinking_from_demonstration else response
         return None
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        batch = TrainingBatch(batch_id, items)
+    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        job_data = JobData(data_id, items)
         samples = sorted(
-            trajectories(batch), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
+            trajectories(job_data), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
         )
         result: list[TrajectoryItem] = []
         solutions_used = feedback_used = 0
@@ -341,17 +364,17 @@ class SDPOBatches(Task2Batch):
             },
             namespace="sdpo",
         )
-        return TrainingBatch(batch.batch_id, tuple(result))
+        return JobData(job_data.data_id, tuple(result))
 
 
 __all__ = [
     "FEEDBACK_TEMPLATE",
     "REPROMPT_TEMPLATE",
     "SOLUTION_TEMPLATE",
-    "SDPOBatches",
     "SDPODemonstrationSettings",
     "SDPOGridSettings",
     "SDPOGrouping",
+    "SDPOJobData",
     "SDPORecord2Record",
     "SDPOTasks",
     "SDPOTeacherSettings",

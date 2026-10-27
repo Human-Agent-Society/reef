@@ -19,8 +19,8 @@ class PipelineContext:
     """What the training pipeline and its stages read for one scenario: its report contract, logger, and mode.
 
     Values: ``training_mode`` is ``auto``, ``manual`` or ``hybrid``;
-    ``max_staleness`` is a non-negative int; ``default_buffer_size`` is None
-    or a positive int. The constructor refuses other values.
+    ``default_job_samples`` is None or a positive int; ``Trainer.build`` gives
+    None to a trainer that trains nothing. The constructor refuses other values.
     Purpose: ``Trainer.build`` makes it. The pipeline and each stage's
     ``from_config`` read it.
     """
@@ -32,24 +32,21 @@ class PipelineContext:
     #: The contract the scenario's ingress admits, when it is wider than ``report_type``: a report it
     #: accepts and ``report_type`` refuses is another component's, and this pipeline releases it.
     admitted_report_type: type[ReportBase] | None = None
-    #: How many versions a sample may lag behind and still train; the recipe's ``max_staleness``.
-    max_staleness: int = 0
     #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
     task_storage: TaskStorage | None = None
-    #: The buffer size when the task-to-batch stage sets none: four batches of the trainer's batch size.
-    #: None holds every sample, for a trainer that trains nothing.
-    default_buffer_size: int | None = None
+    #: The fewest samples of one job when the task-to-job stage sets no ``job_samples``:
+    #: ``evolution.batch_size`` for harness evolution. None otherwise: a weight trainer's stage sets its own
+    #: ``job_samples``, and a trainer that trains nothing keeps every sample.
+    default_job_samples: int | None = None
     #: Whether the pipeline takes training instructions; a recipe whose proposer reads none turns it off.
     manual_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
-        if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
-            raise ValueError("max_staleness must be a non-negative integer")
-        if self.default_buffer_size is not None and (
-            not isinstance(self.default_buffer_size, int)
-            or isinstance(self.default_buffer_size, bool)
-            or self.default_buffer_size <= 0
+        if self.default_job_samples is not None and (
+            not isinstance(self.default_job_samples, int)
+            or isinstance(self.default_job_samples, bool)
+            or self.default_job_samples <= 0
         ):
-            raise ValueError("default_buffer_size must be None or a positive integer")
+            raise ValueError("default_job_samples must be None or a positive integer")

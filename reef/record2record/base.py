@@ -1,17 +1,20 @@
 """The record-to-record stage: records in, record sets out, for one pipeline.
 
-``Record2Record`` is the interface. ``NoRecordSets`` is the default of a pipeline
-that trains nothing.
+``Record2Record`` is the interface, and ``Record2RecordSettings`` is the config
+that every stage that holds units takes. ``NoRecordSets`` is the default of a
+pipeline that trains nothing.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Self
 
-from reef.core.plugins import NoSettings, Plugin, PluginConfigError
+from reef.core.config import config_option
+from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
@@ -24,7 +27,7 @@ from reef.runtime.interfaces import inference_aborted
 class TaskStatus(Enum):
     """What the record-to-task stage made of a record set. The status settles all records of the set together."""
 
-    #: The set has one or more tasks. Its records wait in one batch unit until a batch uses it.
+    #: The set has one or more tasks. Its records wait in one record set unit until job data uses it.
     READY = "ready"
     #: The set has no task and cannot train. The stage ends its records.
     SKIPPED = "skipped"
@@ -43,12 +46,43 @@ class UnitDropReason(Enum):
     STALE = "stale"
 
 
+def require_max_staleness(value: object) -> None:
+    """Raise ``ValueError`` unless ``value`` is a non-negative int (not a bool)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"max_staleness must be a non-negative int, got {value!r}")
+
+
+@dataclass(frozen=True)
+class Record2RecordSettings(PluginSettings):
+    """The config of a record-to-record stage: how many versions its training data may lag behind.
+
+    Values: ``max_staleness`` is a non-negative int. The constructor refuses
+    other values. With 0, only data of the version that the scenario serves
+    trains.
+    Purpose: a stage's ``from_config`` parses it from
+    ``pipeline.record2record.config`` and gives ``max_staleness`` to
+    ``Record2Record.__init__``. A stage settings class that has more keys
+    extends it.
+    """
+
+    max_staleness: int = config_option(
+        0,
+        help=(
+            "The versions that training data may lag behind the served version and still train. "
+            "0 trains only data of the served version."
+        ),
+    )
+
+    def __post_init__(self) -> None:
+        require_max_staleness(self.max_staleness)
+
+
 class Record2Record(ABC, Plugin):
-    """Turn records into record sets for one pipeline, and decide which batch units train and in what order.
+    """Turn records into record sets for one pipeline, and decide which record set units train and in what order.
 
     The pipeline pushes every record that it reads, except training
     instructions, in append order (``push``). It pulls the record sets that
-    the stage formed (``pull``). When the pipeline looks for a batch, it first
+    the stage formed (``pull``). When the pipeline looks for job data, it first
     advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and starts work that is due. No record is in two record sets of one stage:
     ``form`` refuses a set that holds a record of another set. The pipeline
@@ -56,16 +90,18 @@ class Record2Record(ABC, Plugin):
     exposing a set, ``form`` rejects it if any inference response reports an
     engine abort. Rejection ends the whole set through the stage's lifecycle,
     including reports that reference an aborted inference. The stage
-    holds the sets that have tasks in batch units in its ``pool`` until the
-    pipeline reserves them for a batch; the pipeline reserves and consumes
+    holds the sets that have tasks in record set units in its ``pool`` until the
+    pipeline reserves them for job data; the pipeline reserves and consumes
     through the pool, and the stage ends the consumed units (``consume``). The
     pool applies the stage's selection policy. The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
     each version that the scenario serves (``observe_serving_runtime_load_id``).
-    Then it tells the stage to drop the held units that are too many versions
-    behind (``drop_stale_units``).
+    Then it tells the stage to drop the held units that are more than
+    ``max_staleness`` versions behind (``drop_stale_units``). ``max_staleness``
+    is a non-negative int, from ``Record2RecordSettings``; the constructor
+    refuses other values.
 
     A record that the stage ends, for example a record that can no longer
     train, appears in ``releasable_record_ids``. The trainer adds those IDs to
@@ -89,8 +125,11 @@ class Record2Record(ABC, Plugin):
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
-    def __init__(self, selection: SelectionPolicy | None = None) -> None:
-        #: The held batch units. The pipeline reserves a batch from it and consumes the reservation.
+    def __init__(self, selection: SelectionPolicy | None = None, *, max_staleness: int = 0) -> None:
+        require_max_staleness(max_staleness)
+        #: How many versions the training data of a held unit may lag behind the served version and still train.
+        self.max_staleness = max_staleness
+        #: The held record set units. The pipeline reserves job data from it and consumes the reservation.
         self.pool = RecordSetUnitPool(selection)
         #: Record sets that ended after the task stage saw them. The pipeline forgets their tasks.
         self.ended_set_ids: set[Hashable] = set()
@@ -165,7 +204,7 @@ class Record2Record(ABC, Plugin):
             self.reject(record_set)
 
     def accept(self, record_set: RecordSet) -> None:
-        """Hold a set that has tasks in the pool, as a batch unit by itself."""
+        """Hold a set that has tasks in the pool, as a record set unit by itself."""
         self.pool.put(SingleSetUnit.of(record_set))
 
     def reject(self, record_set: RecordSet) -> None:
@@ -186,15 +225,15 @@ class Record2Record(ABC, Plugin):
         """Add the version that the scenario serves now, if the version changed (``ServedVersions.observe``)."""
         self.served_versions.observe(runtime_load_id)
 
-    def drop_stale_units(self, max_staleness: int) -> None:
+    def drop_stale_units(self) -> None:
         """End the held units whose training data is more than ``max_staleness`` versions behind.
 
-        The check does not run while a batch is reserved, because the batch refers to held units.
+        The check does not run while job data is reserved, because the job data refers to held units.
         """
         if self.pool.reserved is not None:
             return
         for unit in stale_units(
-            self.pool.units(), self.producing_runtime_load_ids, self.served_versions.versions, max_staleness
+            self.pool.units(), self.producing_runtime_load_ids, self.served_versions.versions, self.max_staleness
         ):
             self.drop_held_unit(unit, reason=UnitDropReason.STALE)
 
@@ -208,12 +247,8 @@ class Record2Record(ABC, Plugin):
         for record_set in unit.record_sets():
             self.reject(record_set)
 
-    def consume(self, units: tuple[RecordSetUnit, ...], *, trained: bool) -> frozenset[str]:
-        """End the units that an acknowledged batch consumed, and return their keys.
-
-        ``trained`` is False when the backend dropped the batch as stale: its
-        units are consumed all the same, but nothing trained on them.
-        """
+    def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
+        """End the units that acknowledged job data trained on, and return their keys."""
         consumed = frozenset(key for unit in units for key in unit.consumed_ids())
         self.terminal |= consumed
         self.ended_set_ids.update(set_id for unit in units for set_id in unit.set_ids())
@@ -249,10 +284,11 @@ class Record2Record(ABC, Plugin):
 
 
 class NoRecordSets(Record2Record):
-    """Form no record set: the default of a pipeline that trains nothing.
+    """Form no record set: the default of a pipeline that trains nothing. No config.
 
     The stage reads each record and keeps nothing. The pipeline then makes no
-    task and no batch, and the records stay stored for audit.
+    task and no job data, and the records stay stored for audit. The stage
+    holds no unit, so it refuses ``max_staleness``.
     """
 
     @classmethod
@@ -265,12 +301,15 @@ class NoRecordSets(Record2Record):
 
 
 class InferenceRecord2Record(Record2Record):
-    """Hold each inference record as one set, in arrival order, and end every other record untouched."""
+    """Hold each inference record as one set, in arrival order, and end every other record untouched.
+
+    Config: ``Record2RecordSettings``.
+    """
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls()
+        settings = Record2RecordSettings.parse(config, plugin_class=cls)
+        return cls(max_staleness=settings.max_staleness)
 
     def push(self, record: AgentRecord) -> None:
         # A record that is not an inference ends at once.

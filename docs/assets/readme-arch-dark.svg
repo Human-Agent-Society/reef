@@ -39,7 +39,7 @@
   <!-- Trainer -->
   <rect x="308" y="218" width="284" height="44" rx="10" class="draw"/>
   <text x="450" y="236" text-anchor="middle" class="lab">Trainer</text>
-  <text x="450" y="252" text-anchor="middle" class="body m">batches records + feedback</text>
+  <text x="450" y="252" text-anchor="middle" class="body m">turns records + feedback into jobs</text>
 
   <!-- Version history (cylinder) -->
   <path d="M 346,296 L 346,336 A 104,10 0 0 0 554,336 L 554,296 Z" class="fill-soft"/>
@@ -82,7 +82,7 @@
 
   <!-- record store -> trainer -->
   <path d="M 450,190 L 450,216" class="draw-a" marker-end="url(#x-acc)"/>
-  <text x="463" y="206" class="sm m">batch</text>
+  <text x="463" y="206" class="sm m">job data</text>
 
   <!-- trainer -> training runtime -->
   <path d="M 592,240 L 707,240" class="draw" marker-end="url(#x-ink)"/>

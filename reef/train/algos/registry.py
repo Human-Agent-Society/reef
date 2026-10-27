@@ -8,9 +8,12 @@ Backend loss references stay lazy so service-side validation needs no GPU stack.
 from __future__ import annotations
 
 import importlib
-from typing import overload
+from collections.abc import Mapping
+from typing import Any, overload
 
+from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.schedule import StepScheduling
 
 
 class ObjectiveRegistry:
@@ -96,6 +99,24 @@ def unregister_objective(name: str) -> None:
 def resolve_objective(reference: str) -> TrainingObjective:
     """Resolve a registered name or a dotted objective class/instance reference."""
     return OBJECTIVES.resolve(reference)
+
+
+def job_training(parameters: Mapping[str, Any]) -> tuple[TrainingMethod, StepScheduling]:
+    """The method a job's parameters name and the job's step schedule, which the method's objective accepts.
+
+    ``parameters["method"]`` is a ``TrainingMethod`` as an object; the
+    optional ``parameters["scheduling"]`` is a ``StepScheduling`` as an object.
+    Raise ``ValueError`` for a missing or malformed value, or for a schedule
+    the objective cannot train. A training component calls this when it
+    checks a job and again when it runs it.
+    """
+    method_value = parameters.get("method")
+    if not isinstance(method_value, Mapping):
+        raise ValueError("a training job needs the 'method' parameter as an object")
+    method = TrainingMethod.from_dict(method_value)
+    scheduling = StepScheduling.from_parameters(parameters)
+    resolve_objective(method.objective).validate_scheduling(scheduling)
+    return method, scheduling
 
 
 #: ``{backend: {loss_family: reference}}``; Slime is the default backend.

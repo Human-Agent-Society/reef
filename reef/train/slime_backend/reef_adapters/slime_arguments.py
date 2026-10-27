@@ -27,11 +27,6 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
     )
     parser.add_argument(
-        "--reef-rollout-executor-backend",
-        default="auto",
-        help="SGLang rollout executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
-    )
-    parser.add_argument(
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
@@ -41,34 +36,6 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     parser.add_argument("--megatron-lora-alpha", type=int, default=None)
     parser.add_argument("--megatron-lora-dropout", type=float, default=0.0)
     parser.add_argument("--megatron-lora-target-modules", type=str, nargs="+", default=None)
-    parser.add_argument(
-        "--max-loaded-loras",
-        type=int,
-        default=1,
-        help="Adapter slots the SGLang engine keeps loaded on the shared base model (>= 1).",
-    )
-    parser.add_argument(
-        "--keep-lora-base-resident",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Release only the KV cache and CUDA graphs on a colocated LoRA training step, "
-            "leaving the frozen base weights on the GPU. Off by default: it trades the "
-            "per-step base copy for holding that memory for the whole run."
-        ),
-    )
-    parser.add_argument(
-        "--disjoint-prefix-sharing",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Share prefix-cache entries across requests on a regular disjoint engine (not PD). "
-            "Publication then retracts in-flight requests and clears the cache instead of "
-            "preserving their KV, so no entry outlives the weights that built it."
-        ),
-    )
-    parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--critic-steps-per-actor",
         type=int,
@@ -91,8 +58,8 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         type=int,
         default=1,
         help=(
-            "Commits between critic checkpoints (weights and optimizer). 1 saves at every commit; "
-            "a larger value trades a warmer value head after a restart for cheaper commits."
+            "Saved rollouts between critic checkpoints (weights and optimizer). 1 saves the critic with every "
+            "rollout; a larger value trades a warmer value head after a restart for cheaper saves."
         ),
     )
     parser.add_argument(
@@ -146,8 +113,9 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
     explicitly_resident = "--no-offload-train" in arguments
     save = args.save
     if not isinstance(save, str) or not save.strip():
-        # Megatron requires --save-interval only with --save, and the bridge reads both.
-        raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")
+        # The component saves a Megatron checkpoint in --save after every rollout. Megatron also
+        # requires --save-interval with --save, but the component does not read it.
+        raise ValueError("the Slime training component requires --save for Megatron recovery checkpoints")
     if explicitly_enabled_critic:
         args.use_critic = True
         # The critic shares the actor's GPUs, so whichever is idle is

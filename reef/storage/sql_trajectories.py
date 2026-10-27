@@ -27,7 +27,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import RowMapping
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.trajectories import StoredTrajectory, TrajectoryConflict, TrajectoryStore
 

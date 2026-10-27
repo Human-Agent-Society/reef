@@ -66,8 +66,10 @@ def recovered_trainer_states(
 
     The only trainer of a one-component (or record-only) scenario owns every
     commit and consumption receipt: the ones made before they carried a
-    component, and rollbacks, which carry its state. A drop is a step without a commit: its rows count as consumed, and
-    the state and the cursor stay the last commit's.
+    component, and rollbacks, which carry its state. A drop is a step without
+    a commit that an earlier Reef version recorded as a consumption receipt:
+    its rows count as consumed, and the state and the cursor stay the last
+    commit's.
 
     Rehydration must skip consumed rows: retention may keep a consumed row
     stored (audit-only retention is contract-legal), and pushing one again would
@@ -355,7 +357,7 @@ class ScenarioFactory:
                 task_storage=store.tasks,
             )
             if any(
-                component_trainer.trainer.candidate_backend is not None
+                component_trainer.trainer.trains
                 and component_trainer.trainer.pipeline.training_mode != recipe.training_mode
                 for component_trainer in trainers
             ):
@@ -384,7 +386,7 @@ class ScenarioFactory:
                 binding=ScenarioBinding(
                     surface=surface,
                     runtime=runtime,
-                    training_runtime=recipe.training_runtime,
+                    training_component=recipe.training_component,
                     inference_handler=recipe.inference_handler,
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
@@ -419,6 +421,7 @@ class ScenarioFactory:
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
                 component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
+            scenario.resume_rollback_start()
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()

@@ -1,11 +1,14 @@
-# SAO at the paper's model scale: Qwen3-30B-A3B-Thinking-2507 on one 8-GPU
-# node, training and inference colocated. The objective settings are the
-# paper's reasoning-domain values (arXiv:2607.07508 §4.1). The batch follows
+# SAO at the paper's model scale: Qwen3-30B-A3B-Thinking-2507 on 16 GPUs,
+# two 8-GPU nodes of one Ray cluster (RAY_ADDRESS). Eight GPUs train (a TP8
+# actor, the critic on the same GPUs) and eight serve (one TP8 engine). The
+# objective settings are the paper's reasoning-domain values
+# (arXiv:2607.07508 §4.1). The batch follows
 # the paper's shape too: a group size of 1 (one rollout per prompt) and an
 # optimizer step over SAO_BATCH rollouts of different prompts, fed by
 # stream.py, which keeps that many rollouts in flight. The paper's 128 per
-# step is out of reach on one node; 8 is what fits the generation budget.
-# Checkpoints and artifacts go to node-local disk (SAO_CKPT_DIR).
+# step is out of reach on this budget; 8 is what fits the generation budget.
+# Checkpoints and artifacts go to SAO_CKPT_DIR. The training node writes the
+# checkpoints and the Reef service reads them, so both must see that directory.
 #
 # Started by run.sh with SAO_SERVE_YAML=serve-30b.yaml SAO_DRIVER=stream.py.
 
@@ -31,19 +34,23 @@ inference:
     incremental-streaming-output: true
     # Eight concurrent 61k-token rollouts: the KV pool must leave room for the
     # prefill logits of a chunk (all-gathered across TP with return_logprob),
-    # which is what ran out of memory at the default fraction after the first
-    # weight update.
+    # which is what ran out of memory at the default fraction.
     mem-fraction-static: "0.7"
     chunked-prefill-size: "4096"
     max-running-requests: "16"
   model-path: ~/models/Qwen3-30B-A3B-Thinking-2507
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
-  config:
-    max-staleness: 18
+pipeline:
+  record2record:
+    config:
+      max_staleness: 18
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
-  colocate: true
   ready-timeout: 1800
   timeout-s: 14400
   config:
@@ -72,7 +79,8 @@ training:
     moe-router-dtype: "fp32"
     moe-permute-fusion: true
     moe-aux-loss-coeff: "0"
-    # Topology: one node, TP8 / PP1 / EP8, sequence parallel, full recompute.
+    # Topology: one training node, TP8 / PP1 / EP8, sequence parallel, full
+    # recompute. The engine takes the other node.
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "8"
     num-gpus-per-node: "8"

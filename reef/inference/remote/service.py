@@ -13,7 +13,7 @@ from typing import Any, BinaryIO
 from urllib.parse import quote, urlencode
 
 from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.runtime.deployment import WEIGHT_FILES_PROTOCOL, DeploymentResources, InferenceConnection, InferenceService
+from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
 from reef.runtime.interfaces import InferenceBackend, WeightFiles
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
@@ -28,7 +28,7 @@ class RemoteControl:
     call sends one request under ``CONTROL_PATH`` and returns the decoded JSON
     answer; an HTTP error or an unreachable component raises ``RuntimeError``
     with the component's message. Values hold only strings, so they cross
-    process boundaries to Reef's coordinator.
+    process boundaries to Reef's serving runtime.
     """
 
     def __init__(self, url: str, token: str) -> None:
@@ -74,15 +74,23 @@ class RemoteControl:
 class RemoteInferenceBackend(InferenceBackend):
     """Receiver operations of a remote component, called over its control routes.
 
-    ``load_weight_files`` packs the directory into a tar file on the
-    coordinator's node and uploads it; the component unpacks and loads it.
+    ``load_weight_files`` packs the directory into a tar file on the control
+    plane's node and uploads it; the component unpacks and loads it.
+    ``recover`` also covers a component that restarted and so lost the
+    engines of ``service``: it starts them again and initializes them with
+    the last runtime load ID that ``initialize_version`` set. ``pause`` then
+    has no engine to pause and returns, because the restarted engines start
+    paused.
     """
 
-    def __init__(self, control: RemoteControl) -> None:
+    def __init__(self, control: RemoteControl, service: RemoteInferenceService) -> None:
         self.control = control
+        self.service = service
+        self.initial_version: str | None = None
 
     def initialize_version(self, runtime_load_id: str) -> None:
         self.control.call("POST", "initialize-version", payload={"runtime_load_id": runtime_load_id})
+        self.initial_version = runtime_load_id
 
     def inference_url(self) -> str:
         """The component itself: it forwards inference requests to its engines."""
@@ -96,13 +104,25 @@ class RemoteInferenceBackend(InferenceBackend):
         return versions
 
     def pause(self) -> None:
+        # A component that lost the engines runs none that generate; ``recover`` starts them paused.
+        if self.service.engines_lost():
+            return
         self.control.call("POST", "pause")
 
     def resume(self) -> None:
         self.control.call("POST", "resume")
 
-    def recover(self) -> None:
-        self.control.call("POST", "recover")
+    def recover(self) -> int:
+        if self.service.engines_lost():
+            engines = self.service.restart_engines()
+            if self.initial_version is not None:
+                self.initialize_version(self.initial_version)
+            return engines
+        answer = self.control.call("POST", "recover")
+        replaced = answer.get("replaced") if isinstance(answer, Mapping) else None
+        if isinstance(replaced, bool) or not isinstance(replaced, int) or replaced < 0:
+            raise RuntimeError(f"remote inference returned an invalid replaced-engine count: {answer!r}")
+        return replaced
 
     def abort(self) -> None:
         self.control.call("POST", "abort")
@@ -130,17 +150,19 @@ class RemoteInferenceBackend(InferenceBackend):
 
 
 class RemoteInferenceService(InferenceService):
-    """Start engines on a remote component and connect Reef's coordinator to them.
+    """Start engines on a remote component and control them over HTTP.
 
     ``start`` asks the component to start ``engine_config`` with the backend
     that ``engine`` names (``inference.backend``) on ``num_gpus`` GPUs, replacing any engines
-    it runs, and returns a connection without a control executor. The trainer
-    must send ``reef-weight-files-v1``; the coordinator uploads its files
-    through :class:`RemoteInferenceBackend`. ``close`` stops the engines.
+    it runs, and returns a connection without a control executor. Weight
+    files reach the engines through :class:`RemoteInferenceBackend`.
+    ``instance`` is the component process that runs the engines; the engines
+    are lost when the component reports another process or no engines
+    (``engines_lost``), and ``restart_engines`` starts them again.
+    ``close`` stops the engines.
     """
 
     connection_protocol = CONTROL_PROTOCOL
-    supported_transfer_protocols = (WEIGHT_FILES_PROTOCOL,)
 
     def __init__(
         self,
@@ -162,32 +184,46 @@ class RemoteInferenceService(InferenceService):
         self.control = RemoteControl(settings.url, control_token)
         self.started = False
         self.closed = False
+        self.instance: str | None = None
 
     def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
         """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
         self.started = True
-        self.control.call(
+        self.restart_engines()
+        return InferenceConnection(self.connection_protocol, None)
+
+    def restart_engines(self) -> int:
+        """Start the engines on the component, replacing any it runs; return the number of engines."""
+        answer = self.control.call(
             "PUT",
             "engines",
             payload={"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus},
             timeout_s=self.settings.startup_timeout_s,
         )
-        return InferenceConnection(self.connection_protocol, None)
+        instance = answer.get("instance") if isinstance(answer, Mapping) else None
+        if not isinstance(instance, str) or not instance:
+            raise RuntimeError(f"remote inference started engines without naming its process: {answer!r}")
+        self.instance = instance
+        return max(1, self.num_gpus // int(self.engine_config.get("gpus_per_engine") or self.num_gpus))
 
-    def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
-        """The component fenced its engines when it started them; nothing remains to release here."""
-        self.require_connection(connection)
+    def engines_lost(self) -> bool:
+        """Whether the component restarted or stopped the engines; raise for engines that failed."""
+        if not self.started or self.closed:
+            raise RuntimeError("remote inference service is not running")
+        answer = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+        if not isinstance(answer, Mapping) or not isinstance(answer.get("engines"), bool):
+            raise RuntimeError(f"remote inference returned an invalid health report: {answer!r}")
+        return answer.get("instance") != self.instance or not answer["engines"]
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
         self.require_connection(connection)
-        return RemoteInferenceBackend(self.control)
+        return RemoteInferenceBackend(self.control, self)
 
     def check_health(self) -> None:
-        if not self.started or self.closed:
-            raise RuntimeError("remote inference service is not running")
-        self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+        if self.engines_lost():
+            raise RuntimeError("the remote inference component restarted and runs none of this service's engines")
 
     def poll(self) -> None:
         self.check_health()

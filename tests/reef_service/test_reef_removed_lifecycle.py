@@ -3,10 +3,9 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
-from tests.support.runtime_stubs import ExecutorRuntimeFixture
 
 import reef
-from reef import task2batch
+from reef import task2job
 
 
 @pytest.mark.unit
@@ -120,7 +119,7 @@ def test_readme_names_are_exported() -> None:
     assert reef.RecordStore is not None
     assert reef.Scenario is not None
     assert reef.TrainingPipeline is not None
-    assert reef.Task2Batch is not None
+    assert reef.Task2Job is not None
     assert reef.Trainer is not None
     assert reef.Recipe is not None
 
@@ -176,10 +175,6 @@ def test_naming_unification_renames_are_complete() -> None:
 
     assert not hasattr(routes, "register_agent_record_routes")
     assert hasattr(routes, "register_record_routes")
-    # The Ray runtime speaks of one train group handle.
-
-    assert not hasattr(ExecutorRuntimeFixture, "train_group")
-    assert hasattr(ExecutorRuntimeFixture, "train_group_handle")
 
 
 @pytest.mark.unit
@@ -239,7 +234,7 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
 def test_noop_naming_is_removed_in_favor_of_recipe() -> None:
     assert not hasattr(reef, "NoopRecipe")
     assert not hasattr(reef.Dispatcher, "noop")
-    assert not hasattr(task2batch, "NoopProcessor")
+    assert not hasattr(task2job, "NoopProcessor")
     assert importlib.util.find_spec("reef.noop") is None
 
 
@@ -247,7 +242,7 @@ def test_noop_naming_is_removed_in_favor_of_recipe() -> None:
 def test_pairing_interlock_surface_is_replaced_by_the_engine_spec() -> None:
     """The subclassed processor bases gave way to one pipeline over three recipe stages.
 
-    Recipes write a ``Task2Batch`` for ``TrainingPipeline``; the processor bases
+    Recipes write a ``Task2Job`` for ``TrainingPipeline``; the processor bases
     (``DataProcessor``, ``ReportedFeedbackProcessor``, ``ComputedFeedbackProcessor``)
     and the interlock vocabulary (``PairedCandidate``, the
     ``_collect_candidates``/``_terminal_report_ids`` dual bookkeeping) must
@@ -257,7 +252,7 @@ def test_pairing_interlock_surface_is_replaced_by_the_engine_spec() -> None:
     from reef.train.pipeline import TrainingPipeline
 
     for name in ("DataProcessor", "ReportedFeedbackProcessor", "ComputedFeedbackProcessor"):
-        assert not hasattr(task2batch, name)
+        assert not hasattr(task2job, name)
         assert not hasattr(reef, name)
     assert importlib.util.find_spec("reef.train.processors") is None
     assert not hasattr(assembly, "PairedCandidate")

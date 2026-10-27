@@ -33,10 +33,9 @@ from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
 from recipes.openclawrl.turns import TurnJob, TurnJudgment, main_turn_message, turn_job, turn_request_messages
 from reef.background_jobs import BackgroundJobWorker
 from reef.core.config import config_option
-from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
-from reef.record2record import JudgingRecord2Record, RecordJudging
+from reef.record2record import JudgingRecord2Record, Record2RecordSettings, RecordJudging
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +56,12 @@ def session_tag(payload: Any) -> str | None:
 
 
 @dataclass(frozen=True)
-class OpenClawRLJudgingSettings(PluginSettings):
-    """The config of ``OpenClawRLRecord2Record``: session correlation and the PRM judge.
+class OpenClawRLJudgingSettings(Record2RecordSettings):
+    """The config of ``OpenClawRLRecord2Record``: session correlation, the PRM judge, and the staleness limit.
 
     An empty ``prm_url`` is correlate-only mode: sessions resolve, nothing is
-    judged, and nothing trains.
+    judged, and nothing trains. ``max_staleness`` is as in
+    ``Record2RecordSettings``.
     """
 
     session_ttl_s: float = config_option(900.0, help="The idle time in seconds before a session expires.")
@@ -81,6 +81,7 @@ class OpenClawRLJudgingSettings(PluginSettings):
     prm_max_hint_candidates: int = config_option(3, help="The hint candidates collected for each turn, at most.")
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.session_ttl_s <= 0:
             raise ValueError("session_ttl_s must be positive")
         if self.max_open_sessions <= 0:
@@ -339,7 +340,7 @@ class OpenClawRLRecord2Record(JudgingRecord2Record):
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
             )
-        super().__init__(self.openclawrl_judging, worker)
+        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:

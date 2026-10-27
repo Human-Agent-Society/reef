@@ -1,4 +1,4 @@
-"""Assemble selected training components using their integration's deployment definition."""
+"""Assemble a weight-training deployment: its training integration, and the serving its inference section selects."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service, local_inference_component
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
+from reef.service.deploy.serving import ENGINES, NONE, prepare_engine_serving, serving_mode
+from reef.train.deployment import TrainingDeployment
 
 # Built-ins are references, so discovery does not import execution dependencies.
 _BUILTINS = {
@@ -45,18 +46,20 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
 
 
 def local_model_required(config: dict[str, Any]) -> bool:
-    """Whether the selected training backend executes the model on this host.
+    """Whether this host loads the model: for local serving engines, or for a training backend that runs it here.
 
     Provider deployments and local engines need the resolved snapshot on disk.
-    A hosted backend without local engines, including one whose engines run on
-    a remote component, keeps the model identifier as written.
+    A hosted backend whose releases engines on a remote component serve, or
+    that serves them itself, keeps the model identifier as written.
     """
-    reef = config.get("reef", {})
-    backend = reef.get("training_backend")
-    inference_backend = reef.get("inference_backend")
-    if not backend or (inference_backend and not reef.get("inference_remote")):
+    backend_name = config.get("reef", {}).get("training_backend")
+    if not backend_name:
         return True
-    return training_deployment_for(backend).requires_local_model
+    backend = training_deployment_for(backend_name)
+    settings = service_config_from_mapping(config)
+    if serving_mode(settings, backend) == ENGINES and not settings.inference_remote:
+        return True
+    return backend.requires_local_model
 
 
 #: Settings that configure engines or need a served model, with their public names.
@@ -67,7 +70,6 @@ NO_INFERENCE_REFUSED_SETTINGS = (
     ("inference_remote", "inference.remote"),
     ("inference_handler_factory", "inference.handler-factory"),
     ("inference_handler_config", "inference.handler-config"),
-    ("colocate", "training.colocate"),
     ("teacher_model_path", "teacher.model-path"),
     ("evaluation_settings", "evaluation"),
     ("generator_settings", "generator"),
@@ -98,15 +100,20 @@ def validate_no_inference(settings: ServiceConfig) -> None:
 
 
 def assemble_training_services(config: dict[str, Any]) -> None:
-    """Validate common inputs; integrations own process topology and connections."""
+    """Validate common inputs, place the serving engines, and let the integration add its own processes.
+
+    Serving follows the ``inference`` section (``serving_mode``): Reef's
+    engines run on the inference component that ``inference.remote`` names,
+    or on one that this host starts. The training integration owns only its
+    own processes and connections.
+    """
     settings = service_config_from_mapping(config)
     backend = training_deployment_for(settings.training_backend)
-    if settings.inference_backend == NO_INFERENCE_BACKEND:
+    mode = serving_mode(settings, backend)
+    if mode == NONE:
         validate_no_inference(settings)
     if settings.teacher_model_path and not backend.supports_teacher_engine:
         raise DeployConfigError("selected training backend does not support a teacher engine")
-    if settings.inference_remote and not backend.supports_remote_inference:
-        raise DeployConfigError("selected training backend does not support remote engines (inference.remote)")
     model = config_value(config, "reef", "model_path")
     if not isinstance(model, str) or not model:
         raise DeployConfigError("weight training requires --inference.model-path")
@@ -126,12 +133,16 @@ def assemble_training_services(config: dict[str, Any]) -> None:
             "automatic weight training requires managed inference; remove upstream provider settings"
         )
     if config.get("reef", {}).get("runtime"):
-        raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
+        raise DeployConfigError("weight training selects its serving through inference.serving; remove recipe.runtime")
+    if settings.inference_url:
+        raise DeployConfigError("inference.url is reserved: Reef starts or names the serving engines itself")
     component = None
-    if not settings.inference_remote and backend.serves_on_inference_component(asdict(settings)):
-        component = local_inference_component(config, settings)
+    if mode == ENGINES:
+        prepare_engine_serving(config, settings)
         settings = service_config_from_mapping(config)
-    if settings.inference_remote:
+        if not settings.inference_remote:
+            component = local_inference_component(config, settings)
+            settings = service_config_from_mapping(config)
         # Every later reader gets the validated section, with underscore keys and defaults filled in. The
         # component loads the model as the file names it: a later download replaces reef.model_path on this host.
         remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)
@@ -139,11 +150,16 @@ def assemble_training_services(config: dict[str, Any]) -> None:
             remote = replace(remote, model_path=settings.model_path)
         config["reef"]["inference_remote"] = asdict(remote)
         settings = service_config_from_mapping(config)
+        # The HTTP service starts the engines before it serves its first request.
+        config["ready_timeout"] = max(int(config.get("ready_timeout", 30)), int(settings.training_ready_timeout))
     config["reef"]["training_backend"] = settings.training_backend or "slime"
     dependencies = backend.prepare(config, asdict(settings))
     if component is not None:
         dependencies = (component, *dependencies)
     http = http_service(config, service_config_from_mapping(config))
+    environment = backend.http_environment(asdict(settings))
+    if environment:
+        http["env"] = {**http.get("env", {}), **environment}
     if dependencies:
         http["depends_on"] = [process["name"] for process in dependencies]
     config["services"] = [*dependencies, http]

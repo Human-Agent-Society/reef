@@ -1,233 +1,154 @@
-"""Test doubles for Reef runtime contracts."""
+"""Test doubles for Reef's training component and inference runtime contracts."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
+from reef.artifact import Artifact
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.interfaces import (
-    ActivatedModel,
-    InferenceHandler,
-    ModelCandidate,
-    PreparedTrainingStep,
-    TrainingMethod,
-    TrainingRuntime,
-)
-from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethodSelector
-from reef.train.types import TrainingBatch
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.serving import holds_weights
+from reef.train.pipeline import PipelineConfig, PipelineSpec
+
+#: The release format of a stub component that does not name one.
+FULL_WEIGHTS = ReleaseFormat("full")
+#: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
+VERSION_FILE = "model.txt"
 
 
-class StubTrainingRuntime(TrainingRuntime):
-    """Training and a separate inference fixture for in-process recipe smoke tests.
+class StubTrainingComponent(TrainingComponent):
+    """A training component that runs each job in ``submit``, in this thread.
 
-    It satisfies the constructor and typing contract so a training recipe can
-    be built and its data path driven — records in, processor pairing, batch
-    reservation, step preparation — without a running model service. The
-    inference surface is disabled and training-path methods raise
-    ``NotImplementedError``; tests reaching model execution supply their own
-    implementations. ``batch_size`` is the samples in one training step that
-    the runtime reports, a positive int.
+    ``name`` is the backend name of its jobs. Without ``checkpoint_root`` a submitted job
+    fails, so a test that only builds a recipe never trains. With it, a job
+    saves the checkpoints that :meth:`train` returns; the default saves one
+    checkpoint, ``<checkpoint_root>/<n>``, that holds ``model.txt`` with the
+    version name ``w<n>`` for the ``n``-th job. ``submitted`` lists the jobs
+    in submission order and ``imported`` the releases given to
+    :meth:`import_start`. ``shares_scenarios`` is what the component reports
+    for :attr:`TrainingComponent.shares_scenarios`, and ``release_format`` for
+    :attr:`TrainingComponent.release_format` (full weights by default). Like
+    the Tinker component, it runs task jobs that carry a ``rollout`` object.
     """
 
-    def __init__(self, base_url: str = "http://training-runtime", *, batch_size: int = 1) -> None:
-        self.inference = StubInferenceRuntime(self, base_url=base_url)
-        self.step_batch_size = batch_size
-
-    @property
-    def batch_size(self) -> int:
-        return self.step_batch_size
-
-    @property
-    def inference_handler(self) -> InferenceHandler | None:  # type: ignore[override]
-        """No backend: smoke tests never route inference through the stub."""
-        return None
-
-    def prepare_training_step(
+    def __init__(
         self,
-        batch: TrainingBatch,
-        method: TrainingMethod,
-        algorithm_state: Mapping[str, Any],
-        scheduling: StepScheduling,
-        scenario_step: int,
+        checkpoint_root: Path | None = None,
         *,
-        parent_runtime_load_id: str | None = None,
-        scenario: str | None = None,
-    ) -> PreparedTrainingStep:
-        raise NotImplementedError("StubTrainingRuntime does not prepare training steps")
-
-    def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
-        raise NotImplementedError("StubTrainingRuntime does not train candidates")
-
-    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
-        raise NotImplementedError("StubTrainingRuntime does not activate candidates")
-
-    def reject_candidate(self, candidate: ModelCandidate) -> None:
-        raise NotImplementedError("StubTrainingRuntime does not reject candidates")
-
-    @property
-    def base_url(self):
-        return self.inference.base_url
-
-    def serving_runtime_load_id(self):
-        return None
-
-    def serving_adapter_name(self):
-        return None
-
-    def serving_adapter_runtime_load_id(self, scenario):
-        return None
-
-    def current_runtime_load_id(self):
-        return self.inference.current_runtime_load_id()
+        name: str = "stub",
+        shares_scenarios: bool = False,
+        release_format: ReleaseFormat | None = FULL_WEIGHTS,
+    ) -> None:
+        self.checkpoint_root = checkpoint_root
+        self.backend_name = name
+        self.scenarios_shared = shares_scenarios
+        self.releases = release_format
+        self.submitted: list[TrainingJob] = []
+        self.imported: list[Path] = []
+        self.statuses: dict[str, JobStatus] = {}
+        self.closed = False
 
     @property
-    def supports_checkpoint_restore(self):
-        return True
+    def name(self) -> str:
+        return self.backend_name
 
-    def restore_checkpoint(self, artifact, *, scenario=None):
-        return None
+    @property
+    def shares_scenarios(self) -> bool:
+        return self.scenarios_shared
 
-    def restore_serving_checkpoint(self, artifact):
-        raise RuntimeError("test inference runtime does not restore checkpoints")
+    @property
+    def release_format(self) -> ReleaseFormat | None:
+        return self.releases
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        if not isinstance(parameters.get("rollout"), Mapping):
+            raise ValueError("a task job needs the rollout parameter as an object")
+
+    def import_start(self, release: Path) -> str | None:
+        self.imported.append(release)
+        return str(release) if holds_weights(release) else None
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        """The checkpoints that ``job`` saves; raising fails the job."""
+        if self.checkpoint_root is None:
+            raise NotImplementedError("StubTrainingComponent has no checkpoint root")
+        index = len(self.submitted)
+        checkpoint = self.checkpoint_root / str(index)
+        checkpoint.mkdir(parents=True)
+        (checkpoint / VERSION_FILE).write_text(f"w{index}")
+        return (SavedCheckpoint(0, str(checkpoint), str(checkpoint)),)
+
+    def submit(self, job: TrainingJob) -> None:
+        if job.job_id in self.statuses:
+            return
+        self.submitted.append(job)
+        try:
+            self.statuses[job.job_id] = JobStatus(job.job_id, "finished", self.train(job))
+        except Exception as exc:
+            self.statuses[job.job_id] = JobStatus(job.job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+
+    def status(self, job_id: str) -> JobStatus:
+        return self.statuses[job_id]
+
+    def cancel(self, job_id: str) -> None:
+        status = self.statuses.get(job_id)
+        if status is not None and status.state == "running":
+            self.statuses[job_id] = JobStatus(job_id, "failed", status.checkpoints, error="cancelled")
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class StubInferenceRuntime(InferenceProxyRuntime):
-    """Receiver hooks for the in-process training test fixtures."""
+    """An inference proxy that records the releases it serves.
 
-    def __init__(self, training, **kwargs):
-        super().__init__(**kwargs)
-        self.fixture = training
+    A release serves under the version its ``model.txt`` names, or under its
+    release ID when it holds no such file. ``activated`` lists the versions
+    of the releases it served, at commits, rollbacks and starts, in order;
+    ``served`` is the last one, ``None`` before the first one.
+    """
 
-    @property
-    def inference_handler(self):
-        return self.fixture.inference_handler
+    def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
+        super().__init__(base_url=base_url, **kwargs)
+        self.activated: list[str] = []
+        self.served: str | None = None
 
-    def serving_runtime_load_id(self):
-        return self.fixture.serving_runtime_load_id()
+    def current_runtime_load_id(self) -> str | None:
+        return self.served
 
-    def serving_adapter_name(self):
-        return self.fixture.serving_adapter_name()
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        version = self.serve(artifact)
+        self.activated.append(version)
+        return version
 
-    def serving_adapter_runtime_load_id(self, scenario):
-        return self.fixture.serving_adapter_runtime_load_id(scenario)
-
-    def activate_candidate(self, candidate):
-        return self.fixture.activate_candidate(candidate)
-
-    def restore_checkpoint(self, artifact, *, scenario=None):
-        return self.fixture.restore_serving_checkpoint(artifact)
-
-
-def runtime_bindings(value):
-    """Bind independent components from a test fixture or deployment result."""
-    from reef.train.runtime_backend import RuntimeCandidateBackend
-
-    if isinstance(value, RuntimeCandidateBackend):
-        return {"runtime": value.inference_runtime, "training_runtime": value.training_runtime}
-    if isinstance(value, tuple):
-        return {"runtime": value[1], "training_runtime": value[0]}
-    if isinstance(value, StubTrainingRuntime):
-        return {"runtime": value.inference, "training_runtime": value}
-    return {"runtime": value}
+    def serve(self, artifact: Artifact) -> str:
+        path = artifact.local_path
+        marker = None if path is None else Path(path) / VERSION_FILE
+        version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.release_id
+        self.served = version
+        return version
 
 
-def candidate_backend(value, objective, scheduling, **kwargs):
-    """A runtime backend that trains every job with the objective named ``objective``."""
-    from reef.train.runtime_backend import RuntimeCandidateBackend
-
-    bindings = runtime_bindings(value)
-    return RuntimeCandidateBackend(
-        bindings["training_runtime"],
-        FixedTrainingMethodSelector(TrainingMethod(objective)),
-        scheduling,
-        inference_runtime=bindings["runtime"],
-        **kwargs,
-    )
+def runtime_bindings(
+    component: TrainingComponent | None = None, runtime: StubInferenceRuntime | None = None
+) -> dict[str, object]:
+    """The recipe arguments for a training component and its inference runtime; stubs fill what is missing."""
+    return {
+        "training_component": StubTrainingComponent() if component is None else component,
+        "runtime": StubInferenceRuntime() if runtime is None else runtime,
+    }
 
 
-from reef.train.runtime_backend import RuntimeCandidateBackend
+def job_sized_stages(
+    spec: PipelineSpec, section: Mapping[str, Any] | None = None, *, job_samples: int = 1
+) -> PipelineConfig:
+    """The stages of ``spec`` configured by a deployment ``pipeline`` section, with ``job_samples`` set.
 
-
-class ExecutorRuntimeFixture(RuntimeCandidateBackend):
-    """Test fixture assembling two runtimes and the actual training backend."""
-
-    def __init__(self, components=None, **kwargs):
-        from reef.service.runtime import connect_executor_runtimes
-
-        training, inference = (
-            components if components is not None else connect_executor_runtimes(**{"batch_size": 1, **kwargs})
-        )
-        super().__init__(
-            training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
-        )
-
-    def prepare_training_step(self, batch, method, algorithm_state, scheduling, scenario_step):
-        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
-
-    @property
-    def inference(self):
-        return self.inference_runtime
-
-    @property
-    def training(self):
-        return self.training_runtime
-
-    @property
-    def train_group_handle(self):
-        return self.training_runtime.train_group_handle
-
-    @property
-    def base_url(self):
-        return self.inference_runtime.base_url
-
-    @property
-    def model_path(self):
-        return self.inference_runtime.model_path
-
-    @property
-    def inference_timeout_s(self):
-        return self.inference_runtime.inference_timeout_s
-
-    @property
-    def concurrent_training_scenarios(self):
-        return self.training_runtime.concurrent_training_scenarios
-
-    @property
-    def inference_handler(self):
-        return self.inference_runtime.inference_handler
-
-    @property
-    def inference_admission_status(self):
-        return self.inference_runtime.inference_admission_status
-
-    def serving_runtime_load_id(self):
-        return self.inference_runtime.serving_runtime_load_id()
-
-    def current_runtime_load_id(self):
-        return self.inference_runtime.current_runtime_load_id()
-
-    def serving_adapter_name(self):
-        return self.inference_runtime.serving_adapter_name()
-
-    def serving_adapter_runtime_load_id(self, scenario):
-        return self.inference_runtime.serving_adapter_runtime_load_id(scenario)
-
-    async def acquire_inference(self):
-        return await self.inference_runtime.acquire_inference()
-
-    def reconcile_training_job(self, scenario_step, **kwargs):
-        self._scenario = kwargs.pop("scenario", None)
-        return self.recover_pending_step(scenario_step, **kwargs)
-
-    def shutdown(self):
-        self.inference_runtime.pause_admission()
-        try:
-            self.training_runtime.shutdown()
-        finally:
-            self.inference_runtime.shutdown()
-
-
-def runtime_fixture(value):
-    return ExecutorRuntimeFixture(value) if isinstance(value, tuple) else value
+    A weight recipe needs ``pipeline.task2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
+    """
+    stages = {key: dict(value) for key, value in (section or {}).items()}
+    task2job = stages.setdefault("task2job", {})
+    task2job["config"] = {"job_samples": job_samples, **task2job.get("config", {})}
+    return PipelineConfig.from_setting(stages, spec=spec, environ={})

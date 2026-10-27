@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
-import ray
 import torch
-import torch.distributed as dist
-from slime.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
+from slime.utils.reloadable_process_group import monkey_patch_torch_dist
 
 # Megatron's gradient buffer binds ``torch.distributed.reduce_scatter_tensor``,
 # ``all_gather_into_tensor`` and ``_coalescing_manager`` when it is imported. Slime
@@ -24,24 +21,22 @@ monkey_patch_torch_dist()
 
 # isort: split
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
-from slime.backends.megatron_utils.hf_checkpoint_saver import save_hf_model_to_path
-from slime.utils.distributed_utils import get_gloo_group
-from slime.utils.memory_utils import clear_memory, print_memory
-from slime.utils.misc import Box
-from slime.utils.timer import Timer, timer
+from slime.utils.timer import Timer
 from torch_memory_saver import torch_memory_saver
 
 from reef.train.slime_backend.distill.teacher import TEACHER_TAG
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
-from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
+from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
     megatron_lora_enabled,
     zero_megatron_lora_adapters,
 )
-from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_lora_adapter_to_path
+from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import (
+    export_lora_adapter_tensors,
+    save_lora_adapter_to_path,
+)
 from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import restore_scheduler_progress
-from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
     drain_worker_metrics,
@@ -68,35 +63,18 @@ def _loss_family_hook(args: Any, arg_name: str) -> Any:
 
 
 class ReefMegatronTrainRayActor(MegatronTrainRayActor):
-    """Add the small bridge-facing surface absent from the runtime."""
+    """Add what the training component calls on each worker beyond Slime's own actor."""
 
     _get_current_node_ip_and_free_port = staticmethod(reef_node_ip_and_free_port)
 
     def init(self, args, role, with_ref=False, with_opd_teacher=False):
         result = super().init(args, role, with_ref=with_ref, with_opd_teacher=with_opd_teacher)
         if isinstance(result, int):
-            restore_scheduler_progress(args, result, getattr(self, "opt_param_scheduler", None))
-        updater = getattr(self, "weight_updater", None)
-        if updater is not None:
-            updater.tie_word_embeddings = bool(getattr(self.hf_config, "tie_word_embeddings", False))
-        self.adapter_slots: AdapterSlotSwitcher | None = None
-        if role == "actor" and megatron_lora_enabled(args) and not args.debug_rollout_only:
-            # One LoRA slot, several scenarios: snapshots live beside the
-            # Megatron checkpoint so a restart restores every scenario.
-            store = Path(args.save) / ADAPTER_SLOTS_DIRNAME if getattr(args, "save", None) else None
-            if self.args.offload_train:
-                self.wake_up()
-            try:
-                self.adapter_slots = AdapterSlotSwitcher(
-                    self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    store_dir=store,
-                    rank=dist.get_rank(),
-                )
-            finally:
-                if self.args.offload_train:
-                    self.sleep()
+            restore_scheduler_progress(args, result, self.opt_param_scheduler)
+        # A LoRA actor's save converts its adapter through Megatron Bridge; the critic saves no adapter.
+        self.lora_weight_iterator: MegatronToHfWeightIterator | None = None
+        if role == "actor" and megatron_lora_enabled(args):
+            self.lora_weight_iterator = MegatronToHfWeightIterator(args, self.model, None, None)
         # The loss families whose actor init hook ran; a family runs its hook on its first job.
         self.initialized_loss_families = {args.loss_family}
         if role == "actor":
@@ -108,7 +86,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def switch_training_method(self, worker_switch: Mapping[str, Any]) -> None:
         """Switch this actor to a job's loss family and learning-rate schedule.
 
-        ``loss_family_args`` are the family's job arguments, which the bridge
+        ``loss_family_args`` are the family's job arguments, which the component
         derived from the startup arguments. ``learning_rate_schedule_state`` is
         the job's schedule state, or ``None`` for Slime's configured scheduler.
         """
@@ -123,68 +101,30 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             self.initialized_loss_families.add(loss_family)
         self.args.reef_learning_rate_schedule_state = worker_switch["learning_rate_schedule_state"]
 
-    def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
-        """Attach directly to inference and return topology to Reef's trainer."""
-        self.rollout_manager = inference
+    def reset_training_state(self) -> None:
+        """Drop the optimizer's state and restart the learning-rate scheduler at step 0; the weights stay.
+
+        Each inner optimizer of a chained optimizer, and each data-parallel
+        rank's shard of a distributed one, clears its own state (Adam's moments
+        and step counts); the optimizer builds a new state at its next step.
+        """
+        from megatron.core.optimizer import ChainedOptimizer
+
+        optimizers = (
+            self.optimizer.chained_optimizers if isinstance(self.optimizer, ChainedOptimizer) else [self.optimizer]
+        )
+        for optimizer in optimizers:
+            optimizer.optimizer.state.clear()
+        if self.opt_param_scheduler is not None:
+            self.opt_param_scheduler.num_steps = 0
+
+    def parallel_layout(self) -> dict[str, Any]:
+        """Return this rank's training parallel layout, which the component's batch split reads.
+
+        The layout is Slime's ``train_parallel_config``: the data-parallel and
+        context-parallel sizes and the virtual-pipeline microbatch grouping.
+        """
         return dict(self.train_parallel_config)
-
-    # -- Per-scenario adapter slot --------------------------------------
-
-    def activate_scenario(self, scenario: str) -> bool:
-        """Put ``scenario``'s adapter (and optimizer state) into the LoRA slot.
-
-        Returns whether the scenario had prior state; a first-time scenario
-        starts from the pristine adapter. The CPU actor snapshot Slime reads
-        for publication and export is refreshed to match.
-        """
-        slots = self.adapter_slots
-        if slots is None:
-            raise RuntimeError("activate_scenario requires Megatron LoRA on an actor")
-        if slots.active == scenario:
-            self.weight_updater.active_scenario = scenario
-            return True
-        if self.args.offload_train:
-            self.wake_up()
-        try:
-            existed = slots.restore(scenario)
-            self.weights_backuper.backup("actor")
-        finally:
-            if self.args.offload_train:
-                self.sleep()
-        self.weight_updater.active_scenario = scenario
-        return existed
-
-    def active_scenario(self) -> str | None:
-        slots = self.adapter_slots
-        return None if slots is None else slots.active
-
-    def initialize_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Initialize only the sender's metadata; Reef initializes receivers."""
-        self.weight_updater.initialize_exact_runtime_load_id(runtime_load_id)
-
-    def publish_adapter(self, scenario: str, lora_name: str) -> None:
-        """Make ``scenario``'s current adapter resident under ``lora_name``.
-
-        No serving-runtime load ID changes: this re-registers an adapter the
-        engine lost (restart), it is not a training publication.
-        """
-        self.activate_scenario(scenario)
-        self._with_lora_engines(lambda: self.weight_updater.publish_lora_adapter(lora_name))
-
-    def train(
-        self,
-        rollout_id: int,
-        rollout_data_ref: Box,
-        external_data: dict[str, list[torch.Tensor]] | None = None,
-    ) -> dict[str, list[torch.Tensor]] | None:
-        result = super().train(rollout_id, rollout_data_ref, external_data=external_data)
-        if not self.args.offload_train:
-            # A resident model shares its GPUs with the colocated other one.
-            # Slime empties the caching allocator only on the offload path, so
-            # without this a step's freed activations would stay reserved by
-            # this process and be unavailable to the other model's step.
-            clear_memory()
-        return result
 
     def train_actor(self, rollout_id, rollout_data, external_data=None):
         pre_train_hook = _loss_family_hook(self.args, "reef_actor_pre_train_hook_path")
@@ -193,11 +133,6 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         result = super().train_actor(rollout_id, rollout_data, external_data=external_data)
         if megatron_lora_enabled(self.args):
             record_worker_metrics(collect_lora_train_metrics(self.model))
-        slots = self.adapter_slots
-        if slots is not None:
-            if slots.active is None:
-                raise RuntimeError("LoRA training ran without an activated scenario")
-            slots.capture(slots.active)
         return result
 
     def _get_rollout_data(self, rollout_data_ref):
@@ -238,99 +173,10 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             ]
         return rollout_data
 
-    def get_runtime_load_id(self) -> str:
-        return str(self.weight_updater.exact_runtime_load_id)
-
-    def set_runtime_load_id_for_update(self, runtime_load_id: str) -> None:
-        self.weight_updater.prepare_exact_runtime_load_id(runtime_load_id)
-
     def pop_metrics(self) -> dict[str, float]:
-        metrics = drain_worker_metrics()
-        updater = getattr(self, "weight_updater", None)
-        if updater is not None:
-            metrics.update(updater.pop_metrics())
-        return metrics
+        return drain_worker_metrics()
 
-    def update_weights(self, *, manage_generation: bool = True, force_full: bool = False) -> Any:
-        """Pass Reef-owned lifecycle policy through the native actor hook."""
-        updater = self.weight_updater
-        original_update = updater.update_weights
-        supported = inspect.signature(original_update).parameters
-        options = {
-            name: value
-            for name, value in {
-                "manage_generation": manage_generation,
-                "force_full": force_full,
-            }.items()
-            if name in supported
-        }
-
-        def update_with_generation_policy() -> Any:
-            return original_update(**options)
-
-        instance_attributes = vars(updater)
-        previous = instance_attributes.get("update_weights")
-        had_previous = "update_weights" in instance_attributes
-        updater.update_weights = update_with_generation_policy
-        fault_tolerance = getattr(self.args, "use_fault_tolerance", False)
-        if not manage_generation and fault_tolerance:
-            # Pinned Slime's actor hook otherwise recovers inference itself.
-            # Keep its training memory/transport setup while Reef exclusively
-            # decides when a failed receiver is replaced and republished.
-            self.args.use_fault_tolerance = False
-        try:
-            if not megatron_lora_enabled(self.args):
-                return super().update_weights()
-            return self._update_lora_weights()
-        finally:
-            if not manage_generation and fault_tolerance:
-                self.args.use_fault_tolerance = fault_tolerance
-            if had_previous:
-                updater.update_weights = previous
-            else:
-                delattr(updater, "update_weights")
-
-    def export_weight_files(self, directory: str) -> None:
-        """Write this actor's current weights to ``directory`` for Reef's file transfer.
-
-        A LoRA actor writes the active scenario's adapter as a PEFT directory,
-        with the writer of its checkpoints. Another actor writes its full
-        weights as a Hugging Face checkpoint, with the writer of the disk
-        transfer. No receiver takes part: Reef's coordinator delivers the directory.
-        """
-        lora = megatron_lora_enabled(self.args)
-        scenario = None if self.adapter_slots is None else self.adapter_slots.active
-        if lora and scenario is None:
-            raise RuntimeError("a LoRA adapter export requires an activated scenario")
-        updater = self.weight_updater
-        if self.args.offload_train:
-            self.wake_up()
-        try:
-            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
-                if lora:
-                    # Rank 0 gathers the tensors and writes; every rank raises a write error.
-                    save_lora_adapter_to_path(
-                        self.args,
-                        Path(directory),
-                        updater.export_lora_adapter_tensors(),
-                        scenario=scenario,
-                        scenario_step=None,
-                    )
-                else:
-                    save_hf_model_to_path(
-                        self.args,
-                        Path(directory),
-                        self.model,
-                        model_name=updater.model_name,
-                        quantization_config=updater.quantization_config,
-                        progress_desc="Save HF weights for Reef's file transfer",
-                    )
-                    dist.barrier(group=get_gloo_group())
-        finally:
-            if self.args.offload_train:
-                self.sleep()
-
-    def save_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
+    def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and
         # its Timer is a singleton that refuses a second start under the same
         # name ("Timer save_model already started"). Delegating under the
@@ -341,9 +187,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             super().save_model(rollout_id, force_sync=force_sync)
             return
         with Timer().context("save_model"):
-            self._save_lora_model(rollout_id, force_sync=force_sync, scenario_step=scenario_step)
+            self._save_lora_model(rollout_id, force_sync=force_sync)
 
-    def _save_lora_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
+    def _save_lora_model(self, rollout_id: int, force_sync: bool = False) -> None:
         if self.args.debug_rollout_only:
             return
 
@@ -361,101 +207,19 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             if force_sync and self.args.async_save:
                 maybe_finalize_async_save(blocking=True)
 
-            slots = self.adapter_slots
             if self.args.save_hf is not None and self.role == "actor":
+                if self.lora_weight_iterator is None:
+                    raise RuntimeError("a LoRA actor saves its adapter, but it built no adapter export")
                 output_dir = Path(self.args.save_hf.format(rollout_id=rollout_id))
                 context = torch_memory_saver.disable() if self.args.offload_train else nullcontext()
                 with context:
-                    save_lora_adapter_to_path(
-                        self.args,
-                        output_dir,
-                        self.weight_updater.export_lora_adapter_tensors(),
-                        scenario=None if slots is None else slots.active,
-                        scenario_step=scenario_step,
+                    adapter_tensors = export_lora_adapter_tensors(
+                        self.lora_weight_iterator, self.weights_backuper.get("actor")
                     )
-            if slots is not None and slots.active is not None:
-                # The Megatron checkpoint above holds only the active slot;
-                # every scenario's state must survive a restart on its own.
-                # The slot and its snapshot already agree: training captures
-                # the slot on its way out and ``restore`` records whatever it
-                # put back, so re-capturing here would copy the whole adapter
-                # and optimizer shard to the host a second time inside the
-                # window where serving is paused.
-                slots.persist(slots.active)
-                dist.barrier(group=get_gloo_group())
+                    save_lora_adapter_to_path(self.args, output_dir, adapter_tensors, rollout_id=rollout_id)
         finally:
             if self.args.offload_train:
                 self.sleep()
-
-    @timer
-    def _update_lora_weights(self) -> None:
-        """Publish LoRA while the offloaded actor allocation is readable.
-
-        The runtime can publish full weights from its CPU backup while the
-        actor is paused. Megatron Bridge's adapter export also inspects the
-        adapter wrappers, so an offloaded LoRA actor must be resumed for the
-        conversion and then returned to its previous state.
-        """
-        self._with_lora_engines(self.weight_updater.update_weights)
-
-    def _with_lora_engines(self, publish) -> None:
-        """Run ``publish`` with rollout engines connected and the actor readable."""
-        if self.args.debug_train_only or self.args.debug_rollout_only:
-            return
-
-        (
-            rollout_engines,
-            rollout_engine_lock,
-            num_new_engines,
-            engine_gpu_counts,
-            engine_gpu_offsets,
-            engine_parallel_configs,
-        ) = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
-
-        reconnect_rollout_engines = self.args.offload_train and self.args.use_critic and not self.args.colocate
-        if not rollout_engines and not reconnect_rollout_engines:
-            return
-
-        resumed_actor = bool(self.args.offload_train)
-        if resumed_actor:
-            self.wake_up()
-        elif reconnect_rollout_engines:
-            # Kept for symmetry with the runtime if its reconnect predicate
-            # ever stops implying offload_train.
-            reload_process_groups()
-
-        try:
-            if num_new_engines > 0 or reconnect_rollout_engines:
-                self.weight_updater.connect_rollout_engines(
-                    rollout_engines,
-                    rollout_engine_lock,
-                    engine_gpu_counts=engine_gpu_counts,
-                    engine_gpu_offsets=engine_gpu_offsets,
-                    engine_parallel_configs=engine_parallel_configs,
-                )
-                dist.barrier(group=get_gloo_group())
-                if dist.get_rank() == 0:
-                    ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
-
-            # CUDA IPC cannot export storage owned by torch_memory_saver's
-            # pauseable pool. Keep conversion/output tensors in the ordinary
-            # allocator even though the model itself has been resumed.
-            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
-                print_memory("before update_weights")
-                publish()
-                print_memory("after update_weights")
-
-                if getattr(self.args, "keep_old_actor", False):
-                    if self.args.update_weights_interval == 1:
-                        self.weights_backuper.copy(src_tag="rollout_actor", dst_tag="old_actor")
-                        self.weights_backuper.backup("rollout_actor")
-                    else:
-                        self.weights_backuper.backup("old_actor")
-        finally:
-            if resumed_actor:
-                self.sleep()
-            elif reconnect_rollout_engines:
-                destroy_process_groups()
 
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
         super().load_other_checkpoint(model_tag, path)

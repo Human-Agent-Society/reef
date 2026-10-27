@@ -31,8 +31,8 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, ReportContext
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import BufferSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
+from reef.task2job import Task2Job, Task2JobSettings
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def sibling_group(context: ReportContext) -> tuple[str, str]:
     """The attempt's sibling group (its parent commit, or ``ROOT_GROUP``) and its own commit hash."""
     coral = coral_metadata(context)
     if coral is None:
-        raise ValueError("CoralBatches requires metadata.coral with a commit_hash")
+        raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
     parent = coral.get("parent_hash")
     return (parent if isinstance(parent, str) and parent else ROOT_GROUP), coral["commit_hash"]
 
@@ -103,7 +103,7 @@ class CoralTasks(ReportTasks):
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
         coral = coral_metadata(context)
         if coral is None:
-            raise ValueError("CoralBatches requires metadata.coral with a commit_hash")
+            raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
         sample = self.assembly.build(context, context.require_score())
         release_ids = attempt_release_ids(context)
         if len(release_ids) > 1:
@@ -113,12 +113,12 @@ class CoralTasks(ReportTasks):
         )
 
 
-class CoralBatches(Task2Batch):
-    """Complete CORAL sibling groups, one batch: the siblings of one parent are one relative-reward group.
+class CoralJobData(Task2Job):
+    """Complete CORAL sibling groups, one job's data: the siblings of one parent are one relative-reward group.
 
     The record stage decides when a group is complete (``group_size`` in
-    ``pipeline.record2record.config``). A batch takes whole groups until it
-    holds the backend's batch size. Config: ``buffer_size``.
+    ``pipeline.record2record.config``). Job data takes whole groups until it
+    holds ``job_samples``. Config: ``buffer_size`` and ``job_samples``.
     """
 
     @classmethod
@@ -131,12 +131,13 @@ class CoralBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, BufferSettings.parse(config, plugin_class=cls).buffer_size)
+        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        batch = TrainingBatch(batch_id, items)
+    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        data = JobData(data_id, items)
         groups: dict[str, list[TrajectoryItem]] = {}
-        for sample in trajectories(batch):
+        for sample in trajectories(data):
             groups.setdefault(str(sample.metadata["coral"]["group"]), []).append(sample)
         for parent, group in groups.items():
             rewards = tuple(trajectory_reward(sample) for sample in group)
@@ -154,6 +155,6 @@ class CoralBatches(Task2Batch):
                 namespace="coral",
             )
         return replace(
-            batch,
-            items=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(batch)),
+            data,
+            items=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
         )

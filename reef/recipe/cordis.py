@@ -50,7 +50,7 @@ from reef.storage.tasks import TaskStorage
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, eval_task_paths
-from reef.train.cordis_backend.processor import TraceBatches, TraceTasks
+from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
 from reef.train.cordis_backend.strategies import Promoter, Proposer
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
@@ -270,7 +270,7 @@ class CordisRecipe(Recipe):
     binary: str | None = None
     episode_timeout_s: float = 600.0
     episode_repeats: int = 1
-    #: The traces in one evolution step; the trainer makes a batch when the pipeline holds this many.
+    #: The default ``job_samples``: the fewest traces of one evolution step. The stage config can override it.
     batch_size: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
@@ -320,7 +320,7 @@ class CordisRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2batch=TraceBatches)
+        return PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:
@@ -804,5 +804,5 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
-            batch_size=self.batch_size,
+            default_job_samples=self.batch_size,
         )

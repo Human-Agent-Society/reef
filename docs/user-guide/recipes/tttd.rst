@@ -62,9 +62,9 @@ The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
 group, and position. The record stage, ``TTTDRecord2Record``, waits for every
 position in the grid. It rejects a grid that contains more than one release.
-``TTTDBatches`` removes the groups with one reward value across all siblings
-after the grid reaches the barrier. If every group is constant, ``TTTDBatches``
-keeps one group so that the training runtime receives a zero-signal batch.
+``TTTDJobData`` removes the groups with one reward value across all siblings
+after the grid reaches the barrier. If every group is constant, ``TTTDJobData``
+keeps one group so that the training runtime receives zero-signal job data.
 
 Slime computes adaptive-beta entropic leave-one-out advantages within each
 group. The loss uses the rollout log probabilities without PPO clipping and adds
@@ -81,8 +81,8 @@ Configuration
 -------------
 
 The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDTasks``, and
-``TTTDBatches``. The deployment's ``pipeline`` section configures them. Write
-the step grid once, in the record stage. ``TTTDTasks`` and ``TTTDBatches`` read
+``TTTDJobData``. The deployment's ``pipeline`` section configures them. Write
+the step grid once, in the record stage. ``TTTDTasks`` and ``TTTDJobData`` read
 the grid from the record stage.
 
 .. code:: yaml
@@ -94,18 +94,23 @@ the grid from the record stage.
        config:
          groups_per_step: 8
          rollouts_per_group: 64
+     task2job:
+       config:
+         job_samples: 512       # the grid: groups_per_step x rollouts_per_group
 
 .. config::
 
    pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
    pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
    pipeline.record2task.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
-   recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+   pipeline.task2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
-``TTTDBatches`` reads only ``buffer_size``. One batch is always one complete
-grid. The backend's batch size, such as Slime's ``--global-batch-size``, must
-not exceed the grid's rollouts; with a larger one the scenario's pipeline
-fails to build. Set it equal to the grid to train one optimizer step per grid.
+``TTTDJobData`` reads only ``job_samples`` and ``buffer_size``. One job's data
+is always one complete grid. ``job_samples`` must not exceed the grid's
+rollouts; with a larger one the scenario's pipeline fails to build. Set it and
+the backend's batch size, such as Slime's ``--global-batch-size``, equal to
+the grid to train one optimizer step per grid.
 Reef refuses ``groups_per_step`` or ``rollouts_per_group`` under ``recipe.config``
 and names the new place of the key.
 
@@ -175,7 +180,8 @@ following commands from the repository root:
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
 starts the stack, and runs one episode of ``harbor/erdos_min_overlap`` on the
 paper grid: eight groups of 64 rollouts, one optimizer step, thinking enabled,
-two GPUs.
+four GPUs. Two GPUs train the actor and two serve the policy; training and
+serving never share a GPU.
 
 .. code:: bash
 
@@ -233,7 +239,8 @@ Configure a trajectory
 The grid has one source in ``serve.yaml``: ``pipeline.record2record.config``.
 The harness reads the same ``groups_per_step`` and ``rollouts_per_group``
 values, and ``steps`` and ``max_new_tokens`` from ``training.config``, when it
-starts. Slime's ``--global-batch-size`` in that file must equal
+starts. Slime's ``--global-batch-size`` and
+``pipeline.task2job.config.job_samples`` in that file must equal
 ``groups_per_step x rollouts_per_group``.
 
 .. config::
@@ -245,7 +252,7 @@ starts. Slime's ``--global-batch-size`` in that file must equal
    MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
    enable_thinking | True | Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
    TTTD_SEQ_LENGTH | 30000 | training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
-   num_gpus | 2 | GPU count passed to Slime's training and serving topology in ``serve.yaml``; Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
+   num_gpus | 2 | the actor's GPU count in ``serve.yaml``; ``inference.num-gpus`` gives the two serving engines their own two GPUs. Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
    TTTD_STATE_DIR | work/erdos_min_overlap | the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
 
 The reference grid contains ``8 x 64 = 512`` rollouts per optimizer step.
@@ -370,7 +377,7 @@ result at iteration 24. The last change was about ``2.5e-13``. Mean rollout
 rewards then decreased to ``1.1291`` and ``0.9264`` at step 50. Sampled-policy
 KL increased from about ``0.0006`` at step 20 to ``0.0491`` for Packing 26 and
 ``0.0430`` for Packing 32 at step 50. These metrics describe the sampled
-training batches. The certified results come from the task judges and the best
+training jobs. The certified results come from the task judges and the best
 programs stored in the search archives.
 
 The `circle-packing overview
@@ -403,9 +410,9 @@ paths are logged as metadata when ``upload_checkpoints`` is false. `Experiment
 tracking <../../reference/configuration.rst#experiment-tracking>`__ describes grouping,
 rollback behavior, offline mode, and metric names.
 
-When ``TTTDBatches`` receives a complete search grid, it records the following
+When ``TTTDJobData`` receives a complete search grid, it records the following
 metrics in the ``tttd`` namespace. These values describe every evaluated
-rollout before constant-reward groups are removed from the training batch.
+rollout before constant-reward groups are removed from the job's data.
 
 .. list-table:: TTT-Discover search metrics
    :header-rows: 1
@@ -423,12 +430,12 @@ rollout before constant-reward groups are removed from the training batch.
        also the configured reward for an invalid solution.
    * - ``tttd/constant_groups``, ``tttd/constant_groups_removed``
      - Number of constant-reward groups and the number removed before training.
-       If every group is constant, ``TTTDBatches`` retains one group for the
+       If every group is constant, ``TTTDJobData`` retains one group for the
        zero-gradient step.
    * - ``tttd/grid_groups``, ``tttd/grid_rollouts``
      - Size of the completed search grid.
    * - ``tttd/training_groups``, ``tttd/training_rollouts``
-     - Size of the batch after constant-reward filtering.
+     - Size of the job's data after constant-reward filtering.
 
 The harness also includes ``archive_size`` and ``archive_best_reward`` in each
 ``tttd_step_committed`` log event. These fields show whether the archive is
