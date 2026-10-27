@@ -303,7 +303,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 @pytest.mark.parametrize(
     "runtime_type, required",
     [
-        ("reef.train.tinker_backend.launch:runtime_factory", {"state_dir": "state"}),
+        ("reef.train.tinker_backend.launch:component_factory", {"state_dir": "state"}),
         (
             "remote_serving",
             {"remote": {"url": "http://gpu-host:8000"}, "release_format": {"layout": "full"}},
@@ -312,9 +312,12 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
     ids=["tinker", "remote_serving"],
 )
 def test_training_and_serving_runtimes_share_typed_fields_without_allocating_resources(runtime_type, required):
-    from reef.runtime.deployment import runtime_factory_for
+    from reef.runtime.deployment import ConfiguredFactory, runtime_factory_for, training_component_factory_for
 
-    factory = runtime_factory_for(runtime_type)
+    factory: ConfiguredFactory | None = (
+        training_component_factory_for(runtime_type) if ":" in runtime_type else runtime_factory_for(runtime_type)
+    )
+    assert factory is not None
     parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", **required}, {})
     assert parsed["inference_timeout_s"] == 5.5
     # The staleness window is the record-to-record stage's setting; a runtime refuses it.

@@ -17,10 +17,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.recovery import fsync_dir as _fsync_dir
-from reef.runtime.recovery import mkdir_durable as _mkdir_durable
-from reef.runtime.recovery import read_json as _read_json
-from reef.runtime.recovery import write_json as _write_json
+from reef.runtime.durable_files import fsync_dir, mkdir_durable, read_json, write_json
 
 POLICIES = {"latest", "best_reward"}
 Inventory = tuple[list[dict[str, Any]], list[str]]
@@ -177,7 +174,7 @@ class CheckpointStorage:
     def _estimate(self, records: list[dict[str, Any]]) -> int:
         # Retain the high-water mark after deletion so future reservations
         # cannot underestimate a previously observed checkpoint pair.
-        persisted = (_read_json(self.estimate_path) or {}).get("bytes", 0)
+        persisted = (read_json(self.estimate_path) or {}).get("bytes", 0)
         persisted = persisted if isinstance(persisted, int) else 0
         return max(
             self._source_estimate,
@@ -217,10 +214,10 @@ class CheckpointStorage:
             if path.is_symlink() or not path.is_dir():
                 raise CheckpointStorageError(f"checkpoint asset is missing or unsafe: {path}")
         pair_bytes = sum(self._measure(path) for path in self.required_assets(rollout_id))
-        previous = (_read_json(self.estimate_path) or {}).get("bytes", 0)
+        previous = (read_json(self.estimate_path) or {}).get("bytes", 0)
         previous = previous if isinstance(previous, int) else 0
-        _write_json(self.estimate_path, {"bytes": max(previous, pair_bytes)})
-        _write_json(
+        write_json(self.estimate_path, {"bytes": max(previous, pair_bytes)})
+        write_json(
             self._record_path(rollout_id),
             {
                 "version": 1,
@@ -295,7 +292,7 @@ class CheckpointStorage:
         rollout_id = int(record["rollout_id"])
         # Persist intent before renames so reconciliation can finish after a crash.
         record = {**record, "status": "DELETING"}
-        _write_json(self._record_path(rollout_id), record)
+        write_json(self._record_path(rollout_id), record)
         self._finish_delete(record)
 
     def _reconcile(self) -> Inventory:
@@ -317,20 +314,20 @@ class CheckpointStorage:
         for original, tombstone in pairs:
             if original.exists():
                 os.replace(original, tombstone)
-                _fsync_dir(original.parent)
+                fsync_dir(original.parent)
         for _, tombstone in pairs:
             if tombstone.exists():
                 shutil.rmtree(tombstone)
-                _fsync_dir(tombstone.parent)
+                fsync_dir(tombstone.parent)
         self._record_path(rollout_id).unlink(missing_ok=True)
-        _fsync_dir(self.records_root)
+        fsync_dir(self.records_root)
 
     def _records(self, *, allow_deleting: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
         records: list[dict[str, Any]] = []
         errors: list[str] = []
         for path in sorted(self.records_root.glob("*.json")):
             try:
-                if (record := _read_json(path)) is None:
+                if (record := read_json(path)) is None:
                     continue
                 self._validate_record(record, deleting=allow_deleting and record.get("status") == "DELETING")
                 if path != self._record_path(int(record["rollout_id"])):
@@ -491,7 +488,7 @@ class CheckpointStorage:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        _mkdir_durable(self.meta_root)
+        mkdir_durable(self.meta_root)
         roots: tuple[Path, ...] = (self.root, self.hf_root, self.megatron_root, self.meta_root)
         if self.critic_root is not None:
             roots = (*roots, self.critic_root)

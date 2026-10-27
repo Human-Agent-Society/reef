@@ -358,9 +358,11 @@ deployment and does not allocate model resources:
   HTTP service waits for: for Slime, the optional teacher engine; for an
   in-process backend, none. It must not download models, allocate devices or
   construct a component.
-* ``runtime_config(settings, *, loss_family)`` returns the section that
-  ``RuntimeRegistry`` builds in the HTTP process. ``loss_family`` is the
-  recipe's startup loss family.
+* ``component_config(settings, *, loss_family)`` returns the config that
+  ``reef.runtime.deployment.build_training_component`` builds in the HTTP
+  process. Its ``type`` is the dotted reference of the component's
+  ``TrainingComponentFactory``. ``loss_family`` is the recipe's startup loss
+  family.
 * ``http_environment(settings)`` returns variables for the HTTP service
   process. A value can name ``${endpoints.<service>}`` of a service that
   ``prepare`` returned.
@@ -376,7 +378,7 @@ model identifier. ``default_serving`` (``engines`` unless overridden) is the
 serving of a deployment that sets no ``inference.serving`` and no engine
 setting.
 
-The runtime factory that the section's ``type`` names returns the
+The ``TrainingComponentFactory`` that the config's ``type`` names returns the
 ``TrainingComponent`` alone. It runs in the HTTP service's process; Reef
 passes it to the recipe as ``training_component``. The backend does not build
 serving: the ``inference`` section selects it, and the component's
@@ -411,9 +413,9 @@ An in-process integration can reuse the supplied definition:
    from reef.train.deployment import InProcessTrainingDeployment
 
    class Deployment(InProcessTrainingDeployment):
-       runtime_type = "my_backend.runtime:factory"
+       component_type = "my_backend.runtime:factory"
 
-Here ``factory`` is a lightweight ``RuntimeFactory`` instance. Its
+Here ``factory`` is a lightweight ``TrainingComponentFactory`` instance. Its
 ``config_type()`` declarations validate ``training.options`` using the shared
 parser. Import execution libraries only when the factory constructs the
 component, and provide any backend-owned defaults there. The base ``prepare``

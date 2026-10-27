@@ -187,7 +187,7 @@ with surface contracts.
 that ``training.backend`` names and assembles the services it needs;
 ``service/deploy/inference.py`` adds the local inference component when the
 deployment serves saved weights on one.
-``runtime/`` is a namespace package with exactly six Python modules and the
+``runtime/`` is a namespace package with exactly seven Python modules and the
 ``executor/`` package; it has no ``__init__.py`` or import facade:
 
 .. code:: text
@@ -195,6 +195,7 @@ deployment serves saved weights on one.
    runtime/
      interfaces.py
      jobs.py
+     durable_files.py
      deployment.py
      recovery.py
      residency.py
@@ -205,13 +206,14 @@ deployment serves saved weights on one.
 contracts, ``TrainingMethod`` and its learning-rate schedule, and runtime load
 IDs. ``jobs.py`` defines bounded training jobs and the ``TrainingComponent``
 interface. ``deployment.py`` owns runtime factories, ``RuntimeRegistry`` and
-the inference service contracts. ``recovery.py`` owns durable JSON files,
-``InferenceControl`` and ``EngineHealthMonitor``. ``residency.py`` holds the
+the inference service contracts. ``durable_files.py`` writes JSON files and
+directories durably, for the training components' job records. ``recovery.py``
+owns ``InferenceControl`` and ``EngineHealthMonitor``. ``residency.py`` holds the
 ``AdapterResidencyManager``. ``serving.py`` loads saved weights into serving
 engines that the control plane controls directly. ``executor/`` owns worker
 launch and control RPC.
 
-``jobs.py`` and ``interfaces.py`` import no other runtime module; ``serving.py``
+``jobs.py``, ``interfaces.py`` and ``durable_files.py`` import no other runtime module; ``serving.py``
 may import every other module except ``executor/``.
 ``tests/contributing/test_dependency_boundaries.py`` checks this order.
 Runtime contracts have no direct imports of concrete inference or training

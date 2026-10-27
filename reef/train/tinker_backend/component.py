@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import JobData, TaskItem, trajectories
+from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.recovery import read_json, write_json
 from reef.runtime.serving import ADAPTER_DIR, holds_weights
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler

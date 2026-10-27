@@ -45,7 +45,7 @@ TRAINING_CONFIGS = (
 def slime_flags(config):
     """The ``--name=value`` arguments the HTTP service gives Slime for a resolved example."""
     settings = asdict(service_config_from_mapping(config))
-    runtime = SlimeDeployment().runtime_config(settings, loss_family="")
+    runtime = SlimeDeployment().component_config(settings, loss_family="")
     arguments = slime_arguments(runtime["settings"], loss_family="", environ={})
     return dict(argument.removeprefix("--").split("=", 1) for argument in arguments if "=" in argument)
 

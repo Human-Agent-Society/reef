@@ -102,16 +102,16 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
         training.training_deployment_for("unavailable")
 
 
-def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
-    from tests.support._training_deployment import runtime_factory
+def test_a_component_factory_that_builds_no_training_component_is_refused(monkeypatch):
+    from tests.support._training_deployment import component_factory
 
     from reef.inference.http import InferenceProxyRuntime
 
     runtime = InferenceProxyRuntime(base_url="http://unused")
     closed = []
     monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
-    monkeypatch.setattr(type(runtime_factory), "__call__", lambda *args: runtime)
-    with pytest.raises(TypeError, match="TrainingComponent"):
+    monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
+    with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
             ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
         )

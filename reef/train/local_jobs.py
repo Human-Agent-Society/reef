@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import JobData
+from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
-from reef.runtime.recovery import read_json, write_json
 
 logger = logging.getLogger(__name__)
 

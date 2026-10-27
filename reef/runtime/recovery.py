@@ -1,6 +1,5 @@
-"""Durable files and inference failure recovery.
+"""Inference failure recovery.
 
-- Durable files: atomic JSON writes and durable directories.
 - Inference supervision: the hooks an integration implements
   (:class:`InferenceEngineGroup`, :class:`InferenceMonitor`,
   :class:`EngineHealthChecks`), and the objects that drive them:
@@ -10,86 +9,16 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import math
-import os
-import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from threading import Condition, Thread
 from time import monotonic
-from typing import Any
 
 
 logger = logging.getLogger(__name__)
-
-# -- Durable JSON files -------------------------------------------------------
-
-
-def read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    if not isinstance(value, dict):
-        raise ValueError(f"expected JSON object: {path}")
-    return value
-
-
-def write_json(path: Path, value: Mapping[str, Any]) -> None:
-    """Write ``value`` atomically: a reader sees the old file or the new one, never a torn one."""
-    mkdir_durable(path.parent)
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name.lstrip('.')}.",
-            suffix=".tmp",
-            delete=False,
-        ) as file:
-            temporary = Path(file.name)
-            json.dump(value, file, allow_nan=False, separators=(",", ":"), sort_keys=True)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-        fsync_dir(path.parent)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def mkdir_durable(path: Path) -> None:
-    """Create ``path`` and its parents, refusing symlinks, and fsync each new entry."""
-    missing = []
-    current = path
-    while not current.exists():
-        if current.is_symlink():
-            raise OSError(f"refusing symlinked directory: {current}")
-        missing.append(current)
-        current = current.parent
-    if current.is_symlink() or not current.is_dir():
-        raise OSError(f"unsafe directory: {current}")
-    for directory in reversed(missing):
-        try:
-            directory.mkdir()
-        except FileExistsError:
-            if directory.is_symlink() or not directory.is_dir():
-                raise OSError(f"unsafe directory: {directory}") from None
-        fsync_dir(directory.parent)
-
-
-def fsync_dir(path: Path) -> None:
-    descriptor = os.open(path, os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
 
 # -- Inference supervision ----------------------------------------------------
 
@@ -126,7 +55,7 @@ class InferenceEngineGroup(ABC):
 
 
 class InferenceMonitor(ABC):
-    """Background engine monitoring must respect publication/recovery barriers."""
+    """Background engine monitoring, which ``InferenceControl`` pauses while it pauses, replaces or retires engines."""
 
     @abstractmethod
     def pause(self) -> None:
@@ -171,8 +100,9 @@ class InferenceControl:
     - ``terminate`` sets ``paused``, pauses the monitor, retires the engines
       that this deployment owns, and returns how many it retired (0 for
       borrowed engines).
-    - ``recover`` replaces dead engines and returns None. Paused engines stay
-      paused with a paused monitor; otherwise the monitor resumes.
+    - ``recover`` replaces dead engines and returns how many slots it
+      refilled. Paused engines stay paused with a paused monitor; otherwise
+      the monitor resumes.
     """
 
     def __init__(self, engines: InferenceEngineGroup, monitor: InferenceMonitor) -> None:

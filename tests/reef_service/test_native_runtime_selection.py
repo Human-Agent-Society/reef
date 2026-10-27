@@ -90,7 +90,7 @@ def test_a_serving_factory_that_builds_no_inference_runtime_releases_both_compon
             return built[-1]
 
     monkeypatch.setattr("reef.runtime.deployment._runtime_kinds", {"none": WrongServingFactory()})
-    with pytest.raises(TypeError, match="must build an InferenceRuntime"):
+    with pytest.raises(TypeError, match="built a training component: a runtime serves"):
         connect_training_component(training_settings(), model_path="model", loss_family="sao")
     [(_, component)] = created
     assert component.closed and built[0].closed

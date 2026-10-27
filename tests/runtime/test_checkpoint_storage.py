@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime import recovery as durable_io
+from reef.runtime import durable_files as durable_io
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
@@ -421,7 +421,7 @@ class TestCheckpointStorage:
         ):
             pass
 
-        record = checkpoint_storage._read_json(crashing._record_path(0))
+        record = checkpoint_storage.read_json(crashing._record_path(0))
         tombstone = crashing._tombstone_path(hf, 0, record["job_id"])
         assert record["status"] == "DELETING"
         assert tombstone.exists()

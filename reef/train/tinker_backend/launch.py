@@ -16,7 +16,7 @@ from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeFactory
+from reef.runtime.deployment import TrainingComponentFactory
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.runtime.jobs import TrainingComponent
 from reef.train.deployment import InProcessTrainingDeployment
@@ -37,7 +37,7 @@ def tinker_settings(options: Mapping[str, Any]) -> TinkerConfig:
 class TinkerDeployment(InProcessTrainingDeployment):
     """Train with Tinker in the HTTP service; serve through Tinker's sampler unless the inference section says otherwise."""
 
-    runtime_type = "reef.train.tinker_backend.launch:runtime_factory"
+    component_type = "reef.train.tinker_backend.launch:component_factory"
     requires_local_model = False
     default_serving = "trainer"
 
@@ -59,17 +59,15 @@ class TinkerDeployment(InProcessTrainingDeployment):
         }
 
 
-class TinkerRuntimeFactory(RuntimeFactory):
+class TinkerComponentFactory(TrainingComponentFactory):
     """Build the in-process Tinker training component."""
 
-    kind = TinkerDeployment.runtime_type
+    kind = TinkerDeployment.component_type
 
     def config_type(self) -> type:
         return TinkerConfig
 
-    def __call__(
-        self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
-    ) -> TrainingComponent:
+    def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.tinker.sampling import TinkerSDKSampler
         from reef.train.tinker_backend.client import TinkerSDKClient
         from reef.train.tinker_backend.component import TinkerTrainingComponent
@@ -97,4 +95,4 @@ class TinkerRuntimeFactory(RuntimeFactory):
             raise
 
 
-runtime_factory = TinkerRuntimeFactory()
+component_factory = TinkerComponentFactory()

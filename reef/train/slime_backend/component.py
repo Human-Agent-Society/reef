@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TaskItem
+from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
 from reef.runtime.interfaces import (
     LearningRateScheduleState,
@@ -38,7 +39,6 @@ from reef.runtime.interfaces import (
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.recovery import read_json, write_json
 from reef.runtime.serving import ADAPTER_DIR
 from reef.train.algos.registry import job_training
 from reef.train.local_jobs import LocalJobComponent
@@ -636,7 +636,7 @@ class SlimeSettings:
     sections, which select the training workers' executor. ``ray_address``
     and ``namespace`` name the Ray cluster the workers run on.
     ``train_timeout_s`` bounds one worker call, in seconds. The strings are
-    non-empty and the timeout is positive. ``SlimeRuntimeFactory`` makes the
+    non-empty and the timeout is positive. ``SlimeComponentFactory`` makes the
     value; ``create_slime_component`` reads it.
     """
 

@@ -28,7 +28,7 @@ from reef.recipe.base import ServedEndpoint
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.runtime.deployment import RuntimeRegistry, close_runtimes
+from reef.runtime.deployment import RuntimeRegistry, build_training_component, close_runtimes
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
@@ -88,20 +88,13 @@ def connect_training_component(
     ``release_format`` (``reef.service.deploy.serving``).
     """
     backend = training_deployment_for(settings.training_backend)
-    registry = RuntimeRegistry()
-    component = registry.build(
-        backend.runtime_config(asdict(settings), loss_family=loss_family), model_path=model_path
+    component = build_training_component(
+        backend.component_config(asdict(settings), loss_family=loss_family), model_path=model_path
     )
-    if not isinstance(component, TrainingComponent):
-        component.shutdown()
-        raise TypeError("a training backend's runtime factory must build a TrainingComponent")
     try:
-        serving = registry.build(
+        serving = RuntimeRegistry().build(
             serving_runtime_config(settings, backend, component.release_format), model_path=model_path
         )
-        if not isinstance(serving, InferenceRuntime):
-            serving.close()
-            raise TypeError("a serving runtime factory must build an InferenceRuntime")
     except BaseException:
         component.close()
         raise
@@ -253,9 +246,6 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
             if runtime_config
             else _upstream_runtime(settings)
         )
-        if isinstance(runtime, TrainingComponent):
-            runtime.close()
-            raise TypeError("a recipe's runtime must be an inference runtime; training.backend selects training")
         try:
             return build_recipe(selected, env, config=config, runtime=runtime)
         except BaseException:

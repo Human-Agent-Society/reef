@@ -155,8 +155,9 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
   package: importing ``reef.runtime`` does not register integrations or re-export
   classes. Keep its top level limited to ``interfaces.py``, ``jobs.py``,
-  ``deployment.py``, ``recovery.py``, ``residency.py``, ``serving.py`` and
-  ``executor/``.
+  ``durable_files.py``, ``deployment.py``, ``recovery.py``, ``residency.py``,
+  ``serving.py`` and ``executor/``. A training component is not a runtime: its
+  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the

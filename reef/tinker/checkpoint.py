@@ -15,8 +15,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from reef.runtime.durable_files import write_json
 from reef.runtime.interfaces import LearningRateScheduleState
-from reef.runtime.recovery import write_json
 
 MANIFEST = "tinker-checkpoint.json"
 

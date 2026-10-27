@@ -286,7 +286,7 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
     loss_family = weight_type.training_spec().loss_family.strip()
-    runtime = SlimeDeployment().runtime_config(asdict(service_config_from_mapping(config)), loss_family=loss_family)
+    runtime = SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family=loss_family)
     assert runtime["recipe"] == recipe
     # The teacher's address reaches the HTTP service as an environment variable once its service is up.
     environ = {TEACHER_URL_ENV: "http://127.0.0.1:30010"}

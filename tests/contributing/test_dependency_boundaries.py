@@ -438,6 +438,7 @@ def test_runtime_directory_has_only_its_owned_modules() -> None:
     expected = {
         "interfaces.py",
         "jobs.py",
+        "durable_files.py",
         "deployment.py",
         "recovery.py",
         "residency.py",
@@ -456,6 +457,7 @@ def test_runtime_modules_follow_their_dependency_order() -> None:
     allowed = {
         "interfaces.py": (),
         "jobs.py": (),
+        "durable_files.py": (),
         "recovery.py": ("reef.runtime.interfaces",),
         "residency.py": ("reef.runtime.interfaces",),
         "deployment.py": (

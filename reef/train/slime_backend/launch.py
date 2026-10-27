@@ -16,7 +16,7 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, http_readiness_command
+from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory, http_readiness_command
 from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.jobs import TrainingComponent
@@ -195,7 +195,7 @@ class SlimeDeployment(TrainingDeployment):
     """Train with Slime in the HTTP service; the inference section serves its selected checkpoints."""
 
     supports_teacher_engine = True
-    runtime_type = "reef.train.slime_backend.launch:runtime_factory"
+    component_type = "reef.train.slime_backend.launch:component_factory"
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -229,9 +229,9 @@ class SlimeDeployment(TrainingDeployment):
             return {}
         return {TEACHER_URL_ENV: f"${{endpoints.{TEACHER_SERVICE}}}"}
 
-    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
         return {
-            "type": self.runtime_type,
+            "type": self.component_type,
             "loss_family": loss_family,
             "recipe": settings["recipe"],
             "ray_address": settings["ray_address"] or os.environ.get("RAY_ADDRESS", ""),
@@ -245,14 +245,12 @@ class SlimeDeployment(TrainingDeployment):
         }
 
 
-class SlimeRuntimeFactory(RuntimeFactory):
+class SlimeComponentFactory(TrainingComponentFactory):
     """Build the Slime training component."""
 
-    kind = SlimeDeployment.runtime_type
+    kind = SlimeDeployment.component_type
 
-    def __call__(
-        self, config: Mapping[str, Any], model_path: str, recipe_config: Mapping[str, Any], environ: Mapping[str, str]
-    ) -> TrainingComponent:
+    def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.train.slime_backend.component import SlimeSettings, create_slime_component
         from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_TIMEOUT_S
 
@@ -275,4 +273,4 @@ class SlimeRuntimeFactory(RuntimeFactory):
         )
 
 
-runtime_factory = SlimeRuntimeFactory()
+component_factory = SlimeComponentFactory()

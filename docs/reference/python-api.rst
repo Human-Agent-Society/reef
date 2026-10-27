@@ -1804,7 +1804,7 @@ Tinker integration
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
 ``tinker`` backend as an ``InProcessTrainingDeployment``. Its
-``runtime_factory`` builds, from ``TinkerConfig`` and only after deployment
+``component_factory`` builds, from ``TinkerConfig`` and only after deployment
 selection, a ``TinkerTrainingComponent``. Each job
 trains remotely from the job's start manifest. Its parameters are ``method``,
 the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and

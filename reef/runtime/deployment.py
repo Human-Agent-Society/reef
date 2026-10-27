@@ -2,9 +2,11 @@
 
 - Component contracts: what an inference service and the resources it borrows
   each own, and how their health is checked.
-- Runtime factories: the ``type`` table that turns a config section into
-  runtimes, with bundled kinds resolved lazily so importing contracts loads
-  no integration.
+- Runtime factories: the ``type`` table that turns a config section into a
+  serving runtime, with bundled kinds resolved lazily so importing contracts
+  loads no integration.
+- Training component factories: the dotted reference in a training
+  deployment's component config that builds its training component.
 """
 
 from __future__ import annotations
@@ -94,23 +96,19 @@ class InferenceService(ABC):
 
 # -- Runtime factories --------------------------------------------------------
 
-#: What a runtime factory builds: a serving runtime, or a training component, which never serves.
-RuntimeBuild = InferenceRuntime | TrainingComponent
-
 
 class RuntimeConfigError(ReefError):
     """Raised when runtime configuration is invalid or required keys are missing."""
 
 
-class RuntimeFactory(ABC):
-    """Base class for runtime factories.
+class ConfiguredFactory(ABC):
+    """A factory that builds one component from a config section of its own settings type.
 
-    Required (subclass must set):
-        ``kind`` — canonical kind name used in config ``type``.
-
-    Implement:
-        ``__call__`` — receive ``(config, model_path, recipe_config, environ)``
-        and return an :class:`InferenceRuntime` or a :class:`TrainingComponent`.
+    ``kind`` is the non-empty name that the section's ``type`` key holds.
+    ``config_type`` is the settings dataclass whose fields the section sets,
+    or None for a factory that reads the section as it is. ``parse_config``
+    reads the section into those fields. ``RuntimeFactory`` and
+    ``TrainingComponentFactory`` add what they build.
     """
 
     kind: str
@@ -140,6 +138,15 @@ class RuntimeFactory(ABC):
             raise RuntimeConfigError(str(exc)) from exc
         return {"type": config.get("type", self.kind), **values}
 
+
+class RuntimeFactory(ConfiguredFactory):
+    """Build the serving runtime that a ``runtime`` config section describes.
+
+    ``__call__`` receives ``(config, model_path, recipe_config, environ)``
+    and returns an :class:`InferenceRuntime`. ``RuntimeRegistry`` selects the
+    factory by the section's ``type``.
+    """
+
     @abstractmethod
     def __call__(
         self,
@@ -147,8 +154,22 @@ class RuntimeFactory(ABC):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> RuntimeBuild:
-        """Build the serving runtime or the training component that ``config`` describes."""
+    ) -> InferenceRuntime:
+        """Build the serving runtime that ``config`` describes."""
+
+
+class TrainingComponentFactory(ConfiguredFactory):
+    """Build the training component that a training deployment's component config describes.
+
+    ``kind`` is the dotted reference ``package.module:factory`` that the
+    config's ``type`` holds (``TrainingDeployment.component_type``).
+    ``__call__`` receives ``(config, model_path, environ)`` and returns a
+    :class:`TrainingComponent`; ``build_training_component`` calls it.
+    """
+
+    @abstractmethod
+    def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
+        """Build the training component that ``config`` describes."""
 
 
 class _CallableRuntimeFactory(RuntimeFactory):
@@ -161,7 +182,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
 
     kind = ""
 
-    def __init__(self, fn: Callable[..., RuntimeBuild]) -> None:
+    def __init__(self, fn: Callable[..., InferenceRuntime]) -> None:
         self._fn = fn
 
     def __call__(
@@ -170,7 +191,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> RuntimeBuild:
+    ) -> InferenceRuntime:
         return self._fn(config, model_path, recipe_config, environ)
 
 
@@ -236,7 +257,7 @@ def runtime_factory_for(kind: str) -> RuntimeFactory | None:
 
 
 class RuntimeRegistry:
-    """Build runtimes from config sections; injected factories shadow registered kinds."""
+    """Build serving runtimes from config sections; injected factories shadow registered kinds."""
 
     def __init__(self, factories: Mapping[str, RuntimeFactory] | None = None) -> None:
         self._factories: dict[str, RuntimeFactory] = dict(factories or {})
@@ -252,7 +273,9 @@ class RuntimeRegistry:
         model_path: str,
         recipe_config: Mapping[str, Any] | None = None,
         environ: Mapping[str, str] | None = None,
-    ) -> RuntimeBuild:
+    ) -> InferenceRuntime:
+        """The serving runtime of ``config``; ``RuntimeConfigError`` for an unknown type, and ``TypeError`` when
+        the factory builds anything but an ``InferenceRuntime``. A training component it built is closed first."""
         runtime_type = config.get("type")
         if not isinstance(runtime_type, str) or not runtime_type:
             raise RuntimeConfigError("runtime.type must be a non-empty string")
@@ -265,7 +288,59 @@ class RuntimeRegistry:
         if isinstance(factory, RuntimeFactory):
             # Injected entries may be plain callables that parse nothing.
             config = factory.parse_config(config, values)
-        return factory(config, model_path, recipe_config or {}, values)
+        runtime = factory(config, model_path, recipe_config or {}, values)
+        if isinstance(runtime, TrainingComponent):
+            runtime.close()
+            raise TypeError(
+                f"runtime type {runtime_type!r} built a training component: a runtime serves, and training.backend "
+                "selects training"
+            )
+        if not isinstance(runtime, InferenceRuntime):
+            raise TypeError(
+                f"runtime type {runtime_type!r} must build an InferenceRuntime, not {type(runtime).__name__}"
+            )
+        return runtime
+
+
+def training_component_factory_for(reference: str) -> TrainingComponentFactory:
+    """The ``TrainingComponentFactory`` that the dotted ``reference`` (``package.module:factory``) names.
+
+    The reference names a factory instance or a subclass, which is made with no
+    arguments. ``RuntimeConfigError`` for another reference.
+    """
+    module_name, separator, attribute = reference.partition(":")
+    if not separator or not module_name or not attribute:
+        raise RuntimeConfigError(f"training component type {reference!r} must be 'package.module:factory'")
+    try:
+        candidate = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeConfigError(f"cannot import training component type {reference!r}: {exc}") from exc
+    if isinstance(candidate, type) and issubclass(candidate, TrainingComponentFactory):
+        candidate = candidate()
+    if not isinstance(candidate, TrainingComponentFactory):
+        raise RuntimeConfigError(f"training component type {reference!r} is not a TrainingComponentFactory")
+    return candidate
+
+
+def build_training_component(
+    config: Mapping[str, Any], *, model_path: str, environ: Mapping[str, str] | None = None
+) -> TrainingComponent:
+    """The training component of ``config``, whose ``type`` names its factory (``training_component_factory_for``).
+
+    ``TypeError`` when the factory builds anything but a ``TrainingComponent``; a serving runtime it built is
+    shut down first.
+    """
+    reference = config.get("type")
+    if not isinstance(reference, str) or not reference:
+        raise RuntimeConfigError("a training component config needs its factory's dotted reference as type")
+    factory = training_component_factory_for(reference)
+    values = os.environ if environ is None else environ
+    component = factory(factory.parse_config(config, values), model_path, values)
+    if isinstance(component, InferenceRuntime):
+        component.shutdown()
+    if not isinstance(component, TrainingComponent):
+        raise TypeError(f"training component type {reference!r} must build a TrainingComponent")
+    return component
 
 
 def close_runtimes(

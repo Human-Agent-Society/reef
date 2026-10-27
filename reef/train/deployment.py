@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Any, Literal, get_args
 
 from reef.core.errors import DeployConfigError
-from reef.runtime.deployment import runtime_factory_for
+from reef.runtime.deployment import RuntimeConfigError, training_component_factory_for
 from reef.runtime.executor.arguments import normalize_native_options
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
@@ -47,8 +47,10 @@ class TrainingDeployment(ABC):
         """
 
     @abstractmethod
-    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
-        """Describe the training component for RuntimeRegistry, without constructing it.
+    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+        """Describe the training component for ``build_training_component``, without constructing it.
+
+        The config's ``type`` is the dotted reference of the component's ``TrainingComponentFactory``.
 
         ``loss_family`` is the recipe's startup loss family, which a backend
         that starts its workers with one loss family reads.
@@ -69,27 +71,29 @@ class TrainingDeployment(ABC):
 
 
 class InProcessTrainingDeployment(TrainingDeployment):
-    """An integration whose registered runtime factory builds its training component in process.
+    """An integration whose training component factory builds its training component in process.
 
-    Subclasses name their runtime_type. The runtime factory owns option parsing
-    and imports its execution dependencies only when constructing the runtime.
+    Subclasses name their ``component_type``, the dotted reference of a
+    ``TrainingComponentFactory``. The factory owns option parsing and imports
+    its execution dependencies only when it builds the component.
     """
 
-    runtime_type: str
+    component_type: str
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         if {"ray_address", "ray_namespace"} & config["reef"].keys() or "training" in config.get("execution", {}):
             raise DeployConfigError(
                 "in-process training owns its execution; remove Ray and training executor settings"
             )
-        factory = runtime_factory_for(self.runtime_type)
-        if factory is None:
-            raise DeployConfigError(f"unknown training runtime type {self.runtime_type!r}")
-        # Use the runtime's schema for both CLI and YAML options, without a model.
-        factory.parse_config(self.runtime_config(settings, loss_family=""), os.environ)
+        try:
+            factory = training_component_factory_for(self.component_type)
+            # Use the component's schema for both CLI and YAML options, without a model.
+            factory.parse_config(self.component_config(settings, loss_family=""), os.environ)
+        except RuntimeConfigError as exc:
+            raise DeployConfigError(str(exc)) from exc
         return ()
 
-    def runtime_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
+    def component_config(self, settings: Mapping[str, Any], *, loss_family: str) -> dict[str, Any]:
         options = {
             key.replace("-", "_"): value
             for key, value in normalize_native_options(settings["training_backend_options"]).items()
@@ -99,7 +103,7 @@ class InProcessTrainingDeployment(TrainingDeployment):
             raise DeployConfigError("training.options cannot override managed runtime fields")
         return {
             **options,
-            "type": self.runtime_type,
+            "type": self.component_type,
             "inference_timeout_s": settings["inference_timeout_s"],
             "train_timeout_s": settings["train_timeout_s"],
         }

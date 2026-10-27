@@ -43,7 +43,7 @@ from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
+from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 
@@ -720,7 +720,7 @@ def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypat
 )
 def test_bad_runtime_configuration_fails_without_api_key(tmp_path, options):
     with pytest.raises(RuntimeConfigError):
-        runtime_factory.parse_config({"state_dir": str(tmp_path), **options}, {})
+        component_factory.parse_config({"state_dir": str(tmp_path), **options}, {})
 
 
 # -- Through the dispatcher and the HTTP service

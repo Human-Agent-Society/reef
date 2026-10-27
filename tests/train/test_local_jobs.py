@@ -13,8 +13,8 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 
 from reef.core.job_data import JobData
+from reef.runtime.durable_files import write_json
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.runtime.recovery import write_json
 from reef.train import local_jobs
 from reef.train.local_jobs import CHECKPOINTS_FILE, JOB_FILE, RESULT_FILE, LocalJobComponent
 

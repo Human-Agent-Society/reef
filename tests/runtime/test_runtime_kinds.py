@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.inference.null import NullRuntimeFactory
 from reef.runtime.deployment import (
@@ -19,13 +19,13 @@ from reef.runtime.deployment import (
 NOT_A_FACTORY = 7
 
 
-class ComponentFactory(RuntimeFactory):
-    """A factory reef does not bundle: it builds a training component."""
+class ProxyFactory(RuntimeFactory):
+    """A factory reef does not bundle: it builds a proxy runtime."""
 
-    kind = "test_component"
+    kind = "test_proxy"
 
     def __call__(self, config, model_path, recipe_config, environ):
-        return StubTrainingComponent()
+        return StubInferenceRuntime(model_path=model_path)
 
 
 def build_proxy(config, model_path, recipe_config, environ):
@@ -40,8 +40,8 @@ def test_bundled_kinds_resolve_lazily_to_their_factories():
 
 
 def test_a_dotted_kind_names_a_factory_class_or_a_callable():
-    built = RuntimeRegistry().build({"type": f"{__name__}:ComponentFactory"}, model_path="model", environ={})
-    assert isinstance(built, StubTrainingComponent)
+    built = RuntimeRegistry().build({"type": f"{__name__}:ProxyFactory"}, model_path="model", environ={})
+    assert isinstance(built, StubInferenceRuntime) and built.model_path == "model"
     proxy = RuntimeRegistry().build({"type": f"{__name__}:build_proxy"}, model_path="model", environ={})
     assert isinstance(proxy, StubInferenceRuntime)
 

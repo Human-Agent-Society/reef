@@ -45,7 +45,7 @@ def training_config():
 
 
 def slime_runtime_config(config):
-    return SlimeDeployment().runtime_config(asdict(service_config_from_mapping(config)), loss_family="")
+    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family="")
 
 
 def slime_argv(config):

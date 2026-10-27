@@ -7,7 +7,7 @@ from pathlib import Path
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.core.config import config_option
-from reef.runtime.deployment import RuntimeFactory
+from reef.runtime.deployment import TrainingComponentFactory
 from reef.train.deployment import InProcessTrainingDeployment
 
 
@@ -42,17 +42,17 @@ class LocalRuntime(StubTrainingComponent):
             Path(self.config["marker"] + ".closed").touch()
 
 
-class LocalFactory(RuntimeFactory):
+class LocalFactory(TrainingComponentFactory):
     kind = "test-local"
 
     def config_type(self):
         return Options
 
-    def __call__(self, config, model_path, recipe_config, environ):
+    def __call__(self, config, model_path, environ):
         return LocalRuntime(config, model_path)
 
 
-runtime_factory = LocalFactory()
+component_factory = LocalFactory()
 
 
 def build_local_serving(config, model_path, recipe_config, environ):
@@ -63,7 +63,7 @@ def build_local_serving(config, model_path, recipe_config, environ):
 class LocalDeployment(InProcessTrainingDeployment):
     """A training backend that serves its own releases by default, as Tinker does."""
 
-    runtime_type = "tests.support._training_deployment:runtime_factory"
+    component_type = "tests.support._training_deployment:component_factory"
     default_serving = "trainer"
 
     def trainer_serving_config(self, settings):
