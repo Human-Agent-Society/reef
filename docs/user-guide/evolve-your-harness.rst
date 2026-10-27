@@ -591,12 +591,13 @@ Edge cases in the loop are resolved conservatively, so a step never
 publishes accidentally.
 
 - A ``None`` proposal skips the step.
-- An episode that could not run ranks below every real score, so a
-  candidate cannot win on a crash.
-- When both sides fail, the step is a tie.
-- A native episode whose turn ended on an error (a tree that cannot load, a
-  graph that cannot run) counts as one that could not run, whatever its
-  text.
+- A rollout that gave no answer ranks below every real score, so a
+  candidate cannot win on a crash. A native episode whose turn ended on an
+  error (a tree that cannot load, a graph that cannot run) gave no answer,
+  whatever its text.
+- A rollout that the environment could not run (the sandbox, the image or
+  the trial failed) counts for neither side: its pair is dropped.
+- When both sides gave no answer, the pair is a tie.
 - When the result is a rejection, Reef restores the snapshot it took before
   the mutation.
 

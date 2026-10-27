@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from reef.core.evaluation import RolloutScores, mean_score
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.interfaces import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
@@ -107,13 +108,13 @@ class TinkerTrainingComponent(LocalJobComponent):
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
-    samples, and reports each task's episode rewards in the job's metrics
-    (``rollout_rewards``, by task name).
+    samples, and reports in the job's metrics each task's rewards of the
+    rollouts that ran (``rollout_rewards``, by task name).
 
     A task job with ``evaluation_of`` is an evaluation job: it rolls its tasks out on the sampler of its start
-    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the mean
-    reward of the episodes that ran (``evaluation_reward_mean``, None when none ran), and the number of tasks
-    with an episode that ran (``evaluation_tasks``).
+    and stops there, so it trains nothing and saves no checkpoint. Its metrics add ``evaluation_of``, the score
+    of each rollout by task (``evaluation_scores``, ``RolloutScores.to_json``), and their ``mean_score``
+    (``evaluation_mean_score``, None when no rollout ran).
 
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
@@ -253,8 +254,9 @@ class TinkerTrainingComponent(LocalJobComponent):
         kept = read_json(record)
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
-            rewards = {name: tuple(values) for name, values in kept["rewards"].items()}
-            return TaskRollouts(trajectories(JobData(job.data.data_id, samples)), rewards)
+            return TaskRollouts(
+                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+            )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
@@ -273,7 +275,7 @@ class TinkerTrainingComponent(LocalJobComponent):
             record,
             {
                 "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
-                "rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+                "scores": rollouts.scores.to_json(),
             },
         )
         return rollouts
@@ -287,17 +289,16 @@ class TinkerTrainingComponent(LocalJobComponent):
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
             rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards.items()},
+                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
                 "rollout_samples": len(rollouts.samples),
             }
             if parameters.evaluation_of is not None:
                 # An evaluation job scores its start: it trains nothing and saves no checkpoint.
-                rewards = [reward for values in rollouts.rewards.values() for reward in values]
                 return {
                     **rollout_metrics,
                     "evaluation_of": parameters.evaluation_of,
-                    "evaluation_reward_mean": sum(rewards) / len(rewards) if rewards else None,
-                    "evaluation_tasks": sum(1 for values in rollouts.rewards.values() if values),
+                    "evaluation_scores": rollouts.scores.to_json(),
+                    "evaluation_mean_score": mean_score(rollouts.scores.rollouts()),
                 }
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.

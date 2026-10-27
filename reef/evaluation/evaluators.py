@@ -29,8 +29,10 @@ plugin is only concrete once both halves are supplied.
 
 from __future__ import annotations
 
+import math
 from abc import abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.evaluation import (
@@ -38,12 +40,103 @@ from reef.core.evaluation import (
     CandidateEvaluator,
     CheckpointCandidate,
     EvaluationResult,
+    RolloutScore,
+    RolloutScores,
     SelectionDecision,
     UpdateCandidate,
 )
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.evaluation.config import ConfiguredEvaluationPlugin
 from reef.runtime.interfaces import InferenceRuntime
+
+
+@dataclass(frozen=True)
+class ScoreComparison:
+    """How a candidate's rollouts compare with the current release's, pair by pair.
+
+    Values: ``wins``, ``losses``, ``ties`` and ``dropped`` are non-negative ints, and their sum is the number of
+    pairs. Purpose: ``compare_scores`` makes it; the ``score_comparison`` policy reads it.
+    """
+
+    wins: int
+    losses: int
+    ties: int
+    dropped: int
+
+    def __post_init__(self) -> None:
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in self.counts()):
+            raise ValueError("ScoreComparison counts are non-negative ints")
+
+    def counts(self) -> tuple[int, int, int, int]:
+        return self.wins, self.losses, self.ties, self.dropped
+
+
+def compare_scores(candidate: RolloutScores, current: RolloutScores) -> ScoreComparison:
+    """Compare two releases' rollouts pair by pair: the same task and the same run on each side.
+
+    A ``scored`` rollout ranks by its value, and a ``no_answer`` ranks below every ``scored`` one. A pair with a
+    ``not_run`` side is dropped: the environment, not either policy, decided it. ``ValueError`` when the two did
+    not run the same tasks the same number of times.
+    """
+    if [task for task, _ in candidate.tasks] != [
+        task for task, _ in current.tasks
+    ] or candidate.count != current.count:
+        raise ValueError("compared releases run the same tasks the same number of times")
+
+    def rank(score: RolloutScore) -> float:
+        return -math.inf if score.value is None else score.value
+
+    wins = losses = ties = dropped = 0
+    for mine, theirs in zip(candidate.rollouts(), current.rollouts(), strict=True):
+        if "not_run" in (mine.kind, theirs.kind):
+            dropped += 1
+        elif rank(mine) > rank(theirs):
+            wins += 1
+        elif rank(mine) < rank(theirs):
+            losses += 1
+        else:
+            ties += 1
+    return ScoreComparison(wins, losses, ties, dropped)
+
+
+@dataclass(frozen=True)
+class FloorCheck:
+    """Which tasks of a candidate met a floor score.
+
+    Values: ``passed`` and ``failed`` are non-negative ints whose sum is the number of tasks, and ``not_run`` is
+    the non-negative number of rollouts that the environment could not run. Purpose: ``check_floor`` makes it;
+    the ``floor`` policy reads it.
+    """
+
+    passed: int
+    failed: int
+    not_run: int
+
+    def __post_init__(self) -> None:
+        if any(isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in self.counts()):
+            raise ValueError("FloorCheck counts are non-negative ints")
+
+    def counts(self) -> tuple[int, int, int]:
+        return self.passed, self.failed, self.not_run
+
+
+def check_floor(candidate: RolloutScores, floor_score: float) -> FloorCheck:
+    """Check each task of ``candidate`` against ``floor_score``.
+
+    A task passes when it has at least one ``scored`` rollout, every ``scored`` rollout is at least
+    ``floor_score``, and no rollout is ``no_answer``. A ``not_run`` rollout does not fail its task, but a task
+    whose rollouts all did not run does not pass.
+    """
+    passed = 0
+    for _, scores in candidate.tasks:
+        values = [score.value for score in scores if score.kind == "scored"]
+        if (
+            values
+            and all(value is not None and value >= floor_score for value in values)
+            and not any(score.kind == "no_answer" for score in scores)
+        ):
+            passed += 1
+    return FloorCheck(passed, len(candidate.tasks) - passed, candidate.kind_count("not_run"))
 
 
 class SelectionPlugin(CandidateEvaluationPlugin, Plugin):
@@ -219,7 +312,11 @@ __all__ = [
     "AlwaysSelectMixin",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
+    "FloorCheck",
     "ManualPromotionPlugin",
     "RegressionCheckMixin",
+    "ScoreComparison",
     "SelectionPlugin",
+    "check_floor",
+    "compare_scores",
 ]

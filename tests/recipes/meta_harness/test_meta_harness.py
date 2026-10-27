@@ -94,11 +94,19 @@ class DecideOnlyBackend:
         raise AssertionError("this case exercises decide(), not evaluate()")
 
 
+def rollout_scores(values: tuple) -> list[dict[str, object]]:
+    """``RolloutScores.to_json`` of one task per value, with None as a rollout that gave no answer."""
+    return [
+        {"task": f"t{index}", "scores": ["no_answer" if value is None else value]}
+        for index, value in enumerate(values)
+    ]
+
+
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
     return EvaluationResult(
         evaluator="harness_episode_pairs",
         evaluator_version="1",
-        metrics={"candidate_scores": candidate, "current_scores": current},
+        metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
     )
 
 

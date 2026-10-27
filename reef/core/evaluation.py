@@ -1,11 +1,153 @@
-"""Artifact-agnostic contracts for evaluating and selecting candidate updates."""
+"""Artifact-agnostic contracts for evaluating and selecting candidate updates.
+
+An evaluation runs rollouts and gives their scores (``RolloutScores``). A publication policy reads the scores
+and decides whether a release is published; training on tasks assembles the same rollouts into samples.
+"""
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+#: The kind of a rollout's score: it ran and was scored, it ran but the policy gave no answer, or the
+#: environment could not run it.
+RolloutKind = Literal["scored", "no_answer", "not_run"]
+ROLLOUT_KINDS: tuple[RolloutKind, ...] = ("scored", "no_answer", "not_run")
+
+
+@dataclass(frozen=True)
+class RolloutScore:
+    """The score of one rollout: one run of a task under one policy in one environment.
+
+    Values: ``kind`` is ``scored`` (the rollout ran and the scorer gave ``value``), ``no_answer`` (the rollout
+    ran, but the policy gave no answer: the policy caused it) or ``not_run`` (the environment could not run the
+    rollout: the policy did not cause it). ``value`` is a finite number exactly when ``kind`` is ``scored``,
+    else None. Purpose: a rollout runner makes it; publication policies and sample assembly read it through
+    ``RolloutScores``.
+    """
+
+    kind: RolloutKind
+    value: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ROLLOUT_KINDS:
+            raise ValueError(f"RolloutScore.kind must be one of {ROLLOUT_KINDS}, got {self.kind!r}")
+        if self.kind == "scored":
+            value = self.value
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError("a scored rollout has a finite value")
+            object.__setattr__(self, "value", float(value))
+        elif self.value is not None:
+            raise ValueError(f"a {self.kind} rollout has no value")
+
+    @classmethod
+    def scored(cls, value: float) -> RolloutScore:
+        return cls("scored", value)
+
+    @classmethod
+    def no_answer(cls) -> RolloutScore:
+        return cls("no_answer")
+
+    @classmethod
+    def not_run(cls) -> RolloutScore:
+        return cls("not_run")
+
+    def to_json(self) -> float | str:
+        """The value of a scored rollout, else its kind."""
+        return self.kind if self.value is None else self.value
+
+    @classmethod
+    def from_json(cls, value: object) -> RolloutScore:
+        """Read ``to_json``'s value; ``ValueError`` for another value."""
+        if value == "no_answer":
+            return cls.no_answer()
+        if value == "not_run":
+            return cls.not_run()
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"a rollout score is a number, no_answer or not_run, not {value!r}")
+        return cls.scored(value)
+
+
+@dataclass(frozen=True)
+class RolloutScores:
+    """The scores of an evaluation's rollouts, by task.
+
+    Values: ``tasks`` is a non-empty tuple of ``(task, scores)`` pairs, in run order. ``task`` is a non-empty
+    string; a task may appear more than once. ``scores`` is a non-empty tuple of ``RolloutScore`` values, one
+    for each run of the task, and every task has the same number of them (``count``). Purpose: an evaluation
+    gives it; a publication policy reads it, such as ``compare_scores`` and ``check_floor``.
+    """
+
+    tasks: tuple[tuple[str, tuple[RolloutScore, ...]], ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tasks, tuple) or not self.tasks:
+            raise ValueError("RolloutScores holds one or more tasks")
+        counts = set()
+        for entry in self.tasks:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise TypeError("RolloutScores.tasks holds (task, scores) pairs")
+            task, scores = entry
+            if not isinstance(task, str) or not task:
+                raise ValueError("a RolloutScores task is a non-empty string")
+            if not isinstance(scores, tuple) or not scores or not all(isinstance(s, RolloutScore) for s in scores):
+                raise TypeError("a RolloutScores task has a non-empty tuple of RolloutScore values")
+            counts.add(len(scores))
+        if len(counts) != 1:
+            raise ValueError("every task of a RolloutScores has the same number of rollouts")
+
+    @classmethod
+    def by_task(cls, tasks: Sequence[str], scores: Sequence[RolloutScore]) -> RolloutScores:
+        """The scores of ``scores``, given task by task: the first ``len(scores) // len(tasks)`` belong to the first
+        task, and so on. ``ValueError`` when ``scores`` does not divide evenly."""
+        if not tasks or len(scores) % len(tasks):
+            raise ValueError("the rollout scores divide evenly among one or more tasks")
+        count = len(scores) // len(tasks)
+        return cls(
+            tuple((task, tuple(scores[index * count : (index + 1) * count])) for index, task in enumerate(tasks))
+        )
+
+    @property
+    def count(self) -> int:
+        """The rollouts of each task."""
+        return len(self.tasks[0][1])
+
+    def rollouts(self) -> tuple[RolloutScore, ...]:
+        """Every rollout's score, task by task, in run order."""
+        return tuple(score for _, scores in self.tasks for score in scores)
+
+    def kind_count(self, kind: RolloutKind) -> int:
+        """The rollouts of kind ``kind``."""
+        return sum(score.kind == kind for score in self.rollouts())
+
+    def to_json(self) -> list[dict[str, Any]]:
+        """The value as JSON: ``[{"task": ..., "scores": [...]}, ...]``; ``from_json`` reads it back."""
+        return [{"task": task, "scores": [score.to_json() for score in scores]} for task, scores in self.tasks]
+
+    @classmethod
+    def from_json(cls, value: object) -> RolloutScores:
+        """Read ``to_json``'s value; ``ValueError`` for another value."""
+        if not isinstance(value, list):
+            raise ValueError("rollout scores are a list of tasks")
+        tasks = []
+        for entry in value:
+            if (
+                not isinstance(entry, Mapping)
+                or set(entry) != {"task", "scores"}
+                or not isinstance(entry["scores"], list)
+            ):
+                raise ValueError("each task of rollout scores is an object of task and scores")
+            tasks.append((entry["task"], tuple(RolloutScore.from_json(score) for score in entry["scores"])))
+        return cls(tuple(tasks))
+
+
+def mean_score(scores: Iterable[RolloutScore]) -> float | None:
+    """The mean of the rollouts that ran, with each ``no_answer`` as 0; None when no rollout ran."""
+    values = [0.0 if score.value is None else score.value for score in scores if score.kind != "not_run"]
+    return math.fsum(values) / len(values) if values else None
 
 
 @dataclass(frozen=True)
@@ -140,11 +282,16 @@ class CandidateEvaluationPlugin(CandidateEvaluator, CandidateSelector):
 
 
 __all__ = [
+    "ROLLOUT_KINDS",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
     "CheckpointCandidate",
     "EvaluationResult",
+    "RolloutKind",
+    "RolloutScore",
+    "RolloutScores",
     "SelectionDecision",
     "UpdateCandidate",
+    "mean_score",
 ]

@@ -1215,7 +1215,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     for loop in ("main", None):
         result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
         scored = worker._score_result(result, "task one")
-        assert scored.score is None and scored.failure is not None
+        assert scored.score.kind == "no_answer" and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {
         "main": ("loop", "LOOP_ERROR: RuntimeError: boom"),

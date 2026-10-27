@@ -16,12 +16,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections.abc import Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
-from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import (
+    CandidateEvaluationPlugin,
+    EvaluationResult,
+    RolloutScores,
+    SelectionDecision,
+    UpdateCandidate,
+)
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.evaluation.evaluators import BackendEvaluateMixin
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -434,12 +439,11 @@ def _parse_proposal(reply: str) -> dict[str, Any]:
 
 
 def _evaluation_scores(values: Any) -> tuple[float, ...]:
-    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)) or not values:
+    """Per-rollout scores, task by task, with every rollout that has no value read as zero, as upstream
+    Meta-Harness counts a failed run."""
+    if not values:
         raise ValueError("Meta-Harness evaluation requires non-empty score vectors")
-    scores = tuple(0.0 if value is None else float(value) for value in values)
-    if any(not math.isfinite(value) for value in scores):
-        raise ValueError("Meta-Harness evaluation scores must be finite")
-    return scores
+    return tuple(0.0 if score.value is None else score.value for score in RolloutScores.from_json(values).rollouts())
 
 
 __all__ = ["SEARCH_MODES", "MetaHarnessPlugin", "MetaHarnessProposer", "MetaHarnessSelectorMixin", "mutations_between"]
