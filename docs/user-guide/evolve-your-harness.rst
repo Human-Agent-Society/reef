@@ -111,7 +111,7 @@ other three kinds it does render.
 run outside its command sandbox; see `Run a Codex session`_ for approvals and
 network access. Terminus accepts one Python module defining
 ``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
-Harbor uses remote E2B tasks; see the adapter guide for the required
+Harbor runs the tasks remotely (``e2b`` or ``modal``); see the adapter guide for the required
 deployment settings.
 
 Native node kinds
@@ -340,8 +340,8 @@ to forward, and missing variables fail configuration. This keeps remote sandbox
 credentials out of candidate compositions. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
 
-On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
-evaluation episodes in disposable cloud sandboxes. Cordis evaluations and GEPA
+On macOS or a host without Linux namespaces, select a cloud sandbox, ``e2b`` or
+``modal``, to run ordinary evaluation episodes in disposable sandboxes. Cordis evaluations and GEPA
 minibatches use the same episode runner and trajectory readers::
 
     evolution:
@@ -372,6 +372,35 @@ already installed. ``evolution.binary`` names a binary in that template, not a
 path on the Reef host. Startup checks provider access, the template, the
 binary and namespace support using a short-lived sandbox. The host does not
 install the remote agent. Terminus retains its own Harbor hosted configuration.
+
+To use Modal instead, select ``executor: modal``::
+
+    evolution:
+      adapter: pi
+      executor: modal
+      episode_timeout_s: 600
+      sandbox:
+        modal_app: reef-sandboxes
+        forward_ports: [8000]
+
+Install ``reef-infra[modal]``. Modal's client takes its credentials from
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET``, or from the profile that
+``modal setup`` writes; Reef uses them and does not pass them to the agent. The
+options are:
+
+- ``modal_app``: the Modal app the sandboxes belong to (``reef-sandboxes``).
+- ``modal_image``: a registry image to run. Without it, Reef builds Node 22
+  with bubblewrap, Python 3 and the npm adapter, and Modal caches the image. A
+  named image needs the binary, ``bwrap``, ``python3`` and coreutils'
+  ``timeout``.
+- ``modal_cpu`` and ``modal_memory_mb``: the sandbox's requests; Modal's
+  defaults otherwise.
+
+A Modal sandbox lives at most a day, so a run with a longer timeout is refused.
+Nested bubblewrap runs in Modal's default gVisor runtime. As with E2B, startup
+checks provider access, the image, the binary and namespace support with a
+short-lived sandbox, and a restart stops the sandboxes a stopped run of the
+same deployment left.
 
 Every ordinary episode gets its own VM. The remote filesystem and rendered
 inputs are read-only; the workspace and the adapter's declared state directories

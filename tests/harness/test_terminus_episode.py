@@ -275,9 +275,29 @@ def test_code_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("egress,key", [((), "dummy"), (("api.e2b.dev",), "")])
-def test_remote_terminus_requires_explicit_network_and_credentials(egress, key) -> None:
+@pytest.mark.parametrize(
+    "egress,credentials,message",
+    [
+        (
+            (),
+            {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "dummy"},
+            "on e2b requires egress_hosts and E2B_API_KEY",
+        ),
+        (
+            ("api.e2b.dev",),
+            {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": ""},
+            "requires egress_hosts and E2B_API_KEY",
+        ),
+        (
+            ("api.modal.com",),
+            {"REEF_TERMINUS_ENVIRONMENT": "modal", "MODAL_TOKEN_ID": "id"},
+            "on modal requires egress_hosts and MODAL_TOKEN_ID, MODAL_TOKEN_SECRET",
+        ),
+        (("api.example",), {"REEF_TERMINUS_ENVIRONMENT": "docker"}, r"a remote task environment \(e2b or modal\)"),
+    ],
+)
+def test_remote_terminus_requires_explicit_network_and_credentials(egress, credentials, message) -> None:
     descriptor = get_adapter("terminus")
-    executor = SandboxExecutor(egress_hosts=egress, env={"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": key})
-    with pytest.raises(EpisodeError, match="requires egress_hosts and E2B_API_KEY"):
+    executor = SandboxExecutor(egress_hosts=egress, env=credentials)
+    with pytest.raises(EpisodeError, match=message):
         run_episode(descriptor, render_composition(NODES, descriptor), "task", executor=executor)
