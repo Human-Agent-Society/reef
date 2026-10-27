@@ -1,0 +1,53 @@
+# An online ACE deployment on pi. Run it from the repository root:
+#
+#   export REEF_UPSTREAM_URL=http://127.0.0.1:8000 REEF_UPSTREAM_MODEL=qwen3-8b
+#   reef serve -c recipes/ace/examples/serve.yaml
+#
+# The served pi agent is ACE's Generator: it reads the playbook in its rules.
+# Each reported session is one trace, and each trace starts one step. In the
+# step, the served model reflects on the session and writes new bullets, and
+# Reef publishes the new rules at once: no episode runs. All state stays
+# under recipes/ace/work/.
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
+  run-dir: recipes/ace/work/stack
+
+recipe:
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
+
+  config:
+    evolution:
+      adapter: pi
+      # The first tree: base rules that the agent reads from the first
+      # release. The method adds its playbook block below them and keeps
+      # them unchanged.
+      seed: recipes/ace/examples/seed
+      # One reported session is one trace, and one trace is one step.
+      batch_size: 1
+      method:
+        module: recipes.ace:ACE
+        config:
+          # As in the paper, one model plays every role: the served model is
+          # the Reflector and the Curator too.
+          model: served
+          max_bullets: 100
+          prune_margin: 2
+      # The proposals, the history and the step records of each scenario.
+      state_dir: recipes/ace/work/harness
+      evaluation:
+        # Run no episode: publish every candidate that passes validation.
+        policy: none
+
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+storage:
+  agent-record-dir: recipes/ace/work/agent-record
+  artifact-repository: recipes/ace/work/artifacts.git
+  artifact-work-dir: recipes/ace/work/artifact-work
+  artifact-cache-dir: recipes/ace/work/artifact-cache
