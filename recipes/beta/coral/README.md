@@ -64,7 +64,7 @@ LiteLLM -> reef serve         stores INFERENCE records with tags,
 CORAL grader daemon finalizes the attempt (.coral/**/attempts/*.json)
    -> recipes.beta.coral.watcher: resolves the attempt's captured references,
       POST /reef/report {score, references, metadata.coral}, exactly once
-   -> CoralGrouping groups siblings of one parent commit -> CoralBatches -> Slime LoRA step
+   -> CoralGrouping groups siblings of one parent commit -> CoralJobData -> Slime LoRA step
    -> new revision served to the next attempts
 ```
 

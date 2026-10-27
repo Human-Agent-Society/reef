@@ -121,8 +121,8 @@ class PreparedInference:
     record_ref: ArtifactRef
     handler: InferenceHandler
     surface: Surface
-    #: True when a training runtime serves the scenario: the recorded payload
-    #: must then carry the engine-confirmed runtime load ID.
+    #: True when the scenario trains weights on a training component: the
+    #: recorded payload must then carry the engine-confirmed runtime load ID.
     durable: bool
     admission: InferenceAdmissionHandle | None = None
     #: Releases serving state the surface held for this attempt (an adapter
@@ -364,8 +364,8 @@ class RequestService:
                             prepared.hooks.verify_response(prepared.artifact, path, record_response)
                         self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                     # Buffered streaming backends have already finished model
-                    # execution. Downstream client backpressure must not leave a
-                    # stale admission handle across the colocated pause lifecycle.
+                    # execution. Release the admission handle and the lease now,
+                    # so that a slow client does not hold them.
                     if admission is not None:
                         admission.release()
                         admission = None
@@ -622,7 +622,7 @@ class RequestService:
             record_ref=recorded_ref(scenario, parsed, ref),
             handler=selected_handler,
             surface=surface,
-            durable=scenario.training_runtime is not None,
+            durable=scenario.training_component is not None,
             admission=admission,
             hooks=hooks,
         )
@@ -930,9 +930,9 @@ class RequestService:
 
     @classmethod
     def running_request_id(cls, scenario: Scenario) -> str | None:
-        """The id of the request the scenario's step is running: the reserved batch's, else the backend's progress."""
+        """The id of the request the scenario's step is running: the reserved job data's, else the backend's progress."""
         trainer = cls.files_trainer(scenario)
-        reserved = trainer.pending_batch
+        reserved = trainer.pending_job_data
         if reserved is not None and reserved.request is not None:
             return str(reserved.request.id)
         backend = trainer.candidate_backend
@@ -948,7 +948,7 @@ class RequestService:
         catalog row whose ``training_request.id`` names it settles the page.
         Until then the page reads the running step's progress from the
         scenario's candidate backend, when the backend reports one, and
-        whether the trainer holds the request in its reserved batch.
+        whether the trainer holds the request in its reserved job data.
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
         unknown id, or one that is not a training instruction, raises
@@ -962,7 +962,7 @@ class RequestService:
         rows = list(reversed(self.harness_rows(scenario)))
         backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = self.files_trainer(scenario).pending_batch
+        reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(
             record,
@@ -1004,7 +1004,7 @@ class RequestService:
             }
         backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = self.files_trainer(scenario).pending_batch
+        reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
         mine = progress if progress is not None and progress.request_id == record_id else None
@@ -1217,7 +1217,7 @@ def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef
         or claimed == served.release_id
         or surface.files is None
         or surface.inference is not None
-        or scenario.training_runtime is not None
+        or scenario.training_component is not None
     ):
         return served
     return scenario.release_queries.ref_for_version(claimed) or served

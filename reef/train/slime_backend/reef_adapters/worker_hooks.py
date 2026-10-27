@@ -49,15 +49,16 @@ APPLIED_LEARNING_RATE = AppliedLearningRate()
 def _loss_family_spec(args) -> SlimeAlgorithm | None:
     """Resolve the worker's loss-family spec from ``args``, or ``None``.
 
-    Mirrors :func:`resolve_objective_paths`: the driver stamps ``loss_family``
-    before workers start, so the spec's wire-surface declarations are readable
-    here without the driver forwarding each one.
+    Mirrors :func:`resolve_objective_paths`: the training component stamps
+    ``loss_family`` on the arguments before the workers start, so the spec's
+    wire-surface declarations are readable here without the component
+    forwarding each one.
 
-    ``None`` means a bridge booted without a family, or with one this process
-    cannot resolve. The key-set declarations survive that: the driver mirrors
-    them onto ``args`` (``configure_reef_loss_args``) and every caller unions
-    both sources. ``critic_value_head_zero_init`` has no args-carried mirror,
-    so it is the one declaration that needs the spec.
+    ``None`` means arguments without a family, or with one this process
+    cannot resolve. The key-set declarations survive that: the component
+    mirrors them onto ``args`` (``configure_reef_loss_args``) and every caller
+    unions both sources. ``critic_value_head_zero_init`` has no args-carried
+    mirror, so it is the one declaration that needs the spec.
     """
     if not getattr(args, "loss_family", None):
         return None
@@ -121,7 +122,6 @@ def initialize_megatron_objective(args) -> None:
     _install_critic_metrics(args)
     _install_critic_hf_bootstrap(args)
     _install_lora_hf_bootstrap(args)
-    _install_versioned_updaters()
     _install_pg_primitive(args)
     _install_score_centering(args)
 
@@ -385,24 +385,6 @@ def _install_lora_hf_bootstrap(args) -> None:
     hf_to_megatron.load_model_hf_weights = load_model_hf_weights
 
 
-def _install_versioned_updaters() -> None:
-    from slime.backends.megatron_utils import actor
-
-    from reef.train.slime_backend.reef_adapters.weight_updaters import (
-        ReefUpdateWeightFromDisk,
-        ReefUpdateWeightFromDiskDelta,
-        ReefUpdateWeightFromDistributed,
-        ReefUpdateWeightFromTensor,
-    )
-
-    actor.UpdateWeightFromDisk = ReefUpdateWeightFromDisk
-    actor.UpdateWeightFromDistributed = ReefUpdateWeightFromDistributed
-    actor.UpdateWeightFromTensor = ReefUpdateWeightFromTensor
-    from slime.backends.megatron_utils.update_weight import update_weight_from_disk_delta
-
-    update_weight_from_disk_delta.UpdateWeightFromDiskDelta = ReefUpdateWeightFromDiskDelta
-
-
 def _install_pg_primitive(args) -> None:
     """Route Slime's CISPO callsite onto the family's pg primitive, looked up per call."""
     from slime.backends.megatron_utils import loss
@@ -540,7 +522,7 @@ def finalize_critic_metrics(metrics: Mapping[str, object]) -> dict[str, object]:
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
-    """Merge numeric worker metrics for the bridge's next drain.
+    """Merge numeric worker metrics for the training component's next drain (``drain_worker_metrics``).
 
     Non-finite values are dropped: a loss family may log NaN for a metric
     whose phase is absent from a step, and the drained metrics are written
@@ -554,7 +536,7 @@ def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
 
 
 def record_worker_step(metrics: Mapping[str, Any]) -> None:
-    """Append one optimizer step's numeric metrics for the bridge's next drain."""
+    """Append one optimizer step's numeric metrics for the training component's next drain."""
     numeric = {
         str(name): float(value)
         for name, value in metrics.items()

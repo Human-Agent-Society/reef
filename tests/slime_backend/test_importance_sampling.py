@@ -1,7 +1,7 @@
 """The built-in ``importance_sampling`` family of the Slime backend: Tinker's loss of the same name.
 
 The generated-task recipe names this family, so these tests also check that
-the recipe resolves on Slime and that Slime and Tinker give its samples the
+the loss options resolve on Slime and that Slime and Tinker give its samples the
 same token advantages and the same loss. The loss test needs torch; the fake
 ``slime`` loss module returns the trainer's log probabilities as given.
 """
@@ -9,11 +9,9 @@ same token advantages and the same loss. The loss test needs torch; the fake
 from __future__ import annotations
 
 import math
-import os
 import sys
 from argparse import Namespace
 from dataclasses import replace
-from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -22,13 +20,14 @@ from tests.support._trajectories import policy_trajectory
 from reef.recipe.generated_tasks import GeneratedTaskRecipe
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import loss_family_refs
+from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.importance_sampling import ImportanceSamplingAlgorithm
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
-from reef.train.tinker_backend.preparation import prepare_tinker_step
-from reef.train.types import TrainingBatch
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.tinker_backend.losses import resolve_tinker_loss
+from reef.train.tinker_backend.preparation import prepare_tinker_job
+from reef.train.types import JobData
 
 REFERENCE = "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm"
 RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
@@ -52,12 +51,12 @@ def slime_args(**overrides: object) -> Namespace:
     return Namespace(**values)
 
 
-def generated_task_batch() -> TrainingBatch:
+def generated_task_data() -> JobData:
     samples = tuple(
         replace(policy_trajectory(f"episode-{index}", TOKENS, LOSS_MASK, ROLLOUT_LOG_PROBS, reward), group_id=group)
         for index, (group, reward) in enumerate(REWARDS)
     )
-    return TrainingBatch("rollout", samples)
+    return JobData("rollout", samples)
 
 
 @pytest.mark.unit
@@ -90,58 +89,39 @@ def test_importance_sampling_refuses_flags_of_another_loss(overrides: dict[str, 
 
 
 @pytest.mark.unit
-def test_the_generated_task_recipe_resolves_on_slime_at_config_time(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy.orchestrator import resolve_deployment_config
-    from reef.service.training_driver import _resolve_training_recipe
-    from reef.train.slime_backend.driver import _stamp_loss_family_reference
-    from reef.train.slime_backend.launch import driver_arguments
+def test_importance_sampling_options_resolve_on_slime() -> None:
+    from reef.train.slime_backend.launch import slime_arguments
 
-    for key in list(os.environ):
-        if key.startswith("REEF_") or key == "RAY_ADDRESS":
-            monkeypatch.delenv(key)
     options = {
         "global-batch-size": 8,
         "loss-type": "custom_loss",
         "use-rollout-logprobs": True,
         "disable-compute-advantages-and-returns": True,
     }
-    raw = {
-        "recipe": {"implementation": RECIPE},
-        "inference": {"model-path": "/models/demo"},
-        "training": {"backend": "slime", "options": options},
-    }
-    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    assert config["reef"]["training_backend"] == "slime"
-
-    # The driver's steps before Slime parses its flags.
-    loss_family, recipe = _resolve_training_recipe(config)
-    assert (loss_family, recipe) == ("importance_sampling", RECIPE)
-    family = resolve_loss_family(loss_family)
-    family_options, arguments = family.parse_driver_options(driver_arguments(config, loss_family=loss_family))
+    family = resolve_loss_family("importance_sampling")
+    family_options, arguments = family.parse_driver_options(
+        slime_arguments({"training_backend_options": options}, loss_family="importance_sampling", environ={})
+    )
     assert family_options is None
     assert {"--loss-type=custom_loss", "--use-rollout-logprobs"} <= set(arguments)
     args = slime_args()
     family.apply_driver_options(args, family_options)
-    _stamp_loss_family_reference(args, loss_family)
-    assert (args.loss_family, args.loss_family_ref) == ("importance_sampling", REFERENCE)
-    family.validate_backend_args(args, recipe=recipe)
+    family.validate_backend_args(args, recipe=RECIPE)
 
 
 @pytest.mark.unit
 def test_slime_and_tinker_give_generated_task_samples_the_same_token_advantages_and_loss(monkeypatch) -> None:
-    batch = generated_task_batch()
+    job_data = generated_task_data()
     method = TrainingMethod(GeneratedTaskRecipe.training_spec().objective)
-    scheduling = GeneratedTaskRecipe.training_spec().scheduling
+    scheduling = StepScheduling()
 
-    slime_step = prepare_slime_step(batch, method, {}, scheduling, step_size=len(REWARDS))
+    slime_step = prepare_slime_job(job_data, method, {}, scheduling, step_size=len(REWARDS))
     assert slime_step.action == "train" and slime_step.payload is not None
     data = to_slime_rollout_data(slime_step.payload)
     assert data["rollout_log_probs"] == [list(ROLLOUT_LOG_PROBS)] * len(REWARDS)
 
-    tinker_step = prepare_tinker_step(batch, method, {}, scheduling, batch_size=len(REWARDS), kl_coef=0.0)
-    assert tinker_step.payload is not None
-    (tinker_batch,) = tinker_step.payload["batches"]
-    rows = [row_from_payload(row) for row in tinker_batch]
+    tinker_step = prepare_tinker_job(job_data, method, {}, scheduling, batch_size=len(REWARDS), kl_coef=0.0)
+    (rows,) = tinker_step.steps
     tinker_inputs = resolve_tinker_loss("importance_sampling").inputs(rows, [], kl_coef=0.0)
     tinker_advantages = [values["advantages"][-len(LOSS_MASK) :] for values in tinker_inputs]
     # The advantage trains each token the loss mask selects; the tool's output token gets 0.

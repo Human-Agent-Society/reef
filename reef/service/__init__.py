@@ -1,7 +1,8 @@
 """Service entrypoints, process assembly, and HTTP transport over the dispatcher.
 
-``training_driver`` owns startup and shutdown of model deployment components.
-The selected backend supplies a plan; the driver imports no concrete framework.
+``deploy`` starts and stops the deployment's processes. ``assembly`` builds
+the dispatcher and the app; it connects the selected integration's training
+component and inference runtime and imports no concrete training framework.
 
 Everything HTTP lives here, and only the HTTP parts live in the HTTP layer.
 ``RequestService`` is the transport-free core — it parses ``x-reef-*``

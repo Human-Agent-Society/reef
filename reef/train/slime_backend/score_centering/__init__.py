@@ -28,7 +28,7 @@ log-prob gap and the same sample weights and effective loss masks.
 - this module, torch-free: the term's settings, the driver-side checks and
   the rollout keys, and the payload columns (the sampler's top-K per sample,
   in the order the schedule trains the rows);
-- :mod:`.heads`, torch, on the bridge: the check of the recorded heads;
+- :mod:`.heads`, torch, in the training component: the check of the recorded heads;
 - :mod:`.term`, torch, on the workers: the term and the wrapper that adds it
   to the family's loss.
 

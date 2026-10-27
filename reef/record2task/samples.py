@@ -4,7 +4,7 @@ The report reader ``report_score`` lives in ``reef.record2record.reports``.
 ``recorded_request`` and ``recorded_response`` read the messages, tools and
 answer text of a recorded inference; the sample builders turn one inference
 record — or an ordered multi-call episode — into a ``TrajectoryItem`` with the
-tensors the training bridge requires.
+tensors the training component requires.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
 

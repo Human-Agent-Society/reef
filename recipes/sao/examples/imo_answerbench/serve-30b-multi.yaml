@@ -1,10 +1,10 @@
 # SAO at the paper's batch: Qwen3-30B-A3B-Thinking-2507, SAO_TRAIN_NODES training nodes
-# (TP8 actor per node, data parallel across nodes, critic colocated) and
+# (TP8 actor per node, data parallel across nodes, the critic on the actor GPUs) and
 # SAO_ROLLOUT_GPUS engine GPUs on
 # other nodes of the same Ray cluster (RAY_ADDRESS), TP4 per engine. Group
 # size 1, SAO_BATCH (128) rollouts of different prompts per optimizer step,
-# fed by stream.py with SAO_IN_FLIGHT rollouts open. Weights reach the
-# engines by NCCL broadcast after every step. Generation window 24k.
+# fed by stream.py with SAO_IN_FLIGHT rollouts open. Each step's checkpoint
+# reaches the engines as weight files. Generation window 24k.
 
 reef:
   host: 127.0.0.1
@@ -36,11 +36,16 @@ inference:
   model-path: ~/models/Qwen3-30B-A3B-Thinking-2507
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
-  config:
-    max-staleness: 4
+pipeline:
+  record2record:
+    config:
+      max_staleness: 4
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
-  colocate: false
   ready-timeout: 1800
   timeout-s: 14400
   config:
@@ -91,7 +96,7 @@ training:
     use-dynamic-batch-size: true
     max-tokens-per-gpu: "32768"
     log-probs-max-tokens-per-gpu: "32768"
-    # The coordinator verifies the exports from wherever Reef schedules it, so
+    # The Reef service reads the exports that the training nodes write, so
     # the README runs kept SAO_CKPT_DIR on shared storage; keep its footprint
     # bounded by pruning old exports.
     reef-checkpoint-max-storage: "1500GB"

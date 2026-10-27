@@ -1,7 +1,7 @@
-"""TTT-Discover's pipeline stages: the step barrier, the grouped policy samples, and the step batch.
+"""TTT-Discover's pipeline stages: the step barrier, the grouped policy samples, and the step data.
 
 ``TTTDRecord2Record`` owns the step grid (``groups_per_step`` x
-``rollouts_per_group``). ``TTTDTasks`` and ``TTTDBatches`` read the grid from
+``rollouts_per_group``). ``TTTDTasks`` and ``TTTDJobData`` read the grid from
 the record stage that they receive, so the deployment writes it once, in
 ``pipeline.record2record.config``.
 """
@@ -15,14 +15,21 @@ from dataclasses import dataclass, replace
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.plugins import PluginConfigError, PluginSettings
+from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import GroupDecision, Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2record import (
+    GroupDecision,
+    Record2Record,
+    Record2RecordSettings,
+    ReportContext,
+    ReportGrouping,
+    ReportRecord2Record,
+)
 from reef.record2task import Record2Task, ReportTasks
 from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2batch import BufferSettings, Task2Batch
-from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
+from reef.task2job import Task2Job, Task2JobSettings
+from reef.train.types import JobData, TrainDataItem, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +41,13 @@ def inference_release_id(context: ReportContext) -> str | None:
 
 
 @dataclass(frozen=True)
-class TTTDGridSettings(PluginSettings):
-    """The config of ``TTTDRecord2Record``: the step grid."""
+class TTTDGridSettings(Record2RecordSettings):
+    """The config of ``TTTDRecord2Record``: the step grid, and the staleness limit.
+
+    Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two;
+    ``max_staleness`` is as in ``Record2RecordSettings``. The constructor refuses other values.
+    Purpose: ``TTTDRecord2Record.from_config`` parses it from ``pipeline.record2record.config``.
+    """
 
     groups_per_step: int = config_option(8, help="The comparison groups in one step.")
     rollouts_per_group: int = config_option(
@@ -43,6 +55,7 @@ class TTTDGridSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.groups_per_step <= 0:
             raise ValueError("groups_per_step must be positive")
         if self.rollouts_per_group < 2:
@@ -108,7 +121,7 @@ class TTTDGrouping(ReportGrouping):
 class TTTDRecord2Record(ReportRecord2Record):
     """TTTD's record stage: one group per step, in step order; a terminal report owns its sources.
 
-    Config: ``groups_per_step`` and ``rollouts_per_group``, the step grid.
+    Config: ``groups_per_step`` and ``rollouts_per_group``, the step grid, and ``max_staleness``.
     The later stages read the grid from this stage.
     """
 
@@ -122,6 +135,7 @@ class TTTDRecord2Record(ReportRecord2Record):
             TTTDGrouping(settings.groups_per_step, settings.rollouts_per_group),
             exclusive_sources=True,
             ordered_groups=True,
+            max_staleness=settings.max_staleness,
         )
 
     @classmethod
@@ -177,8 +191,8 @@ class TTTDTasks(ReportTasks):
         )
 
 
-class TTTDBatches(Task2Batch):
-    """One complete TTTD step, one batch: the step's grid, without its constant-reward groups.
+class TTTDJobData(Task2Job):
+    """One complete TTTD step, one job's data: the step's grid, without its constant-reward groups.
 
     TTT-Discover samples ``groups_per_step`` parents and exactly
     ``rollouts_per_group`` siblings from each parent.  A partially received
@@ -196,16 +210,24 @@ class TTTDBatches(Task2Batch):
     the backend performs a well-defined zero-gradient step, also matching the
     reference behavior.
 
-    The grid comes from the record stage. ``max_batch_samples`` is the grid,
-    so the trainer refuses a larger batch size and a batch takes exactly one
-    step. Config: ``buffer_size``.
+    The grid comes from the record stage. ``max_job_samples`` is the grid,
+    so the trainer refuses a larger ``job_samples``, and one job's data is
+    exactly one step. Config: ``buffer_size`` and ``job_samples``
+    (``Task2JobSettings``); set ``job_samples`` to the grid.
     """
 
-    def __init__(self, context: PipelineContext, record2record: TTTDRecord2Record, buffer_size: int | None) -> None:
+    def __init__(
+        self,
+        context: PipelineContext,
+        record2record: TTTDRecord2Record,
+        buffer_size: int | None,
+        job_samples: int | None,
+    ) -> None:
         self.groups_per_step = record2record.groups_per_step
         self.rollouts_per_group = record2record.rollouts_per_group
-        super().__init__(context, buffer_size)
-        self.max_batch_samples = self.groups_per_step * self.rollouts_per_group
+        super().__init__(
+            context, buffer_size, job_samples, max_job_samples=self.groups_per_step * self.rollouts_per_group
+        )
 
     @classmethod
     def from_config(
@@ -217,22 +239,22 @@ class TTTDBatches(Task2Batch):
         record2task: Record2Task,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = BufferSettings.parse(config, plugin_class=cls)
+        settings = Task2JobSettings.parse(config, plugin_class=cls)
         if not isinstance(record2record, TTTDRecord2Record):
             raise PluginConfigError(
                 f"{cls.__name__} needs TTTDRecord2Record as record2record, not {type(record2record).__name__}"
             )
-        return cls(context, record2record, settings.buffer_size)
+        return cls(context, record2record, settings.buffer_size, settings.job_samples)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+    def make_job_data(self, items: tuple[TrainDataItem, ...], data_id: str) -> JobData:
         steps = {item.metadata["tttd"]["step"] for item in items}
         if len(steps) != 1:
-            raise RuntimeError("TTTDBatches creates exactly one complete step per batch")
+            raise RuntimeError("TTTDJobData creates exactly one complete step per job")
         step = next(iter(steps))
-        batch = TrainingBatch(batch_id, items)
+        data = JobData(data_id, items)
         # Lay the accepted rollouts back out as the step's grid.
         samples = {
-            (item.metadata["tttd"]["group"], item.metadata["tttd"]["rollout"]): item for item in trajectories(batch)
+            (item.metadata["tttd"]["group"], item.metadata["tttd"]["rollout"]): item for item in trajectories(data)
         }
         all_groups = tuple(
             tuple(samples[(group, rollout)] for rollout in range(self.rollouts_per_group))
@@ -274,7 +296,7 @@ class TTTDBatches(Task2Batch):
             namespace="tttd",
         )
         return replace(
-            batch,
+            data,
             items=tuple(
                 replace(sample, group_id=str(index)) for index, group in enumerate(training_groups) for sample in group
             ),

@@ -260,6 +260,15 @@ class TaskEpisode:
         }
 
 
+def rewards_of(episodes: tuple[TaskEpisode, ...]) -> tuple[float, ...]:
+    """The rewards of the episodes that ran, in order. An episode that ran without a reward counts as 0."""
+    return tuple(
+        episode.reward if episode.reward is not None else 0.0
+        for episode in episodes
+        if not episode.is_infrastructure_failure
+    )
+
+
 class TaskEpisodeRunner:
     """Runs episodes of task directories with one agent against one Reef scenario, and reports every scored episode."""
 

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import ThresholdBatches, threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
@@ -53,7 +53,7 @@ class _FileBackend(CandidateBackend):
         path.mkdir(parents=True)
         (path / f"{self.label}.txt").write_text(f"{self.label} step {step}", encoding="utf-8")
         self.result = TrainStepResult({"steps": step}, artifact=Artifact.local(path))
-        return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
+        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
 
     def evaluate(self, candidate):
         return EvaluationResult("test", "1", {})
@@ -90,10 +90,11 @@ class _TreeRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
-class HybridThresholdBatches(ThresholdBatches):
+class HybridThresholdJobData(ThresholdJobData):
     """The same batches, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
@@ -101,7 +102,7 @@ class HybridThresholdBatches(ThresholdBatches):
 
 def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
     """The threshold pipeline, one report per batch, taking instructions too."""
-    return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+    return threshold_pipeline(context, task2job=HybridThresholdJobData(context, 1, None))
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ class _HybridTreeRecipe(_TreeRecipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
@@ -264,7 +266,7 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
 
 
 @pytest.mark.unit
-def test_service_connects_the_training_runtime_of_a_composite_weight_component() -> None:
+def test_service_connects_the_training_component_of_a_composite_weight_component() -> None:
     from tests.support._training_deployment import LocalRuntime
 
     from reef.service.assembly import _serving_recipe
@@ -280,11 +282,11 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
             }
         }
     )
-    recipe = _serving_recipe("reef.recipe.composite:CompositeRecipe", settings, {}, None)
+    recipe = _serving_recipe("reef.recipe.composite:CompositeRecipe", settings, {})
     assert isinstance(recipe, CompositeRecipe)
-    assert isinstance(recipe.training_runtime, LocalRuntime)
-    assert recipe.training_runtime.received_model_path == "demo-model"
-    assert all(component.training_runtime is recipe.training_runtime for component in recipe.components.values())
+    assert isinstance(recipe.training_component, LocalRuntime)
+    assert recipe.training_component.received_model_path == "demo-model"
+    assert all(component.training_component is recipe.training_component for component in recipe.components.values())
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
 
     # A flat weight recipe setting has no place at the top of a composite.
@@ -294,13 +296,13 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
                 "recipe": "reef.recipe.composite:CompositeRecipe",
                 "model_path": "demo-model",
                 "training_backend": _LOCAL_TRAINING,
-                "max_staleness": 2,
+                "training_mode": "hybrid",
                 "components": _WEIGHTS_AND_HARNESS,
             }
         }
     )
-    with pytest.raises(ValueError, match=r"reef\.max_staleness is not a setting of CompositeRecipe"):
-        _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {}, None)
+    with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
+        _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {})
 
     # A top level evaluation section reaches the component that trains: it is that component which parses it.
     evaluated = service_config_from_mapping(
@@ -315,14 +317,14 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
         }
     )
     with pytest.raises(RecipeConfigError, match=r"cannot import evaluation 'no\.such\.module:Factory'"):
-        _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {}, None)
+        _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {})
 
 
 @pytest.mark.unit
 def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy.deployment_config import selected_weight_training
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.orchestrator import resolve_deployment_config
-    from reef.service.training_driver import _resolve_training_recipe
 
     raw = {
         "recipe": {
@@ -335,11 +337,11 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert config["reef"]["training_backend"] == _LOCAL_TRAINING
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    loss_family, name = _resolve_training_recipe(config)
-    assert name == "reef.recipe.composite:CompositeRecipe"
+    assert config["reef"]["recipe"] == "reef.recipe.composite:CompositeRecipe"
     from recipes.sao.recipe import SAORecipe
 
-    assert loss_family == SAORecipe.training_spec().loss_family
+    # The service builds the training component for the weight component's class and loss family.
+    assert selected_weight_training(CompositeRecipe, config) is SAORecipe
 
     # A component named through the environment is classified once the environment is applied.
     monkeypatch.setenv("PROBE_WEIGHTS", "recipes.sao.recipe:SAORecipe")
@@ -353,15 +355,17 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     config, _ = resolve_deployment_config(interpolated, None, tmp_path / "serve.yaml")
     assert config["reef"]["training_backend"] == _LOCAL_TRAINING
 
-    # The driver reports an unimportable component the way it reports an unimportable recipe.
+    assert selected_weight_training(CompositeRecipe, config) is SAORecipe
+
+    # An unimportable component is refused the way an unimportable recipe is.
     broken = {
         "reef": {
             "recipe": "reef.recipe.composite:CompositeRecipe",
             "components": {"weights": {"implementation": "no.such.module:Recipe"}},
         }
     }
-    with pytest.raises(RuntimeError, match=r"cannot load reef\.recipe"):
-        _resolve_training_recipe(broken)
+    with pytest.raises(RecipeConfigError, match=r"cannot import recipe reference 'no\.such\.module:Recipe'"):
+        selected_weight_training(CompositeRecipe, broken)
 
 
 @pytest.mark.unit
@@ -768,6 +772,7 @@ class _EpisodeTreeRecipe(_TreeRecipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            default_job_samples=1,
         )
 
 
@@ -1272,7 +1277,7 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "hybrid"
-        assert contract["processor"] == type(harness.pipeline.task2batch).__name__
+        assert contract["processor"] == type(harness.pipeline.task2job).__name__
     finally:
         dispatcher.close()
 

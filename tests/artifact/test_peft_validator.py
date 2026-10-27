@@ -106,7 +106,7 @@ def metadata(root: Path, **overrides: Any) -> dict[str, Any]:
         "base_model": {"name_or_path": config["base_model_name_or_path"], "tokenizer": {}},
         "peft": {key: config[key] for key in ("peft_type", "r", "lora_alpha", "target_modules")},
         "dtype": "bfloat16",
-        "source": {"scenario": "math", "scenario_step": 7},
+        "source": {"rollout_id": 7},
         "files": {name: digest(root / name) for name in ("adapter_config.json", "adapter_model.safetensors")},
     }
     document.update(overrides)
@@ -134,7 +134,7 @@ def test_a_reef_exported_adapter_validates_against_its_metadata(tmp_path: Path) 
     artifact = adapter(tmp_path)
     document = metadata(Path(artifact.local_path))
     PEFTValidator(BASE_MODEL, require_metadata=True).validate(artifact)
-    assert document["source"] == {"scenario": "math", "scenario_step": 7}
+    assert document["source"] == {"rollout_id": 7}
 
 
 def test_metadata_from_an_unknown_schema_is_refused(tmp_path: Path) -> None:

@@ -92,8 +92,8 @@ class Proposer(ConfiguredPlugin, ABC):
 
     Implement:
         ``propose`` — given the current composition (as ``(kind, config)``
-        pairs in tree order), a batch of trace samples (a sample's ``score``
-        is ``None`` when the deployment batches recorded traffic without
+        pairs in tree order), the job data's trace samples (a sample's ``score``
+        is ``None`` when the deployment trains on recorded traffic without
         reports, so a method must handle unscored samples), and the
         :class:`~reef.harness.episodes.model_binding.ModelBindings` the method may
         call, return one :class:`~reef.train.cordis_backend.Mutation`, a
@@ -125,8 +125,8 @@ class Proposer(ConfiguredPlugin, ABC):
     ``requests`` contains exactly one mapping with ``id``, ``text``,
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
-    in ``hybrid`` it is what an automatic batch would take next, up to
-    ``evolution.batch_size`` and possibly none (scored traces, or unscored records
+    in ``hybrid`` it is what automatic job data would take next, up to
+    ``job_samples`` (by default ``evolution.batch_size``) and possibly none (scored traces, or unscored records
     when the ``pipeline`` section names the inference stages). A proposer that takes
     instructions sets ``reads_requests``. It generates mutations against the current tree, then the
     same evaluation and publication policy used by automatic evolution apply.
@@ -168,7 +168,7 @@ class Proposer(ConfiguredPlugin, ABC):
         entries: Sequence[Mapping[str, Any]] = (),
         agent_host: AgentHost | None = None,
     ) -> Mutation | Sequence[Mutation] | StepProposal | None:
-        """Propose mutations for the current composition and trace batch."""
+        """Propose mutations for the current composition and the job data's traces."""
 
 
 class Promoter(ConfiguredPlugin, ABC):

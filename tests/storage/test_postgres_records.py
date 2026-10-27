@@ -7,6 +7,7 @@ from threading import Barrier, Event
 
 import pytest
 from sqlalchemy import select
+from tests.support.consumption_receipts import write_consumption_receipt
 
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
@@ -36,7 +37,7 @@ def test_namespaces_restart_and_receipt_isolation(postgres_config):
     original = record()
     with closing(PostgresRecordStore(url, schema=schema, name="one")) as first:
         assert first.append(original) == original
-        first.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
+        write_consumption_receipt(first, "math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.existing_receipt(original) is None
         assert other.consumption_receipts("math") == ()
@@ -50,14 +51,12 @@ def test_namespaces_restart_and_receipt_isolation(postgres_config):
         assert other.count("math") == 1
 
 
-def test_large_consumption_receipt_and_atomic_conflict(postgres_database):
+def test_large_consumption_receipt_reads_back(postgres_database):
     with closing(PostgresRecordStore(postgres_database)) as store:
         store.append(record())
         ids = frozenset({"first", *(f"record-{index:06d}" for index in range(5000))})
-        store.record_consumption("math", ids, receipt_id="large", metadata={"step": 1})
+        write_consumption_receipt(store, "math", ids, receipt_id="large", metadata={"step": 1})
         store.append(record("later"))
-        with pytest.raises(RecordConflict):
-            store.record_consumption("math", ids, receipt_id="large", metadata={"step": 2})
         assert store.get("math", "later") is not None
         assert store.consumption_receipts("math")[0]["consumed_ids"] == tuple(sorted(ids))
 
@@ -81,25 +80,20 @@ def test_concurrent_append_retry_and_conflict(postgres_database):
         assert first.count("math") == 1
 
 
-def test_concurrent_database_initialization_and_consumption(postgres_config):
+def test_concurrent_database_initialization(postgres_config):
     url, schema = postgres_config
     barrier = Barrier(2)
 
-    def initialize_and_consume(step):
+    def initialize_and_append():
         barrier.wait(timeout=5)
         with closing(PostgresRecordStore(url, schema=schema)) as store:
-            store.append(record())
-            try:
-                store.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": step})
-            except RecordConflict:
-                return False
-            return True
+            return store.append_result(record()).inserted
 
     with ThreadPoolExecutor(2) as pool:
-        assert sorted(pool.map(initialize_and_consume, (1, 2))) == [False, True]
+        results = [pool.submit(initialize_and_append) for _ in range(2)]
+        assert sorted(result.result() for result in results) == [False, True]
     with closing(PostgresRecordStore(url, schema=schema)) as store:
         assert store.count("math") == 1
-        assert len(store.consumption_receipts("math")) == 1
 
 
 def test_schema_version_and_database_close(postgres_config):
@@ -163,7 +157,7 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
         with first._transaction(write=False) as connection:
             query = select(first._tables.consumption.c.receipt_id)
             assert connection.execute(query).all() == []
-            second.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
+            write_consumption_receipt(second, "math", frozenset({"first"}), receipt_id="skip", metadata={})
             assert connection.execute(query).all() == []
         assert len(first.consumption_receipts("math")) == 1
         assert first.get("math", "first") == original
@@ -181,7 +175,7 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
     old = PostgresRecordStore(postgres_database, name="math")
     try:
         old.append(record())
-        old.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
+        write_consumption_receipt(old, "math", frozenset({"first"}), receipt_id="skip", metadata={})
         old.append(record("active"))
         archived_id = postgres_database.archive("math")
         assert archived_id == old.storage_id
@@ -209,7 +203,7 @@ def test_capacity_counts_all_records_and_preserves_retry_hashes(postgres_databas
         for name in ("expired", "oldest", "newest", "active"):
             store.append(record(name))
         for name in ("expired", "oldest", "newest"):
-            store.record_consumption("math", frozenset({name}), receipt_id=name, metadata={})
+            write_consumption_receipt(store, "math", frozenset({name}), receipt_id=name, metadata={})
         with postgres_database.transaction() as connection:
             table = postgres_database.tables.records
             newest_bytes = connection.execute(
@@ -376,8 +370,8 @@ def test_legacy_schema_moves_retirement_to_consumption_and_removes_old_tables(po
     with closing(PostgresRecordDatabase(url, schema=schema)) as database:
         with closing(PostgresRecordStore(database, name="one")) as records:
             records.append(record())
-            records.record_consumption(
-                "math", frozenset({"earlier"}), receipt_id="skip", metadata={"outcome": "stale"}
+            write_consumption_receipt(
+                records, "math", frozenset({"earlier"}), receipt_id="skip", metadata={"outcome": "stale"}
             )
         with closing(PostgresRecordStore(database, name="two")) as records:
             records.append(record("other"))

@@ -15,16 +15,16 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
-from reef.train.backend import StepExecution
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import TrainStepResult
 
 
 class Scenario:
@@ -97,12 +97,13 @@ class Scenario:
         return self._name
 
     @property
-    def training_runtime(self) -> TrainingRuntime | None:
-        return self._binding.training_runtime
+    def training_component(self) -> TrainingComponent | None:
+        """The training component the scenario's weight trainer submits jobs to, if it trains weights."""
+        return self._binding.training_component
 
     @property
     def runtime(self) -> InferenceRuntime | None:
-        """Inference or training runtime bound to this scenario."""
+        """The inference runtime that serves this scenario, if any."""
         return self.model_config.runtime or self._binding.runtime
 
     @property
@@ -136,46 +137,24 @@ class Scenario:
 
     @property
     def trainer(self) -> Trainer:
-        """Inspection-only view of the trainer that steps the scenario; the only one of a flat scenario.
+        """Inspection-only view of the trainer that trains the scenario; the only one of a flat scenario.
 
-        The dispatched trainer when there is one, else the first with a
-        candidate backend, else the first: the status, the contract and the
-        undrained batch warning speak of the trainer that runs steps, not of
-        a component that only carries files. Every mutating path goes
+        The first trainer that trains, else the first: the status, the
+        contract and the operational metrics speak of the trainer that
+        trains, not of a component that only carries files. Every mutating path goes
         through a Scenario method so it is serialized against rollback and
         commit by the committer lock. The one exception is the preparation of
         a local step in a scenario with several trainers; the dispatcher still
         runs one step of the scenario at a time. Reading state that is
         not part of a transaction (objective identity, consumption
-        watermarks, processor schema) is safe here; do not reserve batches
+        watermarks, processor schema) is safe here; do not reserve job data
         or replace results through this handle.
         """
-        component = self.dispatched_component
-        if component is not None:
-            return self.trainer_for(component)
         return self.stepping_trainers()[0].trainer
-
-    @property
-    def is_job_reserved(self) -> bool:
-        """Whether a dispatched trainer holds a reserved batch: its job is out at the backend until commit or reject."""
-        component = self.dispatched_component
-        return component is not None and self.trainer_for(component).pending_batch is not None
 
     def trainer_for(self, component: str | None) -> Trainer:
         """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""
         return self._committer.trainer_for(component)
-
-    @property
-    def dispatched_component(self) -> str | None:
-        """The component whose trainer runs a dispatched backend on the training runtime, if any."""
-        return next(
-            (
-                component_trainer.component
-                for component_trainer in self.trainers
-                if component_trainer.trainer.dispatched
-            ),
-            None,
-        )
 
     @property
     def scenario_step(self) -> int:
@@ -192,27 +171,23 @@ class Scenario:
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
 
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
-        """The trainers with a candidate backend; the first trainer when none has one."""
-        stepping = tuple(
-            component_trainer
-            for component_trainer in self.trainers
-            if component_trainer.trainer.candidate_backend is not None
-        )
+        """The trainers that train; the first trainer when none does."""
+        stepping = tuple(component_trainer for component_trainer in self.trainers if component_trainer.trainer.trains)
         return stepping or self.trainers[:1]
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches without waiting for a running backend step.
+        """Select future job data without waiting for a running backend step.
 
         Every trainer that runs a step switches or none does: a scenario whose
         components run in different modes would accept instructions for some
-        and drop them for others. A trainer without a step builds no batch,
+        and drop them for others. A trainer without a step builds no job data,
         so it has no mode to switch.
         """
         if training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         stepping = self.stepping_trainers()
         unsupported = [
-            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.task2batch).__name__})"
+            f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.task2job).__name__})"
             for component_trainer in stepping
             if training_mode not in component_trainer.trainer.pipeline.supported_training_modes
         ]
@@ -222,12 +197,12 @@ class Scenario:
             component_trainer.trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
-        """Prepare one local-backend step.
+        """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
 
         The caller runs one step of the scenario at a time, as the
         dispatcher's cycle lock does. Thus no training commit of another
         trainer lands while the step runs, and a rollback refuses to run
-        while the batch is reserved. A lone trainer also holds the commit
+        while the job data is reserved. A lone trainer also holds the commit
         lock. With several trainers the step runs outside that lock, so a
         trainer without a backend advances its record cursor without waiting
         for a long evaluation.
@@ -236,25 +211,10 @@ class Scenario:
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
             return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
 
-    def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
-        """Reserve one backend-training batch while excluding rollback and commit."""
-        with self._committer.lock:
-            return self.trainer_for(component).reserve_training_batch(
-                serving_runtime_load_id=self.serving_runtime_load_id()
-            )
-
     def serving_runtime_load_id(self) -> str | None:
         """Return the runtime load ID that serves the committed release, or None when it is unknown."""
         artifact = Artifact(self.current_artifact_ref(), self.repository)
         return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
-
-    def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
-        """Run the bound dispatched backend for the reserved batch."""
-        return self.trainer_for(component).execute_reserved_step(self.scenario_step)
-
-    def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
-        """Drop the reserved batch and persist its consumption."""
-        self._committer.reject_pending(component, metrics)
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
@@ -273,19 +233,6 @@ class Scenario:
         """The non-blocking committed step, training outcome, and artifact-head sync status."""
         return self._committer.commit_status
 
-    @property
-    def committed_training_job_id(self) -> str | None:
-        """Training-job identity proven by the dispatched component's newest durable commit.
-
-        Another trainer's commit after it moves the scenario step but does not
-        unmake the proof: the backend still has to finish that job.
-        """
-        with self._committer.lock:
-            record = self._committer.last_record_for(self.dispatched_component)
-            if record is None or not self._committer.record_is_current(record):
-                return None
-            return record.training_job_id
-
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
@@ -297,6 +244,11 @@ class Scenario:
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
+
+    def resume_rollback_start(self) -> None:
+        """Start the next training job from a rollback that the weight trainer's commits do not record yet."""
+        with self._committer.lock:
+            self._committer.resume_rollback_start()
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)
@@ -348,11 +300,6 @@ def validate_component_trainers(
     unknown = [name for name in names if name not in surface.names]
     if unknown:
         raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
-    dispatched = [
-        component_trainer.component for component_trainer in trainers if component_trainer.trainer.dispatched
-    ]
-    if len(dispatched) > 1:
-        raise ReefError(f"at most one component runs on the training runtime, not {dispatched}")
     return trainers
 
 

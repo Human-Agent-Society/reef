@@ -20,9 +20,9 @@ from reef.core.trajectories import (
 )
 from reef.runtime.interfaces import InferenceStream, TrainingMethod
 from reef.service.streaming import stream_record
-from reef.train.algos import StepScheduling
-from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import TaskItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
+from reef.train.algos.schedule import StepScheduling
+from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.types import JobData, TaskItem, TrajectoryItem, trajectories, trajectory_groups
 
 
 def captured_trajectory(record_id="inference-1", reward=1.0):
@@ -59,17 +59,13 @@ def atif_item():
 
 
 def test_mixed_items_survive_worker_serialization():
-    batch = TrainingBatch("mixed", (captured_trajectory(), TaskItem(Path("tasks/example")), atif_item()))
+    batch = JobData("mixed", (captured_trajectory(), TaskItem(Path("tasks/example")), atif_item()))
     assert pickle.loads(pickle.dumps(batch)) == batch
     assert isinstance(batch.items[1], TaskItem)
 
 
-# The cookbook recipes' step schedules, as their ``training_spec()`` binds them.
-SCHEDULING = {
-    "sao": StepScheduling(unit="sample"),
-    "openclawrl": StepScheduling(unit="sample"),
-    "tttd": StepScheduling(unit="sample"),
-}
+#: The step schedule of a job without a ``scheduling`` parameter, as the cookbook recipes submit them.
+SCHEDULING = StepScheduling()
 #: The rollouts in one optimizer step: each batch here trains as one step.
 STEP_SIZE = 2
 
@@ -77,14 +73,13 @@ STEP_SIZE = 2
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algorithm):
     items = tuple(replace(captured_trajectory(str(index), float(index)), group_id="group") for index in range(2))
-    original = TrainingBatch("batch", items)
-    loaded = TrainingBatch(
+    original = JobData("batch", items)
+    loaded = JobData(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    scheduling = SCHEDULING[algorithm]
-    assert prepare_slime_step(
-        loaded, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE
-    ) == prepare_slime_step(original, TrainingMethod(algorithm), {}, scheduling, step_size=STEP_SIZE)
+    assert prepare_slime_job(
+        loaded, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE
+    ) == prepare_slime_job(original, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
     assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
 
@@ -167,19 +162,17 @@ def test_training_response_message_takes_precedence_over_stream_summary() -> Non
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])
 def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(algorithm):
-    batch = TrainingBatch("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
+    batch = JobData("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported item 1"):
-        prepare_slime_step(batch, TrainingMethod(algorithm), state, SCHEDULING[algorithm], step_size=STEP_SIZE)
+        prepare_slime_job(batch, TrainingMethod(algorithm), state, SCHEDULING, step_size=STEP_SIZE)
     assert state == {"steps": 3}
     assert isinstance(batch.items[1], TaskItem)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_step(
-        TrainingBatch("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING["sao"], step_size=STEP_SIZE
-    )
+    prepared = prepare_slime_job(JobData("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING, step_size=STEP_SIZE)
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -192,7 +185,7 @@ def test_groups_preserve_row_and_advantage_order():
         replace(captured_trajectory(str(index), reward), group_id="z" if index < 2 else "a")
         for index, reward in enumerate((0.0, 2.0, 3.0, 1.0))
     )
-    batch = TrainingBatch("groups", items)
+    batch = JobData("groups", items)
     assert trajectories(batch) == items
     assert trajectory_groups(batch) == (items[:2], items[2:])
     from recipes.tttd.objective import TttdObjective
@@ -207,7 +200,7 @@ def test_groups_preserve_row_and_advantage_order():
 
 
 def test_noncontiguous_groups_fail_before_misaligned_training():
-    batch = TrainingBatch(
+    batch = JobData(
         "groups",
         tuple(replace(captured_trajectory(str(index)), group_id=group) for index, group in enumerate(("a", "b", "a"))),
     )
@@ -219,20 +212,20 @@ def test_non_atif_payloads_are_not_accepted_as_trajectories():
     with pytest.raises(TypeError, match="ATIF"):
         TrajectoryItem(object())
     with pytest.raises(TypeError, match="TrajectoryItem or TaskItem"):
-        TrainingBatch("invalid", ({"tokens": [1]},))
+        JobData("invalid", ({"tokens": [1]},))
 
 
 def test_request_only_batch_preserves_manual_training_contract():
     request = TrainingRequest("Improve the harness", "session", "release", id="request")
-    batch = TrainingBatch("manual", request=request)
+    batch = JobData("manual", request=request)
     assert trajectories(batch) == ()
-    assert replace(batch, batch_id="next").request is request
+    assert replace(batch, data_id="next").request is request
 
 
 def test_report_processor_reserves_and_acknowledges_mixed_data():
     from reef.pipeline_context import PipelineContext
     from reef.record2task import ReportTasks
-    from reef.task2batch import Task2Batch
+    from reef.task2job import Task2Job
     from reef.train.pipeline import TrainingPipeline
 
     class MixedTasks(ReportTasks):
@@ -244,9 +237,9 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 else make_trajectory(context.inferences)
             )
 
-    class MixedBatches(Task2Batch):
-        def make_batch(self, tasks, batch_id):
-            return TrainingBatch(batch_id, tasks)
+    class MixedJobData(Task2Job):
+        def make_job_data(self, tasks, data_id):
+            return JobData(data_id, tasks)
 
     from reef.record2record import ReportGrouping, ReportRecord2Record
 
@@ -255,7 +248,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
         context,
         record2record=ReportRecord2Record(context, ReportGrouping(), exclusive_sources=True),
         record2task=MixedTasks(),
-        task2batch=MixedBatches(context, None),
+        task2job=MixedJobData(context, None, None),
     )
     for index, payload in enumerate(
         ({"messages": [{"role": "user", "content": "hi"}]}, {"task_path": "tasks/example"})
@@ -276,24 +269,22 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 payload={"references": [f"inference-{index}"], "score": 1.0},
             )
         )
-    batch = processor.build_batch(2)
-    assert processor.build_batch(2) is batch
+    batch = processor.build_job_data(2)
+    assert processor.build_job_data(2) is batch
     assert isinstance(batch.items[0], TrajectoryItem)
     assert isinstance(batch.items[1], TaskItem)
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
     assert processor.releasable_record_ids().isdisjoint(ids)
-    assert processor.acknowledge(batch.batch_id) == ids
+    assert processor.acknowledge(batch.data_id) == ids
     assert not processor.ready(2)
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl"])
 def test_independent_algorithms_ignore_group_metadata(algorithm):
-    batch = TrainingBatch(
-        "grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2))
-    )
-    result = prepare_slime_step(batch, TrainingMethod(algorithm), {}, SCHEDULING[algorithm], step_size=STEP_SIZE)
+    batch = JobData("grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2)))
+    result = prepare_slime_job(batch, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
-    assert result.payload["source_rows"] == [0, 1]
+    assert result.payload["producing_runtime_load_ids"] == ["weights-1", "weights-1"]
 
 
 def test_extension_updates_preserve_unknown_metadata_and_leave_input_unchanged():

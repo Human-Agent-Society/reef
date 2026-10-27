@@ -22,7 +22,7 @@ from reef.core.errors import ReefError
 class RecordProgress:
     """Record-consumption watermark pinned by a commit record.
 
-    ``consumed_ids`` names the rows the step's batch consumed.
+    ``consumed_ids`` names the rows the step's job data consumed.
     """
 
     high_water_sequence: int

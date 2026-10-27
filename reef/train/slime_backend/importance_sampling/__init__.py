@@ -2,8 +2,8 @@
 
 Slime has this family without a method package, as Tinker has its built-in
 loss (``reef.train.slime_backend.loss_families`` registers it). A recipe whose
-objective names ``importance_sampling``, such as the generated-task recipe,
-therefore trains on either backend.
+objective names ``importance_sampling`` can train collected trajectories on
+either backend. Slime does not yet run the generated-task recipe's task jobs.
 
 - this module: the spec, driver side and torch free.
 - ``objective``: the worker's loss hook and the token loss that TTTD also uses.

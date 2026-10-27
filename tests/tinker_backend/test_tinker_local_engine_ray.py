@@ -3,7 +3,8 @@
 The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
 engine (``tests.support._stub_engine``). The test process is the control
-plane: it builds Tinker's runtime pair as the HTTP service does and drives one
+plane: it builds Tinker's training component and the serving runtime of its
+exported adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
 cookbook converter are faked unless ``REEF_TEST_TINKER_REAL=1`` and
 ``TINKER_API_KEY`` are set, in which case the trainer, the checkpoint download
@@ -25,10 +26,10 @@ from pathlib import Path
 
 import pytest
 
-from reef.runtime.deployment import RuntimeRegistry
+from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.service.deploy.training import training_deployment_for
+from reef.train.jobs import JobLoopState
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
@@ -39,8 +40,8 @@ SCENARIO = "erdos"
 
 FAKE_SDK = textwrap.dedent(
     '''
-    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, archives as local tar files."""
-    import io, json, os, tarfile, uuid
+    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, exported adapter files as local files."""
+    import json, os, uuid
     from types import SimpleNamespace
 
     # Settings live beside the module: Ray workers share the import path, not the driver's environment.
@@ -75,22 +76,31 @@ FAKE_SDK = textwrap.dedent(
             return _Future(SimpleNamespace(path=path))
         def save_state(self, name, ttl_seconds=None): return self._save(name, "weights")
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
+        def save_weights_external(self, name, ttl_seconds=None): return self._save(name, "external_weights")
+
+    class _Tokenizer:
+        # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
+        def apply_chat_template(self, *args, **kwargs): raise AssertionError("the trainer never renders")
+        def decode(self, *args, **kwargs): raise AssertionError("the trainer never renders")
 
     class _Sampler:
         def get_base_model(self): return MODEL
-        def get_tokenizer(self): raise AssertionError("the trainer never renders")
+        def get_tokenizer(self): return _Tokenizer()
         def compute_logprobs(self, model_input): return _Future([None] + [-0.5] * (model_input.length - 1))
 
     class _Rest:
         def get_weights_info_by_tinker_path(self, path):
             return _Future(SimpleNamespace(base_model=MODEL, is_lora=True, lora_rank=32))
-        def get_checkpoint_archive_url_from_tinker_path(self, path):
-            archive = os.path.join(ROOT, uuid.uuid4().hex + ".tar")
-            with tarfile.open(archive, "w") as tar:
-                for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
-                                   ("adapter_model.safetensors", path.encode())):
-                    info = tarfile.TarInfo(name); info.size = len(body); tar.addfile(info, io.BytesIO(body))
-            return _Future(SimpleNamespace(url="file://" + archive))
+        def get_external_weights_urls(self, path):
+            directory = os.path.join(ROOT, uuid.uuid4().hex)
+            os.makedirs(directory)
+            urls = {}
+            for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
+                               ("adapter_model.safetensors", path.encode())):
+                with open(os.path.join(directory, name), "wb") as file:
+                    file.write(body)
+                urls[name] = "file://" + os.path.join(directory, name)
+            return _Future(SimpleNamespace(urls=urls))
 
     class ServiceClient:
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
@@ -118,7 +128,7 @@ FAKE_COOKBOOK = textwrap.dedent(
 )
 
 
-def _write_fake_sdk(root: Path, model: str) -> Path:
+def write_fake_sdk(root: Path, model: str) -> Path:
     site = root / "fake_sdk"
     (site / "tinker").mkdir(parents=True, exist_ok=True)
     (site / "tinker" / "__init__.py").write_text(FAKE_SDK)
@@ -129,8 +139,8 @@ def _write_fake_sdk(root: Path, model: str) -> Path:
     return site
 
 
-def _training_item(version: str, index: int):
-    from reef.core.batches import TrajectoryItem
+def training_item(version: str, index: int):
+    from reef.core.job_data import TrajectoryItem
 
     return TrajectoryItem(
         {
@@ -184,10 +194,10 @@ def inference_component(tmp_path):
         while True:
             assert component.poll() is None, log_path.read_text()[-4000:]
             try:
-                control.call("GET", "health", timeout_s=5)
-            except RuntimeError as exc:
-                if "409" in str(exc):
+                if control.call("GET", "health", timeout_s=5)["engines"] is False:
                     break  # serving, with no engines started yet
+            except RuntimeError:
+                pass  # not listening yet
             assert time.monotonic() < deadline, "component did not start:\n" + log_path.read_text()[-4000:]
             time.sleep(0.5)
         yield url, control
@@ -197,7 +207,7 @@ def inference_component(tmp_path):
 
 @contextmanager
 def control_plane(tmp_path, monkeypatch, url, repository):
-    """Build Tinker's runtime pair and a Dispatcher over it, as the HTTP service does, and close both after.
+    """Build Tinker's component, its serving runtime and a Dispatcher over them, as the HTTP service does, and close both after.
 
     ``repository`` is the artifact backend factory; a restart passes the same one, which holds the releases.
     """
@@ -207,14 +217,18 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     from reef.train.pipeline import PipelineConfig
 
     if not REAL:
-        monkeypatch.syspath_prepend(str(_write_fake_sdk(tmp_path, MODEL)))
+        monkeypatch.syspath_prepend(str(write_fake_sdk(tmp_path, MODEL)))
         for module in ("tinker", "tinker_cookbook", "tinker_cookbook.weights"):
             monkeypatch.delitem(sys.modules, module, raising=False)
     api_key = os.environ["TINKER_API_KEY"] if REAL else "fake-key"
-    monkeypatch.setenv("TINKER_API_KEY", api_key)
+    for name, value in {**TOKENS, "TINKER_API_KEY": api_key}.items():
+        monkeypatch.setenv(name, value)
     raw = {
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
-        "pipeline": {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
+        "pipeline": {
+            "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
+            "task2job": {"config": {"job_samples": 4}},
+        },
         "inference": {
             "model-path": MODEL,
             "backend": ENGINE,
@@ -224,20 +238,25 @@ def control_plane(tmp_path, monkeypatch, url, repository):
         },
         "training": {
             "backend": "tinker",
-            "options": {"state-dir": str(tmp_path / "tinker"), "lora-rank": 32, "batch-size": 4, "kl-coef": 0.0},
+            "options": {
+                "state-dir": str(tmp_path / "tinker"),
+                "lora-rank": 32,
+                "batch-size": 4,
+                "kl-coef": 0.0,
+                "export-adapter": True,
+            },
         },
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["reef"]
-    runtime_config = training_deployment_for("tinker").runtime_config(service_config_from_mapping(config).__dict__)
-    training, inference = RuntimeRegistry().build(
-        runtime_config, model_path=MODEL, environ={**TOKENS, "TINKER_API_KEY": api_key}
+    component, inference = connect_training_component(
+        service_config_from_mapping(config), model_path=MODEL, loss_family="tttd"
     )
     dispatcher = None
     try:
         dispatcher = Dispatcher(
             TTTDRecipe(
-                training,
+                component,
                 runtime=inference,
                 pipeline_stages=PipelineConfig.from_setting(
                     raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
@@ -247,22 +266,27 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         )
-        yield dispatcher, training, inference
+        yield dispatcher, component, inference
     finally:
         if dispatcher is not None:
             dispatcher.close()
-        training.shutdown()
+        component.close()
         inference.shutdown()
 
 
+def loop_state(scenario) -> JobLoopState:
+    """The job trainer's committed state: where the next job starts and the jobs that ended."""
+    return JobLoopState.from_dict(scenario.trainer.state)
+
+
 def train_one_step(dispatcher, inference) -> None:
-    """Feed one TTTD group through the Dispatcher and wait until the scenario commits it."""
+    """Feed one TTTD group through the Dispatcher and wait until the scenario commits the job's end."""
     from reef.core import AgentRecord, RequestType
 
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
-    version = inference.serving_runtime_load_id()
+    version = inference.current_runtime_load_id()
     for index in range(4):
-        item = _training_item(version, index)
+        item = training_item(version, index)
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario=SCENARIO,
@@ -293,9 +317,11 @@ def train_one_step(dispatcher, inference) -> None:
             )
         )
     deadline = time.monotonic() + (1500 if REAL else 300)
-    while scenario.scenario_step < 1 and time.monotonic() < deadline:
+    while loop_state(scenario).finished_jobs < 1 and time.monotonic() < deadline:
         time.sleep(1)
-    assert scenario.scenario_step == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
+    state = loop_state(scenario)
+    assert state.finished_jobs == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
+    assert state.last_job.event == "finished", state.last_job
 
 
 def served_adapters(tmp_path) -> list[Path]:
@@ -314,10 +340,10 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
-        with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, training, inference):
-            initial = inference.serving_runtime_load_id()
+        with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
+            initial = inference.current_runtime_load_id()
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
-            assert inference.base_url == url and training.concurrent_training_scenarios
+            assert inference.base_url == url
             train_one_step(dispatcher, inference)
             published = inference.serving_adapter_runtime_load_id(SCENARIO)
             assert published is not None and published != initial
@@ -325,8 +351,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file() and (adapter / "adapter_model.safetensors").is_file()
             assert inference.inference_admission_status["open"]
-            start = Path(training.start(SCENARIO))
-            assert start.parent == tmp_path / "tinker" / "jobs"
+            start = Path(loop_state(dispatcher.get_or_create_scenario(SCENARIO)).start)
+            assert start.parent.parent == tmp_path / "tinker" / "jobs"
             if not REAL:
                 events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
                 assert [event["event"] for event in events if event["event"] in ("initialize", "restore")] == [
@@ -339,11 +365,11 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             control.call("GET", "runtime-load-ids")
         assert served_adapters(tmp_path) == []
         # A restarted control plane starts the engines again and loads the committed adapter before it serves.
-        with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, training, inference):
-            dispatcher.get_or_create_scenario(SCENARIO)
+        with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
+            scenario = dispatcher.get_or_create_scenario(SCENARIO)
             served = inference.serving_adapter_runtime_load_id(SCENARIO)
             assert served is not None and served != published
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [served] * 2
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file()
-            assert training.start(SCENARIO) == str(start)
+            assert loop_state(scenario).start == str(start)

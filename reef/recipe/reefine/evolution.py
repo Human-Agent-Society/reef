@@ -471,13 +471,13 @@ def propose(
 
     ``nodes`` are the composition's (kind, config) pairs, ``entries`` the
     same tree as ``{"id", "name", "config"}`` mappings when the step handed
-    them over, and ``samples`` the batched failing requests. ``requests`` is
+    them over, and ``samples`` the failing requests of the job's data. ``requests`` is
     what the person asked for through ``POST /reef/train`` in ``manual`` or
     ``hybrid`` mode, one per step; when one is present the model designs the
     change, writes mutations of the kinds ``adapter`` takes from this
     proposer (every kind on pi, no code extension elsewhere) and reviews
     them, with the failures beside it as context (``hybrid`` hands over what
-    an automatic batch would take next, ``manual`` none), and the step gets
+    automatic job data would take next, ``manual`` none), and the step gets
     a :class:`StepProposal` whose notes carry the design and the review;
     else it learns from the failures as before. An endpoint or parse
     failure never crashes the step: on the failure path it returns

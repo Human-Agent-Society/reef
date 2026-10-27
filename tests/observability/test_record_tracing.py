@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from tests.reef_service.test_skill_delivery import FakeStream
-from tests.scenario.test_commit_history import RecordingRuntime, TestPolicyRecipe, wait_for_step
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.artifact_versions import RollbackComponent, finished_jobs
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -447,24 +449,32 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
 def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
+    (initial / "model.txt").write_text("w0")
     observer = _CapturingObserver()
+    component = RollbackComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(RecordingRuntime(served_version="w0")),
-        ),
+        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
     )
     try:
-        dispatcher.accept_record(_inference("i1"))
-        dispatcher.accept_record(_inference("i1"))
+        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
+        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
         dispatcher.accept_record(_report("r1", "i1"))
-        wait_for_step(dispatcher, 1)
+        for _ in range(5000):
+            if finished_jobs(dispatcher):
+                break
+            time.sleep(0.001)
+        assert finished_jobs(dispatcher) == 1
     finally:
         dispatcher.close()
 
     assert observer.accepted == ["i1", "r1"]
-    (commit,) = observer.committed
-    assert (commit.scenario, commit.step, commit.consumed_ids) == ("math", 1, frozenset({"i1", "r1"}))
+    # The job's submission consumes the records; its checkpoint and its end commit after it.
+    assert [(commit.scenario, commit.step, commit.consumed_ids) for commit in observer.committed] == [
+        ("math", 1, frozenset({"i1", "r1"})),
+        ("math", 2, frozenset()),
+        ("math", 3, frozenset()),
+    ]
     assert observer.closed

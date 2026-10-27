@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
@@ -600,46 +599,6 @@ class SQLRecordStore(RecordStore):
     @classmethod
     def _audit_record(cls, row: RowMapping) -> StoredRecord:
         return StoredRecord(sequence=int(row["sequence"]), item=cls._decode(row))
-
-    def record_consumption(
-        self,
-        scenario: str,
-        agent_record_ids: frozenset[str],
-        *,
-        receipt_id: str,
-        metadata: Mapping[str, object],
-    ) -> None:
-        """Persist a skipped batch's consumption without modifying its records."""
-        if not receipt_id:
-            raise ValueError("consumption receipt_id must be non-empty")
-        consumed_ids_json = self._json(sorted(agent_record_ids))
-        metadata_json = self._json(dict(metadata))
-        table = self._tables.consumption
-        with self._transaction(write=True) as connection:
-            self._insert(
-                connection,
-                table,
-                {
-                    "scenario": scenario,
-                    "receipt_id": receipt_id,
-                    "consumed_ids_json": consumed_ids_json,
-                    "metadata_json": metadata_json,
-                    "recorded_at": time.time(),
-                    "consumed_ids_sha256": hashlib.sha256(consumed_ids_json.encode()).hexdigest(),
-                },
-            )
-            existing = connection.execute(
-                select(table.c.metadata_json).where(
-                    self._tables.condition(table),
-                    table.c.scenario == scenario,
-                    table.c.receipt_id == receipt_id,
-                    table.c.consumed_ids_json == consumed_ids_json,
-                )
-            ).scalar_one_or_none()
-            if existing != metadata_json:
-                raise RecordConflict(
-                    f"consumption receipt {receipt_id!r} for scenario {scenario!r} has different content"
-                )
 
     def loss(self, scenario: str) -> RecordLoss:
         table = self._tables.eviction

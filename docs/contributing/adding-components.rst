@@ -19,7 +19,7 @@ Add a recipe
 ------------
 
 Use this playbook when a new method binds record processing, step preparation,
-runtime execution, and artifact delivery. Read `Write a recipe
+training jobs, and artifact delivery. Read `Write a recipe
 <../developer-guide/write-a-recipe.rst>`__ and the `Python API <../reference/python-api.rst>`__ first.
 
 Implementation
@@ -31,10 +31,10 @@ Implementation
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
   settings again in ``reef/service/``.
-- Put the method's record-to-task and task-to-batch stages in
+- Put the method's record-to-task and task-to-job stages in
   ``<method-package>/processor.py``, subclassing ``ReportTasks`` or
-  ``JudgedTasks`` (``reef/record2task/``) and ``Task2Batch``
-  (``reef/task2batch/``), and its record stage in the recipe module.
+  ``JudgedTasks`` (``reef/record2task/``) and ``Task2Job``
+  (``reef/task2job/``), and its record stage in the recipe module.
   Extend those contracts only when they do not already express it.
 - Put the method's backend-neutral training objective in
   ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
@@ -74,25 +74,34 @@ Implementation
 ~~~~~~~~~~~~~~
 
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
-  implementation, framework adapters, bridge code, and plugins inside that
-  subtree.
-- Implement ``TrainingBackend`` from ``reef/runtime/interfaces.py`` for native
-  training operations. ``TrainingRuntime`` in ``reef/runtime/interfaces.py`` is Reef's
-  scheduling interface. The recipe candidate lifecycle is ``CandidateBackend``
-  in ``reef/train/backend.py``.
-- Put the integration's scheduling connection in ``runtime.py`` within its
-  package. Reuse ``reef.train.runtime.ExecutorTrainingRuntime`` when the backend
-  uses Reef's coordinator RPC; keep native optimizer and weight-transfer operations
-  in its ``TrainingBackend`` implementation.
+  implementation, framework adapters, and plugins inside that subtree.
+- Implement ``TrainingComponent`` from ``reef/runtime/jobs.py``. A component
+  runs whole training jobs with the framework's own training loop and saves
+  checkpoints; Reef submits jobs and reads their status. Derive from
+  ``reef.train.local_jobs.LocalJobComponent`` to get durable job directories,
+  one job at a time, and resumption after a restart.
+- Read the job's ``method`` and optional ``scheduling`` parameters with
+  ``reef.train.algos.registry.job_training``, and prepare each job's data
+  with the objective that ``method`` names. Cut the data into optimizer steps
+  with ``reef.train.algos.schedule.schedule_job_data`` under the objective's
+  ``rollout_unit``. Write each
+  ``SavedCheckpoint.release_path`` in a form that serving loads: a Hugging Face
+  checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
+- Implement ``import_start`` to load a published release as the start of the
+  next job. Raise ``ValueError`` when the framework cannot do this; Reef then
+  refuses a rollback for the scenario.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
-- Implement ``TrainingDeployment`` in the integration to describe process preparation
-  and its runtime connection. Implement ``create_training_plan`` when using Reef's
-  shared model driver; return an unstarted trainer and launch data. Reef selects
-  the inference factory independently and owns both lifecycles. In-process integrations can extend
-  ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
-  ``reef.training_backends`` entry-point group; see `Training backend deployment
+- Implement ``TrainingDeployment`` in the integration to describe process
+  preparation, and a ``RuntimeFactory`` that returns the
+  ``TrainingComponent``. Declare the component's ``release_format``; the
+  ``inference`` section builds the serving from it, so the integration builds
+  no serving runtime. A backend with its own serving returns its runtime
+  config from ``trainer_serving_config``. In-process integrations can extend
+  ``InProcessTrainingDeployment``. Expose the definition through a
+  dotted reference or the ``reef.training_backends`` entry-point group; see
+  `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
 - Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
   into framework payloads inside the integration.
@@ -128,25 +137,27 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``type``.
 - For a concrete inference backend, add its native implementation under
   ``reef/inference/<integration>/``. Keep native engine launch, request
-  adaptation, weight reception, and framework imports inside that package.
-  ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
-  it must not import a concrete inference or training implementation.
-  Implement the applicable contracts in
-  ``reef/runtime/interfaces.py`` when integrating with managed
-  training and publication. Import those contracts instead of the coordinator.
-  Put the integration's ``InferenceRuntime`` implementation in its ``runtime.py``;
-  it may reuse ``reef.inference.runtime.ExecutorInferenceRuntime`` with an explicit
-  request handler. Shared monitoring and engine recovery belong in
-  ``runtime/recovery.py``; publication, residency and transfer locking belong in
-  ``runtime/publication.py``. Shared contracts and version values belong in
+  adaptation, weight loading, and framework imports inside that package.
+  ``reef/runtime/`` holds Reef's backend-neutral interfaces; it must not
+  import a concrete inference or training implementation. Implement
+  ``InferenceBackend`` from ``reef/runtime/interfaces.py``, including
+  ``load_weight_files``, so that the serving runtimes in
+  ``runtime/serving.py`` can load published releases. Expose an inference
+  service factory through a dotted reference or the
+  ``reef.inference_backends`` entry-point group, so the inference component
+  can start the engines. Shared monitoring and engine recovery belong in
+  ``runtime/recovery.py``; adapter residency belongs in
+  ``runtime/residency.py``. Shared contracts and version values belong in
   ``runtime/interfaces.py``.
 - For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
   and load the selected integration from service assembly. ``RuntimeFactory`` and
   factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
   package: importing ``reef.runtime`` does not register integrations or re-export
-  classes. Keep its top level limited to ``interfaces.py``, ``scheduler.py``,
-  ``deployment.py``, ``publication.py``, ``recovery.py`` and ``executor/``.
+  classes. Keep its top level limited to ``interfaces.py``, ``jobs.py``,
+  ``durable_files.py``, ``deployment.py``, ``recovery.py``, ``residency.py``,
+  ``serving.py`` and ``executor/``. A training component is not a runtime: its
+  ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``.
 - A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
@@ -186,7 +197,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
 - Put request preparation and response verification in ``InferenceHooks``,
-  restore/recovery behavior in ``ArtifactLoader``, and client-pull delivery in
+  activation and recovery behavior in ``ArtifactLoader``, and client-pull delivery in
   ``FileTree`` under ``reef/surface/``.
 - Build the surface from the owning recipe; do not make the surface choose a
   method or evaluate a candidate.

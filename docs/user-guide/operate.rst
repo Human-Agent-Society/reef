@@ -18,7 +18,21 @@ Check health and status
    curl -f "$REEF_URL/healthz"
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" "$REEF_URL/reef/status"
 
-``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, the number of loaded scenarios (``loaded_scenarios``), and for every scenario its step counter, latest committed step outcome, runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. The committed outcome includes the recipe-owned metrics, so a skipped or rejected update is distinguishable from one that is still running. It is the first place to look when requests keep being served by an old version.
+``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side. It reports these values for the deployment:
+
+- the last asynchronous error
+- model preload failures
+- the number of loaded scenarios (``loaded_scenarios``)
+
+It reports these values for every scenario:
+
+- the step counter and the latest committed step outcome
+- the runtime load ID that the engines serve
+- whether a job's data is waiting, and the processor's state
+- whether inference is admitted or paused while a release loads
+- for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
+
+The committed outcome includes the recipe-owned metrics. You can therefore tell a skipped or rejected update from one that is still running. Look here first when requests keep being served by an old version.
 
 The service and every process ``reef serve`` started write logs under ``reef.run-dir`` (``.reef/run/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
 
@@ -98,35 +112,53 @@ Roll back
      -d '{"release_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/rollback"
 
-Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints. Live runtime load IDs that were never checkpointed cannot be restored, and the bundled Ray/Slime runtime does not implement checkpoint restoration, so rollback restores weights only under the ``tinker`` backend and otherwise applies to harness artifacts; for Ray/Slime weights, redeploy from the checkpoint you want.
+Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints.
+
+A weight rollback also moves where training continues. Reef first imports the target release into the training component. Reef then writes the rollback commit and cancels the running job. The next job starts from the imported release. The ``tinker`` backend imports the release's checkpoint manifest, so a Tinker scenario can roll back. The ``slime`` backend refuses every import, because its workers continue from their own latest checkpoint. Reef then refuses the rollback with HTTP 409. Harness releases roll back without a training component.
+
+Reef cannot move a Slime scenario back to an earlier checkpoint. To train again from one, start a new deployment for a new scenario:
+
+- Give the deployment its own ``save`` and ``save-hf`` directories. The Slime component does not overwrite a rollout that it saved before.
+- Point Slime at the old checkpoint with its own options in ``training.options``: ``load`` names the old ``save`` directory, and ``ckpt-step`` names the saved rollout.
+
+The new scenario's first job continues from the weights that the workers loaded. An existing scenario cannot move to the new deployment: its committed start names a checkpoint of the old one, so the Slime component refuses its jobs.
 
 Set the checkpoint cadence
 --------------------------
 
-Reef serves only weights that the training backend saved and that passed candidate evaluation. Each version whose checkpoint the backend saves becomes an artifact. A Tinker deployment saves each version. A Slime training deployment saves its training checkpoint after each ``N``-th scenario version, where ``N`` is ``save-interval`` in ``training.options``. This checkpoint is the Megatron checkpoint and the HF export. Megatron requires ``save-interval`` with ``save``, so set it explicitly. Under Reef it counts scenario versions, not Slime rollouts.
+Reef serves only weights that a training job saved and that passed candidate evaluation. Every checkpoint that a job saves is a candidate. Without an ``evaluation`` section, Reef publishes every candidate as a release. The next job always starts from the last saved checkpoint, whether or not evaluation selected it.
 
-Set ``1`` to save and publish after each training job. If these saves use too much of each step, set a larger ``N``. The jobs between two saves keep no checkpoint, so they publish nothing: their records, metrics and algorithm state are committed, serving stays on the last saved release, and the trainer keeps training from its own weights. The next saved version carries their updates. The driver does not start with ``--release-train`` when the value is above 1.
+How often a job saves depends on the backend:
 
-A crash or a stop loses the training of the jobs after the last save. That is a maximum of ``N`` - 1 jobs. At the next start, training continues from the last saved checkpoint. The batches of the lost jobs do not train again. Per-scenario LoRA applies the same rule to each scenario, as if each scenario trained its own full weights. Each scenario counts its own versions, saves after its own ``N``-th version, and loses a maximum of ``N`` - 1 of its own jobs. At the next start, Reef publishes each scenario's last save under a new runtime load ID. The scenario serves that checkpoint until its next saved version passes evaluation.
+- A Slime or Tinker job saves a checkpoint every ``save_interval`` optimizer steps, and at its end. ``save_interval`` is a job parameter: the recipe's job plan sets it, and ``recipe.config.job_parameters`` sets it for the default plan. Without it, a job saves one checkpoint at its end.
+- A Slime checkpoint is the Megatron checkpoint and its HF export (with LoRA, the PEFT adapter). Each run of ``save_interval`` steps trains as one Slime rollout (one ``rollout_id``, Slime's unit of training). ``save-interval`` in ``training.options`` does not change this cadence. Megatron requires ``save-interval`` together with ``save``, so keep both set.
 
-On a training deployment, checkpoint retention runs under ``--reef-checkpoint-policy`` (``latest`` or ``best_reward``) with storage-fraction limits; when storage is blocked the step is deferred rather than failed, and ``/reef/status`` shows ``checkpoint_storage``.
+A Slime deployment bounds its checkpoints on disk with options in ``training.options``:
+
+- ``--reef-checkpoint-policy``: ``latest`` or ``best_reward``.
+- ``--reef-checkpoint-max-storage-fraction`` (default 0.8) and ``--reef-checkpoint-min-free-space-fraction`` (default 0.1).
+- ``--reef-checkpoint-max-storage`` and ``--reef-checkpoint-min-free-space``.
+
+Retention never deletes the checkpoint that the next job starts from. When storage cannot hold the next checkpoint, the job fails. The service log names the error, and the commit that ends the job records it in the ``training_job`` metric. A failed job ends like a finished one. Reef consumed the records of its data when it submitted the job, so they do not train again. The next job starts from the last saved checkpoint.
+
+``--critic-save-interval`` (default 1) in ``training.options`` sets how many saved Slime rollouts pass between two critic checkpoints.
 
 Track experiments with W&B
 --------------------------
 
-Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and the Slime driver refuses ``--wandb-key`` so a credential never enters a command line or a run config.
+Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and Reef refuses Slime's ``--wandb-key`` flag so a credential never enters a command line or a run config.
 
 What you see in W&B: one group per scenario and one run per scenario, plus a new run after every rollback, so each post-rollback branch is its own curve. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
-processor queues, waiting ages, active training and weight-sync durations,
-request counts and latency, admission waits, record acceptance/rejection,
-version-mismatch rejections, and stale training batches. Pure inference
+processor queues, waiting ages, training execution durations, request
+counts and latency, admission waits, record acceptance/rejection and
+version-mismatch rejections. Pure inference
 scenarios also upload these samples. These samples do not
 require status polling or a successful training commit. Read the `metric
 definitions <../reference/configuration.rst#operational-metrics>`__ before
-interpreting queue counts: a reserved batch may be executing, and manual-mode
+interpreting queue counts: reserved job data may be executing, and manual-mode
 data may intentionally wait.
 
 Restart and recovery
@@ -148,11 +180,15 @@ What survives a restart, provided the storage paths are persistent:
      - in the Git LFS repository; the recovered head is what is served
    * - algorithm state and record progress
      - restored from the head record of the commit history
-   * - the training of the jobs after the last save
-     - not recoverable; training continues from the last saved checkpoint
-   * - a training step in flight
-     - not recoverable; the batch is replayed after the step is settled
-   * - a local cycle's batch (a harness step) when the service stops
+   * - a training job in flight
+     - resumed: the training component runs the job again after the
+       restart, and Reef keeps polling it. A Tinker job continues after its
+       last saved checkpoint. A Slime job trains its data again from the
+       latest checkpoint, unless it saved its checkpoint before the stop
+   * - checkpoint decisions of a running job
+     - each decision is committed; a restart evaluates only the
+       checkpoints that have no committed decision
+   * - a local cycle's job data (a harness step) when the service stops
      - kept: once shutdown begins, a local cycle commits nothing and no
        new one starts, since its model calls go through the stopping
        service; after the next start the local cycles of a composite
@@ -168,7 +204,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. A scenario whose weight training job is out at its backend answers 409 until the job has landed.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
 
 Choose the storage backend
 --------------------------
@@ -343,7 +379,9 @@ keeps a copy of the files.
 
 The import runs again each time a scenario opens. To add tasks, add them to the
 manifest and the directory, and then restart the service or reload the
-scenario. A task that is already imported with the same files and split does
+scenario. To add tasks to one running scenario without a restart, upload them
+with ``POST /reef/scenarios/{scenario}/tasks`` (`Upload Harbor tasks
+<../reference/http-api.rst#upload-harbor-tasks>`__). A task that is already imported with the same files and split does
 not change. A scenario does not open, and the error says why, when:
 
 - a task directory is missing, or Harbor cannot load it;
@@ -405,8 +443,8 @@ A scenario is idle when all of these conditions are true:
 - No trainer has records that it would still train on.
 - The storage backend is durable.
 
-Reef never unloads a weight-training scenario, because only a delete releases
-its runtime binding.
+A weight-training scenario holds the deployment's training component and its
+running job. Only a delete releases them, so Reef never unloads the scenario.
 
 The start-up preload also obeys ``max-loaded-scenarios``. If no loaded
 scenario is idle, Reef does not preload the next scenario. That scenario loads

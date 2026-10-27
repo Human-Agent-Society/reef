@@ -1,30 +1,25 @@
-"""The generated-task rollout: Reef runs saved tasks itself and trains on their episodes.
+"""The generated-task task jobs: the task pool, the tasks handed out to one job, and the IDs its commit lists.
 
-A rollout episode is not a record. Its agent's model calls carry ``ROLLOUT_HEADER``
-(:mod:`reef.core.records_types`), so the service keeps no record of them, and the episode comes back with its
-answered calls. ``GeneratedTaskBatches`` owns the whole path from a saved task to a training sample, and gives
-the pipeline its samples as its own batch (``Task2Batch.own_batch``); the record stages never see a rollout
-episode. One rollout batch runs at a time:
+The training component rolls the tasks of a task job out itself; Reef runs no episode of them. One job's
+tasks are handed out at a time:
 
-1. When no rollout batch runs, the stage takes up to ``tasks_per_step`` tasks from its ``TaskPool`` and
-   submits them. Each submitted task gets a task use ``u``, distinct within the batch.
-2. When the batch's episodes end, ``samples : U ⇀ TrajectoryItem⁺`` gives the samples of each task use whose
-   episodes can train together, its group. A use without a group is absent.
-3. The stage drops each group whose samples a version produced that is more than ``max_staleness`` versions
-   behind the version the scenario serves. The groups that are left, ``fresh_uses``, are the own batch.
-4. A task whose group did not train, because it was stale or the backend dropped the batch, goes back to the
-   pool. A task without a group stays out of the pool until a restart. A trained task's commit lists
-   ``rollout:<task use>``, and the task is marked trained once that ID is released after the commit is durable.
+1. When no tasks are handed out, ``GeneratedTaskJobData`` takes up to ``tasks_per_step`` tasks from its
+   ``TaskPool`` as the next job's data (``Task2Job.own_job_data``). Each task gets a task use ``u``, distinct
+   within the hand-out.
+2. When the trainer commits the job's submission, the commit lists ``rollout:<task use>``; each task is
+   marked trained once that ID is released after the commit is durable.
+3. When the job's end is durable, the tasks leave the pool, and the stage saves each task's first result
+   from the job's metrics.
 """
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable
 from dataclasses import dataclass
 
-from reef.core.batches import TaskItem, TrajectoryItem
+from reef.core.job_data import TaskItem
 
-#: The prefix of the ID that a commit lists for a trained rollout group.
+#: The prefix of the ID that a commit lists for a task of a submitted task job.
 CONSUMED_ROLLOUT_PREFIX = "rollout:"
 
 
@@ -35,13 +30,13 @@ def consumed_rollout_id(task_use: str) -> str:
 
 @dataclass(frozen=True)
 class PooledTask:
-    """A saved task that waits to roll out.
+    """A saved task that waits for a task job.
 
     Values: ``task_id`` identifies the task in its pool. ``arrival_index``
     orders the tasks of a pool. ``group_key`` names what the task came from,
-    such as its generation. ``item`` is the task that a rollout runs.
-    Purpose: a ``TaskPool`` holds it; the pipeline takes it from the pool to
-    submit it in a rollout batch, and puts it back when the batch did not train it.
+    such as its generation. ``item`` is the task that the job rolls out.
+    Purpose: a ``TaskPool`` holds it; the task-to-job stage takes it from the
+    pool for a task job, and drops it when the job ends.
     """
 
     task_id: Hashable
@@ -51,14 +46,14 @@ class PooledTask:
 
 
 class TaskPool:
-    """The saved tasks that wait to roll out, and the ones that a rollout batch took.
+    """The saved tasks that wait for a task job, and the ones that a task job took.
 
     Values: ``waiting`` and ``taken`` are disjoint finite sets of ``PooledTask`` values with distinct
     ``task_id``; ``arrival_count`` is larger than the ``arrival_index`` of each task that ``add`` made.
-    ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``put_back`` moves taken tasks
-    back with their indices; ``drop`` removes taken tasks; ``add`` gives a new task a new index.
-    Purpose: a rollout task-to-batch stage holds it. The stage that makes tasks adds them; the pipeline takes
-    a rollout batch's tasks from it, and puts back or drops them when the batch ends.
+    ``take`` moves the oldest waiting tasks by ``arrival_index`` to ``taken``; ``drop`` removes taken tasks;
+    ``add`` gives a new task a new index.
+    Purpose: ``GeneratedTaskJobData`` holds it. The record stage adds each round's tasks; the task-to-job
+    stage takes a job's tasks from it, and drops them when the job ends.
     """
 
     def __init__(self) -> None:
@@ -72,13 +67,13 @@ class TaskPool:
 
     @property
     def is_idle(self) -> bool:
-        """Whether no task waits and no rollout batch holds one."""
+        """Whether no task waits and no task job holds one."""
         return not self.waiting and not self.taken
 
     def add(self, task_id: Hashable, item: TaskItem, *, group_key: Hashable | None = None) -> None:
         """Add a task after the waiting ones. A task with a waiting ID replaces it; a taken ID is refused."""
         if task_id in self.taken:
-            raise ValueError(f"task {task_id!r} is in a rollout batch")
+            raise ValueError(f"task {task_id!r} is in a task job")
         self.arrival_count += 1
         self.waiting[task_id] = PooledTask(task_id, self.arrival_count, group_key, item)
 
@@ -89,38 +84,45 @@ class TaskPool:
             self.taken[task.task_id] = self.waiting.pop(task.task_id)
         return taken
 
-    def put_back(self, tasks: tuple[PooledTask, ...]) -> None:
-        """Return taken tasks to the waiting ones, in their old arrival order."""
-        for task in tasks:
-            self.waiting[task.task_id] = self.taken.pop(task.task_id)
-
     def drop(self, tasks: tuple[PooledTask, ...]) -> None:
-        """Remove taken tasks: they trained, or they cannot train before a restart."""
+        """Remove taken tasks: their task job ended."""
         for task in tasks:
             self.taken.pop(task.task_id)
 
 
 @dataclass(frozen=True)
-class ActiveRollout:
-    """The rollout batch that runs, or that waits for its training.
+class HandedOutTasks:
+    """The tasks of the next task job, from hand-out until the trainer commits the job's submission.
 
-    Values: ``task_uses`` are the batch's task uses, and ``tasks`` the pooled tasks that they run, in the same
-    order. ``samples`` is None while the episodes run; then it maps each task use that has a group to its
-    samples, a non-empty tuple. ``fresh_uses`` are the uses, in submit order, whose groups passed the
-    staleness check; they train.
-    Purpose: ``GeneratedTaskBatches`` keeps it from submit until the batch trains or ends.
+    Values: ``batch`` is the hand-out's ID, ``<scenario>:rollout:<hex>``. ``task_uses`` are its task uses,
+    ``<batch>/<task name>``, distinct, one for each of ``tasks``, the pooled tasks, in the same order.
+    Purpose: ``GeneratedTaskJobData`` makes it when it takes the tasks from the pool, and reads it when the
+    submission commits.
     """
 
     batch: str
     task_uses: tuple[str, ...]
     tasks: tuple[PooledTask, ...]
-    samples: Mapping[str, tuple[TrajectoryItem, ...]] | None = None
-    fresh_uses: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if len(self.task_uses) != len(self.tasks):
-            raise ValueError("a rollout batch has one task use for each task")
-        if self.samples is not None and any(not group for group in self.samples.values()):
-            raise ValueError("a rollout group holds at least one sample")
-        if not set(self.fresh_uses) <= set(self.samples or {}):
-            raise ValueError("a fresh task use has a group")
+        if len(self.task_uses) != len(self.tasks) or len(set(self.task_uses)) != len(self.task_uses):
+            raise ValueError("handed-out tasks have one distinct task use for each task")
+
+
+@dataclass(frozen=True)
+class SubmittedTaskJob:
+    """The tasks of one submitted task job, until the commit of its submission is durable.
+
+    Values: ``task_names`` are the distinct, non-empty names of the job's tasks, and ``consumed_ids`` the
+    non-empty IDs that the submission's commit lists for them. Purpose: ``GeneratedTaskJobData`` makes it when
+    the submission commits, and marks ``task_names`` trained once one of ``consumed_ids`` is released.
+    """
+
+    task_names: tuple[str, ...]
+    consumed_ids: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not self.task_names or len(set(self.task_names)) != len(self.task_names) or not all(self.task_names):
+            raise ValueError("a submitted task job has distinct, non-empty task names")
+        if not self.consumed_ids:
+            raise ValueError("a submitted task job's commit lists one or more IDs")

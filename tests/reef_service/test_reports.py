@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from recipes.tttd import TTTDBatches, TTTDGridSettings, TTTDGroupedRolloutReport, TTTDRecord2Record, TTTDTasks
+from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDTasks
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
@@ -254,7 +254,7 @@ def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
         context,
         record2record=record2record,
         record2task=TTTDTasks(SampleAssemblySettings(), record2record),
-        task2batch=TTTDBatches(context, record2record, None),
+        task2job=TTTDJobData(context, record2record, None, None),
     )
     processor.push(
         AgentRecord.create(
