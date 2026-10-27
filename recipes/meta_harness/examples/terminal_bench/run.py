@@ -76,7 +76,11 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> MetaHarnessReci
 
 
 def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
-    """Use persistent artifacts and SQLite records so a new process can resume."""
+    """Use persistent artifacts and SQLite records so a new process can resume.
+
+    ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
+    cycle that its preload starts would commit the same replayed step a second time.
+    """
     return Dispatcher(
         recipe,
         GitLFSRepositoryBackend.factory(
@@ -85,6 +89,7 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
             cache_dir=directory / "artifact-cache",
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
+        hold_local_cycles=True,
     )
 
 
