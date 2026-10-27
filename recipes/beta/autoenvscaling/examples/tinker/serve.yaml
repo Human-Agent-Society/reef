@@ -1,5 +1,5 @@
 # AutoEnvScaling on Tinker: a coding agent rebuilds recorded sessions as Harbor tasks, and the served model trains on them.
-# The built-in generated-task recipe runs the tasks and trains; AutoEnvScaling is the task generator.
+# The built-in generated-task recipe hands the tasks to Tinker, which rolls them out and trains; AutoEnvScaling is the task generator.
 # Supply TINKER_API_KEY, E2B_API_KEY and REEF_AUTOENVSCALING_DESIGNER_TOKEN through the shell, never here.
 # REEF_AUTOENVSCALING_STATE_DIR is where this deployment keeps its state; REEF_AUTOENVSCALING_SOURCES_PATH lists the
 # recorded sessions; REEF_AUTOENVSCALING_DESIGNER_URL is the Reef that serves the agent's model and holds the sessions.
@@ -15,10 +15,10 @@ inference:
   model-path: Qwen/Qwen3-8B
   # An agent's episode is many turns.
   timeout-s: 1800
-# The generator service: writes and checks the agent's tasks and runs their episodes, on the host that has Docker and harbor.
+# The generator service: writes and checks the agent's tasks, on the host that has Docker and harbor.
 generator:
   tasks-root: ${REEF_AUTOENVSCALING_STATE_DIR}/tasks
-  # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
+  # The agent of the generator service's own episodes, thinking off.
   agent:
     name: terminus-2
     model_name: openai/{model}
@@ -32,12 +32,33 @@ generator:
             enable_thinking: false
 recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+  config:
+    job_parameters:
+      # Tinker's own rollout of each task job: the episodes run on Tinker's sampler at the job's start weights.
+      rollout:
+        # The training episodes of each task form one group.
+        episodes_per_task: 4
+        concurrency: 2
+        environment: docker
+        # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+        scaffold_tolerance: 8
+        # The Reasoning Agent, thinking off: a thinking model's episode never assembles into one sample.
+        agent:
+          name: terminus-2
+          model_name: openai/{model}
+          kwargs:
+            api_base: "{base_url}/v1"
+            llm_kwargs:
+              api_key: "{api_key}"
+              extra_body:
+                chat_template_kwargs:
+                  enable_thinking: false
 # The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The next round is due after batches_per_round batches trained.
+  # The next round is due after jobs_per_round jobs trained.
   record2record:
     config:
-      batches_per_round: 2
+      jobs_per_round: 2
   # The rounds: one generation of tasks each, run through the generator service.
   record2task:
     config:
@@ -65,21 +86,17 @@ pipeline:
           # A model call on the same Reef reviews each task's tests; a task they grade on what the instruction does
           # not state is refused.
           review: refuse
-  # A rollout batch is tasks_per_step saved tasks; it trains on the fresh groups of their episodes.
-  task2batch:
+  # One task job holds tasks_per_step saved tasks; Tinker rolls them out and trains on their task groups.
+  task2job:
     config:
       tasks_per_step: 2
-      # The training episodes of each task form one group.
-      episodes_per_task: 4
-      # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
-      scaffold_tolerance: 8
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 1800
   options:
     state-dir: ${REEF_AUTOENVSCALING_STATE_DIR}/tinker
-    # Episodes in one batch and one optimizer step: two complete task groups of episodes_per_task episodes.
+    # Episodes in one optimizer step: two complete task groups of episodes_per_task episodes.
     batch-size: 8
     lora-rank: 32
     learning-rate: 0.00004

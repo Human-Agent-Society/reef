@@ -9,15 +9,18 @@ It includes a record id, a scenario, an inference payload (for inference
 exchange) or feedback (for report), and necessary metadata (e.g. request type
 or artifact identifier used for serving).
 
-``RecordStore`` defines record append, replay, compaction, and audit operations.
-It does not know about trainers, artifact publication, or committed scenario
-steps. ``SQLiteRecordStore`` and ``PostgresRecordStore`` share SQL record operations
-while supplying their own database connections, schemas, and transactions.
+``RecordStore`` defines record append, replay, audit, and consumption receipt
+operations. It does not know about scenario lifecycle, commits, artifact
+publication, or training. ``SQLiteRecordStore`` and ``PostgresRecordStore``
+share SQL record operations while supplying their own database connections,
+schemas, and transactions.
 
-Compaction retires records from training while retaining their bodies for audit.
-It retires only rows the processor marks releasable, and Reef recomputes that
-set from current state on every read. Separate retention maintenance physically
-purges old compacted bodies while keeping retry hashes and commit metadata.
+Consumption does not delete a record: reads include every retained body,
+whether a trainer consumed it or not. Each trainer keeps its own consumption
+in its commits (see `Commit ordering`_). Retention evicts the oldest record
+bodies only when the deployment-wide byte budget is full. It keeps the retry
+hashes, so a retry with different content still conflicts, and it keeps the
+commit metadata.
 
 With a database path configured, the SQLite store uses WAL journalling and
 synchronous = FULL. The default in-memory database is for tests and does not
@@ -32,11 +35,15 @@ the selected model or harness content, and ``runtime_load_id`` names a concrete
 serving-engine weight load. Every release refers to durable bytes: Reef serves
 only weights that a training job saved and that passed candidate evaluation.
 
-The training backend decides which versions are saved. A Slime deployment saves
-each ``save-interval``-th version. The versions between two saves are trained
-but not published: serving stays on the last saved release, and the next saved
-version carries their updates. A restart resumes training from the last saved
-checkpoint; the step counter, algorithm state, and record progress survive.
+The training component decides which checkpoints a job saves. A Slime or
+Tinker job saves a checkpoint every ``save_interval`` optimizer steps when
+the job's parameters set it, and one when the job ends. Each saved checkpoint becomes a candidate.
+A selected candidate becomes a release. Reef commits a rejected candidate
+without a release, and serving stays on the previous release. The next job
+starts from the newest saved checkpoint whether or not it was selected:
+evaluation decides only what is served. A restart resumes from the committed
+state. The step counter, the weight trainer's state, and record progress
+survive.
 
 A release binds one or more named components. Every shipped recipe declares
 one, so its releases are flat: the artifact is the component and its
@@ -64,25 +71,22 @@ Commit ordering
 its task stores. It validates step progression and settles record
 consumption with each commit.
 Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` handles
-registration and release selection, then ``recover_scenario`` opens a session
-and returns the complete ``Scenario``. The scenario owns that session and
-coordinates trainer and artifact operations. The default ``SQLiteScenarioStorage`` assembles
-``SQLiteRecordStore`` with ``CommitHistoryScenarioStore`` and keeps commits in
-append-only JSONL; its fsynced append is the commit point.
-``PostgresScenarioStorage`` keeps commits in a table; the committed row is the
-commit point. A committed step
-records its step number, artifact ref, checkpoint flag, algorithm state, record
-high-water mark, consumed record IDs, compaction retirements, metrics, and
-training job identity. Existing databases and logs require no conversion.
+registration and release selection, opens a storage session, and returns the
+complete ``Scenario``. The scenario owns that session and
+coordinates trainer and artifact operations. Both built-in storages
+assemble their record store with ``CommitHistoryScenarioStore`` and keep
+commits in a ``scenario_commit`` table of the record database.
+``SQLiteScenarioStorage`` keeps one database file per scenario;
+``PostgresScenarioStorage`` keeps every scenario in one schema. The committed
+row is the commit point. A committed step records its step number, artifact
+ref, checkpoint flag, algorithm state, record high-water mark, consumed record
+IDs, metrics, training job ID, and, in a scenario of several trainers, the
+component that made it.
 
 ``commit_step(expected_step=..., commit=...)`` validates the expected scenario
-step before accepting its successor. Identical retries return the original
-commit; different content for that step or a stale expected step conflicts.
-The default adapter appends the commit before applying SQLite compaction.
-These are separate writes: once the append is durable, a compaction failure
-does not undo the commit. Retrying the same commit or running startup recovery
-repairs the remaining compaction. A database adapter may settle both in one
-database transaction while preserving this public contract.
+step before accepting its successor. Identical retries (ignoring only
+``recorded_at``) return the original commit; different content for that step
+or a stale expected step conflicts.
 
 ``ScenarioCommitter`` keeps artifact operations outside the store. For a
 durable store, the order is:
@@ -93,71 +97,75 @@ durable store, the order is:
 
    * - Commit kind
      - Order after trainer preparation
-   * - Saved checkpoint or rollback
-     - Publish durable bytes, commit the store, install the committed heads,
-       synchronize the backend pointer, apply trainer state.
-   * - Local saved artifact
-     - Stage bytes, commit the store, advance the process-local head,
-       apply trainer state.
+   * - Selected checkpoint
+     - Stage the bytes, load them into serving, publish the durable release,
+       commit the store, install the committed heads, synchronize the backend
+       pointer, apply trainer state.
+   * - Rollback or promote
+     - For a rollback to other weights, import the release into the training
+       component. Load the release into serving if it holds other content,
+       publish it as a new release, commit the store, install the committed
+       heads, apply trainer state. After a rollback, the next job starts from
+       the imported release.
    * - No artifact
-     - Commit the store, apply trainer state; keep the artifact head.
+     - Commit the store, apply trainer state; keep the artifact head. A job
+       submission, a rejected checkpoint, and a job's end commit this way.
    * - Pending checkpoint
      - Publish durable bytes, commit the store, apply trainer state;
        leave serving and checkpoint heads in place.
 
 Every trainer is bound to a release component (``records`` when the recipe
 serves none). With several trainers, every commit record names the
-``component`` that made it. A scenario of one trainer names none, so its
-records, checkpoint metadata and drop receipts keep the format they had
-before components.
+``component`` that made it. In a scenario of one trainer, commit records,
+checkpoint metadata and drop receipts name no component.
 
 A scenario runs one training step at a time, whatever the number of its
 trainers:
 
-- A local cycle holds the scenario's cycle lock from preparation to commit.
-- The training thread holds the same lock for a dispatched turn, from the
-  reservation of the batch to the acknowledgement of the job. While a local
-  cycle holds the lock, the training thread skips the scenario. The end of
-  the cycle wakes the thread again.
-- A local cycle prepares nothing while a dispatched batch is reserved, for
-  example while checkpoint storage blocks the job.
-- A rollback or a promote refuses to run while any batch is reserved.
+- Each trainer has a worker. A worker cycle holds the scenario's cycle lock
+  from preparation to commit.
+- A weight trainer commits in short cycles: one submits a job, one decides
+  each saved checkpoint, and one records the job's end. While its job runs,
+  the worker reads the job's status every 2 seconds. Each read is a short
+  cycle, and the lock is free between them.
+- A rollback or a promote refuses to run while any job data is reserved.
 
 Thus the head does not move under a step, and every step commits on the
 release that it was prepared against.
 
-When a commit fails, Reef rebuilds the scenario from durable state at once.
-A failed local cycle rebuilds it itself, and the training thread rebuilds it
-after a failed turn. A local cycle that still runs on the old instance keeps
-that instance open until it ends. Then it commits nothing and looks again on
-the rebuilt instance, which has not read its rows. A local cycle whose
-scenario is deleted under it also ends without a commit.
+When a commit fails, the worker rebuilds the scenario from durable state at
+once. A cycle that still runs on the old instance keeps that instance open
+until it ends. Then it commits nothing and looks again on the rebuilt
+instance, which has not read its rows. A cycle whose scenario is deleted
+under it also ends without a commit.
 
 A commit retires no row, so the trainers share every stored row and each
 keeps its own consumption: a row one trainer consumed is still there for the
-others. A batch that a trainer drops as stale goes on a consumption receipt
+others. Job data that a trainer drops as stale goes on a consumption receipt
 that names its component. On restart each trainer recovers its state and
 read cursor from its own commits and skips the rows its own commits and
 receipts name, which needs durable commit storage.
 
-Without a durable store, live and local saved releases advance the serving
-head before settling the in-memory commit. A conflicting head therefore
-rejects the step before its records are compacted. In-memory commit history
-supports retries only for the lifetime of that session.
+Without a durable store, a saved release advances the serving head before
+the in-memory commit settles. A conflicting head therefore rejects the step
+before its records are consumed. In-memory commit history supports retries
+only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
 under ``scenario_commit_record``. Recovery decodes it into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
-repairs that pointer. An older checkpoint ahead of the local log can
-be adopted into the log. Recovery repairs compaction, replays retained records
-through the committed watermark while excluding every committed step's
-consumed IDs, and restores the read cursor. The watermark is a read position:
-retained records behind it can still belong to an incomplete batch.
+repairs that pointer. An older checkpoint ahead of the commit history can
+be adopted into the history. Recovery replays retained records through the
+committed watermark while excluding every committed step's consumed IDs, and
+restores the read cursor. The watermark is a read position:
+retained records behind it can still belong to incomplete job data.
 
-Runtime work happens outside the transaction, so the training step must succeed
-before its batch is acknowledged. After an ambiguous commit error, history is
-authoritative: callers must reconcile or retry the same commit before
+Training jobs run outside the transaction. A job's ID is a hash of the
+scenario, the backend, the start, the records of the job's data, and the parameters.
+A retry after a crash therefore submits the same job, and the component
+ignores a job ID it already has. After an ambiguous commit error, history is
+authoritative. Callers must reconcile or retry the same commit before
 publishing another version. Each scenario still needs exactly one logical Reef
 writer; expected-step validation does not provide distributed leases or make
 external training operations atomic. Those operations must be idempotent or

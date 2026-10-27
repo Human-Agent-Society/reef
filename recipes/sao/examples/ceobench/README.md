@@ -31,7 +31,7 @@ harness/               the benchmark's bash agent (imports reef_client, not reef
   tools.py               its six tools, run in the agent's workspace inside the task container
   harbor_agent.py        plays one trial with the agent served by Reef and its weeks credited
   report.py              the reward, from weeks and valuation to scaled scores, posting, and the pacer
-serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
+serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic on the actor GPUs
 docker-compose.yaml    the stack in the reef image with host networking and six GPUs
 run.py                 one episode, trained while it is played
 run.sh                 brings the stack up and runs run.py through reef-eval
@@ -174,8 +174,8 @@ decision turn of week N is reported with the week's credit as its score.
   `CEOBENCH_TRAIN_MAX_TOKENS` (24k, the trainer's window).
 
 The game is paced to the trainer through `CEOBENCH_PACE_BATCH`, which is the
-recipe's batch size of 8. Before each model call the harness reports the
-weeks whose credit window has closed and then waits until every filled batch
+deployment's `job_samples` of 8. Before each model call the harness reports the
+weeks whose credit window has closed and then waits until every filled job
 has committed a release, so a week is played by a policy trained on every
 week reported so far. A wait longer than `CEOBENCH_PACE_TIMEOUT_S` (20
 minutes) is forgiven. `CEOBENCH_REPORTS=0` turns reporting and pacing off,
@@ -197,10 +197,10 @@ CEOBENCH_SEED=42 CEOBENCH_DAYS=500 ./run.sh
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (`~/models`),
 `RUN_DIR` (`./work`), and `REEF_GPU_0..5`. Those are the six devices the
-stack uses, four actor GPUs at TP4 with the critic colocated and a two-GPU
-rollout engine. The policy is `Qwen3.6-27B` trained through Megatron Bridge
+stack uses, four actor GPUs at TP4 with the critic on the same GPUs and a two-GPU
+serving engine. The policy is `Qwen3.6-27B` trained through Megatron Bridge
 LoRA. The base stays frozen in the actor and in the SAO critic, the adapters
-and the critic's value head train, and the rollout engine serves the
+and the critic's value head train, and the serving engine serves the
 published adapter. Turns longer than `CEOBENCH_TRAIN_MAX_TOKENS` (24k
 tokens, the largest a step fits beside the two resident bases, with the
 budget worked out in the header of `serve.yaml`) are served and recorded but
@@ -221,11 +221,11 @@ commits before the actor's first update (`num-critic-only-steps`). An empty
 directory now fails startup when `critic-init` is set. Leave the option
 commented out for a cold start. Replicates are independent runs from the base
 model with one stack each, so run `docker compose down` between them or use
-a fresh `RUN_DIR`. A Reef process trains one scenario for its lifetime, and
+a fresh `RUN_DIR`. A Slime deployment trains one scenario for its lifetime, and
 a second seed on the same stack would start from the first seed's adapter.
-After the episode `run.py` waits until the scenario's training releases
-have stopped growing for fifteen quiet minutes, which is longer than one
-step, so the adapter on disk is the one the episode ended with:
+After the episode, `run.py` waits until the scenario's training releases
+have stopped growing for fifteen quiet minutes. This is longer than one step,
+so the adapter on disk is the one the episode ended with:
 
 ```bash
 curl -sS -H "Authorization: Bearer $(cat work/token)" \

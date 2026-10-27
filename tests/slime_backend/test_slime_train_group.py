@@ -23,10 +23,9 @@ class _RemoteMethod:
 def _worker(rank):
     return SimpleNamespace(
         init=_RemoteMethod(0),
-        set_runtime_load_id_for_update=_RemoteMethod(f"prepare-{rank}"),
         pop_metrics=_RemoteMethod({"rank": rank}),
-        get_runtime_load_id=_RemoteMethod("incarnation:4"),
-        update_weights=_RemoteMethod(f"updated-{rank}"),
+        save_model=_RemoteMethod(f"saved-{rank}"),
+        parallel_layout=_RemoteMethod({"dp_size": 2, "cp_size": 1}),
     )
 
 
@@ -47,7 +46,7 @@ def ray_group(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(actor_group.ray, "kill", lambda actor, *, no_restart: killed.append((actor, no_restart)))
     monkeypatch.setattr(actor_group.time, "sleep", lambda duration: None)
     group = SlimeTrainGroup(
-        args=SimpleNamespace(update_weight_mode="full", update_weight_transport="nccl"),
+        args=SimpleNamespace(reef_executor_backend="auto", reef_train_executor_options={}),
         num_nodes=1,
         num_gpus_per_node=2,
         pg=placement,
@@ -59,32 +58,31 @@ def ray_group(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.unit
-def test_bridge_facing_train_group_methods_fan_out(ray_group) -> None:
+def test_train_group_methods_fan_out(ray_group) -> None:
     group, workers, *_ = ray_group
 
     assert isinstance(group.executor, SlimeRayExecutor)
-    assert group.set_runtime_load_id_for_update("incarnation:5") == ["prepare-0", "prepare-1"]
-    assert workers[0].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
-    assert workers[1].set_runtime_load_id_for_update.calls == [(("incarnation:5",), {})]
+    # The start read the workers' parallel layout, which the batch split reads.
+    assert group.train_parallel_config == {"dp_size": 2, "cp_size": 1}
+    assert group.save_model(4, force_sync=True) == ["saved-0", "saved-1"]
+    for worker in workers:
+        assert worker.parallel_layout.calls == [((), {})]
+        assert worker.save_model.calls == [((4,), {"force_sync": True})]
     metrics = group.async_pop_metrics()
-    version = group.async_get_rank0_runtime_load_id()
     assert isinstance(metrics, ExecutorFuture)
     assert resolve(metrics) == [{"rank": 0}, {"rank": 1}]  # every rank drains: the last pipeline stage logs a step
-    assert resolve(version) == "incarnation:4"
-    assert workers[1].get_runtime_load_id.calls == []
 
 
 @pytest.mark.unit
-def test_non_disk_weight_update_preserves_default_and_explicit_worker_flags(ray_group) -> None:
+def test_workers_that_disagree_on_the_parallel_layout_are_refused(ray_group) -> None:
     group, workers, *_ = ray_group
+    group.release()
+    workers[1].parallel_layout.result = {"dp_size": 1, "cp_size": 2}
 
-    assert group.update_weights() == ["updated-0", "updated-1"]
-    assert group.update_weights(manage_generation=False, force_full=True) == ["updated-0", "updated-1"]
-    for worker in workers:
-        assert worker.update_weights.calls == [
-            ((), {}),
-            ((), {"manage_generation": False, "force_full": True}),
-        ]
+    with pytest.raises(RuntimeError, match="disagree on training parallel config"):
+        group.create()
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = group.executor
 
 
 @pytest.mark.unit

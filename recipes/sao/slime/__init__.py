@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
 from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
@@ -225,7 +225,7 @@ class SaoAlgorithm(SlimeAlgorithm):
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         if not getattr(args, "use_critic", False):
             raise RuntimeError(
-                f"{source} requires a value model; pass --use-critic on the Slime driver so the critic group is created"
+                f"{source} requires a value model; set training.options.use-critic so Slime creates the critic group"
             )
 
         eps_low = getattr(args, "eps_clip", None)
@@ -349,7 +349,7 @@ class SaoAlgorithm(SlimeAlgorithm):
 
     def bind(self, config=None, *, critic_steps_per_actor=None, critic_only_steps=0):
         if config is not None and not isinstance(config, SaoSettings):
-            raise TypeError("sao bridge algorithm config must be SaoSettings")
+            raise TypeError("sao algorithm config must be SaoSettings")
         bound = SaoAlgorithm()
         if critic_steps_per_actor is None:
             critic_steps_per_actor = DEFAULT_CRITIC_STEPS_PER_ACTOR
@@ -359,7 +359,7 @@ class SaoAlgorithm(SlimeAlgorithm):
     def train(self, rollout_id, refs, *, actor_group, critic_group, resolve):
         if critic_group is None:
             raise RuntimeError(
-                "SAO requires a value model, but the bridge was booted without one; start the driver with --use-critic"
+                "SAO requires a value model, but Slime started without one; set training.options.use-critic"
             )
         plan = self._schedule.plan(rollout_id)
         critic_values = None
@@ -374,27 +374,35 @@ class SaoAlgorithm(SlimeAlgorithm):
             actor_trained=plan.train_actor,
         )
 
-    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
-        head, sep, tail = serving_version.rpartition(":")
-        serving_step = int(tail) if sep and tail.isdigit() else None
+    def rollout_metrics(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
+        """Telemetry of one rollout's data: its producing-version spread, its queue age and its trained token share.
+
+        A sample's producing-version spread is how many versions its producing
+        version (``incarnation:sequence``) is behind the newest producing
+        version of the same serving incarnation in the data. It measures how
+        far apart the data's samples were produced, not how far they are
+        behind the weights that train on them. A sample whose version has no
+        sequence does not count.
+        """
         metrics: dict[str, Any] = {}
-        if serving_step is not None and head:
-            steps = [
-                step
-                for token in rollout_data.get("producing_runtime_load_ids") or []
-                if token is not None and (step := _runtime_load_id_sequence(str(token), head)) is not None
-            ]
-            future_steps = [step for step in steps if step > serving_step]
-            if future_steps:
-                _logger.warning(
-                    "dropping %d producing weight step(s) %s ahead of serving step %d from sao policy-lag stats",
-                    len(future_steps),
-                    sorted(set(future_steps)),
-                    serving_step,
-                )
-            lags = [serving_step - step for step in steps if step <= serving_step]
-            if lags:
-                metrics.update({"sao/policy_lag_max": max(lags), "sao/policy_lag_mean": sum(lags) / len(lags)})
+        versions = [
+            (head, int(tail))
+            for token in rollout_data.get("producing_runtime_load_ids") or []
+            if token is not None
+            for head, sep, tail in (str(token).rpartition(":"),)
+            if sep and head and tail.isdigit()
+        ]
+        if versions:
+            newest: dict[str, int] = {}
+            for incarnation, sequence in versions:
+                newest[incarnation] = max(sequence, newest.get(incarnation, sequence))
+            spreads = [newest[incarnation] - sequence for incarnation, sequence in versions]
+            metrics.update(
+                {
+                    "sao/producing_version_spread_max": max(spreads),
+                    "sao/producing_version_spread_mean": sum(spreads) / len(spreads),
+                }
+            )
         ages = [
             max(0.0, time.time() - float(value))
             for value in rollout_data.get("rollout_created_ats") or []
@@ -407,11 +415,6 @@ class SaoAlgorithm(SlimeAlgorithm):
             trained = sum(sum(mask) for mask in rollout_data.get("loss_masks") or [])
             metrics["sao/effective_token_rate"] = trained / total
         return metrics
-
-
-def _runtime_load_id_sequence(token: str, incarnation: str) -> int | None:
-    head, sep, tail = token.rpartition(":")
-    return int(tail) if sep and head == incarnation and tail.isdigit() else None
 
 
 def _apply_attention_freeze(critic_args: Namespace) -> None:

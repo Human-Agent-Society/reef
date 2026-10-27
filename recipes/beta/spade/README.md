@@ -24,7 +24,7 @@ SPADE is a task generator. The deployment selects it in `pipeline.record2task.co
 
 1. `generate` makes `count` Designer proposals across the configured `skills`. Each prompt includes the previous generation's results as SPADE's experience section.
 2. `validate` writes the task under the service's tasks root, runs Harbor's oracle and nop agents, and removes the task again. The reference solution must score 1. Doing nothing must score below 1. A duplicate task is invalid. After a reload cancels a generation, a rerun replaces a task with the same name from the earlier attempt.
-3. The recipe saves each valid task with its train/eval split. Later it rolls the training tasks out, `episodes_per_task` times each on the plain arm for training. The recipe runs no eval tasks.
+3. The recipe saves each valid task with its train/eval split. Later it hands the training tasks to the training component as task jobs. The component runs each task `rollout.episodes_per_task` times on the plain arm and trains on the episodes. The recipe runs no eval tasks.
 4. When every training task of the generation has a result, `record_results` runs each train task that ran and that has `solution/hint.txt` `hint_plays` more times through the generator service, on the `hint` arm, with that file appended to the instruction. Hint episodes measure only. It then reports the regret of each train proposal against its Designer receipt. A refused proposal, or one whose task ran no episodes, scores 0. Eval proposals and tasks that could not run get no Designer report and do not go into the experience. This can happen after later generations started.
 
 Regret is the mean hint reward minus the mean plain reward. Without hint episodes, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
@@ -46,11 +46,11 @@ The generator's `config` keys:
 | `grounding_path` | none | a text file added to the Designer prompt |
 | `hint_plays` | 2 | plays of the hint arm; 0 turns it off |
 | `designer_report` | true | report each proposal's regret against the Designer's receipt |
-| `served_model` | the deployment's | the model the Designer and the hint plays ask for; set it to the recipe's `served_model` when that is set |
+| `served_model` | the deployment's | the model the Designer and the hint plays ask for |
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2task.config`, outside the generator configuration. With the defaults, 0.0 and 0, all tasks train. The task store saves these settings when the scenario opens it for the first time. A scenario that loads with other settings fails.
 
-The generated-task recipe uses the `task_group` objective. It centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend. Selecting Slime fails because it has no loss family with that name.
+The generated-task recipe uses the `task_group` objective. It centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend, which runs the episodes on its own sampler. Slime refuses a job of tasks.
 
 ## Run it
 
@@ -61,15 +61,15 @@ curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: applica
   -d '{"name": "spade"}' http://127.0.0.1:8900/reef/scenarios
 ```
 
-`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above (or the first model call that names the scenario) creates it. Round 0 starts when the recipe's processor first looks for a batch after that.
+`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above (or the first model call that names the scenario) creates it. Round 0 starts when the recipe's processor first looks for job data after that.
 
 The deployment's `generator` section makes `reef serve` start the generator service before the HTTP service and hand its address to the recipe as `${endpoints.generator}`. The generator runs under Reef's interpreter; its host needs Docker and the `harbor` command line, which the Reef service itself does not. `execution: {generator: ray}` places it elsewhere. `generator.designer-url` and `generator.designer-model` point the Designer at another service (a strong model on OpenRouter while the Reasoning Agent is the deployment under training); by default both roles are the served model. `generator.designer-options` adds fields to the Designer's request: a model that thinks for thousands of tokens before writing an environment runs past the service's inference deadline, and `{"reasoning_effort": "none"}` keeps it to the reply. With `generator.designer-api: responses` (the default when `inference.upstream-api` is `responses`), the Designer asks through the Responses API, and its options take Responses fields such as `{"reasoning": {"effort": "low"}}`. See [the generator section](../../../docs/reference/configuration.rst) for every key.
 
-With `rounds: 0` the recipe generates nothing; it rolls out only the train tasks that earlier generations saved in the scenario's task store. A rollout episode is not a record: Reef keeps no record of its model calls, and assembles the episode's sample from the calls the episode runner returns.
+With `rounds: 0` the recipe generates nothing; it trains only on the train tasks that earlier generations saved in the scenario's task store. A rollout episode is not a record: Reef keeps no record of its model calls. The training component assembles the episode's sample from the calls that its sampler answered.
 
-Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold_tolerance` (in `pipeline.task2batch.config`) lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
+Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold_tolerance` (in `recipe.config.job_parameters.rollout`) lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
-Known limits: a round runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that. The Designer's own training, its regret as the reward of its proposals, follows.
+Each task job runs its episodes at the weights the job starts from, so a task group holds episodes of one weight version. The Designer's own training, its regret as the reward of its proposals, follows.
 
 ## Generate from selected records
 

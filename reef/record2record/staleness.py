@@ -1,11 +1,11 @@
-"""The staleness check: find the held batch units whose training data is too many versions behind."""
+"""The staleness check: find the held record set units whose training data is too many versions behind."""
 
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping, Sequence
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.core.batches import TrainDataItem, TrajectoryItem
+from reef.core.job_data import TrainDataItem, TrajectoryItem
 from reef.record2record.sets import RecordSetUnit
 from reef.runtime.interfaces import RuntimeLoadId
 

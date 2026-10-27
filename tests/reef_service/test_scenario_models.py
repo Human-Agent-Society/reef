@@ -25,7 +25,7 @@ from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-from reef.train.types import TrainingBatch
+from reef.train.types import JobData
 
 
 @pytest.fixture
@@ -154,7 +154,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             )
         backend = scenario.trainer.candidate_backend
         prepared = backend.prepare_step(
-            TrainingBatch("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
+            JobData("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
             backend.initial_state(),
             0,
         )

@@ -1,4 +1,4 @@
-"""Harness evolution: recorded requests as traces, with reported scores or unscored, batched unmodified."""
+"""Harness evolution: recorded requests as traces, with reported scores or unscored, put into job data unmodified."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, ReportContext, SingleRecordSet
 from reef.record2task import ImmediateRecord2Task, ReportTasks, TaskResult
 from reef.record2task.assembly import reported_task
-from reef.task2batch import DistillBatches
+from reef.task2job import DistillJobData
 from reef.train.types import TrajectoryItem
 
 
@@ -72,11 +72,11 @@ class InferenceTasks(ImmediateRecord2Task):
         return TaskResult.ready((make_trajectory((record_set.record,)),))
 
 
-class TraceBatches(DistillBatches):
-    """Batch trace tasks unmodified; the backends consume them without more processing.
+class TraceJobData(DistillJobData):
+    """Put trace tasks into job data unmodified; the backends consume them without more processing.
 
-    In ``hybrid`` a queued instruction batches with the traces that an
-    automatic batch would take next, up to ``evolution.batch_size``, so the proposer
+    In ``hybrid`` a queued instruction takes the traces that automatic job
+    data would take next, up to ``job_samples``, so the proposer
     reads the request beside them; in ``manual`` it runs alone.
     """
 

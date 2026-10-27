@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
-from tests.train.test_record_stage_batch_parity import CountingBackend, inference, instruction, report
+from tests.train.test_record_stage_job_data_parity import CountingBackend, inference, instruction, report
 
 from reef.core import AgentRecord
 from reef.record2record import (
@@ -25,10 +25,10 @@ from reef.record2record import (
 )
 from reef.record2task import ImmediateRecord2Task, Record2Task, ReportTasks, SkippedReport, TaskResult
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2batch import Task2Batch
+from reef.task2job import Task2Job, Task2JobSettings
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
 
 
 class WithholdingRecord2Record(InferenceRecord2Record):
@@ -76,26 +76,26 @@ class RecordingTasks(ImmediateRecord2Task):
         return TaskResult.skipped()
 
 
-class RecordingBatches(Task2Batch):
+class RecordingJobData(Task2Job):
     """Takes instructions in every mode."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
     def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, None)
+        super().__init__(context, None, None)
 
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
 
 class RecordingPipeline(TrainingPipeline):
-    """Sends records through ``WithholdingRecord2Record``, ``RecordingTasks``, and ``RecordingBatches``. It never becomes ready."""
+    """Sends records through ``WithholdingRecord2Record``, ``RecordingTasks``, and ``RecordingJobData``. It never becomes ready."""
 
     def __init__(self, context: PipelineContext) -> None:
         self.stage = WithholdingRecord2Record()
         self.recording = RecordingTasks()
-        self.batches = RecordingBatches(context)
-        super().__init__(context, record2record=self.stage, record2task=self.recording, task2batch=self.batches)
+        self.batches = RecordingJobData(context)
+        super().__init__(context, record2record=self.stage, record2task=self.recording, task2job=self.batches)
 
 
 class LaterTasks(Record2Task):
@@ -121,9 +121,9 @@ class WaitingPipeline(TrainingPipeline):
     def __init__(self, context: PipelineContext | None = None) -> None:
         context = PipelineContext("s") if context is None else context
         self.later_tasks = LaterTasks()
-        self.batches = RecordingBatches(context)
+        self.batches = RecordingJobData(context)
         super().__init__(
-            context, record2record=InferenceRecord2Record(), record2task=self.later_tasks, task2batch=self.batches
+            context, record2record=InferenceRecord2Record(), record2task=self.later_tasks, task2job=self.batches
         )
 
 
@@ -167,9 +167,9 @@ class PairTasks(ReportTasks):
         return TaskItem(Path(context.report.agent_record_id))
 
 
-class PairBatches(Task2Batch):
-    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
-        return TrainingBatch(batch_id, tasks)
+class PairJobData(Task2Job):
+    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
+        return JobData(data_id, tasks)
 
 
 class PairPipeline(TrainingPipeline):
@@ -182,7 +182,7 @@ class PairPipeline(TrainingPipeline):
             context,
             record2record=ReportRecord2Record(context, PairGrouping(), exclusive_sources=True),
             record2task=self.pair_tasks,
-            task2batch=PairBatches(context, None),
+            task2job=PairJobData(context, None, None),
         )
 
 
@@ -240,12 +240,11 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
         records,
         pipeline_factory=dropping_pipeline,
         candidate_backend=CountingBackend(),
+        default_job_samples=1,
     )
-    batch = trainer.reserve_training_batch()
-    assert batch is not None
-    execution = trainer.execute_reserved_step(0)
-    assert execution.result is not None
-    prepared = trainer.prepare_commit(execution.result)
+    result = trainer.run_once(0)
+    assert result is not None
+    prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == {"i1", "r1", "drop-1"}
     trainer.commit(prepared)
     assert not trainer.pipeline.releasable_record_ids()
@@ -270,7 +269,7 @@ def test_a_retry_in_a_taken_slot_is_terminal_and_released() -> None:
     processor.push(slotted("r1", "i1", "a"))
     processor.push(slotted("r2", "i2", "a"))
     processor.push(slotted("r3", "i3", "b"))
-    batch = processor.build_batch(1)
+    batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.items] == ["r1", "r3"]
     assert {"r2", "i2"} <= processor.releasable_record_ids()
     assert "r2" not in processor.tasks
@@ -288,7 +287,7 @@ def test_a_failed_assembly_keeps_the_report_and_leaves_its_slot_free() -> None:
     processor.pair_tasks.fail_assembly = False
     processor.push(slotted("r1", "i1", "a"))
     processor.push(slotted("r2", "i2", "b"))
-    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["r1", "r2"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["r1", "r2"]
 
 
 @pytest.mark.unit
@@ -307,9 +306,9 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
         processor.push(inference(record_id))
     processor.push(slotted("r2", "i2", "b"))
     processor.push(slotted("r1", "i1", "a"))
-    batch = processor.build_batch(1)
+    batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.items] == ["r2", "r1"]
-    assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
+    assert processor.acknowledge(batch.data_id) == {"i1", "i2", "r1", "r2"}
     assert not processor.tasks
 
 
@@ -322,7 +321,7 @@ def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_ver
     processor.observe_serving_runtime_load_id("e:2")
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
-    batch = processor.build_batch(1)
+    batch = processor.build_job_data(1)
     assert [item.source_agent_record_ids for item in batch.items] == [("i2", "r2")]
     # The stale report ended with the inference that it owns, and its tasks are gone.
     assert {"r1", "i1"} <= processor.releasable_record_ids()
@@ -350,7 +349,7 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
     processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
     assert processor.ready(1), "the result alone makes a batch, without another record"
     assert not processor.background_jobs_running()
-    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["t1"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["t1"]
 
 
 @pytest.mark.unit
@@ -369,13 +368,16 @@ def test_a_second_result_for_a_settled_set_is_refused() -> None:
 def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     records = SQLiteRecordStore()
     records.append(inference("i1"))
-    trainer = Trainer.build("s", records, pipeline_factory=WaitingPipeline, candidate_backend=CountingBackend())
-    assert trainer.reserve_training_batch() is None
+    trainer = Trainer.build(
+        "s", records, pipeline_factory=WaitingPipeline, candidate_backend=CountingBackend(), default_job_samples=1
+    )
+    assert trainer.run_once() is None
     assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
     assert isinstance(processor, WaitingPipeline)
     processor.later_tasks.finish("i1", TaskResult.ready((TaskItem(Path("t1")),)))
-    batch = trainer.reserve_training_batch()
+    assert trainer.run_once() is not None
+    batch = trainer.pending_job_data
     assert batch is not None and [str(item.task_path) for item in batch.items] == ["t1"]
 
 
@@ -387,7 +389,7 @@ class InferenceTasks(ImmediateRecord2Task):
         return TaskResult.ready((TaskItem(Path(record_ids[0]), source_agent_record_ids=record_ids),))
 
 
-class UploadBatches(PairBatches):
+class UploadJobData(PairJobData):
     accepts_trajectories = True
 
 
@@ -401,7 +403,7 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
         context,
         record2record=InferenceRecord2Record(),
         record2task=InferenceTasks(),
-        task2batch=UploadBatches(context, None),
+        task2job=UploadJobData(context, None, None),
     )
     processor.push(inference("i1"))
     assert not processor.ready(2)
@@ -409,19 +411,19 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     processor.push_trajectory("t2", TRAJECTORY)
     assert processor.status()["ready_samples"] == 3
 
-    batch = processor.build_batch(2)
+    batch = processor.build_job_data(2)
     assert batch.items == (TRAJECTORY, TRAJECTORY)
-    processor.release_batch(batch.batch_id)
-    batch = processor.build_batch(2)
+    processor.release_job_data(batch.data_id)
+    batch = processor.build_job_data(2)
     assert batch.items == (TRAJECTORY, TRAJECTORY)
-    assert processor.acknowledge(batch.batch_id) == {"trajectory:t1", "trajectory:t2"}
+    assert processor.acknowledge(batch.data_id) == {"trajectory:t1", "trajectory:t2"}
 
     # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
     processor.push_trajectory("t1", TRAJECTORY)
     processor.push_trajectory("t3", TRAJECTORY)
-    batch = processor.build_batch(2)
+    batch = processor.build_job_data(2)
     assert batch.items == (TRAJECTORY, TaskItem(Path("i1"), source_agent_record_ids=("i1",)))
-    assert processor.acknowledge(batch.batch_id) == {"trajectory:t3", "i1"}
+    assert processor.acknowledge(batch.data_id) == {"trajectory:t3", "i1"}
     consumed = frozenset({"trajectory:t1", "trajectory:t2", "trajectory:t3"})
     assert consumed <= processor.releasable_record_ids()
     processor.release_records(consumed)
@@ -429,9 +431,9 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
 
 
 @pytest.mark.unit
-def test_a_pipeline_refuses_a_trajectory_that_its_batch_stage_does_not_accept() -> None:
+def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_accept() -> None:
     context = PipelineContext("s")
-    processor = TrainingPipeline(context, task2batch=PairBatches(context, None))
+    processor = TrainingPipeline(context, task2job=PairJobData(context, None, None))
     with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
         processor.push_trajectory("t1", TRAJECTORY)
 
@@ -465,27 +467,27 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
     assert processor.status()["ready_samples"] == 2
     assert processor.record2record.pool.reserved is None
     assert not processor.ready(3)
-    batch = processor.build_batch(2)
+    batch = processor.build_job_data(2)
 
     processor.push(inference("i2"))
     processor.later_tasks.finish("i2", ready_tasks("c"))
     processor.advance()
-    assert processor.build_batch(2) is batch
-    assert processor.acknowledge(batch.batch_id) == {"i1"}
+    assert processor.build_job_data(2) is batch
+    assert processor.acknowledge(batch.data_id) == {"i1"}
     assert processor.status()["ready_samples"] == 1
-    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["c"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["c"]
 
 
 @pytest.mark.unit
 def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -> None:
-    context = PipelineContext("s", max_staleness=0)
+    context = PipelineContext("s")
     records = DropRecordingRecords()
     later_tasks = LaterTasks()
     processor = TrainingPipeline(
         context,
         record2record=records,
         record2task=later_tasks,
-        task2batch=UploadBatches(context, 1),
+        task2job=UploadJobData(context, 1, None),
     )
     processor.push(inference("i1"))
     processor.push(inference("i2"))
@@ -523,10 +525,10 @@ def test_a_batch_takes_whole_units_in_selection_order_until_it_holds_the_sample_
     processor.later_tasks.finish("i3", ready_tasks("c"))
     processor.later_tasks.finish("i2", ready_tasks("b1", "b2"))
     processor.later_tasks.finish("i1", ready_tasks("a1", "a2"))
-    batch = processor.build_batch(3)
+    batch = processor.build_job_data(3)
     # The second unit passes the sample count; the batch keeps it whole and leaves the third unit held.
     assert [str(item.task_path) for item in batch.items] == ["a1", "a2", "b1", "b2"]
-    assert processor.acknowledge(batch.batch_id) == {"i1", "i2"}
+    assert processor.acknowledge(batch.data_id) == {"i1", "i2"}
     assert processor.status()["ready_samples"] == 1
 
 
@@ -537,10 +539,10 @@ def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size()
         context,
         record2record=InferenceRecord2Record(),
         record2task=InferenceTasks(),
-        task2batch=UploadBatches(context, 2),
+        task2job=UploadJobData(context, 2, None),
     )
     processor.push(inference("i1"))
-    reserved = processor.build_batch(1)
+    reserved = processor.build_job_data(1)
     for record_id in ("i2", "i3", "i4"):
         processor.push(inference(record_id))
     for trajectory_id in ("t1", "t2", "t3"):
@@ -550,7 +552,7 @@ def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size()
     assert [unit.unit_id for unit in processor.record2record.pool.units()] == ["i1", "i4", "i5"]
     assert {"i2", "i3"} <= processor.releasable_record_ids()
     assert processor.status()["ready_samples"] == 6
-    assert processor.acknowledge(reserved.batch_id) == {"i1"}
+    assert processor.acknowledge(reserved.data_id) == {"i1"}
 
 
 @pytest.mark.unit
@@ -561,65 +563,70 @@ def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffe
         context,
         record2record=InferenceRecord2Record(),
         record2task=later_tasks,
-        task2batch=UploadBatches(context, 2),
+        task2job=UploadJobData(context, 2, None),
     )
     processor.push(inference("i1"))
     later_tasks.finish("i1", ready_tasks("a", "b", "c"))
     assert processor.ready(1)
-    assert [str(item.task_path) for item in processor.build_batch(1).items] == ["a", "b", "c"]
+    assert [str(item.task_path) for item in processor.build_job_data(1).items] == ["a", "b", "c"]
 
 
 @pytest.mark.unit
-def test_the_batch_stage_buffer_size_is_its_own_or_else_the_context_default() -> None:
-    assert PairBatches(PipelineContext("s", default_buffer_size=12), None).buffer_size == 12
-    assert PairBatches(PipelineContext("s", default_buffer_size=12), 3).buffer_size == 3
-    assert PairBatches(PipelineContext("s"), None).buffer_size is None, "no default holds every sample"
+def test_the_stage_sizes_are_its_own_or_else_follow_the_context_default() -> None:
+    defaulted = PairJobData(PipelineContext("s", default_job_samples=3), None, None)
+    assert (defaulted.job_samples, defaulted.buffer_size) == (3, 12), "the buffer holds the data of four jobs"
+    configured = PairJobData(PipelineContext("s", default_job_samples=3), 5, 2)
+    assert (configured.job_samples, configured.buffer_size) == (2, 5)
+    assert (PairJobData(PipelineContext("s", default_job_samples=3), None, 2).buffer_size) == 8
+    unsized = PairJobData(PipelineContext("s"), None, None)
+    assert (unsized.job_samples, unsized.buffer_size) == (None, None), "no default holds every sample"
+    with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
+        PairJobData(PipelineContext("s"), None, 0)
+    with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
+        Task2JobSettings(job_samples=0)
 
 
-class OwnBatches(RecordingBatches):
+class OwnJobData(RecordingJobData):
     """A batch stage with samples of its own: ``samples`` trains as one batch that consumes ``own:<n>``."""
 
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context)
         self.samples: tuple[TrainDataItem, ...] | None = None
-        self.batches_done: list[bool] = []
+        self.batches_done = 0
         self.released: set[str] = set()
 
-    def own_batch(self) -> tuple[TrainDataItem, ...] | None:
+    def own_job_data(self) -> tuple[TrainDataItem, ...] | None:
         return self.samples
 
-    def own_batch_done(self, *, trained: bool) -> frozenset[str]:
-        self.batches_done.append(trained)
+    def own_job_data_submitted(self) -> frozenset[str]:
+        self.batches_done += 1
         self.samples = None
-        return frozenset({f"own:{len(self.batches_done)}"}) if trained else frozenset()
+        return frozenset({f"own:{self.batches_done}"})
 
     def release_own_ids(self, ids: frozenset[str]) -> None:
         self.released |= ids
 
 
 @pytest.mark.unit
-def test_the_batch_stage_own_batch_trains_alone_and_its_ids_release_after_the_commit() -> None:
+def test_the_task_to_job_stage_own_job_data_trains_alone_and_its_ids_release_after_the_commit() -> None:
     context = PipelineContext("s")
-    batches = OwnBatches(context)
+    batches = OwnJobData(context)
     processor = TrainingPipeline(
-        context, record2record=InferenceRecord2Record(), record2task=RecordingTasks(), task2batch=batches
+        context, record2record=InferenceRecord2Record(), record2task=RecordingTasks(), task2job=batches
     )
     assert not processor.ready(4)
     batches.samples = (TaskItem(Path("a")),)
     assert processor.ready(4), "an own batch is ready whatever its sample count"
-    built = processor.build_batch(4)
-    processor.release_batch(built.batch_id)
-    assert batches.batches_done == [] and processor.ready(4), "a released own batch stays the stage's"
-    built = processor.build_batch(4)
+    built = processor.build_job_data(4)
+    processor.release_job_data(built.data_id)
+    assert batches.batches_done == 0 and processor.ready(4), "a released own batch stays the stage's"
+    built = processor.build_job_data(4)
     assert [item.task_path for item in built.items] == [Path("a")]
-    assert processor.acknowledge(built.batch_id) == {"own:1"}
+    assert processor.acknowledge(built.data_id) == {"own:1"}
     assert processor.releasable_record_ids() == {"own:1"}
     processor.release_records(frozenset({"own:1"}))
     assert batches.released == {"own:1"} and not processor.releasable_record_ids()
-    batches.samples = (TaskItem(Path("b")),)
-    dropped = processor.build_batch(4)
-    assert processor.acknowledge(dropped.batch_id, trained=False) == frozenset()
-    assert batches.batches_done == [True, False] and not processor.ready(4)
+    assert batches.batches_done == 1 and not processor.ready(4)
 
 
 @pytest.mark.unit
@@ -651,24 +658,28 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     rejected_report = report("aborted-report", *references)
     for record in (aborted, inference("other"), rejected_report, inference("valid"), report("valid-report", "valid")):
         records.append(record)
-    trainer = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    trainer = Trainer.build(
+        "s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend(), default_job_samples=1
+    )
     if replay_before_commit:
         trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
-    batch = trainer.reserve_training_batch()
+    result = trainer.run_once(0)
+    assert result is not None
+    batch = trainer.pending_job_data
     assert batch is not None
     assert len(batch.items) == 1
     assert batch.items[0].source_agent_record_ids == ("valid", "valid-report")
-    execution = trainer.execute_reserved_step(0)
-    assert execution.result is not None
-    prepared = trainer.prepare_commit(execution.result)
+    prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == {"valid", "valid-report", "aborted-report", *references}
     trainer.commit(prepared)
     assert not trainer.pipeline.releasable_record_ids()
 
-    restored = Trainer.build("s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend())
+    restored = Trainer.build(
+        "s", records, pipeline_factory=threshold_pipeline, candidate_backend=CountingBackend(), default_job_samples=1
+    )
     restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
     records.append(report("later-report", "aborted"))
-    assert restored.reserve_training_batch() is None
+    assert restored.run_once() is None
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.
     assert records.get("s", "aborted") == aborted

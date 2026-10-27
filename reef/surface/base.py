@@ -37,36 +37,31 @@ class ServingRuntime(ABC):
 
 
 class WeightRuntime(ServingRuntime):
-    """A runtime that can inspect and restore served model weights."""
+    """A runtime that serves published model weights.
 
-    @abstractmethod
-    def serving_runtime_load_id(self) -> str | None: ...
+    A runtime load ID names the weights that serve a request. A runtime that
+    loads weights makes a new ``RuntimeLoadId`` string for each load. A
+    runtime that loads nothing, such as a proxy, uses the release ID, since the
+    release alone names what serves.
+    """
 
     @abstractmethod
     def current_runtime_load_id(self) -> str | None:
-        """Return the version that Reef acknowledged as published. An update that is not committed does not count."""
+        """The runtime load ID of the last release the runtime activated, of any scenario.
+
+        ``None`` when the runtime activated none, or loads nothing and names no load.
+        """
 
     @abstractmethod
-    def restore_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Load the rolled-back release ``artifact``; return the runtime load ID that serves it.
-
-        ``scenario`` names the release's scenario exactly when the runtime
-        serves a separate adapter per scenario.
-        """
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        """Bind a recovered or republished artifact before the scenario serves it.
+        """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
-        Called once a release is final and before traffic routes to it, with
-        ``scenario`` as for :meth:`restore_checkpoint`. The
-        default binds nothing and returns the release ID: for runtimes whose
-        serving update and Reef publication are one operation, the artifact
-        already names what the engine serves. A runtime that serves immutable
-        remote snapshots overrides this to select the sampler and training
-        state the artifact references, and returns the runtime load ID it
-        now serves under.
+        Reef calls it once a release is published, at a commit, a rollback, a
+        promote or a start, and before traffic routes to it. ``scenario`` names
+        the release's scenario exactly when the runtime serves a separate
+        adapter per scenario. A raise leaves the runtime serving what it served
+        before.
         """
-        return artifact.ref.release_id
 
 
 class AdapterWeightRuntime(WeightRuntime):
@@ -77,7 +72,7 @@ class AdapterWeightRuntime(WeightRuntime):
 
 
 class ArtifactLoader(ABC):
-    """Runtime-backed artifact loading and startup recovery."""
+    """Make a component's published releases servable on the runtime, and recover the serving head at a start."""
 
     @abstractmethod
     def recover(
@@ -88,26 +83,19 @@ class ArtifactLoader(ABC):
     ) -> ArtifactRef: ...
 
     @abstractmethod
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str: ...
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+        """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
+
+        Called once a release is final: after startup recovery has a
+        materializable head, and after a commit, rollback or promote has
+        published its release. It runs before the scenario routes traffic to
+        the release. ``source`` names the artifact whose bytes a rollback
+        republished.
+        """
 
     def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
         """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown."""
         return None
-
-
-class ArtifactActivator(ArtifactLoader):
-    """Optional loader capability: make a published release servable.
-
-    Called once a release is final — after startup recovery has a
-    materializable head and after a publication or rollback commit has
-    minted its release — and before the scenario routes traffic to it.
-    ``source`` names the artifact whose bytes a rollback republished.
-    """
-
-    @abstractmethod
-    def activate(
-        self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None
-    ) -> str: ...
 
 
 class InferenceHooks(ABC):
@@ -432,15 +420,6 @@ class Surface:
             return None
         return loader.served_runtime_load_id(self.component_artifact(artifact, name), runtime)
 
-    def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> None:
-        """Load the runtime-loaded component of a rollback target; nothing without a loader."""
-        name = self.loader_component
-        if name is None:
-            return
-        loader = self.components[name].loader
-        if loader is not None:
-            loader.load(self.component_artifact(artifact, name), runtime)
-
     def activate(
         self,
         artifact: Artifact,
@@ -458,7 +437,7 @@ class Surface:
         if name is None:
             return
         loader = self.components[name].loader
-        if not isinstance(loader, ArtifactActivator):
+        if loader is None:
             return
         if previous is not None and not self.component_changed(artifact, previous, name):
             return
@@ -472,7 +451,6 @@ class Surface:
 __all__ = [
     "AcceptAnyArtifact",
     "AdapterWeightRuntime",
-    "ArtifactActivator",
     "ArtifactLoader",
     "ComponentSurface",
     "FileTree",

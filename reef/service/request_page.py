@@ -169,7 +169,7 @@ def activity_html(progress: StepProgress, now: float) -> str:
 
 
 def request_state(record: Mapping[str, object], progress: StepProgress | None, consumed: bool) -> str:
-    """Read the backend phase or reserved batch; an unreserved request is queued."""
+    """Read the backend phase or reserved job data; an unreserved request is queued."""
     if progress is not None and progress.request_id == record["agent_record_id"]:
         return progress.phase
     if consumed:
@@ -403,7 +403,7 @@ def build_request_page(
     (``agent_record_id``, ``created_at`` and the
     ``POST /reef/train`` payload). ``progress`` is the training backend's
     running step, counted only when it names this request; ``consumed`` says
-    whether the trainer's reserved batch carries the request. ``link_query``
+    whether the trainer's reserved job data carries the request. ``link_query``
     is carried to the version page link. ``now`` is the clock the elapsed
     times are read against. ``adapter`` names the wrapper the next action runs.
     """

@@ -33,9 +33,9 @@ harness/              agent harness (imports reef_client, not reef)
   agent.py              HarborAgent: six scored rollouts per problem, one report each
   grader.py             \boxed{} extraction and the strict equivalence rule, shared with stream.py and evaluate.py
   report.py             posts Harbor's verifier reward against the trial's receipts
-serve.yaml            smoke stack config (batch 1): Reef + Ray + Slime/Megatron + SGLang, critic colocated
-serve-30b.yaml        Qwen3-30B-A3B-Thinking-2507 on one 8-GPU node, fed by stream.py
-serve-30b-multi.yaml  the same model with data-parallel training nodes and separate rollout engines, batch 128
+serve.yaml            smoke stack config (batch 1): Reef + Ray + Slime/Megatron + SGLang, critic on the actor GPU
+serve-30b.yaml        Qwen3-30B-A3B-Thinking-2507 on two 8-GPU nodes (one trains, one serves), fed by stream.py
+serve-30b-multi.yaml  the same model with data-parallel training nodes and separate serving engines, batch 128
 run.py                the loop, written out: solve, verify, report, task by task
 run.sh                starts the Reef training stack, then runs run.py or SAO_DRIVER
 stream.py             the paper-shaped streaming driver: one rollout per prompt, many prompts in flight
@@ -106,9 +106,10 @@ reef-eval starts one Harbor trial for the next problem
   -> the agent reports the score against that rollout's receipt
   -> SAOTasks accepts the report and emits one ATIF TrajectoryItem
   -> the sao training objective hands Slime a batch of one
-  -> the colocated critic computes values; skip-observation GAE builds the advantages
+  -> the critic computes values; skip-observation GAE builds the advantages
   -> Slime runs policy_loss with SAO's per-token DIS primitive, after two critic steps
-  -> Megatron performs one optimizer step and synchronizes weights to SGLang
+  -> Megatron performs one optimizer step and saves a checkpoint
+  -> Reef loads the checkpoint into SGLang as weight files
   -> the next rollout is served by the updated weights
 ```
 
@@ -127,7 +128,7 @@ involved anywhere in the loop.
 
 The training stack needs the GPU environment described in
 [Evolve your model](../../../../docs/user-guide/evolve-your-model.rst): Ray,
-the Slime driver, and CUDA builds of torch, SGLang, and Megatron. Inside it,
+Slime, and CUDA builds of torch, SGLang, and Megatron. Inside it,
 from this directory:
 
 ```bash
@@ -159,22 +160,23 @@ paths must mean the same thing to the host docker daemon.
 ```
 
 The launcher waits for Reef's health endpoint and stops waiting if Reef
-exits. Configure bridge startup with `training.ready-timeout` and HTTP startup
+exits. Configure training startup with `training.ready-timeout` and HTTP startup
 with `reef.ready-timeout` in `serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
 the script also stops its Reef process.
 
 `run.sh` starts `reef serve -c serve.yaml` with its state under `./work`,
 waits for `/healthz`, and runs `run.py`. `serve.yaml` describes a two-GPU
-stack: one Megatron actor with the critic colocated on it, and one SGLang
-rollout engine, serving `Qwen2.5-1.5B-Instruct`. On the first start Reef
+stack: one GPU for the Megatron actor and the critic, which shares the
+actor's GPU, and one GPU for the SGLang serving engine, which serves
+`Qwen2.5-1.5B-Instruct`. On the first start Reef
 loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
 up; `work/reef.log` has the service log if startup fails.
 
-The config omits `services`: Reef assembles the Slime driver and HTTP process,
-waits for the training bridge, and connects HTTP to the bridge's SGLang workers.
-The native training adapter captures rollout log-probabilities directly from the
-engine for SAO; no separate inference process or manual bridge wiring is needed.
+The config omits `services`. Slime trains inside Reef's HTTP service, and
+`reef serve` starts a local inference component for the SGLang engine on the
+same Ray cluster. The engine returns the rollout log-probabilities that SAO
+needs with each response. No manual wiring is needed.
 `training.options` still holds the model and algorithm settings. CLI overrides
 use the same paths, for example `--training.options.lr 0.000002`.
 
@@ -182,8 +184,9 @@ Reef starts and stops the shared Ray runtime automatically; no `ray start`
 or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
 `CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
 To use an existing cluster, set `RAY_ADDRESS`; that cluster's node configuration
-controls GPU visibility, and Reef leaves it running on exit. Slime allocates
-the model GPUs; the local driver does not reserve them a second time.
+controls GPU visibility, and Reef leaves it running on exit. Training and
+serving never share a GPU: Reef reserves the actor's GPUs, and the inference
+component takes the engine's GPUs.
 
 `run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
 executes one episode: the agent runs its six rollouts, reporting each one as
@@ -209,7 +212,8 @@ The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask
 removed), `train_rollout_logprob_abs_diff` (the mean per-token gap between the
 engine's and the trainer's log-probabilities, the quantity DIS masks on),
 `critic/explained_variance` (meaningful only with more than one sample per
-step), actor and critic `grad_norm`, and the asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
+step), actor and critic `grad_norm`, and the asynchrony telemetry
+`sao/producing_version_spread_*`, `sao/queue_age_s_*`, and
 `sao/effective_token_rate`. Set `observability.wandb.enabled: true` in
 `serve.yaml` and export `WANDB_API_KEY` to keep them per committed step;
 `observability.wandb.directory` is where the run files go.
@@ -231,7 +235,7 @@ The integration reproduces:
   no slowest-sample barrier, with the global batch size of such rollouts per
   optimizer step (the paper uses 128; this smoke config sets
   `global_batch_size: 1`, see below);
-- a value model colocated with the actor and two critic steps per actor step
+- a value model that shares the actor's GPUs and two critic steps per actor step
   (`--critic-steps-per-actor=2`), trained at the paper's value learning rate
   of `5e-6` (`--critic-lr=5e-6`) with the paper's 10-step value warmup
   (`--num-critic-only-steps=10`: the first ten optimizer steps fit the
@@ -258,7 +262,7 @@ paper's learning rate is mostly noise, and two of its diagnostics are
 degenerate at that size: `critic/explained_variance` is
 `1 - Var(R - V) / Var(R)` over the batch, which is identically 0 for one
 sample, and the per-step reward is a coin flip. The streaming protocol below
-uses the paper's shape at a budget one node can afford.
+uses the paper's shape at a budget of two nodes.
 
 ### The streaming protocol
 
@@ -268,10 +272,12 @@ verifier's rule and reports it against its receipt; `serve-30b.yaml` takes
 the optimizer step size from `SAO_BATCH` (`training.config.global_batch_size`,
 the driver's `--global-batch-size`). Held-out problem indices
 are never served, and `evaluate.py` scores the base and the trained weights
-on them afterwards with fresh samples.
+on them afterwards with fresh samples. `serve-30b.yaml` needs two 8-GPU
+nodes in one Ray cluster: set `RAY_ADDRESS` to that cluster's head.
 
 ```bash
 python export_problems.py work/imo_answerbench.jsonl          # problem_idx, problem, gold
+export RAY_ADDRESS=<head>:6379 SAO_CKPT_DIR=<checkpoint dir>
 SAO_BATCH=8 SAO_SERVE_YAML=serve-30b.yaml SAO_DRIVER=stream.py \
 SAO_PROBLEMS=work/imo_answerbench.jsonl SAO_HOLDOUT=0,1,7,... SAO_POOL=2,5,... \
 SAO_IN_FLIGHT=8 SAO_BUDGET=320 ./run.sh
@@ -286,11 +292,11 @@ them with `pip install -e ".[stream]"` from this directory.
 
 The batch-128 SAO runs in Results use `serve-30b-multi.yaml` on an existing
 Ray cluster (`RAY_ADDRESS`): `SAO_TRAIN_NODES` 8-GPU nodes host the actor,
-tensor parallel 8 per node and data parallel across nodes with the critic
-colocated, and `SAO_ROLLOUT_GPUS` GPUs on other nodes host the engines,
+tensor parallel 8 per node and data parallel across nodes with the critic on
+the actor GPUs, and `SAO_ROLLOUT_GPUS` GPUs on other nodes host the engines,
 tensor parallel 4 each. The runs kept `SAO_CKPT_DIR` on shared storage with
-the retention cap set in the stack file, so Reef's coordinator sees the
-exports it verifies from whichever node it lands on. `SAO_PROGRESS_FILE`
+the retention cap set in the stack file, so Reef's service reads the exports
+that the training nodes write. `SAO_PROGRESS_FILE`
 paces the driver on the trainer: write the number of completed optimizer
 steps into it from a host that sees `SAO_CKPT_DIR`, for example the highest
 exported step, `ls "$SAO_CKPT_DIR/hf" | sort -n | tail -1`. The problems
@@ -344,7 +350,7 @@ Both objectives used the paper’s settings where applicable:
 | SAO collection | One rollout per prompt, group size 1; 256 rollouts in flight; maximum staleness 4 |
 | GRPO(+DIS) control | 16 prompts × 8 rollouts; group-relative advantages; one training step per 16 complete groups |
 | Training window | 32,768 generated tokens; `seq-length` 36,864 |
-| Topology | Actor tensor-parallel 8 with `SAO_TRAIN_NODES=4`; critic colocated with actor; rollout engines tensor-parallel 4 |
+| Topology | Actor tensor-parallel 8 with `SAO_TRAIN_NODES=4`; critic on the actor GPUs; serving engines tensor-parallel 4 |
 | Driver and step time | `stream.py`; about 10 minutes per SAO step and 3 minutes per GRPO step |
 
 Held-out accuracy measures strict boxed-answer equivalence, without an LLM judge. Evaluation used a 128k generation window, temperature 1.0, and top-p 1.0. AIME 2025 and HMMT February 2025 each contain 30 problems evaluated with eight samples per problem. IMO-AnswerBench contains 400 problems evaluated with two samples each. We kept SAO checkpoints every 20 optimizer steps and GRPO(+DIS) checkpoints at steps 40 and 80.

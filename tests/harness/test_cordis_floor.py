@@ -26,7 +26,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import CordisBackend, Mutation, StepProgress, StepProposal
 from reef.train.cordis_backend.manifest import advance
-from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
+from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication
 
 MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 PLAIN = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
@@ -177,9 +177,9 @@ def test_a_candidate_that_misses_the_floor_reverts_and_carries_the_manifest_unto
     assert "failure_manifest" not in result.state and result.metrics["selected"] is False
 
 
-def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
-    module = tmp_path / "demo_floor.py"
-    module.write_text(
+def write_floor_module(tmp_path: Path, monkeypatch) -> None:
+    """Make ``demo_floor:Propose`` and ``demo_floor:Evaluate`` importable for a Cordis recipe config."""
+    (tmp_path / "demo_floor.py").write_text(
         "from reef.evaluation.harness import EpisodeScorer\n"
         "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
@@ -188,6 +188,10 @@ def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
+
+
+def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
+    write_floor_module(tmp_path, monkeypatch)
 
     def config(**evolution):
         return {
@@ -295,7 +299,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     b = backend(tmp_path, extending)
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        result = run_backend_step(b, TrainingBatch("demo:instruction:ask-1", (), request=request), b.initial_state())
+        result = run_backend_step(b, JobData("demo:instruction:ask-1", (), request=request), b.initial_state())
     recorded = result.metrics["training_request"]
     assert recorded["id"] == "ask-1" and result.metrics["published"] is True
     # A prompt rides with its item, and meets the screens a check meets.
@@ -315,7 +319,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
 # -- step progress, for the request page -----------------------------------------------------------
 
 
-def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TrainingBatch:
+def _instruction(text: str = "add a rule", request_id: str = "req-1") -> JobData:
     return replace(batch(), request=TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id))
 
 
@@ -412,9 +416,11 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
 
 
 @pytest.mark.unit
-def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path) -> None:
+def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path, monkeypatch) -> None:
     """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
     from reef.recipe.base import ServedEndpoint
+
+    write_floor_module(tmp_path, monkeypatch)
 
     config = {
         "model": {"path": "qwen3-8b"},

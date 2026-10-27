@@ -13,10 +13,6 @@ class UnknownScenario(ReefError):
     """The scenario does not exist and the caller may not create it implicitly."""
 
 
-class ScenarioBusy(ReefError):
-    """The scenario has a training job out at its backend; the operation waits for the job to land."""
-
-
 class ScenarioLimitReached(ReefError):
     """The service holds its maximum number of registered scenarios. It refuses a new scenario."""
 

@@ -133,8 +133,8 @@ reef-eval starts the task container and the judge service for the next session
 You need a GPU host with seven available GPUs, Docker, and `uv` (for `uvx`,
 which runs reef-eval). The example's `docker-compose.yaml` assigns physical GPU 1
 to the PRM, GPU 2 to the student model, and GPUs 3–7 to Reef/Slime, leaving GPU 0
-free. Slime reserves four GPUs for the Megatron actor (tensor parallel 4) and
-one for policy rollout. Its CPU driver reserves no model GPUs itself. Adjust
+free. Reef reserves four GPUs for the Megatron actor (tensor parallel 4), and
+its inference component takes one for the policy serving engine. Adjust
 Compose device assignments for your host; keep the three pools disjoint.
 This example is a single-host deployment.
 
@@ -198,7 +198,7 @@ environments and other processes read them:
   `results/learning_curve.py`, which logs the per-session verdicts into the same
   W&B group.
 
-A reef process trains one scenario for its lifetime. Pointing a different
+A Slime deployment trains one scenario for its lifetime. Pointing a different
 stream name, or a fresh run directory, at a stack that has already trained is
 rejected with "training is already bound to scenario ...". Stop the stack
 with `docker compose down` in this directory before switching streams or
@@ -206,21 +206,14 @@ starting a variant.
 
 A stopped stack restarts from `$RUN_DIR`: the actor resumes its Megatron
 checkpoint, the teacher is reloaded from the base HF weights, and the
-committed head is republished. Two cases need a hand:
+committed head is republished. A training job that a stop interrupted
+continues from its job directory when the stack restarts.
 
-- A stop while Reef is committing a step (after the bridge has published its
-  weights) leaves the bridge waiting for that commit, and every later batch
-  is refused with "training marker is READY_TO_COMMIT; operator recovery
-  required". The batch cannot be replayed (the judges sample), so start the
-  training state over: stop the stack and move `checkpoints`,
-  `artifacts.git`, `artifact-work`, `artifact-cache`, `agent-record` and
-  `prm-records.jsonl` out of `$RUN_DIR`. The lab and stream state stay, and
-  a re-run continues at the next position.
-- The harness runs every container command, hermes included, as your user
-  and hands the hermes home to you at the start of each position, so a
-  killed run leaves nothing root-owned in `$RUN_DIR/lab/streams/<stream>/state`
-  that reef-eval could not reset. A state directory written by an earlier
-  harness may still need a one-time chown to your user.
+The harness runs every container command, hermes included, as your user and
+hands the hermes home to you at the start of each position, so a killed run
+leaves nothing root-owned in `$RUN_DIR/lab/streams/<stream>/state` that
+reef-eval could not reset. A state directory written by an earlier harness
+may still need a one-time chown to your user.
 
 ### Reading a run
 
@@ -252,7 +245,7 @@ uv run --no-project --with matplotlib \
 | Task | the 72-session GSM8K homework stream, hermes memory off |
 | Model | `Qwen3-4B-Thinking-2507` as the policy and as the PRM |
 | Student | the `Qwen3-32B` persona |
-| Hardware | the seven-GPU reference layout: a tensor-parallel-4 actor, one rollout engine, one PRM engine, one engine for the Qwen3-32B student |
+| Hardware | the seven-GPU reference layout: a tensor-parallel-4 actor, one serving engine, one PRM engine, one engine for the Qwen3-32B student |
 | Batch | 16 judged turns per training step |
 | Responses | up to 8192 tokens in a 65,536-token context |
 | Objective | top-K select loss, PPO clip 0.2 / 0.28, `w_rl` 1.0, `w_opd` 1.0, top-4 capture, `sequence_optimal` hint selection |

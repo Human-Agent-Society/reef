@@ -21,7 +21,7 @@ uses the deployment's model:
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2batch: {config: {buffer_size: 32}}}
+             pipeline: {task2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:
@@ -44,7 +44,8 @@ from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime
+from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
@@ -162,7 +163,7 @@ class CompositeRecipe(Recipe):
         *,
         environ: Mapping[str, str],
         runtime: InferenceRuntime | None = None,
-        training_runtime: TrainingRuntime | None = None,
+        training_component: TrainingComponent | None = None,
     ) -> CompositeRecipe:
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
@@ -189,7 +190,7 @@ class CompositeRecipe(Recipe):
                 environ,
                 config=settings,
                 runtime=runtime,
-                training_runtime=training_runtime,
+                training_component=training_component,
             )
         modes = {recipe.training_mode for recipe in components.values()}
         if len(modes) != 1:
@@ -198,7 +199,7 @@ class CompositeRecipe(Recipe):
         if configured_mode is None:
             values["training_mode"] = next(iter(modes))
         try:
-            return cls(components=components, runtime=runtime, training_runtime=training_runtime, **values)
+            return cls(components=components, runtime=runtime, training_component=training_component, **values)
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 
@@ -206,7 +207,7 @@ class CompositeRecipe(Recipe):
     def select_weight_training(
         cls, config: Mapping[str, Any]
     ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        """The one component that trains weights, so the deployment connects its training runtime.
+        """The one component that trains weights, so the deployment connects its training component.
 
         A release loads one component into a runtime, so two weight training
         components are refused here, before any runtime is connected. The

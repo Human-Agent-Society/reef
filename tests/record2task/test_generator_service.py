@@ -22,10 +22,8 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
-from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner
-from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskTasks
-from reef.recipe.generated_tasks.processor import GeneratedTaskRecord2Record, RoundSettings, TaskGroupSettings
+from reef.harness.client.tasks import EpisodeTurn, TaskEpisode, TaskEpisodeRunner, rewards_of
+from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2task.generator import (
     Designer,
     DesignerAnswer,
@@ -754,11 +752,13 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         assert task.metadata["designer_record_id"] == "designer-1"
         assert task.name.startswith("harbor-history-")
         assert (await task_generator.validate(task)).is_valid
-        context = PipelineContext("spade")
-        round_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
-        generation = GeneratedTaskTasks(context, RoundSettings(), round_stage, generator_service=generator)
-        result, _ = await generation.run_training_episodes(task, 0, count=2)
-        assert not result.error and len(result.rollout_rewards) == 2
+        # Two episodes of the staged task, as a training rollout runs them, give the Designer its result.
+        written = await generator.write_task(task)
+        training = await generator.run_episodes(
+            written.path, scenario="spade", arm="plain", count=2, extra_instruction_files=(), tags={"round": "0"}
+        )
+        result = TaskRolloutResult(task.name, rewards_of(training))
+        assert len(result.rollout_rewards) == 2
         assert read_harbor_task(tmp_path / "tasks" / task.name).source_agent_record_ids == task.source_agent_record_ids
         await task_generator.record_results((result.generated(task),), generation=0)
 

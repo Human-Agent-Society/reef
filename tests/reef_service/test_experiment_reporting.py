@@ -36,7 +36,8 @@ def test_rollbacks_and_reads_finish_while_the_tracker_blocks(tmp_path, monkeypat
         assert tracker.rollbacks == []
         release.set()
         value.registry.experiment_reports.flush()
-        assert [event.step for event in tracker.rollbacks] == [2, 3]
+        # The job's submission, checkpoint and end are steps 1 to 3.
+        assert [event.step for event in tracker.rollbacks] == [4, 5]
     finally:
         release.set()
         value.close()
@@ -48,8 +49,10 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     """A blocked ``record`` holds up nothing. ``correlation_metrics`` runs before the commit record is written,
     under the operation lock only, so release reads still answer."""
     tracker = _RecordingTracker()
-    value, _ = _dispatcher(tmp_path, experiment_tracker=tracker)
+    # Loading a scenario wakes its workers: hold them, so that this test runs the one cycle.
+    value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)
     scenario = _scenario(value, 1)
+    value.local_workers.open()
     entered, release = Event(), Event()
 
     def blocked(event):

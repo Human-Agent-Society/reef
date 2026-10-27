@@ -92,18 +92,18 @@ def test_slime_rejects_unsupported_builtin_gpu_launchers(backend):
         slime_executor_class(backend)
 
 
-def test_driver_auto_and_cli_auto_override_yaml(caplog):
+def test_slime_component_auto_and_cli_auto_override_yaml(caplog):
     pytest.importorskip("ray")
-    from reef.train.slime_backend.driver import _configure_executors
+    from reef.train.slime_backend.reef_adapters.startup import configure_executors
 
-    args = SimpleNamespace(reef_executor_backend="auto", reef_rollout_executor_backend="auto")
+    args = SimpleNamespace(reef_executor_backend="auto")
     with caplog.at_level("INFO"):
-        _configure_executors(args, {}, [])
-    assert args.reef_executor_backend == args.reef_rollout_executor_backend == "ray"
+        configure_executors(args, {}, [])
+    assert args.reef_executor_backend == "ray"
     assert "training: executor=ray" in caplog.text
     assert "Slime model workers" in caplog.text
     args.reef_executor_backend = "auto"
-    _configure_executors(args, {"execution": {"training": "custom:Training"}}, ["--reef-executor-backend", "auto"])
+    configure_executors(args, {"training": "custom:Training"}, ["--reef-executor-backend", "auto"])
     assert args.reef_executor_backend == "ray"
 
 
@@ -112,7 +112,9 @@ def test_train_group_auto_resolves_before_create(gpus):
     from reef.train.slime_backend.reef_adapters.executors.ray import SlimeRayExecutor
     from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 
-    group = SlimeTrainGroup(SimpleNamespace(reef_executor_backend="auto"), 1, gpus, pg=None)
+    group = SlimeTrainGroup(
+        SimpleNamespace(reef_executor_backend="auto", reef_train_executor_options={}), 1, gpus, pg=None
+    )
     assert group._executor_config.backend is SlimeRayExecutor
     assert group._executor is None
 

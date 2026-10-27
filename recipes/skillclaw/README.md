@@ -64,13 +64,13 @@ skillclaw/
 
 The day is the sealed day: each task runs in its WildClawBench container, the agent's model calls go through the embedded Reef service (which injects the served pool's catalog and records the exchange), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
 
-The night trigger is the batch: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day batches - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
+The night trigger is the job's data: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day goes into one job's data - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 
 The selection policy is `selection: always`, so every applied night publishes in the paper's regime. The probe episodes (three exact-answer coding tasks) still run and their scores land in the version metrics, so every published pool version carries a measured before/after record without deciding on those scores.
 
 ## The two runs and the claim
 
-`REEF_SC_RUN` selects the run. `skillclaw` is the method run. `frozen` is the control run: it replays and seals the same rounds but reports nothing, so nothing batches, no night runs, and the pool never changes. The gain criterion is fixed before any data is read and carried verbatim in `stats.py` from the sealed campaign (PR #175, commit 0519eefb): a category's gain counts as real only when the method run's final day beats the control mean by more than two control standard deviations (one sided, calibrated to a 5.6 percent false positive rate per category); best day excesses stay descriptive.
+`REEF_SC_RUN` selects the run. `skillclaw` is the method run. `frozen` is the control run: it replays and seals the same rounds but reports nothing, so nothing trains, no night runs, and the pool never changes. The gain criterion is fixed before any data is read and carried verbatim in `stats.py` from the sealed campaign (PR #175, commit 0519eefb): a category's gain counts as real only when the method run's final day beats the control mean by more than two control standard deviations (one sided, calibrated to a 5.6 percent false positive rate per category); best day excesses stay descriptive.
 
 ## The 2026-08-29 results (GLM-5.3-Flash, preliminary)
 
