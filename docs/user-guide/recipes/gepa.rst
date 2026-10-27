@@ -85,7 +85,7 @@ described under Results.
 
 One detail is worth knowing because it affects cost. When the parent happens to
 be the composition currently being served, its minibatch is free: the engine
-has already batched that composition's real traffic, scores included, so there
+has already collected that composition's real traffic, scores included, so there
 is nothing to re-run. Any other parent has to be run from scratch, because no
 traffic was ever served from it.
 

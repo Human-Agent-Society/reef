@@ -12,7 +12,7 @@
 # left) and the discounted changes of the weeks after it, scaled against the
 # weeks before (harness/report.py). A global batch size of 8 trains about a week of decision turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
-# max_staleness admits the turns of a week that earlier steps have aged.
+# pipeline.record2record.config.max_staleness admits the turns of a week that earlier steps have aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
@@ -27,7 +27,7 @@
 # (CEOBENCH_TRAIN_MAX_TOKENS in run.sh); longer turns are served and
 # recorded but do not train. See the README for what this ruled out.
 #
-# GPU budget: four actor GPUs (TP4, the critic colocated) and a two-GPU
+# GPU budget: four actor GPUs (TP4, the critic on the same GPUs) and a two-GPU
 # rollout engine (TP2), the devices docker-compose.yaml hands the container.
 # The actor and the critic stay resident (no offload between their steps:
 # two frozen 27B bases at TP4 fit beside one step's activations), the critic
@@ -44,8 +44,8 @@ reef:
 inference:
   model-path: /root/models/Qwen3.6-27B
   timeout-s: 7200
-  # A two-GPU tensor-parallel rollout engine beside the four actor GPUs
-  # (training.colocate stays off). Engine flags use SGLang's names.
+  # A two-GPU tensor-parallel rollout engine beside the four actor GPUs.
+  # Engine flags use SGLang's names.
   num-gpus: "2"
   tensor-parallel-size: "2"
   options:
@@ -68,13 +68,18 @@ inference:
       max_new_tokens: 16384
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
-  config:
-    max-staleness: 64
+pipeline:
+  record2record:
+    config:
+      max_staleness: 64
+  task2job:
+    config:
+      # The fewest samples of one job: one optimizer step of Slime's global batch.
+      job_samples: ${training.config.global_batch_size}
 training:
   backend: slime
   ready-timeout: 900
   ray-namespace: reef
-  ray-actor-name: reef-train-bridge
   # One SAO training RPC covers critic_steps_per_actor value steps plus the
   # actor step, a checkpoint save, and a weight publish.
   timeout-s: 14400
@@ -135,8 +140,6 @@ training:
       - linear_proj
       - linear_fc1
       - linear_fc2
-    check-lora-weight-equal: true
-    verify-lora-base-weights: true
     recompute-granularity: "full"
     recompute-method: "uniform"
     recompute-num-layers: "1"

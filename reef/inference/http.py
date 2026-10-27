@@ -133,11 +133,6 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def reconnect(self, upstream_url: str) -> None:
-        if not isinstance(upstream_url, str) or not upstream_url.startswith(("http://", "https://")):
-            raise ValueError("inference endpoint must be an HTTP URL")
-        self._upstream_url = upstream_url.rstrip("/")
-
     def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Keyword arguments of one ``session.post`` call."""
         return {
@@ -202,8 +197,8 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. Does not implement training
-    lifecycle methods.
+    and exposes it via inference_handler. It loads no weights: a release
+    serves under its release ID, and no load names what serves.
     """
 
     def __init__(
@@ -268,6 +263,12 @@ class InferenceProxyRuntime(InferenceRuntime):
     @property
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
+
+    def current_runtime_load_id(self) -> str | None:
+        return None
+
+    def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        return artifact.ref.release_id
 
 
 def _clean_text(value: object) -> bool:

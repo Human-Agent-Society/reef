@@ -8,7 +8,7 @@ from threading import Event
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingRuntime, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
@@ -16,15 +16,8 @@ from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.recipe import Recipe
-from reef.runtime.interfaces import (
-    ActivatedModel,
-    CandidateTrainingDeferred,
-    InferenceHandler,
-    ModelCandidate,
-    PreparedTrainingStep,
-    StaleCandidate,
-    TrainingJobResult,
-)
+from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -32,102 +25,35 @@ _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
 
 
-class DurableRuntime(StubTrainingRuntime):
-    def __init__(
-        self,
-        checkpoint_root: Path,
-        *,
-        fail_once: bool = False,
-        serving_version: str = "v0",
-        block: bool = False,
-        block_storage: bool = False,
-        stale_metrics: dict | None = None,
-        complete_metrics: dict | None = None,
-    ) -> None:
-        super().__init__(base_url="http://inference")
-        self.checkpoint_root = checkpoint_root
-        self.fail_once = fail_once
-        self.serving_version = serving_version
+class MaterializingInference(StubInferenceRuntime):
+    """Serve each release under the version its ``model.txt`` names, so the initial release serves as ``w0``."""
+
+    def serve(self, artifact: Artifact) -> str:
+        return super().serve(artifact.materialize())
+
+
+class DurableComponent(StubTrainingComponent):
+    """A component whose jobs run in ``submit``; ``block`` holds a job until the test sets ``release``.
+
+    ``calls`` lists the jobs that trained, and each saved checkpoint carries ``complete_metrics``.
+    """
+
+    def __init__(self, checkpoint_root: Path, *, block: bool = False, complete_metrics: dict | None = None) -> None:
+        super().__init__(checkpoint_root)
         self.block = block
-        self.block_storage = block_storage
-        self.stale_metrics = stale_metrics
-        self.complete_metrics = complete_metrics
+        self.complete_metrics = complete_metrics or {}
         self.started = Event()
         self.release = Event()
-        self.calls: list[dict] = []
-        self.completed: dict[int, ModelCandidate] = {}
-        self.candidate_versions: dict[str, str] = {}
+        self.calls: list[TrainingJob] = []
+        self.inference = MaterializingInference(base_url="http://inference")
 
-    @property
-    def inference_handler(self):
-        return None
-
-    def serving_runtime_load_id(self):
-        return self.serving_version
-
-    def prepare_training_step(
-        self,
-        batch,
-        objective,
-        algorithm_state,
-        scheduling,
-        scenario_step,
-        *,
-        parent_runtime_load_id=None,
-        scenario=None,
-    ):
-        sample = batch.items[0]
-        payload = {
-            "scenario_step": scenario_step,
-            "loss": objective,
-            "source": source_record_id(sample),
-            "parent_runtime_load_id": sample.training.get("runtime_load_id", None),
-        }
-        return PreparedTrainingStep(
-            action="train",
-            payload=payload,
-            next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
-            metrics={},
-        )
-
-    def train_candidate(self, payload):
-        scenario_step = payload["scenario_step"]
-        existing = self.completed.get(scenario_step)
-        if existing is not None:
-            return existing
-        if payload["parent_runtime_load_id"] != self.serving_version:
-            raise StaleCandidate(self.stale_metrics)
-        if self.block_storage:
-            self.started.set()
-            raise CandidateTrainingDeferred({"blocked": True, "reasons": ["test cap"], "delete": []})
-        self.calls.append(dict(payload))
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.calls.append(job)
         self.started.set()
         if self.block and not self.release.wait(5):
             raise TimeoutError("test did not release blocked training")
-        job_id = f"job-{scenario_step}"
-        checkpoint = self.checkpoint_root / job_id
-        checkpoint.mkdir(parents=True)
-        candidate = ModelCandidate(
-            candidate_id=job_id,
-            training_job_id=job_id,
-            checkpoint_path=str(checkpoint),
-            current_runtime_load_id=self.serving_version,
-            training_metrics=self.complete_metrics or {},
-        )
-        self.completed[scenario_step] = candidate
-        self.candidate_versions[job_id] = f"job:{job_id}"
-        if self.fail_once:
-            self.fail_once = False
-            raise ConnectionError("lost remote acknowledgement")
-        return candidate
-
-    def activate_candidate(self, candidate):
-        runtime_load_id = self.candidate_versions[candidate.candidate_id]
-        self.serving_version = runtime_load_id
-        return ActivatedModel(candidate.candidate_id, runtime_load_id)
-
-    def reject_candidate(self, candidate):
-        del candidate
+        (checkpoint,) = super().train(job)
+        return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.release_path, self.complete_metrics),)
 
 
 class BlockingLostAckBackend(InMemoryRepositoryBackend):
@@ -153,7 +79,7 @@ def _training(runtime_load_id: str) -> dict:
 class ImmediateBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         assert payload["return_meta_info"] is True
-        return {"metadata": {"runtime_load_id": "v0"}}
+        return {"metadata": {"runtime_load_id": "w0"}}
 
 
 class RecordingExperimentTracker(ExperimentTracker):
@@ -211,28 +137,29 @@ def wait_for_operational_sample(
 def start_dispatcher(tmp_path: Path):
     opened = []
 
-    def start(backend_type=None, *, experiment_tracker=None, **runtime_options):
+    def start(backend_type=None, *, experiment_tracker=None, **component_options):
         initial = tmp_path / "initial"
         initial.mkdir(exist_ok=True)
-        runtime = DurableRuntime(tmp_path / "checkpoints", **runtime_options)
+        (initial / "model.txt").write_text("w0")
+        component = DurableComponent(tmp_path / "checkpoints", **component_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(runtime)),
+            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
             factory,
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         )
-        opened.append((runtime, dispatcher))
-        return runtime, dispatcher
+        opened.append((component, dispatcher))
+        return component, dispatcher
 
     yield start
-    for runtime, dispatcher in opened:
-        runtime.release.set()
+    for component, dispatcher in opened:
+        component.release.set()
         dispatcher.close()
 
 
-def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str = "v0") -> None:
+def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str = "w0") -> None:
     dispatcher.get_or_create_scenario("math")
     inference_id = f"inference-{suffix}"
     records = (
@@ -254,13 +181,15 @@ def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str
         dispatcher.accept_record(record)
 
 
-def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
+def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
+    """Wait until ``finished_jobs`` jobs ended; each job commits its submission, its checkpoint and its end."""
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
-        if dispatcher.get_or_create_scenario("math").scenario_step == step:
+        status = dispatcher.build_training_status()["scenarios"]["math"]
+        if status["finished_jobs"] == finished_jobs and status["training_job"] is None:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
-    pytest.fail(f"scenario did not reach step {step}: {dispatcher.build_training_status()}")
+    pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")
 
 
 def _wait_for_error(dispatcher: Dispatcher) -> str:
@@ -274,62 +203,77 @@ def _wait_for_error(dispatcher: Dispatcher) -> str:
 
 
 @pytest.mark.unit
-def test_empty_checkpoint_result_fails_closed() -> None:
-    # A job names its saved checkpoint, or None if it saved no checkpoint. An empty path is not correct.
-    with pytest.raises(ValueError, match="checkpoint_path must be a non-empty string"):
-        TrainingJobResult(outcome="complete", runtime_load_id="v1", checkpoint_path="")
-    assert TrainingJobResult(outcome="complete", runtime_load_id="v1").checkpoint_path is None
-
-
-@pytest.mark.unit
-def test_report_returns_and_inference_resolves_while_remote_job_is_blocked(start_dispatcher) -> None:
-    runtime, dispatcher = start_dispatcher(fail_once=True, block=True)
+def test_report_returns_and_inference_resolves_while_training_job_is_blocked(start_dispatcher) -> None:
+    component, dispatcher = start_dispatcher(block=True)
     scenario = dispatcher.get_or_create_scenario("math")
     expected = scenario.current_artifact_ref()
     _submit_pair(dispatcher)
-    assert runtime.started.wait(1)
+    assert component.started.wait(1)
     assert scenario.current_artifact_ref() == expected
-    runtime.release.set()
-    _wait_for_step(dispatcher, 1)
-    assert len(runtime.calls) == 1
+    component.release.set()
+    _wait_for_jobs(dispatcher, 1)
+    assert len(component.calls) == 1
+    assert scenario.scenario_step == 3
 
 
 @pytest.mark.unit
-def test_backend_failure_reaches_reef_status(start_dispatcher) -> None:
-    runtime, dispatcher = start_dispatcher()
+def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher, monkeypatch) -> None:
+    component, dispatcher = start_dispatcher()
+    submit = component.submit
+    submissions: list[str] = []
 
-    def fail(payload) -> ModelCandidate:
-        del payload
+    def lose_first_acknowledgement(job: TrainingJob) -> None:
+        submissions.append(job.job_id)
+        submit(job)
+        if len(submissions) == 1:
+            raise ConnectionError("lost submission acknowledgement")
+
+    monkeypatch.setattr(component, "submit", lose_first_acknowledgement)
+    _submit_pair(dispatcher)
+    # Each record wakes the worker, so a retry may clear the error before a poll sees it: wait for the count.
+    deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
+    while dispatcher.errors.failure_count("math") == 0 and time.monotonic() < deadline:
+        time.sleep(_ASYNC_WAIT_POLL_S)
+    assert dispatcher.errors.failure_count("math") == 1
+    dispatcher.local_workers.wake(dispatcher.get_or_create_scenario("math"))
+    _wait_for_jobs(dispatcher, 1)
+
+    # The retry names the same job, so the component trains it once.
+    assert submissions[0] == submissions[1]
+    assert len(component.calls) == 1
+
+
+@pytest.mark.unit
+def test_backend_failure_reaches_reef_status(start_dispatcher, monkeypatch) -> None:
+    component, dispatcher = start_dispatcher()
+
+    def fail(job: TrainingJob) -> None:
+        del job
         raise RuntimeError("backend submission failed")
 
-    runtime.train_candidate = fail
+    monkeypatch.setattr(component, "submit", fail)
     _submit_pair(dispatcher)
 
     assert _wait_for_error(dispatcher) == "math: RuntimeError: backend submission failed"
 
 
 @pytest.mark.unit
-def test_inference_waits_until_lost_ack_publication_is_committed(start_dispatcher) -> None:
+def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> None:
     BlockingLostAckBackend.started = Event()
     BlockingLostAckBackend.release = Event()
     BlockingLostAckBackend.failed = False
-    runtime, dispatcher = start_dispatcher(BlockingLostAckBackend)
+    component, dispatcher = start_dispatcher(BlockingLostAckBackend)
     _submit_pair(dispatcher)
     assert BlockingLostAckBackend.started.wait(1)
-    assert not runtime.inference.inference_admission_status["open"]
+    BlockingLostAckBackend.release.set()
+    _wait_for_jobs(dispatcher, 1)
 
-    async def request_during_publication():
-        admission = asyncio.create_task(runtime.inference.acquire_inference())
-        await asyncio.sleep(0.05)
-        assert not admission.done()
-        BlockingLostAckBackend.release.set()
-        handle = await asyncio.wait_for(admission, 5)
-        handle.release()
-
-    asyncio.run(request_during_publication())
-    _wait_for_step(dispatcher, 1)
-    assert len(runtime.calls) == 1
-    assert runtime.inference.current_runtime_load_id() == "job:job-0"
+    assert len(component.calls) == 1
+    published = [
+        row for row in dispatcher.list_releases("math") if row["checkpoint"] and row["operation"] == "training"
+    ]
+    assert len(published) == 1
+    assert component.inference.current_runtime_load_id() == "w1"
 
 
 @pytest.mark.unit
@@ -351,21 +295,23 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
         )
     )
 
-    assert response["metadata"]["runtime_load_id"] == "v0"
+    assert response["metadata"]["runtime_load_id"] == "w0"
 
 
 @pytest.mark.unit
 def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
-    runtime, dispatcher = start_dispatcher()
+    component, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
-    _wait_for_step(dispatcher, 1)
+    _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     first = scenario.current_artifact_ref()
-    _submit_pair(dispatcher, "2", runtime.serving_version)
-    _wait_for_step(dispatcher, 2)
+    _submit_pair(dispatcher, "2", "w1")
+    _wait_for_jobs(dispatcher, 2)
 
-    assert [call["scenario_step"] for call in runtime.calls] == [0, 1]
-    assert [call["source"] for call in runtime.calls] == ["inference-1", "inference-2"]
+    assert [source_record_id(job.data.items[0]) for job in component.calls] == ["inference-1", "inference-2"]
+    # Training is linear: the second job starts from the first job's checkpoint.
+    assert component.calls[0].start is None
+    assert component.calls[1].start == str(component.checkpoint_root / "1")
     assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):
         dispatcher.get_or_create_scenario("other")
@@ -373,27 +319,30 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
 
 @pytest.mark.unit
 def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> None:
-    metrics = {"staleness/samples_fresh": 1, "staleness/samples_admitted_stale": 0}
+    metrics = {"train/loss": 0.25, "train/grad_norm": 1.5}
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
     dispatcher.get_or_create_scenario("math")
 
     assert dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
 
     _submit_pair(dispatcher)
-    _wait_for_step(dispatcher, 1)
+    _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
+    # The checkpoint's commit publishes the release and carries the job's training metrics.
     _, committed = scenario.release_queries.artifact_with_metrics()
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["selected"] is True
+    assert committed["training_job"]["event"] == "checkpoint"
+    # The last commit is the job's end.
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert status["step"] == 1
+    assert status["step"] == 3
     assert isinstance(status["recorded_at"], float)
-    assert status["metrics"] == committed
-    status["metrics"]["selection"]["selected"] = False
+    assert status["metrics"]["training_job"]["event"] == "finished"
+    status["metrics"]["training_job"]["event"] = "failed"
     refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert refreshed["metrics"]["selection"]["selected"] is True
+    assert refreshed["metrics"]["training_job"]["event"] == "finished"
 
 
 @pytest.mark.unit
@@ -405,7 +354,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     )
 
     _submit_pair(dispatcher)
-    _wait_for_step(dispatcher, 1)
+    _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     produced = scenario.current_artifact_ref()
     _, committed = scenario.release_queries.artifact_with_metrics(produced.release_id)
@@ -413,82 +362,27 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert committed is not None
     assert committed["experiment/provider"] == "test"
     assert committed["experiment/run_id"] == "run-math"
-    assert len(tracker.events) == 1
-    event = tracker.events[0]
+    # One event per commit: the job's submission, its checkpoint and its end.
+    assert [event.metrics["training_job"]["event"] for event in tracker.events] == [
+        "submitted",
+        "checkpoint",
+        "finished",
+    ]
+    event = tracker.events[1]
     assert event.context.scenario == "math"
     assert event.context.recipe == "test_policy"
-    assert event.context.backend == "RuntimeCandidateBackend"
+    assert event.context.backend == "stub"
     assert event.context.backend_config == {
-        "runtime": "DurableRuntime",
-        "objective": "sft",
-        "scheduling": {
-            "unit": "comparison_set",
-            "epochs": 1,
-            "shuffle": False,
-            "remainder": "partial",
-        },
+        "job_plan": "fixed",
+        "parameters": {"method": {"objective": "sft"}},
     }
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced
     assert event.metrics["train/loss"] == pytest.approx(0.25)
-    assert event.training_job_id == "job-0"
-    assert event.source_runtime_load_id == "v0"
-    assert event.produced_runtime_load_id == "job:job-0"
+    assert event.training_job_id == tracker.events[0].training_job_id
     assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]
     scenario.trainer.pipeline.experiment_logger.log({"accepted": 1}, namespace="processor")
     assert tracker.loggers["math"].logged == [("processor", {"accepted": 1})]
-
-
-@pytest.mark.unit
-def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> None:
-    stale_metrics = {
-        "staleness/samples_dropped": 1,
-        "staleness/drop_reason": "policy_lag_exceeded",
-        "staleness/source_agent_record_ids": ["inference-1"],
-        "staleness/producing_runtime_load_ids": ["v0"],
-        "staleness/serving_runtime_load_id": "v2",
-        "staleness/drop_policy_lags": [2],
-    }
-    runtime, dispatcher = start_dispatcher(serving_version="v2", stale_metrics=stale_metrics)
-    _submit_pair(dispatcher)
-    _submit_pair(dispatcher, "2", "v2")
-    _wait_for_step(dispatcher, 1)
-    scenario = dispatcher.get_or_create_scenario("math")
-
-    assert scenario.trainer.operational_metrics()["runtime/stale_batches_total"] == 1
-    assert [call["source"] for call in runtime.calls] == ["inference-2"]
-    # Rejecting the first batch consumes neither side's step counter, so the
-    # next valid batch reuses scenario step 0 rather than wedging the bridge at 1.
-    assert runtime.calls[0]["scenario_step"] == 0
-    assert scenario.scenario_step == 1
-    assert scenario.records.count("math") == 4
-    receipts = scenario.records.consumption_receipts("math")
-    assert len(receipts) == 1
-    assert receipts[0]["metadata"] == {
-        "outcome": "stale",
-        # The receipt keeps the method the dropped batch was prepared with.
-        "metrics": {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}},
-    }
-    assert receipts[0]["consumed_ids"] == ("inference-1", "report-1")
-
-
-@pytest.mark.unit
-def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, monkeypatch) -> None:
-    monkeypatch.setattr("reef.dispatcher.training_loop.DispatchedTrainingLoop.storage_retry_seconds", 0.01)
-    runtime, dispatcher = start_dispatcher(block_storage=True)
-    _submit_pair(dispatcher)
-    assert runtime.started.wait(1)
-    scenario = dispatcher.get_or_create_scenario("math")
-
-    assert scenario.scenario_step == 0
-    assert scenario.trainer.pending_batch is not None
-    assert scenario.records.count("math") == 2
-    assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"]["reasons"] == ["test cap"]
-    runtime.block_storage = False
-    _wait_for_step(dispatcher, 1)
-    assert runtime.calls[0]["scenario_step"] == 0
-    assert runtime.calls[0]["source"] == "inference-1"
-    assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"] is None
 
 
 def test_operational_sample_wait_ignores_a_matching_backlog_before_training() -> None:
@@ -505,29 +399,28 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    runtime, dispatcher = start_dispatcher(block=True, experiment_tracker=tracker)
+    component, dispatcher = start_dispatcher(block=True, experiment_tracker=tracker)
     _submit_pair(dispatcher)
-    assert runtime.started.wait(1)
-    _submit_pair(dispatcher, "2", "job:job-0")
+    assert component.started.wait(1)
+    _submit_pair(dispatcher, "2", "w1")
     # The first pair can also produce a backlog of two before training starts.
     sample = wait_for_operational_sample(tracker, {"records/unread_count": 2, "training/execution/active": 1})
     assert sample["training/execution/active"] == 1
     assert sample["training/execution/elapsed_seconds"] >= 0
     assert sample["records/oldest_unread_age_seconds"] >= 0
-    assert sample["training/reserved_batches"] == 1
+    assert sample["training/reserved_job_data"] == 1
     assert sample["processor/unreserved_reports"] == 0
     assert sample["processor/reserved_reports"] == 1
-    # The pipeline status is exported too; the default buffer holds four batches of the trainer's batch size.
+    # The pipeline status is exported too; the default buffer holds the data of four jobs.
     assert "processor/ready_samples" in sample
-    assert (sample["processor/batch_size"], sample["processor/buffer_size"]) == (1, 4)
+    assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 4)
     assert not tracker.events
-    runtime.release.set()
-    _wait_for_step(dispatcher, 2)
+    component.release.set()
+    _wait_for_jobs(dispatcher, 2)
     dispatcher.close()
     final = [metrics for namespace, metrics in tracker.loggers["math"].logged if namespace == "operations"][-1]
     assert final["records/unread_count"] == 0
     assert final["training/execution/active"] == 0
-    assert final["runtime/weight_sync/completed_total"] == 2
     assert final["training/failed_attempts_total"] == 0
     assert tracker.closed
     assert not dispatcher.background_threads.metrics_thread.is_alive()
@@ -536,22 +429,22 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
 def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    runtime, dispatcher = start_dispatcher(experiment_tracker=tracker)
-    train_candidate = runtime.train_candidate
-    failures: list[Mapping[str, object]] = []
+    component, dispatcher = start_dispatcher(experiment_tracker=tracker)
+    submit = component.submit
+    failures: list[TrainingJob] = []
 
-    def fail(payload: Mapping[str, object]) -> ModelCandidate:
-        failures.append(payload)
+    def fail(job: TrainingJob) -> None:
+        failures.append(job)
         raise ConnectionError("training submission unavailable")
 
-    monkeypatch.setattr(runtime, "train_candidate", fail)
+    monkeypatch.setattr(component, "submit", fail)
     _submit_pair(dispatcher)
     sample = wait_for_operational_sample(tracker, {"training/error": 1})
     assert sample["training/error"] == 1
     assert not tracker.events
-    monkeypatch.setattr(runtime, "train_candidate", train_candidate)
-    dispatcher.training_loop.ready.set()
-    _wait_for_step(dispatcher, 1)
+    monkeypatch.setattr(component, "submit", submit)
+    dispatcher.local_workers.wake(dispatcher.get_or_create_scenario("math"))
+    _wait_for_jobs(dispatcher, 1)
     dispatcher.record_operational_metrics()
     final = [metrics for namespace, metrics in tracker.loggers["math"].logged if namespace == "operations"][-1]
     assert final["training/error"] == 0
@@ -564,37 +457,10 @@ def test_disabled_tracking_does_not_start_periodic_sampling(start_dispatcher) ->
     assert dispatcher.background_threads.metrics_thread is None
 
 
-def test_periodic_metrics_observe_incomplete_weight_sync(start_dispatcher, monkeypatch) -> None:
-    monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
-    tracker = OperationalExperimentTracker()
-    runtime, dispatcher = start_dispatcher(experiment_tracker=tracker)
-    activate = runtime.activate_candidate
-    transferring = Event()
-    release = Event()
-
-    def block_transfer(candidate: ModelCandidate) -> ActivatedModel:
-        transferring.set()
-        if not release.wait(5):
-            raise TimeoutError("test did not release weight transfer")
-        return activate(candidate)
-
-    monkeypatch.setattr(runtime, "activate_candidate", block_transfer)
-    try:
-        _submit_pair(dispatcher)
-        assert transferring.wait(1)
-        sample = wait_for_operational_sample(tracker, {"runtime/weight_sync/active": 1})
-        assert sample["runtime/weight_sync/elapsed_seconds"] >= 0
-        assert sample["runtime/weight_sync/completed_total"] == 0
-        assert not tracker.events
-    finally:
-        release.set()
-    _wait_for_step(dispatcher, 1)
-
-
 def test_processor_lock_does_not_hide_execution_metrics(start_dispatcher) -> None:
-    runtime, dispatcher = start_dispatcher(block=True)
+    component, dispatcher = start_dispatcher(block=True)
     _submit_pair(dispatcher)
-    assert runtime.started.wait(1)
+    assert component.started.wait(1)
     trainer = dispatcher.get_or_create_scenario("math").trainer
     with trainer._lock:
         sample = trainer.operational_metrics()

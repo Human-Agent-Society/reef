@@ -34,13 +34,7 @@ from reef.storage.commits import (
 )
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.train.trainer import ComponentTrainer, Trainer
-from reef.train.types import (
-    DurableWeightsPublication,
-    NoArtifactPublication,
-    PreparedCommit,
-    SavedArtifactPublication,
-    TrainStepResult,
-)
+from reef.train.types import NoArtifactPublication, PreparedCommit, SavedArtifactPublication, TrainStepResult
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +163,6 @@ class ScenarioCommitter:
             return True
         return record.component is None and record.operation == "training" and len(self.trainers) == 1
 
-    def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
-        """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
-        with self._lock:
-            component_trainer = self.component_trainer(component)
-            component_trainer.trainer.reject_pending(
-                metrics, component=self.component_on_record(component_trainer.component)
-            )
-
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
@@ -201,13 +187,12 @@ class ScenarioCommitter:
         )
 
     def recorded_rollback_restored_weights(self, recorded: CommitRecord) -> bool:
-        """Whether the attempt that wrote ``recorded`` restored the loaded component, so its retry reopens admission."""
+        """Whether the rollback that wrote ``recorded`` changed the runtime-loaded recipe component, so the weight trainer starts from it."""
         loaded = self._binding.surface.loader_component
         if loaded is None:
             return False
         # The release served before the rollback: the newest earlier record that was not held for review, and
-        # the creation before any. A rollback that left the weights alone paused nothing; a dispatched job may
-        # still hold admission.
+        # the creation before any. A rollback that left the weights alone gives the trainer no new start.
         earlier = [
             entry for entry in reversed(self._store.history()) if entry.step < recorded.step and not entry.pending
         ]
@@ -221,7 +206,7 @@ class ScenarioCommitter:
         recorded_entry = None if recorded.components is None else recorded.components.get(loaded)
         if recorded_entry is None or served_entry is None:
             # A composed release always names its weights: a side that cannot be read (the creation manifest
-            # while the repository is away) must not open admission a dispatched job may still hold.
+            # while the repository is away) does not count as a change.
             return False
         return recorded_entry != served_entry
 
@@ -324,7 +309,7 @@ class ScenarioCommitter:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
-            if any(component_trainer.trainer.pending_batch is not None for component_trainer in self.trainers):
+            if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
                 raise ReefError("cannot rollback while a training result is pending commit")
 
             artifacts = self._artifacts
@@ -334,10 +319,17 @@ class ScenarioCommitter:
             recorded = self.recorded_retry(
                 prepared, next_step, operation=operation, rollback_target_release_id=release_id
             )
+            weight_trainer = self.weight_trainer()
             if recorded is not None:
                 recorded = self.finish_recorded_retry(recorded, prepared, self._trainer)
-                if self.recorded_rollback_restored_weights(recorded):
-                    self._resume_restored_weights()
+                if (
+                    weight_trainer is not None
+                    and operation == "rollback"
+                    and self.recorded_rollback_restored_weights(recorded)
+                ):
+                    weight_trainer.trainer.apply_rollback_start(
+                        self.imported_start(weight_trainer.trainer, artifacts.resolve(target_ref))
+                    )
                 return recorded.artifact_ref
             if self._store.durable:
                 self._synchronize_checkpoint()
@@ -361,29 +353,16 @@ class ScenarioCommitter:
                 staged = source
             try:
                 self.admit_restored(source, release_id, promoted)
-                # The runtime-loaded component is restored only when the engine serves other content.
+                # The runtime-loaded component changes only when the engine serves other content. The runtime
+                # serves the target once it is published, so a failed publication leaves serving as it was.
                 loaded_component = surface.loader_component
                 served = Artifact(current_ref, artifacts.repository)
                 restore_weights = loaded_component is not None and surface.component_changed(
                     source, served, loaded_component
                 )
-                if self._binding.training_runtime is not None and loaded_component is not None and restore_weights:
-                    if self._binding.runtime is None:
-                        raise ReefError("training checkpoint restore requires an inference runtime")
-                    if not self._binding.training_runtime.supports_checkpoint_restore:
-                        # Refused before admission closes: nothing here can put the weights back.
-                        raise ReleaseNotRestorable(
-                            f"scenario {self._name!r}: {type(self._binding.training_runtime).__name__} cannot "
-                            f"restore training weights, so release {release_id!r} cannot be served again"
-                        )
-                    self._binding.runtime.pause_admission()
-                    training_runtime = self._binding.training_runtime
-                    training_runtime.restore_checkpoint(
-                        surface.component_artifact(source, loaded_component),
-                        scenario=self._name if training_runtime.concurrent_training_scenarios else None,
-                    )
-                if restore_weights:
-                    surface.load(source, self._binding.runtime)
+                # A rollback also moves where training continues; a promote serves a release training passed already.
+                restoring = weight_trainer if restore_weights and operation == "rollback" else None
+                restored_start = None if restoring is None else self.imported_start(restoring.trainer, source)
                 if staged is None:
                     staged = artifacts.stage(next_step, source, parent=checkpoint)
                 published_ref = artifacts.publish(
@@ -413,11 +392,77 @@ class ScenarioCommitter:
             self.finish_committed_step(
                 prepared, record, self._trainer, expected=current_ref, expected_checkpoint=checkpoint
             )
-            if restore_weights:
-                # A rollback that left the weights alone paused nothing; resuming here would open admission
-                # under a dispatched job that still holds it and call its unpublished version served.
-                self._resume_restored_weights()
+            if restoring is not None:
+                restoring.trainer.apply_rollback_start(restored_start)
             return published_ref
+
+    def resume_rollback_start(self) -> None:
+        """After a restart, start the weight trainer's next job from a rollback newer than the trainer's last commit.
+
+        A rollback moves where training continues, and the trainer's next
+        commit records that. A restart before that commit recovers the
+        trainer's state from its earlier commit, so the newer rollback's
+        release is imported again here.
+        """
+        weight_trainer = self.weight_trainer()
+        if weight_trainer is None or not self._store.durable:
+            return
+        recorded_component = self.component_on_record(weight_trainer.component)
+        records = self._store.history()
+        last_training = next(
+            (
+                record.step
+                for record in reversed(records)
+                if record.operation == "training" and self.own_record(record, recorded_component)
+            ),
+            0,
+        )
+        rollback = next(
+            (
+                record
+                for record in reversed(records)
+                if record.step > last_training
+                and record.operation == "rollback"
+                and self.recorded_rollback_restored_weights(record)
+            ),
+            None,
+        )
+        if rollback is not None:
+            weight_trainer.trainer.apply_rollback_start(
+                self.imported_start(weight_trainer.trainer, self._artifacts.resolve(rollback.artifact_ref))
+            )
+
+    def weight_trainer(self) -> ComponentTrainer | None:
+        """The scenario's weight trainer, which submits training jobs; ``None`` when the scenario trains no weights."""
+        return next(
+            (
+                component_trainer
+                for component_trainer in self.trainers
+                if component_trainer.trainer.job_loop is not None
+            ),
+            None,
+        )
+
+    def imported_start(self, trainer: Trainer, release: Artifact) -> str | None:
+        """Import ``release``'s runtime-loaded recipe component into ``trainer``'s training component as a start.
+
+        Raise ``ReleaseNotRestorable`` when the component cannot start from those weights.
+        """
+        try:
+            return trainer.import_rollback_release(self.loaded_release_path(release))
+        except ValueError as exc:
+            raise ReleaseNotRestorable(f"scenario {self._name!r}: {exc}") from exc
+
+    def loaded_release_path(self, release: Artifact) -> Path:
+        """The local directory of ``release``'s runtime-loaded recipe component."""
+        surface = self._binding.surface
+        loaded = surface.loader_component
+        if loaded is None:
+            raise ReefError(f"scenario {self._name!r} serves no runtime-loaded component")
+        path = surface.component_artifact(release, loaded).materialize().local_path
+        if path is None:
+            raise ReefError(f"scenario {self._name!r}: the release has no local files to train from")
+        return path
 
     def admit_restored(self, source: Artifact, release_id: str, promoted: str | None) -> None:
         """Run on a release a rollback or promote restores the checks its commit ran, and no more.
@@ -471,7 +516,7 @@ class ScenarioCommitter:
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Commit the backend's update of the content this Reef ships, when the served release is stale.
 
-        The update is a training commit with no batch behind it: it consumes no
+        The update is a training commit with no job data behind it: it consumes no
         records and runs no evaluation, since its content is Reef's own. It is
         served at once rather than held for review for the same reason. Returns the
         new head, or ``None`` when the served release already carries the content.
@@ -502,11 +547,6 @@ class ScenarioCommitter:
             self.commit_saved_artifact(result, publication, prepared, trainer, component)
             trainer.apply_committed_state(result.state)
             return self._artifacts.current
-
-    def _resume_restored_weights(self) -> None:
-        if self._binding.training_runtime is not None and self._binding.runtime is not None:
-            self._binding.runtime.mark_published()
-            self._binding.runtime.resume_admission()
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
@@ -541,16 +581,6 @@ class ScenarioCommitter:
                     self.commit_without_artifact(prepared, trainer, component)
                     return result.state
 
-                surface = self._binding.surface
-                if isinstance(publication, DurableWeightsPublication):
-                    # Saved weights become an artifact version; weights a job did not save are never published.
-                    publication = SavedArtifactPublication(
-                        Artifact.local(
-                            Path(publication.checkpoint_path),
-                            metadata={"runtime_load_id": publication.runtime_load_id},
-                        ),
-                        surface.loader_component,
-                    )
                 self.commit_saved_artifact(result, publication, prepared, trainer, component)
                 return result.state
 
@@ -561,11 +591,23 @@ class ScenarioCommitter:
         if observer is None:
             return result
         backend = trainer.candidate_backend
+        job_loop = trainer.job_loop
         try:
-            backend_config = None if backend is None else dict(backend.experiment_config())
+            if backend is not None:
+                backend_config: dict[str, Any] | None = dict(backend.experiment_config())
+            elif job_loop is not None:
+                backend_config = dict(job_loop.plan.experiment_config())
+            else:
+                backend_config = None
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
+        if backend is not None:
+            backend_name: str | None = type(backend).__name__
+        elif job_loop is not None:
+            backend_name = job_loop.component.name
+        else:
+            backend_name = None
         context = TrainingExperimentContext(
             scenario=self._name,
             recipe=observer.recipe,
@@ -573,15 +615,14 @@ class ScenarioCommitter:
             source_artifact_ref=self._artifacts.current,
             run_segment=observer.run_segment,
             run_step=observer.run_step,
-            backend=None if backend is None else type(backend).__name__,
+            backend=backend_name,
             backend_config=backend_config,
             component=self.component_on_record(component),
         )
+        artifact = result.artifact
         correlation = observer.prepare(
             context,
-            source_runtime_load_id=result.source_runtime_load_id,
-            produced_runtime_load_id=result.runtime_load_id,
-            checkpoint_path=result.checkpoint_path,
+            checkpoint_path=None if artifact is None or artifact.local_path is None else str(artifact.local_path),
         )
         if correlation:
             try:

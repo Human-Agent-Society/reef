@@ -83,13 +83,13 @@ import a concrete integration.
 |                         | resolution, runtime binding, and the built-in Reefine    |                                            |
 |                         | and generated-task recipes                               |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/train/``         | the trainer loop, the training pipeline, batch types,    | HTTP endpoints, deployment                 |
-|                         | backend integrations                                     | configuration parsing                      |
+| ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |
+|                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and batch assembly, record storage, |
-|                         | grouping, judging, eligibility checks, selection order   | task generation                            |
+| ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and job data assembly, record       |
+|                         | grouping, judging, eligibility checks, selection order   | storage, task generation                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2task/``   | turning a record set into tasks (``Record2Task``,        | which records train, batch shape,          |
+| ``reef/record2task/``   | turning a record set into tasks (``Record2Task``,        | which records train, job data shape,       |
 |                         | ``ReportTasks``, ``JudgedTasks``), and the generator     | training loops                             |
 |                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -97,14 +97,14 @@ import a concrete integration.
 |                         | episodes, built-in selection policies, and the           | artifact publication                       |
 |                         | ``evaluation`` plugin configuration                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/task2batch/``    | shaping the tasks of the selected batch units into one   | which records train, the training loop,    |
-|                         | batch (``Task2Batch``)                                   | step signals                               |
+| ``reef/task2job/``      | shaping the tasks of the selected record set units into  | which records train, the training loop,    |
+|                         | one job's data (``Task2Job``)                            | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/runtime/``       | backend-neutral runtime contracts, scheduling,           | concrete inference and training            |
-|                         | weight synchronization and publication coordination      | integrations                               |
+| ``reef/runtime/``       | backend-neutral contracts: training components,          | concrete inference and training            |
+|                         | inference runtimes, saved-weight serving, executors      | integrations                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/inference/``     | concrete inference backends, native engine control,      | training algorithms and publication        |
-|                         | request adaptation and weight reception                  | decisions                                  |
+|                         | request adaptation and loading saved weights             | decisions                                  |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/surface/``       | delivering a published artifact to the                   | proposing, evaluating, or                  |
 |                         | process or client that uses it                           | selecting updates                          |
@@ -162,13 +162,13 @@ package's own submodules and third-party libraries):
    * - ``harness``
      - ``sandbox``, ``runtime``, ``core``
    * - ``evaluation``
-     - ``harness``, ``runtime``, ``core``
+     - ``harness``, ``sandbox``, ``runtime``, ``core``
    * - ``train``
-     - ``evaluation``, ``harness``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``evaluation``, ``harness``, ``sandbox``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``recipe``
-     - ``train``, ``evaluation``, ``harness``, ``sandbox``, ``runtime``, ``surface``, ``storage``, ``observability``, ``core``
+     - ``train``, ``evaluation``, ``harness``, ``sandbox``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
-     - ``recipe``, ``train``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``recipe``, ``train``, ``inference``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
@@ -176,15 +176,17 @@ package's own submodules and third-party libraries):
    * - ``cli``
      - ``service``, ``core``
 
-Shared batches and candidate evaluation contracts live in ``core/batches.py``
+Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
-payloads and holds the queued instruction carried by a training batch. Request
+payloads and holds the queued instruction carried by a job's data. Request
 requirements and their release-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with surface contracts.
-``recipe/cordis.py`` assembles the harness training backend, and
-``service/training_driver.py`` independently selects training and inference
-definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdown.
+``recipe/cordis.py`` assembles the harness training backend.
+``service/deploy/training.py`` selects the training deployment definition
+that ``training.backend`` names and assembles the services it needs;
+``service/deploy/inference.py`` adds the local inference component when the
+deployment serves saved weights on one.
 ``runtime/`` is a namespace package with exactly seven Python modules and the
 ``executor/`` package; it has no ``__init__.py`` or import facade:
 
@@ -193,55 +195,65 @@ definitions; ``runtime/deployment.py`` owns their startup, attachment and shutdo
    runtime/
      interfaces.py
      jobs.py
-     scheduler.py
+     durable_files.py
      deployment.py
-     publication.py
      recovery.py
+     residency.py
      serving.py
      executor/
 
-``interfaces.py`` defines the independent ``TrainingRuntime`` and
-``InferenceRuntime`` scheduling interfaces, the native ``TrainingBackend`` and
-``InferenceBackend`` contracts, and shared values and storage interfaces.
-``scheduler.py`` owns recipe-facing candidate/commit coordination, remote job
-serialization and train/checkpoint ordering.
-``jobs.py`` defines bounded training jobs and the ``TrainingComponent``
-interface. ``publication.py`` owns weight publication, version allocation, LoRA residency
-and transfer locking. ``serving.py`` loads saved adapters into serving engines
-that the control plane controls directly. ``recovery.py`` owns durable markers, scenario history,
-engine monitoring and restart recovery. ``deployment.py`` owns component
-lifecycle, runtime configuration and factory resolution. ``executor/`` owns
-worker launch, control RPC and coordinator connections.
+``interfaces.py`` defines the ``InferenceRuntime`` and ``InferenceBackend``
+contracts, ``TrainingMethod`` and its learning-rate schedule, and runtime load
+IDs. ``jobs.py`` defines bounded training jobs and the ``TrainingComponent``
+interface. ``deployment.py`` owns runtime factories, ``RuntimeRegistry`` and
+the inference service contracts. ``durable_files.py`` writes JSON files and
+directories durably, for the training components' job records. ``recovery.py``
+owns ``InferenceControl`` and ``EngineHealthMonitor``. ``residency.py`` holds the
+``AdapterResidencyManager``. ``serving.py`` loads saved weights into serving
+engines that the control plane controls directly. ``executor/`` owns worker
+launch and control RPC.
 
-Dependencies run from deployment through scheduling, recovery and publication
-to interfaces. Executor implementations depend only on interfaces and their own
-package. Runtime coordination has no direct imports of concrete inference or
-training code; the deployment registry resolves the selected factory explicitly.
-Generic connection implementations live in ``inference/runtime.py`` and
-``train/runtime.py``; HTTP provider handling lives in ``inference/http.py``.
-``inference/sglang/runtime.py`` supplies ``SGLangInferenceRuntime``,
-``inference/vllm/runtime.py`` supplies ``VLLMInferenceRuntime``, and
-``train/slime_backend/runtime.py`` supplies ``SlimeTrainingRuntime``. These
-implement the scheduling interfaces; their native Backend implementations retain
-model operations, checkpoint and tensor I/O.
+``jobs.py``, ``interfaces.py`` and ``durable_files.py`` import no other runtime module; ``serving.py``
+may import every other module except ``executor/``.
+``tests/contributing/test_dependency_boundaries.py`` checks this order.
+Runtime contracts have no direct imports of concrete inference or training
+code; the deployment registry resolves the selected factory explicitly.
+
+In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
+``JobLoop``, the recipe's ``JobPlan`` and the committed ``JobLoopState``;
+``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
+training components; ``deployment.py`` holds the ``TrainingDeployment``
+definitions; and ``backend.py`` holds ``CandidateBackend``, the candidate
+lifecycle of harness evolution. ``train/slime_backend/component.py`` and
+``train/tinker_backend/component.py`` supply the Slime and Tinker training
+components, and each ``launch.py`` supplies its deployment definition and
+runtime factory. No training backend builds serving:
+``service/deploy/serving.py`` selects and configures it from the
+``inference`` section and the component's release format.
+
+HTTP provider handling lives in ``inference/http.py``.
 ``inference/chat.py`` holds the engine-neutral OpenAI and Anthropic chat facade
 over a token-native generate route: it renders the prompt, builds the training
 record from a ``CapturedGeneration`` and streams protocol frames. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the control classes that SGLang and vLLM
-share: the coordinator backend, the inference service, the control actor and its
-default serving executor. ``inference/sglang/`` owns SGLang engine launch,
-capture and control independently of training; ``inference/vllm/`` owns vLLM capture,
+and builds its tool-call parser. ``inference/engine_control.py`` holds the
+control classes that SGLang and vLLM share: the inference backend, the
+inference service, the control actor and its default serving executor.
+``inference/sglang/`` owns SGLang engine launch, capture and control
+independently of training; ``inference/vllm/`` owns vLLM capture,
 the KV connector that stamps tokens with their weight version, and engine launch and
-control over vLLM's HTTP control routes. ``inference/remote/`` runs those engines
-on another host: its component (``python -m reef.inference.remote``) serves their
-control operations and requests over HTTP, and ``RemoteInferenceService`` is the
-control plane's receiver for it. ``inference/null.py`` is the receiver of
-``inference.backend: none``: it runs no engine, records the version that the
-trainer holds and refuses every request. ``train/slime_backend/inference.py`` only
-translates Slime options into plain launch data; the selected inference factory
-constructs its own configuration.
-``train/slime_backend/driver.py`` supplies Slime component definitions.
+control over vLLM's HTTP control routes. ``inference/remote/`` is the inference
+component: ``python -m reef.inference.remote`` runs the engines and serves
+their control operations and requests over HTTP. ``RemoteInferenceBackend``
+is the control plane's client for it, and ``inference/remote/runtime.py``
+supplies the ``remote_serving`` runtime kind and builds the engines' input
+(``serving_engine_config``). ``inference/null.py`` is the
+runtime of ``inference.backend: none``: it runs no engine and refuses every
+request. ``inference/tinker.py`` serves Tinker's sampler. ``tinker/`` holds
+the Tinker SDK pieces that the Tinker training component and the Tinker
+serving runtime share: ``tinker/sampling.py`` renders and samples text chat
+with Reef's training capture, for serving and for the component's own
+rollouts.
 
 The extension points those packages expose are in `Python API
 <../reference/python-api.rst>`__.
@@ -308,7 +320,7 @@ The extension points those packages expose are in `Python API
   ``reef/artifact/``. If it decides how consumers activate those bytes, put
   that behavior in ``reef/surface/`` instead.
 - Does it define a backend-neutral model-service contract? Put it in
-  ``reef/runtime/``, alongside Reef's scheduling and publication coordination.
+  ``reef/runtime/``, beside the training component and serving contracts.
   Put concrete inference engines and their request/control adapters in
   ``reef/inference/<integration>/``; put implementation tied to a concrete
   training stack in its own ``reef/train/<integration>/`` subtree.
@@ -318,8 +330,8 @@ The extension points those packages expose are in `Python API
   weights counterpart.
 - Does it decide which records train, or in which groups? Put it in
   ``reef/record2record/``. Does it turn one record set into tasks? Put the
-  shared contract in ``reef/record2task/``. Does it shape tasks into a batch?
-  Put it in ``reef/task2batch/``. Does it turn a batch into a step signal? Put
+  shared contract in ``reef/record2task/``. Does it shape tasks into job data?
+  Put it in ``reef/task2job/``. Does it turn job data into a step signal? Put
   it in ``reef/train/algos/``. ``reef/train/pipeline.py`` drives the three
   stages. A recipe selects and binds that machinery; it should
   not reimplement it.

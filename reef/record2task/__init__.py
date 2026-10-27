@@ -2,13 +2,13 @@
 
 Reef reuses records in a pipeline of three stages::
 
-    record ─► record2record ─► record set ─► record2task ─► task ─► task2batch ─► batch
+    record ─► record2record ─► record set ─► record2task ─► task ─► task2job ─► job data
 
 ``reef.record2record`` decides which records Reef uses and forms record sets.
 This package turns each set into tasks. A task is a ``TrainDataItem``: a
 ``TrajectoryItem`` that trains directly, or a ``TaskItem`` that the algorithm
-rolls out. A recipe's ``Task2Batch`` (``reef.task2batch``) shapes the
-tasks into batches, and ``reef.train.pipeline.TrainingPipeline`` drives the
+rolls out. A recipe's ``Task2Job`` (``reef.task2job``) shapes the
+tasks into job data, and ``reef.train.pipeline.TrainingPipeline`` drives the
 three stages.
 
 Entry point: ``Record2Task`` in ``base.py``. The recipe's ``pipeline_spec()``
@@ -26,7 +26,7 @@ Implementations:
 * ``GeneratedTaskTasks`` (in the built-in recipe ``reef.recipe.generated_tasks``):
   new Harbor tasks from a description and, optionally, from recorded sessions.
   Each round generates and checks tasks. Their rollout episodes are not
-  records: ``GeneratedTaskBatches`` turns them into samples.
+  records: ``GeneratedTaskJobData`` turns them into samples.
 
 Shared parts of ``make_sample``:
 

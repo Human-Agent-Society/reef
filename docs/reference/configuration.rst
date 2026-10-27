@@ -84,7 +84,7 @@ The public layout groups fields by their owner:
 * ``recipe.implementation``: the selected recipe class or preset.
 * ``recipe.config``: fields declared by that recipe.
 * ``recipe.runtime``: the runtime type and its declared settings.
-* ``training``: backend selection, bridge startup/request timeouts, Ray connection and native Slime ``options``.
+* ``training``: backend selection, startup and worker-call timeouts, Ray connection and native training ``options``.
 * ``storage``: artifact backend and repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
@@ -97,68 +97,104 @@ or training backend determine the processes, dependencies and connections.
 ``training.config`` holds workload variables such as checkpoint directories;
 native training flags belong in ``training.options`` and engine flags in ``inference.options``.
 
-With the default Slime backend, Reef starts a local driver, waits for its healthy
-coordinator, then starts HTTP and obtains the inference connection from that coordinator.
-For managed full-weight and LoRA training, including colocated configurations,
-the backend-neutral Reef model driver owns separate
-resource, inference and training components. Reef selects the two backend
-definitions independently, starts each component, then attaches a weight-transfer
-session. Training workers send directly to inference workers; batch processing
-uses Slime's adapter inside Reef's coordinator. Publication, version verification,
-LoRA residency and colocated memory handoffs live in ``reef.runtime``.
-Native engine launch and control live in ``reef.inference.sglang``. Reef
-reserves the model GPUs itself (``reef.runtime.executor.placement``): one
-placement group per deployment, ordered by node and device, sliced for the
-training and inference components; ``training.colocate`` gives both the same
-bundles.
-External-engine paths use the same component lifecycle while borrowing their
-external engines; automatic cold-rebuild supervision remains disabled for them.
-HTTP and the driver share the Ray address, namespace, actor name and resolved
-model path. With no Ray address, Reef owns the shared runtime and stops it on
-exit; an existing cluster is left running. Model topology, optimizer settings
-and checkpoint paths still need the complete options for the selected recipe.
+A weight-training stack trains and serves on separate processes and GPUs. The
+training backend runs a training component inside the HTTP service. Reef
+submits each job's ready data to that component as a bounded job, and the
+component saves checkpoints. Reef evaluates each saved checkpoint and
+publishes the selected ones as releases. The serving engines load only
+published releases, from files. With the default Slime backend and an engine
+(``inference.backend: sglang`` or ``vllm``), ``reef serve`` starts these
+services:
+
+- ``inference``: a local inference component (``python -m
+  reef.inference.remote``) on a free loopback port. It starts the serving
+  engines and loads each published release into them. An ``inference.remote``
+  section replaces it with a component on another host.
+- ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
+  section is set.
+- ``reef``: the HTTP service. It hosts the Slime training component, which
+  reserves the training GPUs on Ray and starts Slime's workers.
+
+The inference component and the HTTP service join the same Ray cluster
+(``RAY_ADDRESS`` or ``training.ray-address``), so the engines and the training
+workers reserve separate GPUs. With no Ray address, Reef starts a local
+cluster and stops it on exit; an existing cluster is left running. Model
+topology, optimizer settings and checkpoint paths still need the complete
+options for the selected recipe. `Training components, serving and executors
+<../developer-guide/executors.rst>`__ describes the job and serving contracts.
 
 The same path supports CLI-only training with
 ``--recipe.implementation package.module:WeightRecipe``,
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
-``training.backend`` defaults to ``slime`` for compatibility. The optional
-``tinker`` backend provides remote LoRA training and immutable sampling without
-local GPUs, or serves its saved adapters on Reef's SGLang engines when
-``inference.backend: sglang`` is selected; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
-installed ``reef.training_backends`` entry-point name or an importable
-``package.module:Deployment`` class. The selected definition describes the process
-plan and HTTP runtime connection; Reef owns the managed component lifecycle; other backends do not inherit Slime's Ray,
-SGLang or native-argument requirements.
+``training.backend`` defaults to ``slime``. The optional ``tinker`` backend
+trains LoRA adapters remotely without local GPUs. Tinker's sampler serves
+them by default. Reef's SGLang engines serve them instead when Tinker exports
+each adapter (``training.options.export-adapter``) and the ``inference``
+section configures engines; see `Train with Tinker <../user-guide/tinker.rst>`__.
+``training.backend`` also accepts an installed ``reef.training_backends``
+entry-point name or an importable ``package.module:Deployment`` class. The
+selected definition validates its settings. It names the services that the
+HTTP service depends on. It also describes the training component that the
+HTTP service builds. Serving is not the backend's: the ``inference`` section
+selects it (see `Serving of a weight-training deployment
+<#serving-of-a-weight-training-deployment>`__). Other backends do not inherit
+Slime's Ray or native-argument requirements.
 
 An in-process integration can use ``InProcessTrainingDeployment``: it starts
-only Reef HTTP and constructs its registered training runtime inside that
-process. ``training.options`` is parsed by that runtime factory, with CLI leaf
-overrides taking precedence over YAML. Runtime type, model and shared timeout
-settings cannot be overridden inside the options map. Such integrations reject
-Ray, training/rollout executor and standalone inference-engine settings. MLX
-support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/325>`__;
-this extension contract alone does not install or implement MLX.
-``training.ready-timeout`` controls bridge startup (default 3600 seconds);
-``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
+only Reef HTTP, whose registered runtime factory builds the training component
+inside that process. ``training.options`` is parsed by that runtime factory,
+with CLI leaf overrides taking precedence over YAML. Runtime type, model and
+shared timeout settings cannot be overridden inside the options map. Such
+integrations reject Ray and training executor settings.
 
-``training.timeout-s`` sets the training coordinator RPC wait in seconds. With
-Slime, it also sets the internal worker RPC waits for training, checkpoint saves,
-weight export and publication. For example, set ``training: {timeout-s: 43200}`` in
-YAML or pass ``--training.timeout-s 43200`` to allow waits of up to 12 hours.
-The value must be a positive finite number. If omitted, the coordinator wait
-follows ``inference.timeout-s`` (default 300 seconds), while Slime's internal
-worker waits retain their four-hour default. Worker initialization keeps its
-existing timeout independently of this setting.
+``training.ready-timeout`` (default 3600 seconds) bounds the startup of the
+services that the training backend adds, such as the inference component and
+the teacher engine. ``reef.ready-timeout`` (default 30 seconds) bounds HTTP
+startup. When the HTTP service loads the model into training workers or
+starts serving engines before it answers, as with Slime and whenever Reef's
+engines serve, Reef raises ``reef.ready-timeout`` to at least
+``training.ready-timeout``.
 
-Each RPC has its own wait budget. The outer coordinator call still bounds the
-combined training and checkpoint-save wait; giving each internal RPC 12 hours
-does not allow those phases to take 12 hours each inside the same outer call.
-A timeout stops waiting, not worker execution, and does not automatically retry
-the job or save an intermediate checkpoint. A job left in ``RUNNING`` needs
-operator recovery before it can be replayed; see
-`Training-step coordination <../developer-guide/executors.rst#training-step-coordination>`__.
+``training.timeout-s`` bounds each call to the training workers, in seconds.
+With Slime, it bounds each worker call of a job, such as training and
+checkpoint saves; when omitted, the bound is four hours. With Tinker, it
+bounds each remote call. For example, set ``training: {timeout-s: 43200}`` in
+YAML or pass ``--training.timeout-s 43200`` to allow calls of up to 12 hours.
+The value must be a positive finite number. A timeout stops waiting, not the
+work on the workers. The job then fails; Reef does not retry it, and the
+next job starts from the last saved checkpoint.
 
-Slime-integrated inference uses the same ``inference`` fields as standalone
+Serving of a weight-training deployment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``inference`` section alone decides how a weight-training deployment
+serves its releases. The training backend builds only its training
+component, and that component declares the format of its releases: full
+weights, or a PEFT adapter with its rank and target modules.
+
+.. config::
+
+   inference.serving | ``engines`` when an engine setting is set, else the training backend's default | ``engines``: Reef's engines on an inference component load each release (Slime's default); ``trainer``: the training backend serves its own releases (Tinker's sampler, Tinker's default); ``none``: nothing serves; ``module:Factory``: a serving ``RuntimeFactory``
+   inference.serving-config | {} | the settings of a ``module:Factory`` serving runtime; it also receives the release format as ``release_format``, ``null`` when the releases hold no weight files
+   inference.max-loaded-adapters | 1 | adapters the engines keep resident when the releases are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
+   inference.prefix-sharing | false | share prefix-cache entries between requests. Each release load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
+
+The engine settings are ``inference.backend``, ``inference.num-gpus``,
+``inference.tensor-parallel-size``, ``inference.options``,
+``inference.remote``, ``inference.handler-factory``,
+``inference.handler-config``, ``inference.max-loaded-adapters`` and
+``inference.prefix-sharing``. Another serving mode refuses them. The engines
+start with the release format: an adapter format enables SGLang's adapter
+table with the adapter's rank and target modules. Releases without weight
+files, such as Tinker's without ``export-adapter``, cannot be served by
+engines; the HTTP service refuses that pairing when it starts.
+
+The control plane checks the inference component every 30 seconds. When the
+component has restarted, or an engine has failed, the control plane pauses
+generation, starts the lost engines again, loads each scenario's served
+release into them, and resumes.
+
+Engine-serving inference uses the same ``inference`` fields as standalone
 serving. ``inference.num-gpus`` is the total inference GPU budget;
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
 The total defaults to the per-engine count and must be a positive multiple of
@@ -174,33 +210,33 @@ tensor parallel size. An external provider does not accept local GPU requests.
      tensor-parallel-size: 1
      options:
        mem-fraction-static: 0.6
-       router-port: 30000  # Slime-integrated inference only
+       router-port: 30000  # SGLang engines of a training stack only
    training:
      backend: slime
-     colocate: false  # true trains on the inference GPUs
      options:
        actor-num-nodes: 1
        actor-num-gpus-per-node: 1
+       global-batch-size: 32
        # Add the recipe's optimizer, model and checkpoint options here.
 
 CLI overrides use the same parser, for example
 ``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
-SGLang's names without a ``sglang-`` prefix. The Slime integration translates
-these only when constructing driver arguments; generated inference flags are
-not stored in ``training.options``. Router bind settings use ``router-ip`` and
-``router-port``; other supported router flags retain their native ``router-*``
-names. The standalone engine launcher does not include a router.
+SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
+from the ``inference`` section and the release format; Slime starts no engine
+(``--rollout-num-gpus 0``). ``router-port`` binds the first router's HTTP
+port, and other supported router flags keep their native ``router-*`` names.
+``router-ip`` is refused, because the serving engines use no external
+router. The standalone engine launcher does not include a router.
 
-In Slime-integrated inference, and for the local SGLang engines that the
-Tinker backend starts, each engine probes free ports on its host at startup.
-A probe reserves nothing, so another process, such as another stack on the
-same host network, can bind a probed port first. If the engine then fails to
-start and another process holds one of its ports, Reef stops the engine and
-starts it again on new ports. Reef does the same when another process listens
-on the engine's HTTP port and answers the readiness check. Reef makes at most
-three startup attempts per engine. Other startup failures, and any failure of
-an encoder engine, stop the launch.
+For the SGLang engines of a training stack, each engine probes free ports on
+its host at startup. A probe reserves nothing, so another process, such as
+another stack on the same host network, can bind a probed port first. If the
+engine then fails to start and another process holds one of its ports, Reef
+stops the engine and starts it again on new ports. Reef does the same when
+another process listens on the engine's HTTP port and answers the readiness
+check. Reef makes at most three startup attempts per engine. Other startup
+failures, and any failure of an encoder engine, stop the launch.
 
 When Reef starts a router, it probes a free metrics port on the host, from
 port 4000 up. It also probes a free HTTP port, unless the router uses
@@ -213,108 +249,88 @@ three attempts. A configured ``router-port`` does not change, so a conflict on
 it stops the launch. Another stack's metrics port can take a ``router-port``
 near 4000, so use a port outside that range.
 
-Encoder engines keep the weights they started with. Weight updates go only to
-the other engines of the model. When a model with an encoder group trains,
-keep its vision encoder frozen.
+Encoder engines keep the weights they started with. Published weights load
+only into the other engines of the model. When a model with an encoder group
+trains, keep its vision encoder frozen.
 
 Managed launches reject inference flags in ``training.options``, such as
-``rollout-num-gpus``, ``rollout-num-gpus-per-engine``, ``sglang-*`` and
-``colocate``, even if their values agree with the ``inference`` fields and
-``training.colocate``. Native options cannot override
+``rollout-num-gpus``, ``rollout-num-gpus-per-engine`` and ``sglang-*``, even
+if their values agree with the ``inference`` fields. Training and serving use
+separate GPUs, so Slime refuses ``training.colocate`` and the native
+``colocate`` and ``offload-rollout`` options. Native options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
 prefill/decode-disaggregated inference topologies are not supported by this
 managed path yet. Reef binds ``training.options.hf-checkpoint`` to
-``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
-by Reef and cannot be supplied through native options.
+``inference.model-path``; an explicit value must agree. Slime also needs an
+explicit ``training.options.global-batch-size``, the samples in one optimizer
+step: Slime cuts each job's data into optimizer batches of that size.
 
-The training-capable SGLang implementation lives in ``reef.inference.sglang``.
-Its native engine launch and control do not depend on Slime. Slime converts its
-training requirements to plain configuration data and supplies the weight transport;
-the inference component receives ordinary configuration and borrowed GPU
-reservations. Custom inference executors now receive ``config`` and ``pg``
-instead of Slime's argument namespace. See `Worker executors
-<../developer-guide/executors.rst#independent-sglang-backend>`__ for the boundary.
+The SGLang integration lives in ``reef.inference.sglang``. Its native engine
+launch and control do not depend on Slime. The serving runtime turns the
+``inference`` section and the release format into plain engine configuration
+data (``reef.inference.remote.runtime.serving_engine_config``), and the
+inference component starts the engines from that data. See
+`Independent SGLang backend
+<../developer-guide/executors.rst#independent-sglang-backend>`__ for the
+boundary.
 
-This continues `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
-Training GPU capacity remains in ``training.options.actor-num-*``; the shared
-physical node size remains ``training.options.num-gpus-per-node``. Inference
-and training share one allocation plan, with no duplicate model-GPU
-reservations. Full-weight, LoRA and colocated training borrow Reef-owned
-inference. ``training.colocate`` shares the GPU reservation between them; Reef
-derives the native training and inference offload flags from it, and managed
-launches reject their spellings in ``training.options``.
-``training.options.keep-lora-base-resident`` retains the frozen inference base
-during later colocated LoRA steps; cold startup still releases all inference
-memory before training initializes. The separate inference control actor requires
-one Ray CPU and zero GPUs. Batch processing runs locally in the training
-coordinator, so no separate batch-manager CPU is reserved. The HTTP endpoint is
-still discovered through the training bridge. Managed deployments, including
-LoRA and colocated modes, automatically rebuild both components after failure,
-rerun checkpoint recovery and rediscover the endpoint
-without restarting the HTTP service. Explicit gateway URLs stay fixed. This
-recovery does not replay ambiguous optimizer steps and stops if old resources
-cannot be confirmed retired. A rejected Slime candidate also requires restoring
-the committed checkpoint before restart; its training checkpoint must not be
-used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
-recovery policy and compatibility limits.
+Training GPU capacity is set in ``training.options.actor-num-*``; the physical
+node size is ``training.options.num-gpus-per-node``. The inference component
+reserves ``inference.num-gpus`` GPUs on the same Ray cluster, and the
+inference control process takes one Ray CPU and no GPU. When a training worker
+fails, the running job fails and later jobs fail too; restart the service, and
+the Slime component loads its latest checkpoint again. Engine failures are
+handled by the inference component (see `Engine supervision
+<../developer-guide/executors.rst#engine-supervision>`__).
 
-``reef.inference_backend: vllm`` selects the vLLM engine integration for
-training-time serving. Reef launches one vLLM server per engine on the
-reserved GPUs with ``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
-``--logprobs-mode processed_logprobs``, and drives publication through vLLM's
-control routes: ``/pause?mode=keep`` (a retracting pause adds
-``/reset_prefix_cache?reset_running_requests=true``), ``/sleep`` and
-``/wake_up`` for colocated memory release, ``/update_weight_version``,
-``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
-Engines are single-node; more than one engine needs ``router_url``. Each
-engine takes one port, probed upward from ``engine_port_base`` (default
-15000) on its host. If the engine then fails to start and another process
-holds that port, or another process listens on that port when the engine
-becomes ready, Reef stops the engine and starts it again on a new port, with
-at most three startup attempts per engine. Engine
-options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
-``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, defaults
-``generation_config`` to ``vllm`` so the model's own generation defaults cannot
-add truncation or a temperature the trainer never sees, rejects
+``inference.backend: vllm`` selects the vLLM engine integration. The
+inference component launches one vLLM server per engine on its GPUs with
+``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
+``--logprobs-mode processed_logprobs``. It loads each published release
+through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
+``/reset_prefix_cache?reset_running_requests=true``),
+``/update_weight_version``, ``/collective_rpc reload_weights`` and the
+``/v1/load_lora_adapter`` routes. Engines are single-node; more than one
+engine needs ``router_url``.
+
+Each engine takes one port, probed upward from ``engine_port_base`` (default
+15000) on its host. Reef can lose that port to another process. This happens
+when the engine fails to start and another process holds the port. It also
+happens when another process listens on the port when the engine becomes
+ready. In both cases, Reef stops the engine and starts it again on a new
+port. Each engine gets at most three startup attempts.
+
+Engine options use vLLM's engine-argument names. Reef sets ``model``,
+``host``, ``port`` and ``tensor_parallel_size`` itself and refuses
+``enable_sleep_mode``. It defaults
+``generation_config`` to ``vllm``, so the model's own generation defaults
+cannot add truncation or a temperature the trainer never sees. It rejects
 ``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
-instead) and enables prefix caching only under a retracting pause. vLLM
-releases the KV cache only together with the weights, so
-``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
-itself once every region is resident, so the engine restores the KV cache
-when Reef resumes generation rather than when the coordinator calls
-``onload_kv``: generation stays paused until the coordinator's commit.
+instead) and enables prefix caching only under a retracting pause.
 
-The Slime backend pairs with ``inference.backend: vllm`` through the disk
-weight path: ``training.options.update-weight-transport: disk`` in full mode,
-with no ``update-weight-local-checkpoint-dir``, no LoRA rank and no
-``check-weight-update-equal``, since Slime's other transports call SGLang-only
-engine routes. The trainer writes each checkpoint under
-``update-weight-disk-dir`` and the engines reload it with their weight version.
-Engine options come from ``inference.options`` in vLLM's own names and never
-pass through Slime's parser. One engine per stack: ``inference.num-gpus`` must
-equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
-The Tinker backend still produces SGLang engine options and keeps
-``inference.backend: sglang``.
+vLLM engines serve full-weight releases only. The HTTP service refuses
+adapter releases, such as Slime's with ``training.options.megatron-lora-rank``
+or Tinker's with ``export-adapter``, when it starts. Reef starts no vLLM
+router, so one engine serves the stack: ``inference.num-gpus`` must equal
+``inference.tensor-parallel-size``. Engine options come from
+``inference.options`` in vLLM's own names.
 
-With an ``inference.remote`` section, Slime's engines run on a remote inference
-component, and Slime reserves only its training GPUs. Each publication exports
-the actor's current weights under ``weight-files``, beside the HF and Megatron
-checkpoint directories. The coordinator uploads the export to the component,
-and the next publication replaces the export.
+Reef's serving engines run on an inference component, local or remote.
+The HTTP service uploads each published release to the component as files:
 
-- Full-weight training exports a Hugging Face checkpoint. The component reloads
-  it in place of the served weights. A publication moves the whole model each
-  time, for example about 16 GB for an 8B bf16 model.
-- LoRA training (``training.options.megatron-lora-rank``) exports the
-  scenario's PEFT adapter. The component loads it as a new adapter beside the
-  base model. Only ``inference.backend: sglang`` serves LoRA adapters.
+- Full-weight training publishes the checkpoint's Hugging Face export. The
+  component reloads it in place of the served weights. Each load moves the
+  whole model, for example about 16 GB for an 8B bf16 model.
+- LoRA training (``training.options.megatron-lora-rank``) publishes the
+  scenario's PEFT adapter. The component loads it as the scenario's adapter
+  beside the base model. Only ``inference.backend: sglang`` serves LoRA
+  adapters.
 
-Every training node writes its own shards of a full-weight export, so
-multi-node training needs ``weight-files`` on shared storage. A publication
-whose export lacks a file on rank 0's node fails. ``training.colocate`` is
-refused with remote engines.
+The HTTP service reads each release from the checkpoint directory. With
+multi-node training, put the checkpoint directory on storage that the HTTP
+service's host can read.
 
-Reef coordinates native inference and training, alongside its HTTP service.
+Reef starts only its own inference, training and HTTP services.
 PRM and user-simulation services are independently deployed by OpenClawRL;
 Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
 ``recipe.config.prm-url`` and ``recipe.config.prm-tokenizer-path``, with the same
@@ -355,18 +371,16 @@ takes every GPU that ``training.options.actor-*`` names:
      options:
        actor-num-nodes: "1"
        actor-num-gpus-per-node: "8"
-       save-interval: "42"
+       global-batch-size: "32"
        # Add the recipe's optimizer, model and checkpoint options here.
 
-A training step in this mode works as follows:
+Training in this mode works as follows:
 
-- The trainer stays on its GPUs between steps. Reef does not offload or
-  reload it, because no other model shares the GPUs.
-- Each step commits its records, metrics and algorithm state. No weights leave
-  the trainer between saves.
-- Each ``save-interval``-th step saves the Megatron checkpoint and the HF
-  export, and Reef publishes that version as an artifact. See `Set the
-  checkpoint cadence
+- Each job trains its data on Slime's workers, which stay on their GPUs
+  between jobs.
+- Each job saves one checkpoint: the Megatron checkpoint and its HF export.
+  This mode refuses an ``evaluation`` section, so Reef publishes every
+  checkpoint as a release. See `Set the checkpoint cadence
   <../user-guide/operate.rst#set-the-checkpoint-cadence>`__.
 - A restart continues from the last saved checkpoint, as with an engine.
 
@@ -379,10 +393,7 @@ model: ``inference.num-gpus`` (other than 0),
 ``inference.tensor-parallel-size``, ``inference.options``, ``inference.url``,
 ``inference.remote``, ``inference.handler-factory``,
 ``inference.handler-config``, ``training.colocate``, a ``teacher`` engine, an
-``evaluation`` section, a ``generator`` section and a composite recipe. The
-Slime driver also refuses LoRA (``megatron-lora-rank``), ``offload-train`` and
-a loss family that reads rollout log probs, such as the on-policy
-distillation, SAO and TTT-Discover families.
+``evaluation`` section, a ``generator`` section and a composite recipe.
 
 Native backend options
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -423,9 +434,10 @@ For Slime, a training stack can contain:
 
 Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
-options reach ``reef.service.training_driver`` through the same effective config
-as the HTTP child. The driver passes them through its existing recipe-specific
-argument handling and Slime's native parser.
+options reach the Slime training component in the HTTP service through the
+effective config. The component takes out Reef's own options, such as
+``--reef-checkpoint-policy``, and the loss family's options, then passes the
+rest to Slime's native parser.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
@@ -531,7 +543,6 @@ where its value came from:
    [reef]   reef.tokens = ["****"]  (file)
    [reef]   inference.model-path = /models/demo  (file)
    [reef]   inference.backend = sglang  (automatic)
-   [reef]   recipe.config.max-staleness = 2  (environment REEF_MAX_STALENESS)
    [reef]   training.backend = slime  (automatic)
 
 Sources are ``file``, ``command line``, ``environment`` (the ``REEF_*``
@@ -613,8 +624,8 @@ the deployment and reaches dotted recipes as well as named presets.
 
 After selecting ``recipe.implementation``, Reef loads that class's declarations without
 constructing the recipe. A dotted weight-training recipe exposes its fields
-as ``--recipe.config.max-staleness``, with the aliases
-``--max-staleness`` / ``--max_staleness`` / ``--reef.max_staleness``. Other dotted
+as ``--recipe.config.<field>``, for example ``--recipe.config.training-mode``, with the aliases
+``--training-mode`` / ``--training_mode`` / ``--reef.training_mode``. Other dotted
 recipes use the same ``--recipe.config.*`` namespace; their ``--reef.data.*``
 spellings remain accepted aliases. ``reef serve -c stack.yaml --help`` includes the
 selected component's flags; basic ``reef serve --help`` does not load a recipe.
@@ -655,8 +666,8 @@ continue through Slime's own parser; Reef does not duplicate that schema.
 
 A non-weight dotted recipe can supply ``recipe.runtime`` to select a registered
 or dotted runtime factory. Its declared fields use names such as
-``--recipe.runtime.timeout-s``. Inference proxy, Ray training, and executor
-training adapters declare their connection settings. Custom ``RuntimeFactory``
+``--recipe.runtime.timeout-s``. The inference proxy declares its connection
+settings. Custom ``RuntimeFactory``
 implementations can opt in with ``config_type()``; legacy callable factories
 keep receiving their existing mapping. Unknown fields in a declared component
 schema fail validation. Recipe-specific sections and opaque adapter option
@@ -711,8 +722,8 @@ examples, and harness evolution ships as a tutorial.
 +-------------------------------------------------------------+----------------------------------------------------------+
 | ``recipes/basic/local-sglang.yaml``                         | local inference: an SGLang server plus Reef, no training |
 +-------------------------------------------------------------+----------------------------------------------------------+
-| ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: Ray head, Slime driver, Reef, and the   |
-|                                                             | method's own services                                    |
+| ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: an inference component and Reef, which  |
+|                                                             | trains with Slime                                        |
 +-------------------------------------------------------------+----------------------------------------------------------+
 | ``tutorials/evolve-your-harness/configs/serve.yaml``        | harness evolution: one Reef process, no GPU; ``run.sh``  |
 |                                                             | materializes its recipe preset and starts the stack      |
@@ -745,7 +756,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    inference.upstream-api-key | its credential. Reef is the only party that sees it.
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
-   inference.url | the address the training backend reports | the local engine; set only to front the engines with something else
+   inference.url | reserved: every built-in deployment refuses it, because Reef starts or names its engines itself (``inference.model-path``, ``inference.upstream-url`` or ``inference.remote``)
 
 Storage paths default under ``.reef/``, which the basic and sao stacks keep;
 the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere
@@ -806,7 +817,7 @@ version to 3. Training commits store only consumption progress. Already deleted
 bodies cannot be recovered. Do not share stores between old and new writers, or
 downgrade without restoring a compatible backup.
 
-Recipe settings such as ``max_staleness``, and any others the recipe declares
+Recipe settings such as ``training_mode``, and any others the recipe declares
 with ``config_field``, go under ``recipe.config``. A field the selected recipe
 does not declare is an error. With a named preset, the recipe reads its
 configuration from the preset file.
@@ -819,22 +830,22 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.evolution``.
 
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
-In ``auto``, the recipe's processor decides when its data can form a batch,
+In ``auto``, the recipe's processor decides when its data can form a job,
 and ``POST /reef/train`` is refused. In ``manual``, inference and reports
 cannot authorize training by themselves; ``POST /reef/train`` supplies the
 user instruction, and harness evolution runs it alone. In ``hybrid``, the
-processor batches as in ``auto`` and runs instructions too, a queued
+processor makes job data as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
-instruction, the units an automatic batch would take next, up to
-``evolution.batch_size`` traces and possibly none: scored traces, or
+instruction, the units that automatic job data would take next, up to
+``job_samples`` traces (by default ``evolution.batch_size``) and possibly none: scored traces, or
 unscored records when the ``pipeline`` section names the inference stages. The processor defines
-what an instruction batch carries, independently of its automatic batching
+what an instruction's data carries, independently of its automatic
 policy.
 
 The training pipeline receives ``PipelineContext.training_mode`` as its
-initial batching mode. The modes share record push and retention. In ``manual``
-an instruction's batch has no batch units; in ``hybrid`` it takes the units that
-an automatic batch would. A recipe's ``Task2Batch`` declares
+initial training mode. The modes share record push and retention. In ``manual``
+an instruction's data has no record set units; in ``hybrid`` it takes the units that
+automatic job data would. A recipe's ``Task2Job`` declares
 ``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that
 explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
@@ -849,16 +860,33 @@ on an inference-only recipe does not create a training backend.
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
 Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
-at runtime. This changes subsequent batches; a reserved batch completes under
+at runtime. This changes subsequent job data; reserved job data completes under
 its original mode. Mode changes are not persisted: a service restart uses the
 recipe's configured mode again, while a scenario reload after a failed step
 keeps the selected mode. In every mode the held record sets keep at most
-``pipeline.task2batch.config.buffer_size`` samples. As records arrive, the
+``pipeline.task2job.config.buffer_size`` samples. As records arrive, the
 pipeline releases the oldest sets beyond that limit and logs one warning.
 
 .. config::
 
-   recipe.config.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
+   recipe.config.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of training by the recipe's rules; ``hybrid`` trains by the recipe's rules and runs a queued instruction first
+
+``recipe.config.job_parameters`` is an object that a weight recipe's default
+job plan sends with every job, beside ``method``. The training component
+reads it: for example ``scheduling`` (`Step scheduling
+<python-api.rst#training-objective>`__) or ``save_interval``. The component
+refuses a parameter that it does not take, and the job is not submitted. The
+recipe refuses a ``method`` key, because the recipe's objective is the
+method. A recipe with its own ``job_plan`` does not read the setting.
+
+.. code:: yaml
+
+   recipe:
+     config:
+       job_parameters:
+         scheduling:
+           packing_length: 8192
+         save_interval: 50
 
 A recipe is selected three ways:
 
@@ -913,29 +941,33 @@ model. Harness-evolution presets also carry ``recipe.config.evolution``:
 
 The preset's ``recipe.implementation`` is ``recipe`` or a dotted recipe class.
 Weight-training recipes are selected directly by dotted class in the deployment
-config, so the service can assemble their Ray training runtime. Presets suit
+config, so the service can build their training component. Presets suit
 recipes whose runtime can be built from the preset or the deployment's
 upstream proxy. There, ``recipe.config`` holds the training mode and the
 recipe's own sections, and ``pipeline`` holds the stage config.
 
 A composite recipe serves and evolves several release components in one
-scenario, one recipe per component. Its ``components`` object maps each
-component name to a section with the shape of the top-level ``recipe``
-section: ``implementation`` names the recipe class, and ``config`` holds the
-recipe's fields and sections. A component also keeps its own ``pipeline``
-stage config under ``config``. A component has no ``runtime``: every
-component uses the deployment's model, runtime and training runtime. A
-composite whose component trains weights is deployed the way that recipe is:
-``training.backend`` selects the training backend, and the runtime pair
-reaches every component. A top-level ``pipeline`` or ``evaluation`` section
-goes to the component that trains weights. The repository base keeps one
-directory per component: the recipes' seeds are written there, a bootstrap
-model snapshot goes under the weight-training component's directory, and a
-component whose recipe seeds nothing starts empty. Each component's trainer
-runs as its own worker and commits into the same release chain, so every
-step checkpoints and the components share one ``training_mode``. A report
-is admitted when any component's contract accepts it, and each trainer
-keeps the reports its own contract parses:
+scenario, one recipe per recipe component. Its ``components`` object maps
+each recipe component name to a section with the shape of the top-level
+``recipe`` section. In that section, ``implementation`` names the recipe
+class, and ``config`` holds the recipe's fields and sections. A recipe component also
+keeps its own ``pipeline`` stage config under ``config``.
+
+A recipe component has no ``runtime``: every recipe component uses the
+deployment's model, inference runtime and training component. A composite
+whose recipe component trains weights is deployed the way that recipe is.
+``training.backend`` selects the backend. Its training component and
+inference runtime serve every recipe component. A top-level ``pipeline`` or
+``evaluation`` section goes to the recipe component that trains weights.
+
+The repository base keeps one directory per recipe component. Reef writes
+the recipes' seeds there. A bootstrap model snapshot goes under the directory
+of the recipe component that trains weights. A recipe component whose recipe
+seeds nothing starts empty. Each recipe component's trainer runs as its own
+worker and commits into the same release chain. Every step therefore
+checkpoints, and the recipe components share one ``training_mode``. Reef
+admits a report when the contract of any recipe component accepts it. Each
+trainer keeps the reports its own contract parses:
 
 .. code:: yaml
 
@@ -956,9 +988,10 @@ keeps the reports its own contract parses:
    inference:
      upstream-model: qwen3-8b
 
-The same composite with a weight-training component is a deployment file:
-the composite is selected by its dotted class, ``training.backend`` picks the
-backend, and the weight component's stage config lives under its ``config.pipeline``:
+The same composite with a recipe component that trains weights is a
+deployment file. Its dotted class selects the composite, and
+``training.backend`` selects the backend. The stage config of the recipe
+component that trains weights goes under its ``config.pipeline``:
 
 .. code:: yaml
 
@@ -969,7 +1002,7 @@ backend, and the weight component's stage config lives under its ``config.pipeli
          weights:
            implementation: recipes.sao.recipe:SAORecipe
            config:
-             pipeline: {task2batch: {config: {buffer_size: 32}}}
+             pipeline: {task2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
            implementation: reef.recipe.cordis:CordisRecipe
            config:
@@ -979,22 +1012,19 @@ backend, and the weight component's stage config lives under its ``config.pipeli
    training:
      backend: slime
 
-A preset's ``recipe.runtime.type: executor_training`` selects an executor-backed
-training coordinator. Its ``executor`` mapping accepts ``backend`` (default
-``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
-``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
-configuration still connects to a named bridge. The Slime driver's separate
-``--reef-executor-backend`` selects the model worker executor and defaults to
-``auto`` (currently Slime's Ray launcher). See `Worker executors <../developer-guide/executors.rst>`__ for the full
-contracts and examples.
+Slime's ``--reef-executor-backend`` option selects the executor of its
+training workers and defaults to ``auto`` (Slime's Ray launcher). See
+`Slime worker executors <../developer-guide/executors.rst#slime-worker-executors>`__
+for its contract.
 
 Stack execution backends
 ------------------------
 
 Reef chooses native process placement in backend implementation code;
-``execution.services`` is rejected. ``execution.training`` and ``execution.rollout``
-select the Slime training-worker and rollout-control executors (both default
-``auto``, resolving to ``ray``). All selectors accept a backend name/import path or a profile under
+``execution.services`` is rejected. ``execution.training`` selects the
+executor of Slime's training workers (default ``auto``, resolving to ``ray``).
+The serving engines' executor belongs to the inference component.
+``execution.rollout`` selects it, for every training backend. All selectors accept a backend name/import path or a profile under
 ``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
 ``options``, ``workers``, and ``resources`` containing ``cpus_per_worker`` and
 ``gpus_per_worker``. Counts must be positive integers; resource quantities must
@@ -1018,7 +1048,7 @@ CPU-only local executors do not reserve cores or enforce CPU quotas.
 
 Service executors accept the same resources, mapped to per-service launch
 requests, but ``workers`` must be one: service replicas are not implemented.
-Slime training/rollout reject these generic workers/resources fields; their
+The ``training`` and ``rollout`` roles reject these generic workers/resources fields; their
 model-parallel topology and placement groups still come from Slime's existing
 training configuration. Resource declarations are never silently treated as
 model-parallel resizing.
@@ -1040,10 +1070,10 @@ These keys go under ``recipe.config.evolution``. `Evolve your harness
 
 .. config::
 
-   evolution.batch_size | 1 | traces in one evolve step; a step starts when this many traces are held
+   evolution.batch_size | 1 | the default ``pipeline.task2job.config.job_samples``: the fewest traces of one evolve step; a step starts when this many traces are held
 
-The default stages batch every valid scored report as a trace, including
-successful outcomes. To batch recorded traffic alone, every ``batch_size``
+The default stages train on every valid scored report as a trace, including
+successful outcomes. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
 ``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
 ``pipeline.record2task.module: reef.train.cordis_backend.processor:InferenceTasks``.
@@ -1113,11 +1143,10 @@ An ``inference.remote`` section runs the engines that ``inference.backend``
 names on a remote inference component instead of this host. The component's
 ``--engine`` must name the same backend. `Serve from a remote GPU host
 <../user-guide/tinker.rst#serve-from-a-remote-gpu-host>`__ shows the setup.
-``reef serve`` refuses the section unless the training backend supports remote
-engines. Tinker serves each scenario's saved adapter; without the section,
-Tinker's engines run on a component that ``reef serve`` starts on this host.
-Slime publishes full weights, or per-scenario adapters with LoRA, and refuses
-``training.colocate`` with remote engines. The section tells Reef how to reach
+Any training backend can serve on a remote component. Without the section, a
+training stack's engines run on a component that ``reef serve`` starts on
+this host. The release format sets what the engines serve: one scenario's
+full weights, or one adapter per scenario. The section tells Reef how to reach
 the component:
 
 .. config::
@@ -1137,13 +1166,13 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
-   training.colocate | false | train on the inference GPUs: Reef reserves one shared allocation and derives the native offload flags
-   training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
-   training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. It is also the batch size of the training pipeline: a batch forms when this many samples are held. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
+   training.colocate | false | must stay false: training and serving use separate GPUs, and Slime and Tinker refuse ``true``
+   training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
+   training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
+   training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.task2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
-   training.config.checkpoint_retention | storage-fraction bounds and the retention policy
+   training.config.checkpoint_retention | storage-fraction bounds and the retention policy. When storage cannot hold the next checkpoint, the Slime job fails. A failed job ends, and the records of its data do not train again, because Reef consumed them when it submitted the job.
    training.options | native training flags: actor GPU layout, optimizer, sequence length, and loss settings
 
 Slime fills architecture flags such as layer counts and hidden sizes from
@@ -1154,10 +1183,20 @@ The ``evaluation`` section
 
 Only weight-training recipes read this section; a deployment that pairs it
 with any other recipe fails at startup, because a harness recipe builds its
-evaluator in code. Absent by default, in which case a successful
-weight-training step publishes without an evaluation. When present, Reef calls the
-named class's ``from_config`` method once per scenario and hands the plugin the exported but
-unpublished checkpoint.
+evaluator in code. Every checkpoint that a training job saves becomes a
+release. Absent by default, in which case Reef serves every release. When
+present, Reef calls the named class's ``from_config`` method once per
+scenario. The plugin then receives each saved checkpoint as a
+``CheckpointCandidate`` and decides whether Reef serves its release. A release
+that the plugin does not select is held for review, and a person serves it
+with ``POST /reef/scenarios/{scenario}/promote``.
+
+For fully manual promotion, name the built-in plugin that selects no release:
+
+.. code:: yaml
+
+   evaluation:
+     module: reef.evaluation.evaluators:ManualPromotionPlugin
 
 .. config::
 
@@ -1172,14 +1211,14 @@ unpublished checkpoint.
        benchmark: gsm8k
        threshold: 0.8
 
-The class method ``from_config(config, *, runtime, training_runtime, scenario,
+The class method ``from_config(config, *, runtime, scenario,
 environ)`` returns the scenario's plugin. Reef checks the class when it loads
 the recipe config. It builds the plugin later, so allocate model resources in
 ``from_config``. Reef rejects functions, abstract classes and structural
 lookalikes.
 
 The plugin interface is in `Write a recipe
-<../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
+<../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__.
 
 The ``pipeline`` section
 ------------------------
@@ -1194,7 +1233,7 @@ class for a stage. Every stage reads only its own ``config``; the recipe's
 
    pipeline.record2record | the record-to-record stage: ``config``, and optionally ``module``, a ``Record2Record`` subclass
    pipeline.record2task | the record-to-task stage: ``config``, and optionally ``module``, a ``Record2Task`` subclass
-   pipeline.task2batch | the task-to-batch stage: ``config``, and optionally ``module``, a ``Task2Batch`` subclass
+   pipeline.task2job | the task-to-job stage: ``config``, and optionally ``module``, a ``Task2Job`` subclass
 
 .. code:: yaml
 
@@ -1210,21 +1249,64 @@ A stage without a key is the recipe's class with no config. Each recipe's page
 lists the keys of its stages. Keys are written as the stage reads them; a
 hyphen spelling is also accepted.
 
-The batch size is not a stage key. The training backend owns it, and it
-counts samples: Slime's ``--global-batch-size``
-(``training.config.global_batch_size`` in the examples), Tinker's
-``batch_size``, or ``evolution.batch_size`` for harness evolution. A batch
-takes whole record sets until it holds at least the batch size, so it can
-hold more. Slime and Tinker then cut the batch into optimizer steps of the
-batch size; the recipe's ``StepScheduling.remainder`` decides what happens to
-a shorter last step.
-
-Every built-in task-to-batch stage reads ``buffer_size``. A recipe's page
-lists the other keys of its stage.
+Every built-in record-to-record stage that holds units reads
+``max_staleness``, Reef's staleness filter. Reef drops held training data
+whose producing version lags the served version by more than this many
+versions. The limit is a record-to-record setting, not a recipe setting:
+``recipe.config.max_staleness`` is an error.
 
 .. config::
 
-   pipeline.task2batch.config.buffer_size | four times the batch size | the most samples that wait for a batch; at least the batch size. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+   pipeline.record2record.config.max_staleness | 0 | the versions that training data may lag behind the served version and still train, a non-negative int; 0 trains only data of the served version
+
+.. code:: yaml
+
+   pipeline:
+     record2record:
+       config:
+         max_staleness: 2
+
+``NoRecordSets`` and ``SFTRecord2Record`` refuse the key: the first holds no
+unit, and the second never drops an SFT target as stale. A training
+framework's own off-policy limit goes in that backend's
+``training.options``. No built-in backend has one now. See `Staleness
+<../developer-guide/processors.rst#staleness>`__.
+
+Reef submits one training job for each job's data. ``job_samples`` is the
+fewest samples that one job trains. A weight recipe requires it: a
+deployment without it fails the recipe build with a ``RecipeConfigError``
+that names ``pipeline.task2job.config.job_samples``. Harness evolution uses
+``evolution.batch_size`` when the key is absent.
+
+The training component cuts each job's data into optimizer batches by its own
+batch size: Slime's ``--global-batch-size``
+(``training.config.global_batch_size`` in the examples) or Tinker's
+``batch_size``. Usually, set ``job_samples`` to that batch size, so that one
+job is one optimizer step:
+
+.. code:: yaml
+
+   pipeline:
+     task2job:
+       config:
+         job_samples: ${training.config.global_batch_size}
+
+The two values can differ. Job data takes whole record sets until it holds at
+least ``job_samples``, so it can hold more: a group of rollouts is one unit,
+and a job with more samples than the batch size trains more than one
+optimizer step. A job with fewer samples than the batch size trains one
+partial step. The ``remainder`` field of a job's optional ``scheduling``
+parameter decides what happens to a shorter last step; by default, the
+component trains it as a smaller step. See `Job size
+<../developer-guide/processors.rst#job-size>`__.
+
+Every built-in task-to-job stage that trains on records reads ``job_samples``
+and ``buffer_size``. A recipe's page lists the other keys of its stage.
+
+.. config::
+
+   pipeline.task2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
+   pipeline.task2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1246,18 +1328,26 @@ The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
-``GeneratedTaskTasks``, and ``GeneratedTaskBatches``. Without
-``pipeline.record2task.config.rounds`` no round runs, no task rolls out, and
-nothing trains.
+``GeneratedTaskTasks``, and ``GeneratedTaskJobData``. Without
+``pipeline.record2task.config.rounds`` no round runs and nothing trains. Each
+job is a task job: the training component rolls the job's tasks out on its own
+sampler and trains on their episodes, as
+``recipe.config.job_parameters.rollout`` says. The recipe requires that
+parameter.
 
 .. code:: yaml
 
    recipe:
      implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
+     config:
+       job_parameters:
+         rollout:
+           episodes_per_task: 4
+           environment: docker
    pipeline:
      record2record:
        config:
-         batches_per_round: 2
+         jobs_per_round: 2
      record2task:
        config:
          generator_url: ${endpoints.generator}
@@ -1269,23 +1359,23 @@ nothing trains.
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
              state_dir: ${REEF_STATE_DIR}/generations
-     task2batch:
+     task2job:
        config:
-         episodes_per_task: 4
+         tasks_per_step: 2
 
 ``GeneratedTaskRecord2Record`` paces the rounds and holds their source
-sessions. It trains on no report: the recipe trains on its rollout episodes,
-which are not records.
+sessions. It trains on no report: the recipe trains on the episodes that the
+training component runs, which are not records.
 
 .. config::
 
-   pipeline.record2record.config.batches_per_round | 1 | trained batches after which the next round starts
+   pipeline.record2record.config.jobs_per_round | 1 | trained jobs after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
    pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
 
-``GeneratedTaskTasks`` runs the generations, and stages and runs each saved
-task's episodes for the rollout:
+``GeneratedTaskTasks`` runs the generations and sends their results to the
+generator:
 
 .. config::
 
@@ -1295,7 +1385,6 @@ task's episodes for the rollout:
    pipeline.record2task.config.generator_url | the generator service, ``${endpoints.generator}``. Required with rounds.
    pipeline.record2task.config.eval_fraction | 0.0 | fraction of new source groups held out before their episodes run; between 0 and 1
    pipeline.record2task.config.split_seed | 0 | fixed seed for the task store's train/eval split
-   pipeline.record2task.config.served_model | the model the episodes ask for; the deployment's by default
    pipeline.record2task.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
    pipeline.record2task.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
 
@@ -1312,16 +1401,26 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskBatches`` rolls saved tasks out, assembles one sample from each
-episode that ran, and batches the groups of each task. A rollout batch trains on
-all of its fresh groups, whatever Tinker's batch size
-(``training.options.batch-size``) is, so the stage has no ``buffer_size``:
+``GeneratedTaskJobData`` hands saved tasks to the training component as one
+task job, whatever Tinker's batch size (``training.options.batch-size``) is,
+so the stage has no ``buffer_size`` and no ``job_samples``:
 
 .. config::
 
-   pipeline.task2batch.config.tasks_per_step | 4 | saved tasks of one rollout batch
-   pipeline.task2batch.config.episodes_per_task | 4 | training episodes of each task in a rollout. At least 2.
-   pipeline.task2batch.config.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+   pipeline.task2job.config.tasks_per_step | 4 | saved tasks of one task job
+
+The Tinker component runs a task job's episodes on Tinker's sampler at the
+job's start weights. The ``rollout`` job parameter configures them:
+
+.. config::
+
+   rollout.episodes_per_task | required | training episodes of each task, at least 2; the samples of one task form its group
+   rollout.agent | terminus-2 | the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit Tinker's text chat: system, user and assistant text messages, no tools.
+   rollout.environment | docker | the Harbor environment type of the episodes, such as ``docker`` or ``e2b``
+   rollout.agent_host | none | the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
+   rollout.concurrency | 2 | episodes in flight
+   rollout.verifier_timeout_reward | 0.0 | the reward of an episode whose verifier timed out; ``null`` leaves it unscored
+   rollout.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
@@ -1333,6 +1432,64 @@ A source session is a report, without a training arm, whose inference
 records all carry ``source_tag``. The generator service accepts at most
 512 KiB of records and files in one request, so keep
 ``source_records_per_round`` small when the sessions are long.
+
+SFT then RL
+~~~~~~~~~~~
+
+The built-in SFT-then-RL recipe, ``reef.recipe.sft_then_rl:SFTThenRLRecipe``,
+trains one scenario in two ways:
+
+- SFT jobs, as the SFT recipe trains them, on demonstration reports and on
+  uploaded ATIF trajectories (`Upload trajectories
+  <http-api.rst#upload-trajectories>`__). They use ``SftObjective`` and
+  ``recipe.config.job_parameters``.
+- RL task jobs on the train tasks of the scenario's ``imported-tasks`` store,
+  which `Upload Harbor tasks <http-api.rst#upload-harbor-tasks>`__ or the
+  ``task-import`` section fill. They use the ``task_group`` objective and
+  ``recipe.config.task_job_parameters``. The training component rolls each
+  job's tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
+
+Held SFT samples train first: while ``job_samples`` of them wait, the next job
+is an SFT job. Each job starts from the last checkpoint of the job before it,
+so the RL jobs start from the SFT weights. Each train task trains in one task
+job; eval tasks never train. The training component must run task jobs, so the
+recipe requires the ``tinker`` training backend with a sampler.
+
+The recipe evaluates every artifact on the eval tasks. When the trainer
+decides a checkpoint, it also submits an evaluation job that starts from that
+checkpoint, rolls out every eval task with ``task_job_parameters``, and trains
+nothing (the Tinker job parameter ``evaluation_of``). The component runs it
+after the jobs before it. When it ends, the trainer commits its result in the
+commit metric ``artifact_evaluation``: the ``candidate_id`` of the checkpoint
+(``<training job>:<step>``, the ``selection.candidate_id`` of the release's
+commit), the job's ``event``, and its ``metrics``, such as
+``evaluation_reward_mean``. The evaluation decides nothing: the ``evaluation``
+section decides which release serves.
+
+.. code:: yaml
+
+   recipe:
+     implementation: reef.recipe.sft_then_rl:SFTThenRLRecipe
+     config:
+       task_job_parameters:
+         rollout:
+           episodes_per_task: 4
+           environment: e2b
+   pipeline:
+     record2task:
+       config:
+         tokenizer_path: Qwen/Qwen3-8B
+     task2job:
+       config:
+         job_samples: 64
+         tasks_per_job: 8
+
+.. config::
+
+   recipe.config.job_parameters | none | parameters of every SFT job beside ``method``, such as ``save_interval``
+   recipe.config.task_job_parameters | required | parameters of every RL task job beside ``method``: ``rollout``, as for the generated-task recipe above, and the component's own parameters, such as ``learning_rate``
+   pipeline.task2job.config.job_samples | required | the fewest SFT samples of one SFT job
+   pipeline.task2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
 
 The ``generator`` section
 -------------------------
@@ -1513,33 +1670,29 @@ The following names are relative to ``operations/``:
      - Record-store append calls, including identical retries that reach the
        store. ``failed_total`` counts append exceptions, including conflicts;
        validation rejections before append do not count as write failures.
-   * - ``runtime/stale_batches_total``
-     - Candidates the training backend refuses as stale, such as a Tinker
-       candidate whose base checkpoint changed while it trained. Samples that
-       the record-to-record stage drops for ``max_staleness`` do not count.
    * - ``records/unread_count``
      - Training-visible records after the processor's read cursor. These may
-       still need feedback or filtering; this is not a ready-batch count.
+       still need feedback or filtering; this is not a ready job data count.
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation
        time; zero when none remain.
    * - ``processor/unreserved_reports``, ``processor/reserved_reports``
      - Reported-feedback records waiting outside, or held inside, the reserved
-       batch. An incomplete group still counts as waiting.
+       job data. An incomplete group still counts as waiting.
    * - ``processor/oldest_report_wait_seconds``
      - Age of the oldest unreserved report; zero when none remain.
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
    * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
-     - Computed-feedback candidates outside or inside the reserved batch.
-   * - ``processor/ready_samples``, ``processor/batch_size``, ``processor/buffer_size``
-     - Samples that a batch can take now, samples that an automatic batch
+     - Computed-feedback candidates outside or inside the reserved job data.
+   * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
+     - Samples that job data can take now, samples that automatic job data
        needs, and the most samples that the held record sets keep.
    * - ``processor/buffered_requests``
      - Explicit training instructions already buffered by the processor.
-   * - ``training/reserved_batches``
+   * - ``training/reserved_job_data``
      - Zero or one. A reservation can be executing or waiting for settlement;
-       it is not necessarily a queued batch.
+       it is not necessarily queued job data.
    * - ``training/auto_enabled``
      - One for auto/hybrid training, zero for manual training. Waiting data in
        manual mode does not by itself indicate a stalled worker.
@@ -1548,29 +1701,24 @@ The following names are relative to ``operations/``:
        recorded by the dispatcher, including retries and worker failures.
        Recovery clears the current error but retains the counter. The counter
        resets on dispatcher restart or scenario deletion.
-   * - ``training/checkpoint_storage_blocked``
-     - Whether the dispatched training worker is blocked on checkpoint storage.
    * - ``training/execution/*``
-     - Backend preparation, evaluation, and settlement measurements.
-   * - ``runtime/weight_sync/*``
-     - Runtime-scheduler weight activation/update calls, including resumed
-       transfers. This covers the call's full duration, not only network time.
+     - The trainer's execution calls: a weight trainer's job submissions and
+       polls, including checkpoint evaluations, or a harness trainer's
+       candidate preparation.
 
 All operation families expose ``started_total``, ``active`` (in-flight count),
 ``elapsed_seconds`` (age of the oldest active call, zero when idle),
 ``completed_total``, ``failed_total``, ``duration_seconds_total``, and
-``last_duration_seconds`` after a call finishes. Execution and weight-sync calls
-are serial, so their active count is zero or one. Request and admission calls
+``last_duration_seconds`` after a call finishes. Execution calls are serial,
+so their active count is zero or one. Request and admission calls
 can overlap. Durations are in seconds; cumulative durations sum individual
 calls, so concurrent work may accumulate faster than wall time. Divide the
 change in total duration by the change in completed plus failed count to obtain
 a mean completed-call latency for an interval.
-An execution returning a skip, stale drop, or storage retry is a completed
-backend call, not necessarily a committed training step. These measurements
-reset when their trainer or scheduler is rebuilt, including recovery; the
-corresponding ``training/started_at_seconds`` and ``runtime/started_at_seconds``
-identify that reset. Stale-batch counts share the scheduler lifetime. Request
-and ingestion measurements reset when the scenario is rebuilt, including
+A completed execution call is not necessarily a commit: a poll of a running
+job that saved no new checkpoint commits nothing. These measurements reset
+when their trainer is rebuilt, including recovery; ``training/started_at_seconds``
+identifies that reset. Request and ingestion measurements reset when the scenario is rebuilt, including
 recovery, with ``operations/started_at_seconds`` identifying that reset. They
 are not persisted training history. Malformed HTTP payloads/headers and
 failures before scenario resolution are outside these scenario measurements.

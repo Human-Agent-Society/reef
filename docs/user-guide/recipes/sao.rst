@@ -27,8 +27,9 @@ What it does
 ------------
 
 SAO has no comparison group. A rollout is accepted as soon as its score
-arrives, without waiting for siblings and without a barrier, and the batch
-size of accepted rollouts, from as many prompts, forms one optimizer step. It can be used
+arrives, without waiting for siblings and without a barrier, and
+``job_samples`` accepted rollouts, from as many prompts, form one training
+job of one optimizer step. It can be used
 for a stream of tasks where each attempt gets its own score.
 
 .. flow::
@@ -36,7 +37,7 @@ for a stream of tasks where each attempt gets its own score.
 
    Rollout :: one attempt at a task
    Feedback :: a score reported against the rollout's receipt
-   Step* :: train once the batch size of scored rollouts has accumulated
+   Step* :: train once ``job_samples`` scored rollouts have accumulated
    Version :: publish the updated weights to the engine
 
 How Reef implements it
@@ -44,14 +45,15 @@ How Reef implements it
 
 The record-to-task stage turns every eligible ``ScoredRolloutReport`` into one
 ``TrajectoryItem``. "Single rollout" means one rollout per prompt, with no
-comparison group. The batch size is Slime's ``--global-batch-size``: that
-many such rollouts, from different prompts, form one optimizer step. The
-paper uses 128. Setting it to 1 makes
+comparison group. ``pipeline.task2job.config.job_samples`` such rollouts,
+from different prompts, form one job. Slime's ``--global-batch-size`` is the
+rollouts of one optimizer step; with the same value, one job is one step. The
+paper uses 128. Setting both to 1 makes
 every sample its own training step, which is convenient for a smoke run but
-is not the paper's estimator: the value model needs a full batch per step to
+is not the paper's estimator: the value model needs a full optimizer batch per step to
 learn, and without it the single-sample advantages are noise. The ``sao``
 loss family runs Slime's ``policy_loss`` with
-SAO's per-token primitive and a critic colocated on the actor GPUs. The
+SAO's per-token primitive and a critic that shares the actor's GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
 inside the training backend.
 
@@ -72,27 +74,34 @@ Configuration
 -------------
 
 SAO's pipeline has three stages: ``ExclusiveReportRecord2Record``,
-``SAOTasks``, and ``SAOBatches``. The deployment's ``pipeline`` section configures them. The
-record stage takes no config. Set the batch size in the training config:
+``SAOTasks``, and ``SAOJobData``. The deployment's ``pipeline`` section configures them. The
+record stage takes no config. Set the job size in the task-to-job stage and
+the optimizer batch in the training config:
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.sao.recipe:SAORecipe
-     config:
-       max-staleness: 18
+   pipeline:
+     record2record:
+       config:
+         max_staleness: 18
+     task2job:
+       config:
+         job_samples: ${training.config.global_batch_size}
    training:
      config:
        global_batch_size: 8
 
 .. config::
 
-   training.config.global_batch_size | rollouts (one per prompt) per batch and per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
+   pipeline.task2job.config.job_samples | required | rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+   training.config.global_batch_size | rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
    pipeline.record2task.config | {} | the sample-assembly keys: ``accept_multi_turn_policy_samples`` (default false) trains a report that references several model calls as one multi-turn sample; ``realign_threshold`` (1024) and ``scaffold_tolerance`` (0) bound the tokens that assembly may realign.
-   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
 
 A ``batch-size`` key in ``recipe.config`` or in
-``pipeline.task2batch.config`` is an unknown key: the recipe or the scenario's
+``pipeline.task2job.config`` is an unknown key: the recipe or the scenario's
 pipeline refuses it.
 
 Run the example
@@ -112,7 +121,7 @@ receipt. The next problem is served by the weights the previous one produced.
    ./run.sh
 
 ``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
-with the critic colocated on it and one SGLang rollout engine. The smoke
+that shares its GPU with the critic, and one SGLang serving engine. The smoke
 config sets ``training.config.global_batch_size`` to 1, so each scored
 rollout adds one ``training`` entry to the scenario's version chain:
 
@@ -123,8 +132,9 @@ rollout adds one ``training`` entry to the scenario's version chain:
    # {"scenario": "sao-smoke", "releases": [{"operation": "training", "current": true, ...}, ...]}
 
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
-critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
-``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
+critic ``grad_norm``, and the asynchrony metrics
+``sao/producing_version_spread_*``, ``sao/queue_age_s_*``, and
+``sao/effective_token_rate``.
 
 CEO-Bench
 ~~~~~~~~~

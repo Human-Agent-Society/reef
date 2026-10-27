@@ -34,8 +34,6 @@ class TrainingExperimentEvent:
     metrics: Mapping[str, Any]
     outcome: str
     training_job_id: str | None = None
-    source_runtime_load_id: str | None = None
-    produced_runtime_load_id: str | None = None
     checkpoint_path: str | None = None
 
 

@@ -1,237 +1,113 @@
-"""One training thread, several scenarios, one adapter-serving runtime."""
+"""Training scenarios on one deployment: one per process, or several on a runtime that serves each its own weights."""
 
 from __future__ import annotations
 
-import asyncio
 import time
+from pathlib import Path
 
 import pytest
-from tests.scenario.test_commit_history import RecordingRuntime, build_training_dispatcher, wait_for_step
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import VERSION_FILE, StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord
+from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
-from reef.core.records_types import RequestType
-from reef.service.app import RequestService
-from reef.surface import adapter_name
+from reef.core.trajectories import source_record_id
+from reef.dispatcher import Dispatcher
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class AdapterRuntime(RecordingRuntime):
-    """A recording runtime that time-slices one adapter slot between scenarios."""
-
-    def __init__(self) -> None:
-        super().__init__(served_version="w0")
-        self.scenarios: list[str] = []
-        self.adapter_versions: dict[str, str] = {}
+class SharedRuntime(StubInferenceRuntime):
+    """A stub runtime that several training scenarios can share."""
 
     @property
-    def concurrent_training_scenarios(self) -> bool:
+    def shared_by_training_scenarios(self) -> bool:
         return True
 
-    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
-        return self.adapter_versions.get(scenario)
 
-    def train_candidate(self, payload):
-        self.scenarios.append(payload["scenario"])
-        return super().train_candidate(payload)
-
-    def activate_candidate(self, candidate):
-        activated = super().activate_candidate(candidate)
-        self.adapter_versions[self.scenarios[-1]] = activated.runtime_load_id
-        return activated
-
-
-def _inference(scenario: str, agent_record_id: str, runtime_load_id: str | None = None) -> AgentRecord:
-    """An inference record; ``runtime_load_id`` is the version that served it, when the runtime reports one."""
-    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if runtime_load_id is not None:
-        payload["runtime_load_id"] = runtime_load_id
-    return AgentRecord.create(
-        scenario=scenario,
-        request_type=RequestType.INFERENCE,
-        payload=payload,
-        agent_record_id=agent_record_id,
-    )
-
-
-def _report(scenario: str, agent_record_id: str, reference: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario=scenario,
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [reference]},
-        agent_record_id=agent_record_id,
-        references=(reference,),
-    )
-
-
-def _feed(dispatcher, scenario: str, index: int, runtime_load_id: str | None = None) -> None:
-    dispatcher.accept_record(_inference(scenario, f"{scenario}-i{index}", runtime_load_id))
-    dispatcher.accept_record(_report(scenario, f"{scenario}-r{index}", f"{scenario}-i{index}"))
-
-
-@pytest.mark.unit
-def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
+def _dispatcher(
+    tmp_path, runtime: StubInferenceRuntime, *, shares_scenarios: bool = False
+) -> tuple[Dispatcher, StubTrainingComponent]:
     initial = tmp_path / "initial"
     initial.mkdir()
-    runtime = AdapterRuntime()
-    runtime._checkpoint_dir = tmp_path / "exported"
-    dispatcher = build_training_dispatcher(
-        runtime, tmp_path, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    )
-    try:
-        _feed(dispatcher, "math", 1)
-        _feed(dispatcher, "code", 1)
-        wait_for_step(dispatcher, 1, scenario="math")
-        wait_for_step(dispatcher, 1, scenario="code")
-        # The staleness check trains only data of the version that code serves now: its own adapter w2.
-        _feed(dispatcher, "code", 2, "w2")
-        wait_for_step(dispatcher, 2, scenario="code")
-
-        assert dispatcher.registry.training_scenario_names == ("math", "code")
-        assert runtime.scenarios == ["math", "code", "code"], "every job names the scenario whose adapter it trains"
-        math = dispatcher.get_or_create_scenario("math")
-        code = dispatcher.get_or_create_scenario("code")
-        assert math.scenario_step == 1 and code.scenario_step == 2
-        assert dispatcher.current_artifact("math").materialize().metadata["runtime_load_id"] == "w1"
-        assert dispatcher.current_artifact("code").materialize().metadata["runtime_load_id"] == "w3"
-
-        status = dispatcher.build_training_status()
-        assert set(status["scenarios"]) == {"math", "code"}
-        assert status["scenarios"]["math"]["adapter_runtime_load_id"] == "w1"
-        assert status["scenarios"]["code"]["adapter_runtime_load_id"] == "w3"
-
-        # Each scenario's surface routes to its own adapter revision.
-        payload = {"messages": []}
-        math_hooks = math.surface.inference
-        code_hooks = code.surface.inference
-        assert math_hooks is not None and code_hooks is not None
-        # The request service materializes the release before the hooks read its metadata.
-        served_math = math_hooks.prepare_request(dispatcher.current_artifact("math").materialize(), "/v1", payload)
-        served_code = code_hooks.prepare_request(dispatcher.current_artifact("code").materialize(), "/v1", payload)
-        assert served_math["lora_path"] == adapter_name("math", "w1")
-        assert served_code["lora_path"] == adapter_name("code", "w3")
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.unit
-def test_a_checkpointed_release_still_routes_requests_to_its_adapter(tmp_path) -> None:
-    """A checkpointed commit makes the durable release the serving head; requests must still name its adapter.
-
-    The engine loads the new adapter either way, so a request that names none is silently answered by the
-    frozen base while its record claims the release.
-    """
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    runtime = AdapterRuntime()
-    runtime._checkpoint_dir = tmp_path / "exported"
-    dispatcher = build_training_dispatcher(
-        runtime,
-        tmp_path,
+    component = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=shares_scenarios)
+    dispatcher = Dispatcher(
+        TestPolicyRecipe(component, runtime=runtime),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
-    try:
-        _feed(dispatcher, "math", 1)
-        wait_for_step(dispatcher, 1, scenario="math")
-        math = dispatcher.get_or_create_scenario("math")
-        assert runtime.adapter_versions["math"] == "w1"
-        assert getattr(math.current_artifact_ref(), "runtime_load_id", None) is None, "the head is the durable release"
+    return dispatcher, component
 
-        _, request = asyncio.run(
-            RequestService(dispatcher)._prepare_request(
-                {"x-reef-scenario": "math"}, {"messages": []}, "/v1/chat/completions", handler=object()
-            )
+
+def _train(dispatcher: Dispatcher, runtime: StubInferenceRuntime, scenario: str) -> None:
+    """Feed one scored exchange of ``scenario``, served by the current version, and wait until its job ends."""
+    dispatcher.get_or_create_scenario(scenario)
+    inference = f"{scenario}-i1"
+    dispatcher.accept_record(
+        AgentRecord.create(
+            scenario=scenario,
+            request_type=RequestType.INFERENCE,
+            payload={
+                "tokens": [1, 2],
+                "loss_mask": [0, 1],
+                "rollout_log_probs": [-0.2],
+                "runtime_load_id": runtime.current_runtime_load_id(),
+            },
+            agent_record_id=inference,
         )
-        assert request["lora_path"] == adapter_name("math", "w1")
-    finally:
-        dispatcher.close()
+    )
+    dispatcher.accept_record(
+        AgentRecord.create(
+            scenario=scenario,
+            request_type=RequestType.REPORT,
+            payload={"score": 1.0, "references": [inference]},
+            agent_record_id=f"{scenario}-r1",
+            references=(inference,),
+        )
+    )
+    deadline = time.monotonic() + 10
+    while dispatcher.build_training_status()["scenarios"][scenario]["finished_jobs"] < 1:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"the job of {scenario!r} did not end")
+        time.sleep(0.05)
 
 
 @pytest.mark.unit
-def test_a_full_weight_runtime_still_trains_one_scenario_only(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = build_training_dispatcher(
-        RecordingRuntime(), tmp_path, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    )
+def test_a_runtime_that_serves_one_model_binds_training_to_one_scenario(tmp_path) -> None:
+    dispatcher, _ = _dispatcher(tmp_path, StubInferenceRuntime())
     try:
         dispatcher.get_or_create_scenario("math")
-        with pytest.raises(ReefError, match="already bound"):
+        with pytest.raises(ReefError, match="training is already bound to scenario 'math'"):
+            dispatcher.get_or_create_scenario("code")
+        assert dispatcher.get_or_create_scenario("math").training_component is not None
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_shared_runtime_binds_one_scenario_when_the_training_component_does_not_share(tmp_path) -> None:
+    dispatcher, _ = _dispatcher(tmp_path, SharedRuntime(), shares_scenarios=False)
+    try:
+        dispatcher.get_or_create_scenario("math")
+        with pytest.raises(ReefError, match="training is already bound to scenario 'math'"):
             dispatcher.get_or_create_scenario("code")
     finally:
         dispatcher.close()
 
 
-class _PayloadRecordingRuntime(RecordingRuntime):
-    """A full weight runtime that keeps every payload it was asked to train."""
-
-    def __init__(self) -> None:
-        super().__init__(served_version="w0")
-        self.payloads: list[dict] = []
-
-    def train_candidate(self, payload):
-        self.payloads.append(dict(payload))
-        return super().train_candidate(payload)
-
-
 @pytest.mark.unit
-def test_every_job_names_its_owner_and_only_an_adapter_runtime_gets_the_slot_scenario(tmp_path) -> None:
-    """The job marker names the scenario that owns the job, on a full weight runtime too, so a delete never has to
-    guess whose job is out; only a runtime training several scenarios gets the scenario that picks its slot."""
-    full, adapters = _PayloadRecordingRuntime(), AdapterRuntime()
-    # The full weight runtime serves w0; the adapter runtime serves no adapter for code yet.
-    for runtime, scenario, version in ((full, "math", "w0"), (adapters, "code", None)):
-        initial = tmp_path / scenario / "initial"
-        initial.mkdir(parents=True)
-        dispatcher = build_training_dispatcher(
-            runtime, tmp_path / scenario, InMemoryRepositoryBackend.factory(initial, root=tmp_path / scenario / "repo")
-        )
-        try:
-            _feed(dispatcher, scenario, 1, version)
-            wait_for_step(dispatcher, 1, scenario=scenario)
-        finally:
-            dispatcher.close()
-    assert [payload["owner"] for payload in full.payloads] == ["math"]
-    assert all("scenario" not in payload for payload in full.payloads)
-    assert adapters.scenarios == ["code"]
-
-
-@pytest.mark.unit
-def test_one_scenarios_failure_reloads_only_that_scenario(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
-    class FlakyRuntime(AdapterRuntime):
-        def train_candidate(self, payload):
-            if payload["scenario"] == "code" and not getattr(self, "_failed", False):
-                self._failed = True
-                self.scenarios.append("code")
-                raise RuntimeError("code exploded")
-            return super().train_candidate(payload)
-
-    runtime = FlakyRuntime()
-    dispatcher = build_training_dispatcher(
-        runtime,
-        tmp_path,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        agent_record_dir=tmp_path / "agent-record",
-    )
+def test_a_shared_runtime_trains_each_scenario_on_the_one_training_component(tmp_path) -> None:
+    runtime = SharedRuntime()
+    dispatcher, component = _dispatcher(tmp_path, runtime, shares_scenarios=True)
     try:
-        math = dispatcher.get_or_create_scenario("math")
-        code = dispatcher.get_or_create_scenario("code")
-        _feed(dispatcher, "math", 1)
-        _feed(dispatcher, "code", 1)
-        wait_for_step(dispatcher, 1, scenario="math")
-        for _ in range(1000):
-            reloaded_code = dispatcher.get_or_create_scenario("code")
-            if reloaded_code is not code:
-                break
-            time.sleep(0.001)
-        else:
-            raise AssertionError("the failing scenario was not reloaded")
-
-        wait_for_step(dispatcher, 1, scenario="code")
-        assert dispatcher.get_or_create_scenario("math") is math, "code's failure reloaded math"
-        assert math.scenario_step == 1, "math did not retain its committed step"
+        # The stub serves one version for every scenario, so each exchange names the version served when it arrives.
+        _train(dispatcher, runtime, "math")
+        _train(dispatcher, runtime, "code")
+        # Each scenario submitted its own job of its own records, and each one's checkpoint became its head.
+        assert [source_record_id(job.data.items[0]) for job in component.submitted] == ["math-i1", "code-i1"]
+        for scenario, version in (("math", "w1"), ("code", "w2")):
+            head = dispatcher.current_artifact(scenario).materialize()
+            assert (Path(head.local_path) / VERSION_FILE).read_text() == version
     finally:
         dispatcher.close()

@@ -10,7 +10,7 @@ observation changes the pool, and the next day measures what changed.
 | Evolves     | the harness tree: the agent's skill pool                     |
 +-------------+--------------------------------------------------------------+
 | Signal      | one report per task, with the day's last report closing      |
-|             | the batch                                                    |
+|             | the job data                                                 |
 +-------------+--------------------------------------------------------------+
 | Loss family | none (no weight training)                                    |
 +-------------+--------------------------------------------------------------+
@@ -65,7 +65,7 @@ Configuration
 ``recipes/skillclaw/skillclaw.yaml`` is the recipe config the driver boots. It
 names ``recipes.skillclaw.recipe:SkillClawRecipe`` as its ``implementation``
 and sets ``evolution.batch_size: 60``, so every report of
-the day batches and the day's last one triggers the night. The engine's keys are
+the day goes into one job's data and the day's last one triggers the night. The engine's keys are
 in `Recipe configuration
 <../../reference/configuration.rst#recipe-configuration>`__.
 

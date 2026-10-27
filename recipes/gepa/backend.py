@@ -9,7 +9,7 @@ from typing import Any
 from reef.core.evaluation import SelectionDecision
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import CordisBackend
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import JobData, TrainStepResult
 
 from .archive import Archive
 
@@ -29,7 +29,7 @@ class GEPABackend(CordisBackend):
 
     def prepare_step(
         self,
-        batch: TrainingBatch,
+        data: JobData,
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
@@ -37,7 +37,7 @@ class GEPABackend(CordisBackend):
         before = self._archive.to_dict()
         self._archive_before_step = before
         try:
-            prepared = super().prepare_step(batch, state, scenario_step)
+            prepared = super().prepare_step(data, state, scenario_step)
         except BaseException:
             self._archive.restore(before)
             self._archive_before_step = None

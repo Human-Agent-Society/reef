@@ -11,7 +11,7 @@ export GUIDANCE_CONFIG="${GUIDANCE_CONFIG:-$PWD/serve.yaml}"
 export GUIDANCE_STATE_DIR="${GUIDANCE_STATE_DIR:-$PWD/work/$GUIDANCE_TASK}"
 export GUIDANCE_MODEL="${GUIDANCE_MODEL:-Qwen/Qwen3-8B}"
 export GUIDANCE_MODEL_PATH="${GUIDANCE_MODEL_PATH:-$PWD/work/models/${GUIDANCE_MODEL##*/}}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export GUIDANCE_STATE_DIR="$(python3 -c 'from pathlib import Path; import os; print(Path(os.environ["GUIDANCE_STATE_DIR"]).resolve())')"
 export GUIDANCE_MODEL_PATH="$(python3 -c 'from pathlib import Path; import os; print(Path(os.environ["GUIDANCE_MODEL_PATH"]).resolve())')"
 # Reject grid mismatches before downloading weights or starting GPU workers.

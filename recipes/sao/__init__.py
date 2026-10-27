@@ -2,19 +2,19 @@
 
 - ``recipe`` — the SAO recipe class and its ``WeightTrainingSpec``. Its
   record stage is Reef's ``ExclusiveReportRecord2Record``.
-- ``processor`` — the stages ``SAOTasks`` and ``SAOBatches``: one scored
-  rollout, one batch unit.
+- ``processor`` — the stages ``SAOTasks`` and ``SAOJobData``: one scored
+  rollout, one record set unit.
 - ``objective`` — the backend-agnostic training objective.
 - ``slime`` — the Slime loss family (DIS ratio, actor/critic cadence) and
-  its torch objective. Imported by the training driver and workers only;
+  its torch objective. Imported by the Slime training component and workers only;
   this package's public surface never loads it.
 """
 
 from recipes.sao.objective import SaoObjective
-from recipes.sao.processor import SAOBatches, SAOTasks
+from recipes.sao.processor import SAOJobData, SAOTasks
 from recipes.sao.recipe import SAORecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sao", "recipes.sao.slime:SaoAlgorithm")
 
-__all__ = ["SAOBatches", "SAORecipe", "SAOTasks", "SaoObjective"]
+__all__ = ["SAOJobData", "SAORecipe", "SAOTasks", "SaoObjective"]

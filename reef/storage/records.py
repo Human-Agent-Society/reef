@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -18,6 +18,15 @@ from reef.core.records_types import AgentRecord, RequestType
 
 
 class ConsumptionReceipt(TypedDict):
+    """Record IDs consumed without a training commit, as an older store holds them.
+
+    Reef no longer writes receipts. A store that an earlier Reef version wrote
+    keeps the receipts of its stale job data drops, and the storage migration turns
+    old retired rows into receipts. ``consumed_ids`` is sorted; ``metadata`` may
+    name the receipt's ``component``. Scenario recovery reads them, so that
+    these records never train.
+    """
+
     receipt_id: str
     consumed_ids: tuple[str, ...]
     metadata: dict[str, object]
@@ -152,23 +161,8 @@ class RecordStore(ABC):
         """Read retained records with the same sequence bounds as ``replay_page``, optionally of one type."""
 
     @abstractmethod
-    def record_consumption(
-        self,
-        scenario: str,
-        agent_record_ids: frozenset[str],
-        *,
-        receipt_id: str,
-        metadata: Mapping[str, object],
-    ) -> None:
-        """Persist consumption outside a training commit; leave record bodies readable.
-
-        An identical (scenario, receipt id, record IDs) retry is idempotent.
-        Different metadata for the same identity raises ``RecordConflict``.
-        """
-
-    @abstractmethod
     def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        """Read durable consumption receipts in recorded order."""
+        """Read the scenario's consumption receipts that an older store holds, in recorded order."""
 
     def loss(self, scenario: str) -> RecordLoss:
         """Capacity losses, including after restart; non-evicting stores return zero."""

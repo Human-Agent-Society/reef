@@ -29,6 +29,7 @@ from reef.recipe.generated_tasks.processor import (
     RoundSettings,
     TaskGroupSettings,
 )
+from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2task.generator import GeneratorError, TaskNameConflict
 from reef.record2task.generator.inputs import TaskGenerationRequest
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -294,14 +295,13 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     generated = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
     saved_tasks = generation.task_store.tasks(split="train")
     for task in generated.tasks:
-        asyncio.run(generation.run_and_record(task, count=2))
+        # The end of the task job saves each task's training rewards, from the training component's rollout.
+        generation.save_result(TaskRolloutResult(task.metadata["task"]["name"], (0.25, 0.25)))
     delivery_error = asyncio.run(generation.deliver_results())
     generation.close()
     assert len(generated.tasks) == len(saved_tasks) == 2 and delivery_error == ""
     requests = [(call["task"], call["arm"], call["count"], call["extra"]) for call in service.episode_requests]
     assert requests == [
-        ("harbor-00000-000-inspection", "plain", 2, ()),
-        ("harbor-00000-002-inspection", "plain", 2, ()),
         ("harbor-00000-000-inspection", "hint", 1, ("solution/hint.txt",)),
         ("harbor-00000-002-inspection", "hint", 1, ("solution/hint.txt",)),
     ]

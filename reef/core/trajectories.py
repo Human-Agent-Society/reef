@@ -13,7 +13,7 @@ import mimetypes
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.batches import TrajectoryItem
+from reef.core.job_data import TrajectoryItem
 from reef.core.records_types import AgentRecord
 
 
@@ -302,13 +302,39 @@ def _provider_content(content: Any) -> Any:
     ]
 
 
-def _project_exchange(trajectory: Mapping[str, Any]) -> Mapping[str, Any]:
+def atif_messages(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The provider chat messages of an ATIF document's ``steps``, in step order.
+
+    An ``agent`` step becomes an ``assistant`` message with its reasoning and tool calls; a step of another source
+    keeps the source as its role. Each result of a step's observation follows the step as a ``tool`` message, or as
+    a ``user`` message when it names no tool call. ``ValueError``: ``steps`` is not a list of objects, each with a
+    string ``source``; or a step's ``tool_calls`` is not a list of objects with ``tool_call_id``, ``function_name``
+    and object ``arguments``; or its ``observation.results`` is not a list of objects.
+    """
+    steps = trajectory.get("steps")
+    if not isinstance(steps, list) or any(
+        not isinstance(step, Mapping) or not isinstance(step.get("source"), str) for step in steps
+    ):
+        raise ValueError("ATIF steps must be a list of step objects, each with a string source")
+    for step in steps:
+        calls = step.get("tool_calls") or []
+        if not isinstance(calls, list) or any(
+            not isinstance(call, Mapping)
+            or not isinstance(call.get("tool_call_id"), str)
+            or not isinstance(call.get("function_name"), str)
+            or not isinstance(call.get("arguments"), Mapping)
+            for call in calls
+        ):
+            raise ValueError("ATIF tool_calls must be objects with tool_call_id, function_name and object arguments")
+        results = (step.get("observation") or {}).get("results", [])
+        if not isinstance(results, list) or any(not isinstance(result, Mapping) for result in results):
+            raise ValueError("ATIF observation results must be a list of objects")
     messages: list[dict[str, Any]] = []
-    for step in trajectory["steps"]:
+    for step in steps:
         source = step["source"]
         message: dict[str, Any] = {
             "role": "assistant" if source == "agent" else source,
-            "content": _provider_content(step["message"]),
+            "content": _provider_content(step.get("message", "")),
         }
         if step.get("reasoning_content"):
             message["reasoning_content"] = step["reasoning_content"]
@@ -333,6 +359,11 @@ def _project_exchange(trajectory: Mapping[str, Any]) -> Mapping[str, Any]:
             }
             for observation in (step.get("observation") or {}).get("results", [])
         )
+    return messages
+
+
+def _project_exchange(trajectory: Mapping[str, Any]) -> Mapping[str, Any]:
+    messages = atif_messages(trajectory)
     final = messages[-1] if messages and messages[-1]["role"] == "assistant" else None
     return {
         "messages": messages[:-1] if final is not None else messages,
