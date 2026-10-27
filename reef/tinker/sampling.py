@@ -9,7 +9,6 @@ the loss mask and the sampled log probabilities.
 
 from __future__ import annotations
 
-import importlib
 import math
 import time
 import uuid
@@ -19,25 +18,30 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.runtime.interfaces import UpstreamStatusError
-
-
-def close_service(sdk: Any, service: Any, status: str, *, timeout_s: float | None) -> None:
-    """Close the SDK ``ServiceClient`` ``service``, ending its session with ``status`` (``success`` or ``errored``).
-
-    A Tinker-compatible service without the session-finish call, such as Spindle, answers 404 to it and ends
-    the session when its heartbeats stop; closing still releases the client's connections.
-    """
-    try:
-        service.close(status).result(timeout=timeout_s)
-    except sdk.NotFoundError:
-        return
+from reef.tinker.service import close_service, open_service, tinker_sdk
 
 
 @dataclass(frozen=True)
 class SampleResult:
+    """One sampled continuation.
+
+    Values: ``tokens`` are the sampled token IDs and ``logprobs`` the sampler's log probability of each, finite
+    and as many as the tokens; ``stop_reason`` is the sampler's non-empty reason to stop, such as ``stop`` or
+    ``length``. Purpose: ``TinkerSampler.sample`` makes it; ``chat_completion`` shapes the answer and its
+    training capture from it.
+    """
+
     tokens: tuple[int, ...]
     logprobs: tuple[float, ...]
     stop_reason: str
+
+    def __post_init__(self) -> None:
+        if len(self.tokens) != len(self.logprobs):
+            raise ValueError("Tinker must return exact log probabilities for every sampled token")
+        if any(not math.isfinite(value) for value in self.logprobs):
+            raise ValueError("Tinker returned non-finite sampled log probabilities")
+        if not isinstance(self.stop_reason, str) or not self.stop_reason:
+            raise ValueError("a sample needs the sampler's stop reason")
 
 
 class TinkerSampler(ABC):
@@ -70,6 +74,8 @@ class TinkerSDKSampler(TinkerSampler):
     #: The base model's sampling client and its tokenizer, made at the first use.
     base_client: Any | None
     tokenizer: Any | None
+    #: The sampling client of each sampler path, made at its first request.
+    clients: dict[str, Any]
 
     def __init__(
         self,
@@ -81,17 +87,17 @@ class TinkerSDKSampler(TinkerSampler):
         timeout_s: float = 300.0,
     ) -> None:
         """Sample ``base_model`` on the Tinker-compatible service at ``base_url`` (``None``: hosted Tinker)."""
-        try:
-            self._sdk = importlib.import_module("tinker")
-        except ImportError as exc:
-            raise RuntimeError("install Tinker support with uv pip install 'reef-infra[tinker]'") from exc
+        self._sdk = tinker_sdk()
         self._model = base_model
         self._timeout_s = timeout_s
-        self._service = self._sdk.ServiceClient(api_key=api_key, project_id=project_id, base_url=base_url)
+        self._service = open_service(
+            self._sdk, api_key=api_key, project_id=project_id, base_url=base_url, timeout_s=timeout_s
+        )
         # On a service such as Spindle, a sampling client starts a sampler pool, which a component that only
-        # trains never needs.
+        # trains never needs; and a rollout samples one checkpoint many times, so each client is kept.
         self.base_client = None
         self.tokenizer = None
+        self.clients = {}
 
     def base_sampler(self) -> Any:
         """The base model's sampling client, made at the first call."""
@@ -124,10 +130,13 @@ class TinkerSDKSampler(TinkerSampler):
     def sample(self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any]) -> SampleResult:
         if sampler_path is None:
             sampler = self.base_sampler()
+        elif sampler_path in self.clients:
+            sampler = self.clients[sampler_path]
         else:
             sampler = self._service.create_sampling_client(model_path=sampler_path)
             if sampler.get_base_model() != self._model:
                 raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
+            self.clients[sampler_path] = sampler
         try:
             result = sampler.sample(
                 prompt=self._sdk.ModelInput.from_ints(prompt),
@@ -143,10 +152,8 @@ class TinkerSDKSampler(TinkerSampler):
         if len(result.sequences) != 1:
             raise ValueError("Tinker returned an unexpected number of sequences")
         sequence = result.sequences[0]
-        if sequence.logprobs is None or len(sequence.tokens) != len(sequence.logprobs):
+        if sequence.logprobs is None:
             raise ValueError("Tinker must return exact log probabilities for every sampled token")
-        if any(not math.isfinite(value) for value in sequence.logprobs):
-            raise ValueError("Tinker returned non-finite sampled log probabilities")
         return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
 
     def close(self) -> None:

@@ -22,10 +22,10 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.adapter import adapter_name
+from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
@@ -47,7 +47,7 @@ class RemoteClient:
     def initialize(self):
         return TinkerCheckpoint("Qwen/Qwen3-8B", 16, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss, learning_rates):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
         self.calls.append(checkpoint)
         number = len(self.calls)
         return TinkerCheckpoint(

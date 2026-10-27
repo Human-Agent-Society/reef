@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import math
 import shutil
 import urllib.request
@@ -13,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.serving import ADAPTER_DIR
-from reef.tinker.sampling import close_service
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.tinker.service import close_service, open_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
 
@@ -24,7 +23,7 @@ TINKER_ADAPTER_DIR = "tinker-adapter"
 
 
 class TinkerClient(ABC):
-    """Remote training operations, also implementable by offline tests; sampling lives in ``reef.inference.tinker``."""
+    """Remote training operations, also implementable by offline tests; sampling lives in ``reef.tinker.sampling``."""
 
     @abstractmethod
     def initialize(self) -> TinkerCheckpoint: ...
@@ -33,13 +32,19 @@ class TinkerClient(ABC):
     def train(
         self,
         checkpoint: TinkerCheckpoint,
-        batches: Sequence[Sequence[TokenRow]],
+        steps: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
         learning_rates: Sequence[float],
+        *,
+        kl_coef: float,
+        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
-        """Train one optimizer step per batch from ``checkpoint``, step ``i`` at ``learning_rates[i]``.
+        """Train one optimizer step per entry of ``steps`` from ``checkpoint``, step ``i`` at ``learning_rates[i]``.
 
-        The result's ``adapter_path`` names its exported adapter exactly when ``TinkerConfig.export_adapter`` is set.
+        ``loss`` weighs its KL term by ``kl_coef``. Return the checkpoint after the last step, whose
+        ``adapter_path`` names its exported adapter exactly when ``export_adapter`` is set, and Tinker's
+        metrics of the steps. ``ValueError``: ``steps`` and ``learning_rates`` differ in length, or ``loss``
+        refuses ``kl_coef``.
         """
 
     @abstractmethod
@@ -65,10 +70,7 @@ class TinkerSDKClient(TinkerClient):
     base_client: Any | None
 
     def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
-        try:
-            self._sdk = importlib.import_module("tinker")
-        except ImportError as exc:
-            raise RuntimeError("install Tinker support with uv pip install 'reef-infra[tinker]'") from exc
+        self._sdk = tinker_sdk()
         self._model = base_model
         self._config = config
         self._api_key = api_key
@@ -78,14 +80,13 @@ class TinkerSDKClient(TinkerClient):
         self.base_client = None
 
     def _new_service(self) -> Any:
-        options: dict[str, Any] = {
-            "api_key": self._api_key,
-            "project_id": self._config.project_id,
-            "base_url": self._config.base_url,
-        }
-        if self._config.train_timeout_s is not None:
-            options["timeout"] = self._config.train_timeout_s
-        return self._sdk.ServiceClient(**options)
+        return open_service(
+            self._sdk,
+            api_key=self._api_key,
+            project_id=self._config.project_id,
+            base_url=self._config.base_url,
+            timeout_s=self._config.train_timeout_s,
+        )
 
     def _save(self, trainer: Any, *, export_adapter: bool) -> TinkerCheckpoint:
         """Save ``trainer``'s weights durably, and with ``export_adapter`` also its adapter for ``download``."""
@@ -124,13 +125,16 @@ class TinkerSDKClient(TinkerClient):
     def train(
         self,
         checkpoint: TinkerCheckpoint,
-        batches: Sequence[Sequence[TokenRow]],
+        steps: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
         learning_rates: Sequence[float],
+        *,
+        kl_coef: float,
+        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
-        if len(learning_rates) != len(batches):
-            raise ValueError("Tinker training needs one learning rate per optimizer batch")
-        loss.check_kl_coef(self._config.kl_coef)
+        if len(learning_rates) != len(steps):
+            raise ValueError("Tinker training needs one learning rate per optimizer step")
+        loss.check_kl_coef(kl_coef)
         service = self._new_service()
         status = "errored"
         try:
@@ -145,9 +149,9 @@ class TinkerSDKClient(TinkerClient):
                 raise ValueError("remote Tinker training checkpoint does not match the configured model/rank")
             trainer = service.create_training_client_from_state_with_optimizer(checkpoint.state_path)
             metrics: dict[str, Any] = {}
-            for rows, learning_rate in zip(batches, learning_rates, strict=True):
-                base = self._base_logprobs(rows) if loss.needs_base_logprobs and self._config.kl_coef else []
-                inputs = loss.inputs(rows, base, kl_coef=self._config.kl_coef)
+            for rows, learning_rate in zip(steps, learning_rates, strict=True):
+                base = self._base_logprobs(rows) if loss.needs_base_logprobs and kl_coef else []
+                inputs = loss.inputs(rows, base, kl_coef=kl_coef)
                 if len(inputs) != len(rows):
                     raise ValueError("Tinker loss adapter must return one input per training row")
                 data = [
@@ -166,8 +170,7 @@ class TinkerSDKClient(TinkerClient):
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(
                     timeout=self._config.train_timeout_s
                 )
-            metrics["optimizer_steps"] = len(batches)
-            result_checkpoint = self._save(trainer, export_adapter=self._config.export_adapter)
+            result_checkpoint = self._save(trainer, export_adapter=export_adapter)
             status = "success"
             return result_checkpoint, metrics
         finally:

@@ -15,9 +15,9 @@ from reef.core.trajectories import trajectory_reward
 from reef.harness.client.tasks import EpisodeRow, TaskLab
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
+from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.tinker_backend import component as component_module
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
@@ -116,6 +116,27 @@ def test_the_sampler_endpoint_refuses_a_request_that_tinker_cannot_serve():
 
 
 @pytest.mark.unit
+def test_the_sampler_endpoint_answers_a_bad_request_and_a_sampler_failure_with_their_status():
+    class Failing(Sampler):
+        def sample(self, sampler_path, prompt, params):
+            raise ValueError("Tinker returned non-finite sampled log probabilities")
+
+    def post(url: str, body: bytes) -> tuple[int, str]:
+        request = urllib.request.Request(f"{url}/v1/chat/completions", data=body, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, response.read().decode()
+        except urllib.error.HTTPError as error:
+            return error.code, error.read().decode()
+
+    chat = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+    with SamplerEndpoint(Failing(), None, model=MODEL, runtime_load_id="tinker:base") as endpoint:
+        assert post(endpoint.url, b"{not json")[0] == 400
+        status, body = post(endpoint.url, chat)
+    assert status == 502 and "non-finite" in body
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("rollout", "message"),
     [
@@ -138,7 +159,7 @@ class Client(TinkerClient):
     def initialize(self):
         return TinkerCheckpoint(MODEL, 32, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss, learning_rates):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
         self.trained.append(sum(len(batch) for batch in batches))
         return TinkerCheckpoint(MODEL, 32, "tinker://update/state", "tinker://update/sampler"), {"loss": 0.5}
 
@@ -172,6 +193,22 @@ def grouped(tmp_path: Path) -> TaskRollouts:
 
 
 @pytest.mark.unit
+def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
+    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
+
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+    )
+    try:
+        tasks = (harbor_task(tmp_path / "a", "add"), harbor_task(tmp_path / "b", "add"))
+        parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
+        with pytest.raises(ValueError, match="distinct names"):
+            component.submit(TrainingJob("job-0", "tinker", None, JobData("d", tasks), parameters))
+    finally:
+        component.close()
+
+
+@pytest.mark.unit
 def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(tmp_path, monkeypatch):
     import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
 
@@ -197,7 +234,10 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         # The rollouts are kept: running the job again trains them without new episodes.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
         assert kept["rewards"] == {"add": [1.0, 0.0]}
-        assert component.task_rollouts(job, component.job_directory("job-0"), component._base) == grouped(tmp_path)
+        settings = component.job_parameters(parameters).rollout
+        assert component.task_rollouts(job, component.job_directory("job-0"), component._base, settings) == grouped(
+            tmp_path
+        )
         assert len(calls) == 1
     finally:
         component.close()

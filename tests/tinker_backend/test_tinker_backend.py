@@ -32,6 +32,7 @@ from reef.runtime.serving import ADAPTER_DIR
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
+from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
 from reef.train.algos.objective import TrainingObjective
@@ -39,9 +40,8 @@ from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoopState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
-from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerClient
-from reef.train.tinker_backend.component import TinkerTrainingComponent
+from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
@@ -59,6 +59,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.learning_rates = []
         self.sampled = []
         self.downloads = []
+        self.training_options = []
         self.closed = False
         self.fail = False
 
@@ -66,9 +67,10 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.initializations += 1
         return TinkerCheckpoint(MODEL, 32, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss, learning_rates):
+    def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef, export_adapter):
         self.calls.append((checkpoint, batches, loss))
         self.learning_rates.append(tuple(learning_rates))
+        self.training_options.append((kl_coef, export_adapter))
         if self.fail:
             raise TimeoutError("uncertain remote optimizer result")
         number = len(self.calls)
@@ -289,20 +291,28 @@ def test_save_interval_saves_a_checkpoint_every_interval_and_at_the_end(componen
     assert TinkerCheckpoint.read(Path(status.checkpoints[-1].path)).learning_rate_schedule_state == (
         LearningRateScheduleState(WARMUP, 5)
     )
+    # Only the last checkpoint has trained all the data that the objective's next state is for.
+    manifests = [TinkerCheckpoint.read(Path(checkpoint.path)) for checkpoint in status.checkpoints]
+    assert [manifest.algorithm_state for manifest in manifests] == [{}, {}, {"steps": 1}]
+    assert [checkpoint.metrics["checkpoint_optimizer_steps"] for checkpoint in status.checkpoints] == [2, 2, 1]
+    assert status.metrics["optimizer_steps"] == 5
+
+
+def test_the_jobs_kl_coefficient_and_the_adapter_export_reach_training(component, client, second_objective):
+    # The job's coefficient, not the component's default of 0, weighs the TTTD loss's KL term.
+    status = train(component, batch(), second_objective.name, kl_coef=0.2)
+    assert status.state == "finished", status.error
+    assert client.training_options == [(0.2, False)]
 
 
 def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenarios_share_the_component(
     component, config, objective
 ):
     method = {"method": TrainingMethod(objective.name).to_dict()}
-    assert component.job_parameters({**method, "kl_coef": 0.2}) == {
-        **method,
-        "batch_size": config.batch_size,
-        "kl_coef": 0.2,
-        "learning_rate": config.learning_rate,
-        "save_interval": None,
-        "rollout": None,
-    }
+    parameters = component.job_parameters({**method, "kl_coef": 0.2})
+    assert parameters == TinkerJobParameters(
+        TrainingMethod(objective.name), StepScheduling(), config.batch_size, config.learning_rate, 0.2, None, None
+    )
     assert component.shares_scenarios is True
 
 
@@ -316,6 +326,10 @@ def test_job_parameters_fill_the_configured_defaults_and_jobs_of_several_scenari
         ({"save_interval": 0}, "save_interval must be a positive int"),
         ({"save_interval": True}, "save_interval must be a positive int"),
         ({"save_interval": 1.5}, "save_interval must be a positive int"),
+        ({"batch_size": 0}, "batch_size must be a positive int"),
+        ({"learning_rate": "fast"}, "learning_rate must be a finite number"),
+        ({"learning_rate": -1e-4}, "learning_rate must be positive"),
+        ({"kl_coef": -0.1}, "kl_coef non-negative"),
     ],
 )
 def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothing(
@@ -364,9 +378,9 @@ def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(confi
     held = TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler", service="https://spindle.example")
     assert TinkerCheckpoint.from_dict(held.to_dict()) == held
     assert "service" not in TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler").to_dict()
-    held.validate_model(MODEL, 32, "https://spindle.example")
+    held.check_compatible(MODEL, service="https://spindle.example", lora_rank=32)
     with pytest.raises(ValueError, match="not by the configured service hosted Tinker"):
-        held.validate_model(MODEL, 32, None)
+        held.check_compatible(MODEL, service=None, lora_rank=32)
 
 
 def test_import_start_copies_a_release_manifest_and_takes_the_base_tree_as_the_base(component, objective, tmp_path):
@@ -389,7 +403,7 @@ def test_exclusive_state_dir_and_model_validation(component, config, inference, 
     other.write(tmp_path / "other")
     with pytest.raises(ValueError, match="base model"):
         inference.activate_checkpoint(Artifact.local(tmp_path / "other"))
-    with pytest.raises(ValueError, match="model/rank"):
+    with pytest.raises(ValueError, match="LoRA of base model"):
         component.import_start(tmp_path / "other")
     (tmp_path / "other" / MANIFEST).unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
@@ -498,7 +512,7 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     scheduling = StepScheduling(epochs=2, remainder="partial")
     data = JobData("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
     step = prepare_tinker_job(data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0)
-    assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
+    assert [len(rows) for rows in step.steps] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
 
@@ -507,7 +521,7 @@ def test_a_packed_tinker_step_trains_batch_size_packs(objective):
     # Each sample has 4 tokens, so packs of 8 tokens hold two samples, and one step trains one pack.
     scheduling = StepScheduling(packing_length=8)
     step = prepare_tinker_job(batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0)
-    assert [len(rows) for rows in step.payload["batches"]] == [2, 1]
+    assert [len(rows) for rows in step.steps] == [2, 1]
 
 
 def test_step_size_respects_error_remainder(objective):
@@ -912,8 +926,7 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
     step = prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0)
 
     loss = resolve_tinker_loss("sft")
-    (batch,) = step.payload["batches"]
-    rows = [TokenRow(**{**row, "tokens": tuple(row["tokens"]), "mask": tuple(row["mask"])}) for row in batch]
+    (rows,) = step.steps
     assert loss.loss_fn == "cross_entropy"
     # Position i predicts token i+1: the two prompt positions before the target weigh 0.
     assert loss.inputs(rows, [], kl_coef=0.0)[0] == {

@@ -10,6 +10,16 @@ from reef.core.config import config_option
 
 @dataclass(frozen=True)
 class TinkerConfig:
+    """The ``training.options`` of the Tinker training component.
+
+    Values: ``state_dir`` and ``api_key_env`` are non-empty; ``lora_rank`` and ``batch_size`` are positive;
+    ``learning_rate`` is finite and positive and ``kl_coef`` finite and non-negative, the defaults of each job's
+    parameters (``TinkerJobParameters``); ``seed`` is an int or None; ``base_url`` is an http(s) URL or None
+    for hosted Tinker; ``inference_timeout_s`` is positive and ``train_timeout_s`` positive or None.
+    Purpose: ``tinker_settings`` parses it from a deployment; the component, its SDK client and its sampler read
+    it, and ``TinkerDeployment.trainer_serving_config`` derives Tinker serving from it.
+    """
+
     state_dir: str = config_option(help="Persistent local directory for Tinker checkpoint manifests.")
     lora_rank: int = config_option(32, help="Rank of the remote LoRA adapter.")
     learning_rate: float = config_option(1e-4, help="Adam learning rate.")
@@ -37,8 +47,12 @@ class TinkerConfig:
         ),
     )
     project_id: str | None = config_option(None, help="Optional Tinker project ID.")
-    inference_timeout_s: float = config_option(300.0)
-    train_timeout_s: float | None = config_option(None)
+    inference_timeout_s: float = config_option(
+        300.0, help="Seconds that one sample may take: a request's, and a task job's rollout sampling."
+    )
+    train_timeout_s: float | None = config_option(
+        None, help="Seconds that one training call to Tinker may take; unset waits as long as the SDK does."
+    )
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():

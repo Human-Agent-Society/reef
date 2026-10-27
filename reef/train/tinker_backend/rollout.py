@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -105,38 +106,67 @@ class TaskRollouts:
     samples: tuple[TrajectoryItem, ...]
     rewards: Mapping[str, tuple[float, ...]]
 
+    def __post_init__(self) -> None:
+        if any(not isinstance(sample, TrajectoryItem) for sample in self.samples):
+            raise TypeError("task rollouts train trajectories")
+        groups = [sample.group_id for sample in self.samples]
+        seen: list[str | None] = []
+        for group in groups:
+            if not seen or seen[-1] != group:
+                if group in seen or group not in self.rewards:
+                    raise ValueError("each task's samples form one contiguous group named by a task with rewards")
+                seen.append(group)
+        if any(groups.count(group) < 2 for group in seen):
+            raise ValueError("a task's group trains only with two or more samples")
+        if any(any(not math.isfinite(value) for value in values) for values in self.rewards.values()):
+            raise ValueError("episode rewards must be finite")
+
 
 class SamplerEndpoint:
     """An OpenAI text chat endpoint on loopback that samples one Tinker sampler, for the episodes of one job.
 
     ``sampler_path`` is the job's start sampler, or None for the base model. Each answer carries the training
-    capture with ``runtime_load_id``. The server runs on its own threads, so an agent that blocks the
-    rollout's event loop cannot block it. Use it as a context manager; ``url`` is set inside it.
+    capture with ``runtime_load_id``. A request that is not JSON gets 400, a sampler refusal its own status, and a
+    sampler failure (a malformed sample, a timeout) 502 with the reason. The server runs on its own threads, so
+    an agent that blocks the rollout's event loop cannot block it. Use it as a context manager: it binds its
+    loopback port and sets ``url`` when it is entered, and closes the port when it exits.
     """
 
     def __init__(self, sampler: TinkerSampler, sampler_path: str | None, *, model: str, runtime_load_id: str) -> None:
+        self.sampler = sampler
+        self.sampler_path = sampler_path
+        self.model = model
+        self.runtime_load_id = runtime_load_id
+        self.server: ThreadingHTTPServer | None = None
+        self.url = ""
+
+    def answer(self, payload: Any) -> tuple[int, Mapping[str, Any]]:
+        """The status and the body that answer the chat request ``payload``."""
+        try:
+            return 200, sample_chat(
+                self.sampler, self.sampler_path, payload, model=self.model, runtime_load_id=self.runtime_load_id
+            )
+        except UpstreamStatusError as exc:
+            return exc.status, {"error": {"message": str(exc)}}
+        except (ValueError, TimeoutError) as exc:
+            return 502, {"error": {"message": f"the Tinker sampler failed: {exc}"}}
+
+    def __enter__(self) -> SamplerEndpoint:
         endpoint = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 if self.path != "/v1/chat/completions":
-                    self.answer(404, {"error": {"message": f"no route {self.path}"}})
+                    self.reply(404, {"error": {"message": f"no route {self.path}"}})
                     return
-                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 try:
-                    answer = sample_chat(
-                        endpoint.sampler,
-                        endpoint.sampler_path,
-                        payload,
-                        model=endpoint.model,
-                        runtime_load_id=endpoint.runtime_load_id,
-                    )
-                except UpstreamStatusError as exc:
-                    self.answer(exc.status, {"error": {"message": str(exc)}})
+                    payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                except json.JSONDecodeError as exc:
+                    self.reply(400, {"error": {"message": f"the request is not JSON: {exc}"}})
                     return
-                self.answer(200, answer)
+                self.reply(*endpoint.answer(payload))
 
-            def answer(self, status: int, body: Mapping[str, Any]) -> None:
+            def reply(self, status: int, body: Mapping[str, Any]) -> None:
                 data = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -147,20 +177,16 @@ class SamplerEndpoint:
             def log_message(self, format: str, *args: Any) -> None:
                 return
 
-        self.sampler = sampler
-        self.sampler_path = sampler_path
-        self.model = model
-        self.runtime_load_id = runtime_load_id
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
-
-    def __enter__(self) -> SamplerEndpoint:
         threading.Thread(target=self.server.serve_forever, name="tinker-rollout-sampler", daemon=True).start()
         return self
 
     def __exit__(self, *exc_info: object) -> None:
-        self.server.shutdown()
-        self.server.server_close()
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
 
 
 def task_name(task: TaskItem) -> str:

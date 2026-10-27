@@ -1,10 +1,10 @@
-"""Versioned local manifests referencing durable Tinker checkpoints.
+"""Versioned local manifests referencing durable Tinker checkpoints, which Tinker training and serving share.
 
 A manifest also records the learning-rate schedule its weights were trained
 under and the optimizer steps that schedule has completed, and the objective's
-state after the job that saved it: the optimizer state lives in the remote
-checkpoint, and the schedule's progress and the objective's state travel with
-it, so a job that starts from this checkpoint continues both.
+state: the optimizer state lives in the remote checkpoint, and the schedule's
+progress and the objective's state travel with it, so a job that starts from
+this checkpoint continues both.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ class TinkerCheckpoint:
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
     writes them as the manifest ``MANIFEST`` of a checkpoint directory; the component, the Tinker inference
     runtime, ``TinkerClient.download`` and a serving runtime that resolves the weights itself read them.
+    ``check_compatible`` is how a reader refuses a checkpoint of another model or service.
     """
 
     base_model: str
@@ -42,7 +43,9 @@ class TinkerCheckpoint:
     schema_version: int = 1
     #: ``None`` until a job selects a schedule: the configured learning rate applies.
     learning_rate_schedule_state: LearningRateScheduleState | None = None
-    #: The objective's state after the job that saved this checkpoint, a JSON object; empty for the base.
+    #: The objective's state, a JSON object: after the data of the job that saved this checkpoint when it is
+    #: the job's last, else the state that job started with (the objective computes its state for the whole
+    #: data); empty for the base.
     algorithm_state: Mapping[str, Any] = field(default_factory=dict)
     #: The objective whose state ``algorithm_state`` is; ``None`` exactly when the state is empty. A job of
     #: another objective starts with an empty state.
@@ -60,10 +63,14 @@ class TinkerCheckpoint:
         if (self.objective is None) != (not self.algorithm_state):
             raise ValueError("a Tinker checkpoint names the objective of a non-empty state, and only of one")
 
-    def validate_model(self, base_model: str, lora_rank: int, service: str | None) -> None:
-        """Raise ``ValueError`` unless the checkpoint is of ``base_model`` and ``lora_rank`` and held by ``service``."""
-        if (self.base_model, self.lora_rank) != (base_model, lora_rank):
-            raise ValueError("Tinker checkpoint model/rank does not match the runtime")
+    def check_compatible(self, base_model: str, *, service: str | None, lora_rank: int | None = None) -> None:
+        """Raise ``ValueError`` unless the checkpoint is of ``base_model``, held by ``service``, and of ``lora_rank``
+        when it is given (the trainer's check; a sampler serves any rank)."""
+        if self.base_model != base_model or (lora_rank is not None and self.lora_rank != lora_rank):
+            raise ValueError(
+                f"the Tinker checkpoint is a rank {self.lora_rank} LoRA of base model {self.base_model}, not one of "
+                f"{base_model}" + ("" if lora_rank is None else f" with rank {lora_rank}")
+            )
         if self.service != service:
             raise ValueError(
                 f"the Tinker checkpoint is held by {self.service or 'hosted Tinker'}, "

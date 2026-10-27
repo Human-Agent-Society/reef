@@ -47,26 +47,26 @@ class TokenRow:
     logprobs: tuple[float, ...]
     advantage: float
 
+    def __post_init__(self) -> None:
+        violation = policy_row_violation(self.tokens, self.mask, self.logprobs or None)
+        if violation:
+            raise ValueError(f"invalid Tinker training row: {violation}")
+        if any(isinstance(token, bool) or not isinstance(token, int) or token < 0 for token in self.tokens):
+            raise ValueError("Tinker tokens must be non-negative integers")
+        if not math.isfinite(self.advantage):
+            raise ValueError("Tinker advantages must be finite")
+
     @classmethod
     def from_item(cls, item: TrajectoryItem, advantage: float, *, rollout_log_probs: bool = True) -> TokenRow:
         """The row of ``item``; ``rollout_log_probs`` requires one rollout log probability per response token."""
         training = item.training
-        row = cls(
-            tuple(training.get("tokens", ())),
-            tuple(training.get("loss_mask", ())),
-            tuple(training.get("rollout_log_probs", ())) if rollout_log_probs else (),
-            advantage,
-        )
-        violation = policy_row_violation(row.tokens, row.mask, row.logprobs if rollout_log_probs else None)
-        if violation:
-            raise ValueError(f"invalid Tinker training row: {violation}")
-        if any(isinstance(token, bool) or not isinstance(token, int) or token < 0 for token in row.tokens):
-            raise ValueError("Tinker tokens must be non-negative integers")
-        if training.get("response_length", len(row.mask)) != len(row.mask):
+        logprobs = tuple(training.get("rollout_log_probs", ())) if rollout_log_probs else ()
+        mask = tuple(training.get("loss_mask", ()))
+        if rollout_log_probs and len(logprobs) != len(mask):
+            raise ValueError("invalid Tinker training row: rollout_log_probs must have one value per response token")
+        if training.get("response_length", len(mask)) != len(mask):
             raise ValueError("Tinker response_length must match the response loss mask")
-        if not math.isfinite(advantage):
-            raise ValueError("Tinker advantages must be finite")
-        return row
+        return cls(tuple(training.get("tokens", ())), mask, logprobs, advantage)
 
     def inputs(self, advantages: Sequence[float]) -> dict[str, list[Any]]:
         """The ``loss_fn_inputs`` of ``importance_sampling`` for one response-token advantage each."""
@@ -183,7 +183,3 @@ def resolve_tinker_loss(loss_family: str) -> TinkerLoss:
         raise TypeError(f"Tinker loss family {reference!r} is not a TinkerLoss")
     _resolved[loss_family] = candidate
     return candidate
-
-
-def row_from_payload(value: Mapping[str, Any]) -> TokenRow:
-    return TokenRow(tuple(value["tokens"]), tuple(value["mask"]), tuple(value["logprobs"]), value["advantage"])

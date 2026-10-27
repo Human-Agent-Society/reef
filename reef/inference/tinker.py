@@ -13,8 +13,6 @@ serves.
 from __future__ import annotations
 
 import asyncio
-import json
-import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from threading import RLock
@@ -22,45 +20,50 @@ from typing import Any
 
 from reef_client.sse import synthesize_sse_events
 
-from reef.artifact.artifact import REPOSITORY_FILES, Artifact
+from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.runtime.deployment import RuntimeFactory, config_secret
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
+from reef.runtime.interfaces import (
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+    RuntimeLoadId,
+    UpstreamStatusError,
+    new_runtime_load_id_incarnation,
+)
+from reef.runtime.serving import holds_weights
+from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler, TinkerSDKSampler, sample_chat
 
-#: The manifest a Tinker checkpoint artifact carries; the trainer writes it, this side reads it.
-MANIFEST = "tinker-checkpoint.json"
+#: The hosted Tinker service, which ``service=None`` names.
 TINKER_URL = "https://tinker.thinkingmachines.ai"
 
 
-def checkpoint_sampler_path(artifact: Artifact, base_model: str) -> str | None:
-    """The remote sampler a materialized artifact names; None for Reef's empty base tree."""
+def checkpoint_sampler_path(artifact: Artifact, base_model: str, service: str | None) -> str | None:
+    """The sampler a materialized release names, or None for Reef's empty base tree.
+
+    ``ValueError``: the release is not materialized; its manifest names another model or another service than
+    ``service``; or it holds files but no manifest.
+    """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
-    manifest = path / MANIFEST
-    if manifest.exists():
-        value = json.loads(manifest.read_text())
-        if not isinstance(value, Mapping) or value.get("base_model") != base_model:
-            raise ValueError("Tinker checkpoint manifest does not name the served base model")
-        sampler = value.get("sampler_path")
-        if not isinstance(sampler, str) or not sampler.startswith("tinker://"):
-            raise ValueError("Tinker checkpoint manifest must name a tinker:// sampler")
-        return sampler
-    # Reef's empty base tree represents the initial seeded adapter.
-    # An arbitrary uploaded weight directory must not silently become base.
-    contents = {entry.name for entry in path.iterdir()} - REPOSITORY_FILES
-    if contents:
+    if (path / MANIFEST).exists():
+        checkpoint = TinkerCheckpoint.read(path)
+        checkpoint.check_compatible(base_model, service=service)
+        return checkpoint.sampler_path
+    # Reef's empty base tree is the base model; an arbitrary uploaded weight directory must not become it.
+    if holds_weights(path):
         raise ValueError(f"artifact is missing {MANIFEST}")
     return None
 
 
 class TinkerInferenceRuntime(InferenceRuntime):
-    """Serve the sampler each frozen artifact names, and follow Reef's publication of new ones.
+    """Serve the sampler each release names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
 
-    Every snapshot served in this process gets a runtime load ID of this
+    Every sampler served in this process gets a runtime load ID of this
     incarnation; activating a release whose sampler is not the one served
-    mints a new one.
+    mints a new one. A release of another service is refused.
     """
 
     def __init__(
@@ -68,15 +71,16 @@ class TinkerInferenceRuntime(InferenceRuntime):
         sampler: TinkerSampler,
         *,
         base_model: str,
-        base_url: str = TINKER_URL,
+        service: str | None = None,
         inference_timeout_s: float = 300.0,
     ) -> None:
-        super().__init__(base_url=base_url, inference_timeout_s=inference_timeout_s)
+        super().__init__(base_url=service or TINKER_URL, inference_timeout_s=inference_timeout_s)
         self._sampler = sampler
         self._model = base_model
+        self._service = service
         self._handler = TinkerInferenceHandler(self, sampler, base_model)
         self._lock = RLock()
-        self._incarnation = uuid.uuid4().hex
+        self._incarnation = new_runtime_load_id_incarnation()
         self._load_count = 0
         self._versions: dict[str | None, str] = {}
         self._releases: dict[str, tuple[str | None, str]] = {}
@@ -108,7 +112,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         return sampler_path, version
 
     def _new_load(self, sampler_path: str | None) -> tuple[str | None, str]:
-        version = f"{self._incarnation}:{self._load_count}"
+        version = str(RuntimeLoadId(self._incarnation, self._load_count))
         self._load_count += 1
         return sampler_path, version
 
@@ -117,7 +121,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         with self._lock:
             if artifact.ref.release_id in self._releases:
                 return self._releases[artifact.ref.release_id]
-            sampler_path = checkpoint_sampler_path(artifact, self._model)
+            sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             # A release that carries the served sampler forward (a step of
             # another component, a rollback to the same weights) was never
             # activated; it serves under the load the engine reports now,
@@ -137,7 +141,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the release's sampler; a sampler other than the served one is a new serving update."""
         with self._lock:
-            sampler_path = checkpoint_sampler_path(artifact, self._model)
+            sampler_path = checkpoint_sampler_path(artifact, self._model, self._service)
             if sampler_path != self._active:
                 # Even a sampler served earlier in this incarnation, as after a rollback, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
@@ -209,6 +213,8 @@ class TinkerInferenceConfig:
     def __post_init__(self) -> None:
         if self.timeout_s <= 0:
             raise ValueError("runtime.timeout_s must be positive")
+        if self.base_url is not None and not self.base_url.startswith(("https://", "http://")):
+            raise ValueError("runtime.base_url must be an http(s) URL")
 
 
 class TinkerInferenceRuntimeFactory(RuntimeFactory):
@@ -237,7 +243,12 @@ class TinkerInferenceRuntimeFactory(RuntimeFactory):
             timeout_s=config["timeout_s"],
         )
         try:
-            return TinkerInferenceRuntime(sampler, base_model=model_path, inference_timeout_s=config["timeout_s"])
+            return TinkerInferenceRuntime(
+                sampler,
+                base_model=model_path,
+                service=config.get("base_url"),
+                inference_timeout_s=config["timeout_s"],
+            )
         except BaseException:
             sampler.close()
             raise
